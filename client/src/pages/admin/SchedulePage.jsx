@@ -46,6 +46,9 @@ import {
   termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
+// The station labels and the typed station counts are shared with the Fast Complete
+// sheet (lib/station-checks.js): one copy of each rule.
+import { STATION_PROGRAM_UI, STATION_STATUS_UI, stationAutoCounts, stationStatusLabel } from "../../lib/station-checks";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
 // here for existing importers.
@@ -61,7 +64,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
-import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
+import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
@@ -83,6 +86,7 @@ import {
   amountInUnit,
   markTankEntry,
   tankPropagates,
+  productRowId,
   followTank,
   clearTankOnUnitChange,
   joinTankOnUnitChange,
@@ -90,6 +94,8 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -160,7 +166,8 @@ import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
-import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
+import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
@@ -940,6 +947,19 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
   mosquito: "mosquito",
   termite: "termite",
 };
+
+// An appointment whose own service is an area add-on (GATE_AREA_ADDONS) is generic work. The name
+// reads "lawn" for "Lawn Insect Spot Treatment" and "pest" for "Web Sweep", and
+// neither takes that line's completion form: the visit's catalog key decides. A normal
+// pest or lawn visit with add-on rows attached keeps its own lane (AreaAddOnFields adds the
+// add-on's product beside it); only the lightweight shortcuts stay off for it.
+const AREA_ADDON_LINE = "general";
+function visitServiceCategory(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
+}
+function visitServiceLine(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+}
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
@@ -2096,6 +2116,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return derived != null ? String(derived) : "";
     })(),
   });
+  // Auto-dispatch lock (recurring occurrences only). Sent with the save as
+  // the box's value and the value it opened with; the server acts only on a
+  // flip, and may also set the lock itself when the date or time changes.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveErrorState] = useState("");
@@ -2291,6 +2316,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // How a shared stop moves (the choice box near the date and time). Declared
   // here because the availability search below answers for that move.
   const [comboMove, setComboMove] = useState("together");
+  const editServices = [
+    { name: form.serviceType, key: form.serviceKey },
+    ...serviceLines.map((line) => ({ name: line.serviceType, key: line.serviceKey })),
+  ].filter((item) => typeof item.name === "string" && item.name.trim());
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
     moveScope: comboMove,
@@ -2318,6 +2347,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
+    // The same two best-times rows as New Appointment (owner 2026-10-08),
+    // ranked for what the save will book: the form's primary service (it can
+    // be re-picked here) and its add-on lines, in the same order as their
+    // catalog keys. The server adds a shared stop's other services when they
+    // move with it (moveScope).
+    serviceTypes: editServices.map((item) => item.name),
+    serviceKeys: editServices.map((item) => item.key || ""),
+    bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -3704,6 +3741,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          // The auto-dispatch box and the value it opened with; the server acts only on a flip.
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           // A shared stop: the server runs the choice in this one request.
           comboMove: comboSlotChanged ? comboMove : undefined,
           // The stop this form showed; the server refuses if it changed.
@@ -6196,6 +6236,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
+                bestRows
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -6358,6 +6399,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
+              <AutoDispatchLockBox
+                service={service}
+                checked={autoDispatchLocked}
+                onChange={setAutoDispatchLocked}
+                disabled={saving}
+                helperColor={D.muted}
+                rowProps={{ style: { marginBottom: 14 } }}
+              />
               <div
                 style={{
                   display: "flex",
@@ -7078,12 +7127,13 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D }) {
+function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
       <button
         type="button"
+        id={domId}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         style={{
@@ -7172,6 +7222,12 @@ function JobCardStrip({ strip, D }) {
   );
 }
 
+// A card's title: the product, and for a sold add-on's own card the add-on, so two cards of one product read apart.
+const jobCardProductTitle = (p) => (p.source ? `${p.name} · ${p.source}` : p.name);
+// A card's identity: the product, and the add-on for a sold add-on's own card (the server's rowId; the product ID alone for a
+// card without one). Keys the list, the DOM ids and every lookup of a card by product.
+const jobCardRowId = (p) => p.rowId || p.id;
+
 function JobCardSprayCheck({ sprayCheck, products, D }) {
   const f = sprayCheck?.forecast;
   const range = f?.tempF && f.tempF[0] != null ? `${f.tempF[0]}–${f.tempF[1]}°F` : null;
@@ -7194,8 +7250,8 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
             {products.map((p) => (
-              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <div key={jobCardRowId(p)} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{jobCardProductTitle(p)}</span>
                 <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                   {p.verdict !== "ok" && p.verdictReason && (
                     <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
@@ -7271,6 +7327,24 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
   );
 }
 
+// A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
+// basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
+// grass sends the reason in place of the rate.
+export function JobCardGoverned({ governed, D }) {
+  if (!governed) return null;
+  return (
+    <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
+      {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
+      {governed.grass && <div>{governed.grass}</div>}
+      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      <div>Area: {governed.area}</div>
+      <div>Limit: {governed.limit}</div>
+      {governed.use && <div>{governed.use}</div>}
+      {governed.safety && <div style={{ fontWeight: 500 }}>Safety: {governed.safety}</div>}
+    </div>
+  );
+}
+
 function JobCardProduct({ p, serviceId, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
@@ -7284,9 +7358,10 @@ function JobCardProduct({ p, serviceId, D }) {
     </>
   );
   return (
-    <JobCardCollapsible title={p.name} right={right} D={D}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        <JobCardGoverned governed={p.governed} D={D} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
@@ -7484,6 +7559,11 @@ function JobCardTank({ tank, serviceId, D }) {
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
+            {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
+              <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
+                {mix.rotationWarnings.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
+              </div>
+            )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
@@ -7586,7 +7666,7 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
   );
 }
 
-function JobCardTab({ card, loading, error, D }) {
+export function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7631,7 +7711,7 @@ function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={p.id} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7728,7 +7808,7 @@ export function ProtocolPanel({ service, onClose }) {
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
   // classified from the raw value — the panel must agree with them.
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
-  const serviceCategory = detectServiceCategory(panelServiceType);
+  const serviceCategory = visitServiceCategory(service, panelServiceType);
   const isLawn = serviceCategory === "lawn";
   // Fail closed: only an affirmative { enabled: true } opens the gated tab and
   // ask bar. A failed request is shown as a notice under the header instead.
@@ -7818,8 +7898,12 @@ export function ProtocolPanel({ service, onClose }) {
       const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
         ? profileLawnTypes
         : [service.lawnType, service.lawn_type];
+      // The server says when GATE_LAWN_V13 is on and this lawn records bahia in any field (any
+      // spelling): the v13 program has none, so the track is bahia and the server answers no program
+      // instead of another grass's program. Otherwise the resolution is the old one, unchanged.
+      const noBahiaProgram = profileResponse?.lawn_v13_no_program === true;
       const trackKey = isLawn && !failedSections.includes("Turf profile")
-        ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
+        ? (noBahiaProgram ? "bahia" : recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean))
           || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
         : null;
       const lawnSqft = isLawn
@@ -8401,6 +8485,51 @@ export function ProtocolPanel({ service, onClose }) {
                                 key={`${step.step}-${step.productId}`}
                                 style={{
                                   fontSize: 11,
+                                  color: D.text,
+                                  marginBottom: 3,
+                                }}
+                              >
+                                {" "}
+                                <strong>
+                                  {step.step}. {step.productName}
+                                </strong>
+                                {step.instruction && (
+                                  <div
+                                    style={{ color: D.muted, marginLeft: 14 }}
+                                  >
+                                    {step.instruction}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {lawnMix.bermudaMixingOrder?.length > 0 && (
+                          <div
+                            style={{
+                              marginTop: 10,
+                              paddingTop: 10,
+                              borderTop: `1px solid ${D.border}`,
+                            }}
+                          >
+                            {" "}
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 500,
+                                color: D.muted,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.6,
+                                marginBottom: 6,
+                              }}
+                            >
+                              Bermuda backpack mix
+                            </div>
+                            {lawnMix.bermudaMixingOrder.map((step) => (
+                              <div
+                                key={`${step.step}-${step.productId}`}
+                                style={{
+                                  fontSize: 14,
                                   color: D.text,
                                   marginBottom: 3,
                                 }}
@@ -9486,6 +9615,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    // The server reads what the visit books from its own rows (serviceId).
+    bestRows: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -10328,6 +10460,7 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
 // covers two areas, so it records no single shared coverage (null) and its
 // products and findings keep their own areas.
 function propertyAreaLineFor(service) {
+  if (isAreaAddOnVisit(service)) return null;
   const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
   const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
   return raw === normalized ? normalized : null;
@@ -10396,6 +10529,42 @@ function requiredApplicationArea(method, serviceType = "", includeOptionalLawnAr
 
 function effectiveApplicationMethod(method) {
   return normalizeApplicationMethod(method) || "perimeter_spray";
+}
+
+// The first product row of a completion that cannot be saved yet, as the sentence to show, or null: a row whose method
+// needs a treated area that is missing, and a row recorded for a chemical area add-on without its rate, unit, treated square
+// feet or amount (the server refuses it too, the row being that add-on's application record). `typeFor` is the row's service type.
+// The completion group a removed product row belongs to: the ROW's own persisted id (a restored draft has it before any
+// protocol action loads), else the loaded action's for that product. An add-on's own row of a product is never part of the
+// host's completion group.
+export function completionGroupOfRemovedRow(removedRow, productId, protocolActions) {
+  if (removedRow?.group) return removedRow.group;
+  if (removedRow?.areaAddOnKey) return undefined;
+  return (protocolActions || []).find((a) => a.group && a.product?.id === productId)?.group;
+}
+// The rest of a completion group: the product ids that come off with it (every row with that group plus the loaded
+// actions' products) and the chip labels handleProtocolActionSelect added for each member (a member's label is its
+// product name). No group: nothing.
+export function completionGroupMates(group, selectedProducts, protocolActions) {
+  if (!group) return { productIds: new Set(), labels: new Set() };
+  const members = (selectedProducts || []).filter((p) => p.group === group);
+  const actions = (protocolActions || []).filter((a) => a.group === group);
+  return {
+    productIds: new Set([...members.map((p) => p.productId), ...actions.filter((a) => a.product?.id).map((a) => a.product.id)]),
+    labels: new Set([...members.map((p) => String(p.name)), ...actions.map((a) => String(a.note || a.label || a.raw || "Completed protocol item"))]),
+  };
+}
+
+function completionProductRowProblem(service, rows, typeFor) {
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
+  const missingArea = rows.find((p) => {
+    const requirement = areaOf(p);
+    if (!requirement) return false;
+    const value = Number(p.areaValue);
+    return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
+  });
+  // (This helper runs for a COMPLETED visit only: every chemical add-on the visit carries then needs its product row.)
+  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : (addOnActualsProblem(service, rows) || addOnRecordMissingProblem(service, rows));
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
@@ -11528,37 +11697,6 @@ function clampStationView(view) {
     y: round(Math.min(Math.max(0, view.y), STATION_FRAME_H - view.h)),
   };
 }
-const STATION_STATUS_UI = {
-  ok: { color: "#10b981", label: "OK" },
-  activity: { color: "#ef4444", label: "Activity" },
-  serviced: { color: "#f59e0b", label: "Serviced" },
-  inaccessible: { color: "#94a3b8", label: "No access" },
-};
-const STATION_PROGRAM_UI = {
-  termite: {
-    title: "Bait station map",
-    hint: "Every station starts as OK — tap a pin to flag activity, service, or no access.",
-    activityLabel: "Activity",
-    activityCounter: "with activity",
-  },
-  rodent: {
-    title: "Rodent bait station map",
-    hint: "Every station starts as OK — tap a pin to flag consumption, service, or no access.",
-    activityLabel: "Consumption",
-    activityCounter: "with consumption",
-  },
-  trapping: {
-    title: "Rodent trap map",
-    hint: "Every trap starts as OK — tap a pin to record a capture, service, or no access.",
-    activityLabel: "Capture",
-    activityCounter: "with captures",
-  },
-};
-function stationStatusLabel(status, program) {
-  if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
-  return STATION_STATUS_UI[status]?.label || status;
-}
-
 export function StationMarkingStep({
   map,
   stations, // [{ key, id?, number, label?, shape: {cx,cy,r}|null, stale }]
@@ -12214,6 +12352,12 @@ function PestRecapCard({ serviceId }) {
   );
 }
 
+// Shown beside the Additional work selector while the bermuda removal mix carries the
+// server's spray conditions; the test-patch line is the short wording for a CitraBlue or
+// unconfirmed St. Augustine cultivar.
+const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "zoysia2eeOnHand", "testPatchFirst"];
+const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
+
 export function CompletionPanel({
   service,
   products,
@@ -12596,7 +12740,7 @@ export function CompletionPanel({
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
-  const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
+  const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
   const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
   const lawnAreasInitializedRef = useRef(completionImprovements);
@@ -12964,40 +13108,17 @@ export function CompletionPanel({
     // let the termite report (which falls back to the typed counts when a
     // visit has no check rows) tell the declined customer every station
     // was inspected (codex round-2 P1).
-    const isInspectionOnly = visitOutcome === "inspection_only";
-    const isCustomerDeclined = visitOutcome === "customer_declined";
-    const checkedKeys = isCustomerDeclined
-      ? []
-      : isInspectionOnly
-        ? activeKeys.filter((key) => stationMoves[key]
-          || stationNew.some((station) => station.key === key)
-          || Object.prototype.hasOwnProperty.call(stationStatuses, key))
-        : activeKeys;
-    const statusOf = (key) => stationStatuses[key] || "ok";
-    const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
-    // Each program maps to ITS schema's count keys — never auto-write a key
-    // the schema doesn't own, or submit validation rejects the unknown
-    // field. Trapping owns traps_checked only: captures is a tech-judgment
-    // count (one trap can hold multiple captures), and the schema has no
-    // total/inaccessible keys.
-    const counts = stationProgram === "trapping"
-      ? { traps_checked: String(checkedKeys.length - inaccessible) }
-      : {
-        // total_stations is termite-only since 2026-07-23: the rodent
-        // schema retired it (the map's pins ARE the roster), and writing it
-        // there would trip the unknown-field rejection at submit
-        // (codex P1 on #2963).
-        ...(stationProgram === "termite"
-          ? { total_stations: String(activeKeys.length) }
-          : {}),
-        stations_checked: String(checkedKeys.length - inaccessible),
-        stations_inaccessible: String(inaccessible),
-        // Only the termite schema carries a per-station activity COUNT; the
-        // rodent flow records consumption as a select (tech judgment).
-        ...(stationProgram === "termite"
-          ? { stations_with_activity: String(checkedKeys.filter((key) => statusOf(key) === "activity").length) }
-          : {}),
-      };
+    // The counts rule (and why an inspection_only or declined visit counts only
+    // what was explicitly checked) lives in lib/station-checks.js.
+    const counts = stationAutoCounts({
+      program: stationProgram,
+      activeKeys,
+      statuses: stationStatuses,
+      visitOutcome,
+      isExplicit: (key) => stationMoves[key]
+        || stationNew.some((station) => station.key === key)
+        || Object.prototype.hasOwnProperty.call(stationStatuses, key),
+    });
     // Snapshot the last auto-written values BEFORE scheduling the state
     // updates: the updater callbacks run after this effect finishes, so
     // reading the ref inside them would see the values we're about to
@@ -13493,7 +13614,7 @@ export function CompletionPanel({
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
-    !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+    !isTypedFindings && visitServiceCategory(service, service.serviceType) === "lawn";
   // The tracer's capture mode follows the SERVER's eligibility variant
   // when the feed carries one (codex P2 r3): typed lawn visits
   // (aeration/fungicide/insect control) set isTypedFindings, which forces
@@ -13521,7 +13642,12 @@ export function CompletionPanel({
   // compliance gate still requires its own completion photos (T&S needs >=2),
   // so keep the uploader whenever any companion is present.
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
-  const serviceTypeForArea = service?.serviceType || service?.service_type || "";
+  // A lawn-family area add-on that IS the visit is recorded by area on a lawn product ("Fire Ant
+  // Yard Treatment" reads as pest). On a host visit, only the rows recorded for a chemical add-on
+  // are lawn-family (typeFor); every other row keeps the host's own type.
+  const ownServiceType = service?.serviceType || service?.service_type || "";
+  const serviceTypeForArea = areaAddOnRowServiceType(service, ownServiceType, null);
+  const typeFor = (row) => areaAddOnRowServiceType(service, ownServiceType, row);
   const calibrationRequired = isLawn && !!service.waveguardTier;
   // Advisory inventory posture is member-tier only — mirrors the server's
   // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
@@ -13539,7 +13665,7 @@ export function CompletionPanel({
     }
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  const serviceCategory = visitServiceCategory(service, service.serviceType);
   // Bed bug closeouts get interior-specific treated-area chips, skip the
   // satellite spray-trace (a perimeter trace has no meaning for an interior
   // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
@@ -13569,7 +13695,7 @@ export function CompletionPanel({
   // pest visit keeps the tracer, because that visit really did spray.
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
-  const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const serviceLineForCloseout = visitServiceLine(service, serviceTypeForArea);
   // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
   // flag): the visit's photos and their descriptions sit inside the notes
   // box and the separate photo section goes away. Never on lawn or tree,
@@ -14052,7 +14178,7 @@ export function CompletionPanel({
       if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
       const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
       const activeDefaults = lawnDefaultsSeedSuppressed
-        ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
+        ? defaults.filter(row => selectedProducts.some(product => !product.areaAddOnKey && String(product.productId) === String(row.productId))) : defaults;
       const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
       lawnDefaultMixSeededRef.current = true;
       lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
@@ -14524,9 +14650,10 @@ export function CompletionPanel({
   const nLimitSummaryText = treatmentPlanAnnualN
     ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || "lb N / 1,000 sqft / year"}.`
     : "";
+  // An area add-on's product row belongs to the add-on, not to the host's protocol: it is never "off protocol".
   const offProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter(
-        (p) => !treatmentPlanProductIds.includes(String(p.productId)),
+        (p) => !p.areaAddOnKey && !treatmentPlanProductIds.includes(String(p.productId)),
       )
     : [];
   const selectedProductIds = new Set(
@@ -14545,7 +14672,7 @@ export function CompletionPanel({
       !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
-      (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
+      (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product))),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -14862,7 +14989,7 @@ export function CompletionPanel({
   // changes, so this never loops).
   useEffect(() => {
     if (techTips?.available !== true) return;
-    const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
+    const known = pickableTipIds(techTips);
     setSelectedTipIds((prev) => {
       const kept = prev.filter((id) => known.has(id));
       return kept.length === prev.length ? prev : kept;
@@ -15027,7 +15154,7 @@ export function CompletionPanel({
       }
       if (lawnDefaultsEnabled) {
         setProtocolActions(lawnPlanActionOptions(lawnCompletionDefaults.options));
-        setProtocolActionMeta({ source: "appointment_plan" });
+        setProtocolActionMeta({ source: "appointment_plan", ...(lawnCompletionDefaults.planWarnings ? { warnings: lawnCompletionDefaults.planWarnings } : {}) });
         setProtocolActionsLoaded(true);
         setProtocolActionsLoading(false);
         return () => { cancelled = true; };
@@ -15044,6 +15171,8 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
+      // The server reads the visit's account (bermuda removal) itself.
+      if (service.id) params.set("scheduledServiceId", service.id);
     }
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
@@ -15139,7 +15268,11 @@ export function CompletionPanel({
       .then((data) => {
         if (cancelled) return;
         lawnPlanVerifiedRef.current = service.id;
-        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
+        // The plan's own bermuda removal warnings (why the mix is not offered) ride with the completion
+        // defaults, so the drawer shows them beside the Additional work selector like the actions list's.
+        const planWarnings = (Array.isArray(data?.plan?.propertyGate?.warnings) ? data.plan.propertyGate.warnings : [])
+          .filter((warning) => String(warning?.code || "").startsWith("lawn_bermuda_"));
+        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id, ...(planWarnings.length ? { planWarnings } : {}) });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
           data?.plan?.protocol?.blocked ||
@@ -15752,7 +15885,7 @@ export function CompletionPanel({
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
-            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            const normalized = normalizeProductArea(product, typeFor(product));
             // Bed bug: a pre-migration draft carries the old inferred
             // perimeter default — reclassify it to the interior default so
             // a restored draft can't demand perimeter footage or record
@@ -16994,7 +17127,7 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
-        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationMethod: productApplicationMethod(p, typeFor(p)),
         applicationArea:
           p.applicationArea ||
           (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
@@ -17104,7 +17237,7 @@ export function CompletionPanel({
     if (
       activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
-        || selectedProducts.find((p) => p.productId === action.product.id))
+        || selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id))
     ) {
       return;
     }
@@ -17126,9 +17259,15 @@ export function CompletionPanel({
     }
     if (
       action.product?.id &&
-      !selectedProducts.find((p) => p.productId === action.product.id)
+      !selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id)
     ) {
-      addProduct(action.product);
+      addProduct({
+        ...action.product,
+        ...(action.prefillAmount === false ? { prefillAmount: false } : {}),
+        group: action.group,
+        // A spot action (the bermuda removal mix, /completion-actions path) records as spot work.
+        ...(action.applicationMode === "spot" ? { applicationMode: "spot", applicationMethod: action.product.applicationMethod || "spot_treatment" } : {}),
+      });
     }
   }
   function handleOneTimeRecapOnlyChange(checked) {
@@ -17146,7 +17285,7 @@ export function CompletionPanel({
     // The duplicate check runs FIRST (codex r81): re-clicking an
     // already-selected product's search result changes nothing and must
     // not clear a valid untouched report.
-    if (selectedProducts.find((p) => p.productId === product.id)) return;
+    if (selectedProducts.find((p) => !p.areaAddOnKey && p.productId === product.id)) return;
     // Products feed the generation grounding (and T&S derives its treatments
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
@@ -17159,10 +17298,11 @@ export function CompletionPanel({
     // r6 P1) — under the protocol row's application mode: the catalog
     // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
     // method, area requirement and rate prefill all follow the mode (r7 P1).
-    const catalogProduct = lawnDefaultsEnabled
+    const spotAction = product.applicationMode === "spot";
+    const catalogProduct = lawnDefaultsEnabled || spotAction
       ? products.find((row) => String(row.id) === String(product.id)) || product
       : product;
-    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+    let row = buildSelectedProduct((lawnDefaultsEnabled || spotAction) && product.applicationMethod
       ? { ...catalogProduct, application_method: product.applicationMethod }
       : catalogProduct);
     if (lawnDefaultsEnabled) {
@@ -17180,6 +17320,11 @@ export function CompletionPanel({
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
+    }
+    // A spot line (the bermuda removal mix) has no catalog-derived amount: no rate, area or
+    // total is suggested; the tech enters the area treated and the amount used.
+    if (product.prefillAmount === false) {
+      row = { ...row, rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used.", areaUnit: "sqft", ...(product.group ? { group: product.group } : {}) };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
@@ -17203,6 +17348,8 @@ export function CompletionPanel({
   // whole-lawn broadcast quantity: only a broadcast method takes it; any other
   // method on a lawn visit (a soil drench, spot work) stays manual.
   function productUsesPropertyArea(product, applicationMethod) {
+    // An add-on's product is entered with the area the add-on was sold for, never the host line's property area.
+    if (product.areaAddOnKey) return false;
     if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
@@ -17217,12 +17364,14 @@ export function CompletionPanel({
     // default falls to 'perimeter_spray' and wrongly demands linear
     // footage for an interior placement. Passed in by the protocol
     // completion-defaults seed only; every other caller is unaffected.
+    // A product recorded for a chemical add-on carries its key (areaAddOnKey) and is judged lawn-family.
+    const rowType = typeFor(product);
     const applicationMethod = applicationMethodOverride
-      || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+      || defaultApplicationMethod(product, rowType, { interiorLane: isBedBugVisit });
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -17236,7 +17385,7 @@ export function CompletionPanel({
       labelMaxRate,
     } = resolveRatePrefill(product, {
       applicationMethod,
-      serviceLine: serviceLineFromType(serviceTypeForArea),
+      serviceLine: serviceLineFromType(rowType),
     });
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
@@ -17276,7 +17425,9 @@ export function CompletionPanel({
         : perBasisUnit || areaRequirement?.unit === "linear_ft"
           ? ""
           : derivedTotalAmount(prefillRate, prefillArea);
-    return {
+    // A row recorded for an area add-on starts at the add-on's GOVERNED rate, never the catalog default
+    // (withGovernedAddOnRate); every other row passes through unchanged.
+    return withGovernedAddOnRate(service, product, {
         productId: product.id,
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
@@ -17324,9 +17475,10 @@ export function CompletionPanel({
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
+        areaAddOnKey: product.areaAddOnKey,
         areaValue: prefillArea,
         propertyServiceAreaField: !!currentPropertyAreas && productUsesServiceArea,
-        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, serviceTypeForArea, false, true)?.unit === "sqft"
+        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, rowType, false, true)?.unit === "sqft"
           ? { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId ?? null, kind: propertyAreaKey, pending: !currentPropertyAreas } : null,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
@@ -17352,7 +17504,7 @@ export function CompletionPanel({
           ),
           allowedTargetLinesForVisit(service),
         ),
-    };
+    });
   }
   function addSubstitutionProduct(substitution) {
     if (!substitution?.substituteProductId) return;
@@ -17375,8 +17527,8 @@ export function CompletionPanel({
     setSelectedProducts((prev) =>
       prev.map((p) => {
         const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
+          productApplicationMethod(p, typeFor(p)),
+          typeFor(p),
         );
         if (areaRequirement?.unit !== "linear_ft") return p;
         if (Number(p.areaValue) > 0) return p;
@@ -17384,32 +17536,71 @@ export function CompletionPanel({
       }),
     );
   }
-  function removeProduct(productId) {
+  // Records a chemical area add-on's product on a host visit (AreaAddOnFields): an ordinary product
+  // row tagged with the add-on, so its method and treated area follow the lawn rules (typeFor)
+  // whatever line the host visit is, and the server saves it like any other application row.
+  function addAreaAddOnProduct(product, addOn) {
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
+    lawnDefaultMixSeededRef.current = true;
+    const row = buildSelectedProduct({ ...product, areaAddOnKey: addOn.key });
+    setSelectedProducts((prev) => [...prev.filter((p) => productRowId(p) !== productRowId(row)), row]);
+  }
+  // `rowId` is productRowId(row): the product and, for an add-on's row, the add-on, so the host's row of a
+  // product and the add-on's row of the same product are removed and edited separately.
+  // A removed lawn plan default is remembered by product, with its name (a governed row restored while the plan request
+  // failed is still a plan default: its removal must survive a successful retry, pre-push audit).
+  function rememberRemovedLawnDefault(removedRow, productId) {
+    if (!(lawnDefaultsEnabled || removedRow?.lawnPlanDefaults)) return;
+    const removedName = removedRow?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+    if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+    setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+  }
+  function removeProduct(rowId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
-    // A governed row restored while the plan request failed is still a plan
-    // default: its removal must survive a successful retry (pre-push audit).
-    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
-    if (governed) {
-      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
-      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
-      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
-    }
+    const removedRow = selectedProducts.find((p) => productRowId(p) === rowId);
+    const productId = removedRow?.productId ?? rowId;
+    rememberRemovedLawnDefault(removedRow, productId);
     // Same ledger, for the protocol-defaults seed (pre-push audit P1, PR
     // #5049 r2) — a deliberate removal of a seeded default must survive
     // the list going empty, or a later open re-seeds what the tech took
     // off. Only THIS function (the tech's own tap) records one; the
     // non-performed-outcome clearing effect deliberately does not.
-    const removedRow = selectedProducts.find((p) => p.productId === productId);
     if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
+    // Products that share a completion group (the bermuda removal mix) come off together, with the group's chips.
+    const group = completionGroupOfRemovedRow(removedRow, productId, protocolActions);
+    const mates = completionGroupMates(group, selectedProducts, protocolActions);
+    for (const label of mates.labels) removeSelectedLabel("protocol", label);
     setSelectedProducts((prev) =>
-      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
+      // The row itself goes by its row id (an add-on's row of a product and the host's row are separate); the rest of a
+      // completion group goes by product, and never takes an add-on's tagged row with it.
+      promoteTankOwner(prev.filter((p) => productRowId(p) !== rowId && !(mates.productIds.has(p.productId) && !p.areaAddOnKey))),
     );
   }
-  function updateProduct(productId, field, value) {
+  // The x on a report pill. A label that belongs to a completion group (the bermuda
+  // removal mix) takes the whole group with it: every label, scope and note line, and
+  // every product row, the same as removing one of its product rows.
+  function removeSelectionPill(kind, label) {
+    if (generating) return;
+    // A pill of a group row: found by the row's own group and name first (works before the actions load).
+    const row = kind === "protocol" ? selectedProducts.find((p) => p.group && String(p.name) === label) : null;
+    const member = kind === "protocol" && !row
+      ? protocolActions.find((a) => a.group && String(a.note || a.label || a.raw || "Completed protocol item") === label)
+      : null;
+    const groupProductId = row?.productId
+      || (member && protocolActions.find((a) => a.group === member.group && a.product?.id)?.product.id);
+    if (groupProductId) removeProduct(groupProductId);
+    else if (member) {
+      for (const mate of protocolActions.filter((a) => a.group === member.group)) {
+        removeSelectedLabel("protocol", String(mate.note || mate.label || mate.raw || "Completed protocol item"));
+      }
+    } else removeSelectedLabel(kind, label);
+  }
+  function updateProduct(rowId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
@@ -17418,13 +17609,13 @@ export function CompletionPanel({
       // live in lib/product-rate-prefill. Only the owner's corrections travel,
       // so a row given its own gallons detaches alone.
       const tankOwner = tankOwnerRow(prev);
-      const propagateTank = tankPropagates(prev, productId, field);
+      const propagateTank = tankPropagates(prev, rowId, field);
       // An owner that leaves per-gallon frees the slot the same way removing
       // it does, and the rows still on its mix keep the tank: without an heir
       // the next gallons edit — a detached row's included — would propagate
       // over them (pre-push audit P1). Idempotent while an owner remains.
       return promoteTankOwner(prev.map((p) => {
-        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
+        if (productRowId(p) !== rowId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
@@ -17461,7 +17652,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            serviceTypeForArea, false, next.propertyServiceAreaField,
+            typeFor(next), false, next.propertyServiceAreaField,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17486,9 +17677,9 @@ export function CompletionPanel({
           }
         } else if (field === "areaValue") {
           const areaRequirement = requiredApplicationArea(
-            productApplicationMethod(next, serviceTypeForArea),
-            serviceTypeForArea,
-            governed, next.propertyServiceAreaField,
+            productApplicationMethod(next, typeFor(next)),
+            typeFor(next),
+            governed || !!next.group, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -18434,21 +18625,15 @@ export function CompletionPanel({
         return;
       }
     }
-      const missingRequiredAreaProduct = selectedProducts.find((p) => {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
-        );
-      if (!areaRequirement) return false;
-      const value = Number(p.areaValue);
-      return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
-    });
-    if (!isIncompleteVisit && missingRequiredAreaProduct) {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(missingRequiredAreaProduct, serviceTypeForArea),
-          serviceTypeForArea,
-        );
-      alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
+    // An incomplete visit skips the ordinary row checks, but a submitted add-on row still needs its actuals (the server refuses it).
+    // The feed could not say whether this visit carries add-on treatments: a completed visit is not submitted blind.
+    if (service?.areaAddOnsLookupFailed === true && !isIncompleteVisit) {
+      alert(AREA_ADDONS_LOOKUP_FAILED_MESSAGE);
+      return;
+    }
+    const productRowProblem = isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) : completionProductRowProblem(service, selectedProducts, typeFor);
+    if (productRowProblem) {
+      alert(productRowProblem);
       return;
     }
     setSubmitting(true);
@@ -18502,7 +18687,7 @@ export function CompletionPanel({
       // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
       // server's unlisted-skip audit (Codex #4113 P2).
       const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
-        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => !row.areaAddOnKey && String(row.productId) === String(id))).flatMap((id) => {
             const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
             const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
@@ -18564,12 +18749,14 @@ export function CompletionPanel({
             ...(p.amountUnit === "tsp"
               ? submittedAmount(p.totalAmount, p.amountUnit)
               : { totalAmount: p.totalAmount, amountUnit: p.amountUnit }),
-            applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+            applicationMethod: productApplicationMethod(p, typeFor(p)),
           applicationArea:
             p.applicationArea ||
             (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
+          // The area add-on this row records (the server keeps it only for an add-on the visit carries).
+          areaAddOnKey: p.areaAddOnKey,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
         // The existing completion field carries the visit area into the server
@@ -18841,9 +19028,9 @@ export function CompletionPanel({
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
-      if (service?.completionInvoiceAlreadySent) {
-        body.invoiceAlreadySent = true;
-      }
+      // The invoice fields of the body: the Fast Complete sheets build theirs
+      // with the same helper (lib/completion-invoice-fields.js).
+      Object.assign(body, completionInvoiceFields(service));
       // Once the completion is KNOWN COMMITTED, every submit — automatic
       // retry or the manual one after give-up — replays the committed body
       // byte-for-byte through replayCommittedCompletion above; a fresh build
@@ -19026,7 +19213,7 @@ export function CompletionPanel({
     return (
       (!!noteText && inSelection) ||
       (action?.product?.id &&
-        selectedProducts.some((p) => p.productId === action.product.id))
+        selectedProducts.some((p) => !p.areaAddOnKey && p.productId === action.product.id))
     );
   }
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
@@ -19059,6 +19246,18 @@ export function CompletionPanel({
     selected: isProtocolActionSelected(action),
     action,
   }));
+  // The bermuda removal mix carries the server's spray conditions (active growth, the June
+  // morning limit, rain and irrigation, mowing, and the test patch on a CitraBlue or
+  // unconfirmed cultivar): one short line each beside the selector, the same line shown
+  // once however many of the three products carry it.
+  const bermudaConditionLines = [...new Set(effectiveProtocolActions
+    .filter((action) => action.group)
+    .flatMap((action) => action.gateNotes || [])
+    .filter((note) => BERMUDA_CONDITION_KEYS.includes(note.key))
+    .map((note) => (note.key === "testPatchFirst" ? BERMUDA_TEST_PATCH_LINE : note.text)))];
+  // The actions list's own warnings (/completion-actions): why the bermuda removal mix is not
+  // offered (an excluded cultivar, a blocked or capped product), one short line each.
+  const protocolActionWarningLines = [...new Set((protocolActionMeta?.warnings || []).map((warning) => warning?.message).filter(Boolean))];
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
@@ -19143,19 +19342,34 @@ export function CompletionPanel({
         }
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
+      // Options that share a group (the bermuda removal mix) go on together.
+      if (option.action.group) {
+        for (const mate of effectiveProtocolActions) {
+          if (mate !== option.action && mate.group === option.action.group) applyProtocolAction(mate);
+        }
+        normalizeGroupRows(option.action.group);
+      }
     }
   }
-  // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).
-  // Ticking it is the same as picking the sweep from the old dropdown
-  // (applyProtocolAction: label, scope, [Protocol] note line); unticking is
-  // the same as the x on its pill (removeSelectedLabel).
-  const pestSweepLabel = activeSelectedLabels(selectedProtocolActionLabels).find(
-    (label) => String(label).trim().toLowerCase() === PEST_SWEEP_ACTION.label.toLowerCase(),
-  );
-  function handlePestSweepChange(checked) {
-    if (generating) return;
-    if (checked) applyProtocolAction(PEST_SWEEP_ACTION);
-    else if (pestSweepLabel) removeSelectedLabel("protocol", pestSweepLabel);
+  // A product of the group that was added or restored BEFORE the group was applied has its own row
+  // (a catalog method, a catalog rate and area): it takes the group's spot shape, no catalog area
+  // or rate, and no derived total (a total the tech typed stays). Rows the group adds already have it.
+  function normalizeGroupRows(group) {
+    const members = new Map(effectiveProtocolActions.filter((a) => a.group === group && a.product?.id).map((a) => [String(a.product.id), a]));
+    setSelectedProducts((prev) => prev.map((row) => {
+      const member = members.get(String(row.productId));
+      if (!member || (member.prefillAmount !== false && member.applicationMode !== "spot")) return row;
+      const method = member.product.applicationMethod || "spot_treatment";
+      const unit = requiredApplicationArea(method, serviceTypeForArea, true)?.unit || "sqft";
+      // A typed total is the tech's actual and stays (with its manual flag); the catalog rate, the area
+      // and the area default flags are cleared either way.
+      const kept = row.totalAmountManual === true;
+      return {
+        ...row, applicationMethod: method, group, areaUnit: unit,
+        rate: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false,
+        ...(kept ? {} : { totalAmount: "", lawnAmountReason: "Spot work: enter the area treated and the amount used." }),
+      };
+    }));
   }
   function handleLawnFindingAdd(text) {
     if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
@@ -19244,7 +19458,7 @@ export function CompletionPanel({
       // cannot survive beside a newer application measurement.
       selectedProducts.map((p) => [
         p.productId, p.name, p.rate || null, p.rateUnit || null,
-        productApplicationMethod(p, serviceTypeForArea),
+        productApplicationMethod(p, typeFor(p)),
         p.applicationArea || null, p.areaValue ?? null, p.areaUnit || null,
         Array.isArray(p.targets) ? p.targets : [],
       ]),
@@ -20435,7 +20649,7 @@ export function CompletionPanel({
                     <button
                       type="button"
                       aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                      onClick={() => removeSelectedLabel(kind, label)}
+                      onClick={() => removeSelectionPill(kind, label)}
                       style={{
                         border: "none",
                         background: "transparent",
@@ -20478,30 +20692,6 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {isRegularPestVisit && (
-              <div style={{ marginBottom: 20 }}>
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    fontFamily: font,
-                    fontSize: 14,
-                    color: M.ink,
-                    cursor: "pointer",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={Boolean(pestSweepLabel)}
-                    disabled={generating}
-                    onChange={(e) => handlePestSweepChange(e.target.checked)}
-                    style={{ width: 18, height: 18, accentColor: M.ink }}
-                  />
-                  Swept eaves and webs
-                </label>
-              </div>
-            )}
             {!isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -20544,6 +20734,16 @@ export function CompletionPanel({
                             </option>
                           ))}
                     </select>
+                    {bermudaConditionLines.map((line) => (
+                      <div key={line} style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
+                    {protocolActionWarningLines.map((line) => (
+                      <div key={line} role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
                     {selectedProtocolActionCount > 0 && (
                       <div
                         style={{
@@ -21066,6 +21266,16 @@ export function CompletionPanel({
                 />
               );
             })}
+            <AreaAddOnFields
+              service={service}
+              selectedProducts={selectedProducts}
+              products={products}
+              onAddProduct={addAreaAddOnProduct}
+              disabled={generating}
+              colors={{ text: M.ink, muted: M.ink3, border: M.hairline }}
+              selectStyle={mSelect}
+              labelStyle={eyebrowStyle}
+            />
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -21073,7 +21283,7 @@ export function CompletionPanel({
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
                     const selected = !!selectedProducts.find(
-                      (sp) => sp.productId === p.id,
+                      (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                     );
                     return (
                       <Chip
@@ -21144,7 +21354,7 @@ export function CompletionPanel({
                 >
                   {selectedProducts.map((sp) => (
                     <div
-                      key={sp.productId}
+                      key={productRowId(sp)}
                       style={{
                         background: M.card,
                         border: `0.5px solid ${M.hairline}`,
@@ -21177,7 +21387,7 @@ export function CompletionPanel({
                         placeholder="Rate"
                         value={sp.rate}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "rate", e.target.value)
+                          updateProduct(productRowId(sp), "rate", e.target.value)
                         }
                         style={{
                           ...mInput,
@@ -21190,7 +21400,7 @@ export function CompletionPanel({
                         value={sp.rateUnit}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "rateUnit",
                             e.target.value,
                           )
@@ -21227,7 +21437,7 @@ export function CompletionPanel({
                             placeholder="Gal"
                             value={sp.carrierGallons ?? ""}
                             onChange={(e) =>
-                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                              updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                             }
                             style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
                           />{" "}
@@ -21242,7 +21452,7 @@ export function CompletionPanel({
                         value={sp.totalAmount || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "totalAmount",
                             e.target.value,
                           )
@@ -21258,7 +21468,7 @@ export function CompletionPanel({
                         value={sp.amountUnit ?? sp.rateUnit ?? ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "amountUnit",
                             e.target.value,
                           )
@@ -21316,7 +21526,7 @@ export function CompletionPanel({
                                 selected={selectedAreas.includes(area)}
                                 onClick={() =>
                                   updateProduct(
-                                    sp.productId,
+                                    productRowId(sp),
                                     "applicationArea",
                                     toggleProductAreaValue(
                                       sp.applicationArea,
@@ -21333,10 +21543,10 @@ export function CompletionPanel({
                         );
                       })()}
                       <select
-                        value={productApplicationMethod(sp, serviceTypeForArea)}
+                        value={productApplicationMethod(sp, typeFor(sp))}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "applicationMethod",
                             e.target.value,
                           )
@@ -21364,9 +21574,9 @@ export function CompletionPanel({
                       </select>
                       {(() => {
                         const areaRequirement = requiredApplicationArea(
-                          productApplicationMethod(sp, serviceTypeForArea),
-                          serviceTypeForArea,
-                          lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                          productApplicationMethod(sp, typeFor(sp)),
+                          typeFor(sp),
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -21377,7 +21587,7 @@ export function CompletionPanel({
                             value={sp.areaValue || ""}
                             onChange={(e) =>
                               updateProduct(
-                                sp.productId,
+                                productRowId(sp),
                                 "areaValue",
                                 e.target.value,
                               )
@@ -21393,7 +21603,7 @@ export function CompletionPanel({
                       })()}
                       <button
                         type="button"
-                        onClick={() => removeProduct(sp.productId)}
+                        onClick={() => removeProduct(productRowId(sp))}
                         aria-label="Remove product"
                         style={{
                           width: 36,
@@ -21427,12 +21637,12 @@ export function CompletionPanel({
                         });
                         return (
                         <ProductTargetsPicker
-                          idSuffix={sp.productId}
+                          idSuffix={productRowId(sp)}
                           targets={sp.targets}
                           suggestions={picker.suggestions}
                           noun={picker.noun}
                           onChange={(next) =>
-                            updateProduct(sp.productId, "targets", next)
+                            updateProduct(productRowId(sp), "targets", next)
                           }
                           theme={{
                             labelColor: M.ink3,
@@ -22951,7 +23161,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                    onClick={() => removeSelectedLabel(kind, label)}
+                    onClick={() => removeSelectionPill(kind, label)}
                     style={{
                       border: "none",
                       background: "transparent",
@@ -22999,22 +23209,6 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {isRegularPestVisit && (
-              <div style={{ marginBottom: 12 }}>
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: D.text, cursor: "pointer" }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={Boolean(pestSweepLabel)}
-                    disabled={generating}
-                    onChange={(e) => handlePestSweepChange(e.target.checked)}
-                    style={{ width: 16, height: 16 }}
-                  />
-                  Swept eaves and webs
-                </label>
-              </div>
-            )}
             {!isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -23063,6 +23257,12 @@ export function CompletionPanel({
                           </option>
                         ))}
                   </select>
+                  {bermudaConditionLines.map((line) => (
+                    <div key={line} style={{ fontSize: 14, color: D.muted }}>{line}</div>
+                  ))}
+                  {protocolActionWarningLines.map((line) => (
+                    <div key={line} role="note" style={{ fontSize: 14, color: D.muted }}>{line}</div>
+                  ))}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>
                       {selectedProtocolActionCount} protocol action
@@ -23544,6 +23744,16 @@ export function CompletionPanel({
               />
             );
           })}
+          <AreaAddOnFields
+            service={service}
+            selectedProducts={selectedProducts}
+            products={products}
+            onAddProduct={addAreaAddOnProduct}
+            disabled={generating}
+            colors={{ text: D.text, muted: D.muted, border: D.border }}
+            selectStyle={inputStyle}
+            labelStyle={labelStyle}
+          />
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -23558,7 +23768,7 @@ export function CompletionPanel({
             >
               {(products || []).slice(0, 5).map((p) => {
                 const isSelected = selectedProducts.find(
-                  (sp) => sp.productId === p.id,
+                  (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                 );
                 return (
                   <button
@@ -23636,7 +23846,7 @@ export function CompletionPanel({
             >
               {selectedProducts.map((sp) => (
                 <div
-                  key={sp.productId}
+                  key={productRowId(sp)}
                   style={{
                     background: D.card,
                     border: `1px solid ${D.border}`,
@@ -23668,14 +23878,14 @@ export function CompletionPanel({
                     placeholder="Rate"
                     value={sp.rate}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rate", e.target.value)
+                      updateProduct(productRowId(sp), "rate", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.rateUnit}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rateUnit", e.target.value)
+                      updateProduct(productRowId(sp), "rateUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23704,7 +23914,7 @@ export function CompletionPanel({
                         placeholder="Gal"
                         value={sp.carrierGallons ?? ""}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                          updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                         }
                         style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                       />{" "}
@@ -23718,14 +23928,14 @@ export function CompletionPanel({
                     placeholder="Total"
                     value={sp.totalAmount || ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "totalAmount", e.target.value)
+                      updateProduct(productRowId(sp), "totalAmount", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.amountUnit ?? sp.rateUnit ?? ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "amountUnit", e.target.value)
+                      updateProduct(productRowId(sp), "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23777,7 +23987,7 @@ export function CompletionPanel({
                               type="button"
                               onClick={() =>
                                 updateProduct(
-                                  sp.productId,
+                                  productRowId(sp),
                                   "applicationArea",
                                   toggleProductAreaValue(
                                     sp.applicationArea,
@@ -23807,10 +24017,10 @@ export function CompletionPanel({
                     );
                   })()}
                   <select
-                    value={productApplicationMethod(sp, serviceTypeForArea)}
+                    value={productApplicationMethod(sp, typeFor(sp))}
                     onChange={(e) =>
                       updateProduct(
-                        sp.productId,
+                        productRowId(sp),
                         "applicationMethod",
                         e.target.value,
                       )
@@ -23837,9 +24047,9 @@ export function CompletionPanel({
                   </select>
                   {(() => {
                     const areaRequirement = requiredApplicationArea(
-                      productApplicationMethod(sp, serviceTypeForArea),
-                      serviceTypeForArea,
-                      lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                      productApplicationMethod(sp, typeFor(sp)),
+                      typeFor(sp),
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -23850,7 +24060,7 @@ export function CompletionPanel({
                         value={sp.areaValue || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "areaValue",
                             e.target.value,
                           )
@@ -23862,7 +24072,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label="Remove product"
-                    onClick={() => removeProduct(sp.productId)}
+                    onClick={() => removeProduct(productRowId(sp))}
                     style={{
                       background: "none",
                       border: "none",
@@ -23890,12 +24100,12 @@ export function CompletionPanel({
                     });
                     return (
                     <ProductTargetsPicker
-                      idSuffix={sp.productId}
+                      idSuffix={productRowId(sp)}
                       targets={sp.targets}
                       suggestions={picker.suggestions}
                       noun={picker.noun}
                       onChange={(next) =>
-                        updateProduct(sp.productId, "targets", next)
+                        updateProduct(productRowId(sp), "targets", next)
                       }
                       theme={{
                         labelColor: D.muted,
@@ -25118,12 +25328,15 @@ function TechTipPicker({
     if (String(customTip || "").trim()) setShowCustom(true);
   }, [customTip]);
   const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
-  const groups = library?.groups || [];
+  const groups = useMemo(() => rotatedTipGroups(library), [library]);
   const allTips = useMemo(
     () => groups.flatMap((g) => (g.tips || []).map((t) => ({ ...t, groupLabel: g.label }))),
     [groups],
   );
-  const tipById = useMemo(() => new Map(allTips.map((t) => [t.id, t])), [allTips]);
+  // A search reads the whole library (`more`: the tips this visit's list
+  // leaves out, owner 2026-10-09); the open list stays the visit's own.
+  const searchTips = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const tipById = useMemo(() => new Map(searchTips.map((t) => [t.id, t])), [searchTips]);
   // The custom line takes a slot like a library pick (the server caps the
   // frozen set the same way), so the count and the cap include it.
   const customCount = String(customTip || "").trim() ? 1 : 0;
@@ -25134,7 +25347,7 @@ function TechTipPicker({
   // would drop over cap.
   const customLocked = !customCount && selectedIds.length >= TECH_TIP_MAX;
   const q = query.trim().toLowerCase();
-  const ranked = q ? rankTechTips(allTips, q) : null;
+  const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
   const inactive = disabled || loading || !!error;
@@ -25409,6 +25622,8 @@ const MONTH_NAMES = [
 
 /* Product descriptions — plain-language for techs and Virginia */
 const PRODUCT_DESCRIPTIONS = {
+  // Before the generic key: the plain product is the caterpillar product on lawn and tree & shrub lines.
+  "acelepryn insecticide": "chlorantraniliprole for leaf-feeding caterpillars (IRAC 28)",
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
@@ -25485,12 +25700,13 @@ const PRODUCT_DESCRIPTIONS = {
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",
-  mainspring: "non-neonic option for whiteflies, caterpillars, leafminers, and resistance management (IRAC 28)",
-  "distance igr": "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
-  distance: "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
+  mainspring: "non-neonic option for whiteflies, leafminers, and resistance management (IRAC 28)",
+  "distance igr": "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
+  distance: "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
   talus: "insect growth regulator for immature whitefly and scale stages (IRAC 16)",
   "kphite 7lp": "phosphite support for root/oomycete pressure; FRAC P07",
   kphite: "phosphite support for root/oomycete pressure; FRAC P07",
+  reliant: "phosphite support for root/oomycete pressure; FRAC P07",
   conserve: "spinosyn option for caterpillar/thrips-type work where labeled",
   floramite: "miticide for confirmed mite pressure only",
   "liquid copper": "contact protectant for labeled leaf or bacterial disease; keep separate from oil",
@@ -25537,10 +25753,21 @@ const TRACK_SAFETY_RULES = {
   ],
 };
 
+/* Overrides for a lawn payload that carries its own safety_rules (the v13 program,
+   GATE_LAWN_V13): Celsius is limited to 2 applications a year there. The base list above keeps the
+   legacy wording (3) for the gate-off protocol. */
+const PRODUCT_DESCRIPTIONS_V13 = {
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
+  "lesco 10-0-22":
+    "slow-release fertilizer with extra potassium for winter hardiness",
+};
+
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */
 export {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 };

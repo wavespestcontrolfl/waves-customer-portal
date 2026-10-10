@@ -149,6 +149,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.querySelector('svg')).toBeNull();
   });
 
+  it('lawnCoverageHidden (GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES) prints no generated map or zone legend', () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 340"><rect/></svg>';
+    const base = { ...BASE_DATA, mapSvg: svg, zones: [{ letter: 'A', label: 'Front perimeter' }] };
+    const shown = render(<ServiceReportDocument data={base} token="tok123" />);
+    expect(shown.container.textContent).toContain('Where we treated');
+    expect(shown.container.textContent).toContain('Front perimeter');
+    shown.unmount();
+    const { container } = render(<ServiceReportDocument data={{ ...base, lawnCoverageHidden: true }} token="tok123" />);
+    expect(container.textContent).not.toContain('Where we treated');
+    expect(container.textContent).not.toContain('A — Front perimeter');
+    expect(container.querySelector('img[src^="data:image/svg+xml"]')).toBeNull();
+  });
+
+  it('lawnCoverageHidden still prints a real technician-traced map', () => {
+    const data = { ...BASE_DATA, lawnCoverageHidden: true, treatmentMap: { traced: { snapshotUrl: 'https://cdn.example.com/trace.png' } } };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(document.querySelector('img[src="https://cdn.example.com/trace.png"]')).toBeTruthy();
+  });
+
   it('embeds the technician-traced treatment map when one exists', () => {
     const data = { ...BASE_DATA, treatmentMap: { traced: { snapshotUrl: 'https://cdn.example.com/trace.png' }, footer: 'Technician-reported service zones.' } };
     render(<ServiceReportDocument data={data} token="tok123" />);
@@ -431,6 +450,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
         aftercare: { watering: `${line1} ${line2} ${line3}`, holdTask: `${line1} ${line2}`, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
         snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
         insights: [{ category: 'water', headline: 'Water', customerAction: line2 }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.split(line1)).toHaveLength(2);
+    expect(text.split(line2)).toHaveLength(2);
+  });
+
+  it('rain has watered it in (GATE_LAWN_WATER_IN_RAIN): the banner sentences print once, not again in the hero task', () => {
+    const line1 = 'Rain since your visit has watered today’s treatment in.';
+    const line2 = 'No extra sprinkler run is needed for it.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'water_in_by_rain', lines: [line1, line2], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2}`, waterInRequired: false, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line1 }],
       },
     };
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
@@ -1117,6 +1155,22 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
     expect(container.textContent).toMatch(/a follow-up is already planned/);
     expect(container.textContent).not.toContain('No notable issues were found today.');
+  });
+
+  it('prints the whole frozen lawn Visit Summary, not the reconciled first sentence', () => {
+    const summary = 'Today we applied a feeding, which fits the fall season. In the photos we noticed some weed pressure. Results from treatments like these build gradually, and each visit adds to the last one. At the next visit we will look at weeds.';
+    const data = {
+      ...BASE_DATA,
+      typedReport: null,
+      summary,
+      summarySource: 'lawn_visit_summary',
+      reportV2: { todaysResult: 'Today we applied a feeding, which fits the fall season.', insights: [{ headline: 'Weed watch', whatWeSaw: 'Some weeds.' }] },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain(summary);
+    // Any other source keeps the reconciled result in front of the summary, as before.
+    const other = render(<ServiceReportDocument data={{ ...data, summarySource: 'recap' }} token="tok123" />);
+    expect(other.container.textContent).not.toContain('In the photos we noticed some weed pressure');
   });
 
   it('keeps a promised follow-up and the next-service arrival window', () => {

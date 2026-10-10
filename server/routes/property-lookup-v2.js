@@ -5196,6 +5196,87 @@ function requireBermudaSuppressionGate() {
   throw err;
 }
 
+// Area add-on treatments (GATE_AREA_ADDONS, owner rulings 2026-10-08). The
+// estimator posts options.areaAddOns = [{ key, areaSqFt, grassType? }] plus ONE
+// options.areaAddOnVisit ('standalone' | 'sameTripAddOn', default standalone)
+// for the whole group, and this is the ONE place it becomes engine
+// services.areaAddOns / services.areaAddOnVisit. Same posture as
+// the Bermuda gate: requested-while-dark fails CLOSED with a 400 the builder
+// surfaces verbatim, and the save-replay rethrows it (failClosed). Anything the
+// engine owns (known key, positive area, visit context, the host service for a
+// same-visit add-on) is validated by the engine's one validator, not here; this
+// boundary only refuses a malformed envelope, the legacy `applications` field
+// (one application per estimate in version 1) and an unverified grass.
+function areaAddOnInputError(message, code = 'AREA_ADDON_INPUT_INVALID') {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.code = code;
+  err.failClosed = true;
+  return err;
+}
+function requireAreaAddOnsGate() {
+  if (require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return;
+  throw areaAddOnInputError('Area add-on treatments are not enabled on this environment (GATE_AREA_ADDONS) - remove the add-ons or flip the gate.', 'AREA_ADDONS_GATED');
+}
+// `track` is the estimate's grass track; `grassChosen` says the operator
+// picked it (the translator defaults an unpicked grass to St. Augustine, which
+// must never price a label-bound add-on: that add-on then quotes as custom).
+// A label-bound entry's OWN grass (the estimator row's required Grass select)
+// wins over the estimate's: a chosen grass prices by itself, and an empty or
+// "unknown" one quotes as custom even when the estimate names a grass.
+function areaAddOnsFromOptions(options, { track, grassChosen }) {
+  const raw = options.areaAddOns;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw areaAddOnInputError('areaAddOns must be a list of { key, areaSqFt }.');
+  if (raw.length === 0) return undefined;
+  requireAreaAddOnsGate();
+  const { AREA_ADDONS } = require('../services/pricing-engine/constants');
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw areaAddOnInputError(`areaAddOns entry ${index + 1} must be an object.`);
+    }
+    if (entry.applications !== undefined) {
+      throw areaAddOnInputError('applications is not supported: each area add-on is one application per estimate, and a second application is a new estimate.');
+    }
+    // The visit is chosen once for the whole group. A per-add-on visitContext
+    // from an older client is refused: honoring it would charge the drive twice.
+    if (entry.visitContext !== undefined) {
+      throw areaAddOnInputError('visitContext is set once for all area add-ons (options.areaAddOnVisit), not on each add-on - update the estimator and send areaAddOnVisit.', 'AREA_ADDON_VISIT_PER_ENTRY');
+    }
+    const cfg = typeof entry.key === 'string' && Object.prototype.hasOwnProperty.call(AREA_ADDONS.items, entry.key)
+      ? AREA_ADDONS.items[entry.key] : null;
+    return {
+      key: entry.key,
+      ...(entry.areaSqFt !== undefined ? { areaSqFt: entry.areaSqFt } : {}),
+      ...(cfg?.requiresGrassTrack ? { grassType: areaAddOnGrass(entry.grassType, { track, grassChosen }) } : {}),
+    };
+  });
+}
+// A label-bound add-on's grass. A string is the rep's choice ('' = not chosen yet
+// = unknown). An explicit null is also "not chosen" (the client contract sends
+// 'unknown'), so it never borrows the estimate's grass. Only an ABSENT field
+// takes the estimate's grass, and only when the rep chose one on the form.
+function areaAddOnGrass(value, { track, grassChosen }) {
+  if (typeof value === 'string') return value.trim() || 'unknown';
+  if (value === null) return 'unknown';
+  return grassChosen ? track : 'unknown';
+}
+// The group's visit: absent = their own visit; anything else must be a known context.
+function areaAddOnVisitFromOptions(options) {
+  const visit = options.areaAddOnVisit;
+  if (visit === undefined || visit === null) return 'standalone';
+  if (visit !== 'standalone' && visit !== 'sameTripAddOn') {
+    throw areaAddOnInputError("areaAddOnVisit must be 'standalone' or 'sameTripAddOn'.", 'AREA_ADDON_VISIT_INVALID');
+  }
+  return visit;
+}
+
+// The engine's services.areaAddOns / services.areaAddOnVisit for these options: both, or nothing.
+function areaAddOnServices(options, ctx) {
+  const areaAddOns = areaAddOnsFromOptions(options, ctx);
+  return areaAddOns ? { areaAddOns, areaAddOnVisit: areaAddOnVisitFromOptions(options) } : {};
+}
+
 // An association's common-area job (HOA / multifamily), by the operator's
 // business type or the property's subtype. One predicate for the lookup's
 // suite scope and the translate-time refusal; the estimate tool's
@@ -5895,6 +5976,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('PLUGGING')) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
+  Object.assign(services, areaAddOnServices(o, { track, grassChosen: !!o.grassType }));
   if (sel.has('RODENT_SANITATION')) {
     services.sanitation = {
       tier: o.sanitationTier || 'standard',
@@ -6159,6 +6241,8 @@ router.post('/calculate-estimate', async (req, res) => {
         retryable: true,
       });
     }
+    // The add-ons' yearly-limit history of the matched customer's property (read here; the engine never queries).
+    v1Input = await require('../services/area-addon-limits').attachQuoteAreaAddOnHistory(require('../models/db'), v1Input, options, { requesterRole: req.techRole });
     v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
       .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);

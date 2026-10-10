@@ -375,7 +375,23 @@ const NO_LAWN_GUIDANCE = Object.freeze({
   window: null,
   products: [],
   conditional_products: [],
+  held_products: [],
 });
+
+// GATE_LAWN_NOV_LARGE_PATCH_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000"); for a visit where the
+// plan cuts it (waveguard-plan-engine fungusNitrogenCut, the plan's own decision) the brief states the cut and why, so the pocket
+// reference agrees with the plan and the Fast Complete sheet. Gate off, not v13 or no cut: the entries are left as they are (no read).
+// STRICT like the brief's other reads: the sweep stores the brief, so a failed area read aborts the generation (the prior brief
+// survives) instead of storing the normal target the live plan would not use once the database is back.
+async function projectFungusNitrogenCut(dbh, svc, entries, summary) {
+  const { fungusNitrogenCut } = require('./waveguard-plan-engine');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  for (const entry of entries) {
+    const stated = String(entry.gates.targetN || '').match(/^\s*(\d+(?:\.\d+)?)\s*lb N\/1000/i);
+    const cut = stated ? await fungusNitrogenCut(dbh, svc, { targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true }) : null;
+    if (cut != null) entry.gates = { ...entry.gates, targetN: `${cut} lb N/1000 (active fungus mapped; normal ${stated[1]} lb N/1000)` };
+  }
+}
 
 // Lawn visits: ONLY the products active for the visit's protocol window —
 // the owner's bounded-product constraint. Window resolution order:
@@ -396,6 +412,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // strict — an outage here read as unknown_grass_track would hash
     // empty lawn guidance over a valid cached brief.
     const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
+    // GATE_LAWN_V13: a bahia lawn has no program, so no window is shown for it, even when the
+    // visit was assigned a protocol (an assignment cannot give a bahia lawn another grass's guidance).
+    if (grass.noProgram) return { ...NO_LAWN_GUIDANCE, reason: 'lawn_v13_bahia_no_program' };
     const scheduledDay = calendarDay(svc.scheduled_date);
     const serviceDate = scheduledDay ? parseETDateTime(`${scheduledDay}T12:00`) : new Date();
 
@@ -462,7 +481,21 @@ async function loadLawnWindowGuidance(dbh, svc) {
       title: cleanText(g.title, 160),
       ruleText: cleanText(g.ruleText, 300),
     }));
+    // A product the city holds back for this window (North Port Nutra-TECH, June to September) is NOT
+    // to be applied: it leaves the fixed and conditional lists (no dose) and ships as a hold with the
+    // plan's own warning text. The city resolves as the plan resolves it (stamped address, turf
+    // profile municipality, customer city); strict, like every read here.
+    const { v13NorthPortHold, loadVisitCity, v13HoldWarnings } = require('./waveguard-plan-engine');
+    const municipality = await loadVisitCity(dbh, svc);
+    const heldRows = (summary.products || []).filter((p) => v13NorthPortHold(p, municipality));
+    const held = heldRows.map((p) => ({
+      name: cleanText(p.productName || p.protocolProductName, 120),
+      role: cleanText(p.role, 60),
+      hold: true,
+      message: cleanText(v13HoldWarnings([{ selectionReason: 'north_port_product_window', product: { id: p.productId, name: p.productName || p.protocolProductName } }])[0].message, 300),
+    }));
     const shaped = (summary.products || [])
+      .filter((p) => !heldRows.includes(p))
       .map((p) => ({
         shapedEntry: shapeWindowProduct(p),
         productId: p.productId || null,
@@ -474,6 +507,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
+    await projectFungusNitrogenCut(dbh, svc, shaped, summary);
 
     // Customer-specific application limits (annual max apps, cumulative
     // rate, minimum interval, MOA rotation — application-limits.js, the
@@ -487,7 +521,11 @@ async function loadLawnWindowGuidance(dbh, svc) {
     const LimitChecker = require('./application-limits');
     for (const entry of shaped) {
       if (!entry.fixed || !entry.productId) continue;
-      const limits = await LimitChecker.checkLimits(svc.customer_id, entry.productId, serviceDate);
+      // The treated property and this visit scope the history, as the plan engine scopes it:
+      // another property's applications, and this visit's own ledger rows, are not held against it.
+      const limits = await LimitChecker.checkLimits(svc.customer_id, entry.productId, serviceDate, undefined, {
+        propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id,
+      });
       const violations = [
         ...(limits.blocks || []).map((v) => ({ severity: 'block', type: v.type || null, message: cleanText(v.message || v.description, 200) })),
         ...(limits.warnings || []).map((v) => ({ severity: v.severity || 'warn', type: v.type || null, message: cleanText(v.message || v.description, 200) })),
@@ -516,6 +554,8 @@ async function loadLawnWindowGuidance(dbh, svc) {
       } : null,
       // Fixed guidance = default-in-plan, gate-free products only.
       products: shaped.filter((p) => p.fixed).map((p) => p.shapedEntry),
+      // Held back by the visit's city: no dose, the plan's hold text.
+      held_products: held,
       // Everything gated or optional, carrying the COMPLETE gate object
       // (never just gates.trigger — premiumTier / soilPIndexBelow / maxTempF
       // and the rest must survive) plus the trigger convenience field.

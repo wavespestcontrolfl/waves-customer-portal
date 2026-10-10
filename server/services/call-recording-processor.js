@@ -66,7 +66,7 @@ const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
-const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { buildExtractionPrompt, buildExtractionPromptParts, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { appointmentConfirmedRules } = require('./prompts/appointment-confirmed-rules');
 const { dispatchWithFallback, anthropicText } = require('./llm/call');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
@@ -212,6 +212,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { flagCallBookingRain } = require('./call-booking-rain-flag');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
@@ -1565,7 +1566,12 @@ function sanitizePriorText(value, max = 300) {
     .trim()
     .slice(0, max);
 }
-async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null) {
+// `opts.accept` (offline replay only; production passes nothing): an async test
+// of a candidate row ({ id, created_at, ai_extraction_enriched }). The newest of
+// the 10 newest candidates that passes is used, so a call that was not yet
+// processed when the pass being replayed ran is skipped for the next older one,
+// which is what that pass's own `whereNotNull('ai_extraction')` did then.
+async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null, opts = {}) {
   try {
     const digits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
     if (digits.length < 10) return null;
@@ -1594,7 +1600,15 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     // "Prior" means STRICTLY EARLIER: a force-reprocess or out-of-order queue
     // drain must never hand call 1 the extraction of call 2 as its past.
     if (currentCallCreatedAt) q.where('created_at', '<', currentCallCreatedAt);
-    const row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
+    let row = null;
+    if (typeof opts.accept === 'function') {
+      const candidates = await q.limit(10).select('id', 'created_at', 'call_summary', 'ai_extraction', 'ai_extraction_enriched');
+      for (const candidate of candidates) {
+        if (await opts.accept(candidate)) { row = candidate; break; }
+      }
+    } else {
+      row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
+    }
     if (!row) return null;
     const v1 = typeof row.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : (row.ai_extraction || {});
     if (v1.is_spam === true) return null;
@@ -3773,11 +3787,60 @@ const FORCE_CLAIM_QUIET_MINUTES = 3;
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
+// A pass interrupted by a deploy (GATE_CALL_PROC_SHUTDOWN_RELEASE). At SIGTERM
+// every pass this process holds a claim for is STAMPED — nothing else changes:
+// the claim, token and status stay with the dying pass, so no second pass can
+// run while it is still alive (a released claim let the replacement pod resend
+// a DOI email the dying pass had just sent — Codex #6260 r4 P1). A stamped
+// claim becomes reclaimable after a SHORT heartbeat silence instead of the
+// 10-minute window: the pass beats every 60 s while alive and Railway kills
+// the old pod within 30 s of SIGTERM, so 2 quiet minutes on a stamped row is
+// proof the pass is dead, and a pass that somehow survived keeps beating and
+// is never taken. The claim that takes the row clears the stamp. The stamp
+// write refreshes the heartbeat in the same statement: the pass IS alive at
+// SIGTERM, and a beat that had gone stale behind a long provider call must not
+// make the row reclaimable during the old pod's last 25 seconds (Codex r5 P1).
+// The clause is read only while the gate is on: a gate-off pod after a rollback
+// ignores stamps a gate-on pod left behind (Codex r5 P1).
+const SHUTDOWN_RECLAIM_QUIET_MINUTES = 2;
+const SHUTDOWN_STAMP_KEY = 'shutdown_interrupted_at';
+const shutdownInterruptedClaim = "("
+  + `metadata ->> '${SHUTDOWN_STAMP_KEY}' IS NOT NULL`
+  + ` AND COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${SHUTDOWN_RECLAIM_QUIET_MINUTES} minutes'`
+  + ")";
+// The quarantine backstop's OUTER age gate (updated_at 10 min old) lets the
+// webhook's immediate path win; the claim itself refreshes updated_at, so a
+// deploy-stamped quarantined claim would wait the full window behind it
+// (Codex r6 P2). This alternative opens that gate for a stamped dead claim.
+const stampedDeadClaimOrFalse = () => (isEnabled('callProcShutdownRelease')
+  ? `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`
+  : 'FALSE');
 const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
+  + (isEnabled('callProcShutdownRelease') ? ` OR ${shutdownInterruptedClaim}` : '')
   + ")";
+// Passes this process currently holds a claim for (call_log.id → claim token),
+// so markInFlightForShutdown knows which rows to stamp. Filled right after the
+// claim, cleared in processRecording's outer finally.
+// Keyed by the pass TOKEN, not the call id: two contenders for one row (the
+// ring-first flow's duplicate webhook) register side by side, and the loser's
+// exit removes only its own entry, never the owner's (Codex r7 P1).
+const inFlightPasses = new Map();
+// Set at SIGTERM: a claim taken after this point is stamped by its own claim
+// write, since it will die with the process too.
+let shuttingDown = false;
+// Claim writes (transaction + post-commit self-stamp) still in flight. A
+// claim UPDATE can sit on a row lock across SIGTERM with its drain read
+// already taken as false; the marker waits for these, within its budget,
+// before it stamps, so a claim that commits inside the budget is visible to
+// the token-fenced stamp (Codex r10 P2).
+const pendingClaimWrites = new Set();
+const shutdownStampSql = (conn) => conn.raw(
+  `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
+  [new Date().toISOString()],
+);
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -6294,8 +6357,20 @@ function hasPreSlabTermiteContext(text) {
   return explicitPreSlab || ((soilOrTermiticideTreatment || termiteTreatment) && (constructionCue || concreteTiming)) || newConstructionTermite;
 }
 
+// The business's own name is not a service request: "confirmed the 4:30
+// appointment with Waves Pest Control" names no service, yet "pest control"
+// inside the name resolved General Pest Control and a confirmation callback
+// booked a pest visit (call 1185737f, 2026-06-19).
+// Not the generic catalog row's exact name, "Waves Pest Control Appointment
+// Service": it keeps resolving as it always has (the replay showed stripping
+// it re-labels existing-customer scheduling calls). Prose such as "a Waves
+// Pest Control appointment for 4:30" is still stripped.
+// Only the retired brand spelling "... & Lawn Care" is taken with the name;
+// "Waves Pest Control and lawn care was requested" keeps its lawn request.
+const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment\s+service\b)(?:\s*&\s*lawn\s*care\b)?/g;
+
 function canonicalWavesService(value) {
-  const text = String(value || '').toLowerCase();
+  const text = String(value || '').toLowerCase().replace(OWN_BUSINESS_NAME_RE, ' ').trim();
   if (!text) return null;
   if (hasPreSlabTermiteContext(text)) return 'Pre-Slab Termidor';
   if (/\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/.test(text)) return 'Termite Wood Treatment';
@@ -8524,13 +8599,22 @@ function callTimeETString(callStartedAt) {
 }
 
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
+const V2_OUTPUT_CONTRACT = '\n\n═══ OUTPUT CONTRACT ═══\n'
+  + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
+  + 'every required field present, every enum value exact, no extra fields, '
+  + 'use null for unknown nullable fields.\n'
+  + JSON.stringify(modelOutputSchema);
+
 function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
-  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
-    + '\n\n═══ OUTPUT CONTRACT ═══\n'
-    + 'Return ONLY a single JSON object that conforms EXACTLY to this JSON Schema: '
-    + 'every required field present, every enum value exact, no extra fields, '
-    + 'use null for unknown nullable fields.\n'
-    + JSON.stringify(modelOutputSchema);
+  return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts) + V2_OUTPUT_CONTRACT;
+}
+
+// The system layout (GATE_CALL_EXTRACTION_SYSTEM_PROMPT): the rules and the output
+// contract are one static system part, the same for every call under one catalog and
+// one gate state, so the provider caches it; the user message is the call alone.
+function buildV2ExtractionParts(transcription, callerPhone, callDateET, promptOpts = {}) {
+  const { system, user } = buildExtractionPromptParts(transcription, callerPhone, callDateET, promptOpts);
+  return { system: system + V2_OUTPUT_CONTRACT, text: user };
 }
 
 // Parse → validate(model-output) → inject server meta → normalize → validate(persisted).
@@ -8596,7 +8680,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   }
 
   const callDateET = etDateString(opts.callStartedAt || new Date());
-  const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
+  // GATE_CALL_EXTRACTION_SYSTEM_PROMPT. The processor reads the gate once per call and
+  // hands the value in, so the request and every version stamp for that call agree; a
+  // caller that hands nothing in (the reviewed-call replay) reads the gate here.
+  const systemLayout = opts.systemPromptLayout === undefined
+    ? require('../config/feature-gates').callExtractionSystemPromptLive() === true
+    : opts.systemPromptLayout === true;
+  const promptOpts = {
     bookableServiceNames: opts.bookableServiceNames,
     // The call's own ET clock time, so a time agreed with no day ("I'll be
     // there at three") can be judged against it: today when still ahead.
@@ -8616,7 +8706,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // slot, the caller says yes and staff commit. Absent (false) off, so the prompt is
     // byte-identical off.
     ...(opts.agentProposedSlotCommitment === true ? { agentProposedSlotCommitment: true } : {}),
-  });
+  };
+  const request = systemLayout
+    ? buildV2ExtractionParts(transcription, callerPhone, callDateET, promptOpts)
+    : { text: buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts) };
 
   // Cross-provider dispatch with the model-output schema validated INSIDE
   // the dispatcher — contract-invalid primary output (valid JSON, wrong
@@ -8631,7 +8724,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   // default decoding.
   const res = await dispatchWithFallback(CALL_EXTRACTION_ROUTE, {
     laneId: 'call_extraction',
-    text: prompt,
+    ...request,
     jsonMode: true,
     maxTokens: 16384,
     temperature: 0,
@@ -8662,7 +8755,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
     // version must carry its hash or cohorts mix under one version.
-    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true }),
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout }),
   });
 }
 
@@ -9269,6 +9362,16 @@ const CallRecordingProcessor = {
     // in flight either commits before the lock (pre-claim, correctly the
     // baseline) or waits and lands post-claim, where the CAS stales it.
     let contactCasBaselineAtClaim = null;
+    // On the registry BEFORE the claim can commit: a SIGTERM that lands while
+    // the claim transaction is committing must still see this pass, or the
+    // stamp UPDATE snapshots an empty registry and the fresh claim dies
+    // unstamped (Codex r6 P2). The stamp UPDATE is token-fenced, so against
+    // an uncommitted claim it waits on the row lock and then stamps the
+    // committed row; against a claim that never commits it matches 0 rows.
+    // A refused or thrown claim leaves the registry below.
+    inFlightPasses.set(procToken, { callId: call.id, callSid });
+    const unregisterClaim = () => { inFlightPasses.delete(procToken); };
+    const claimWrite = (async () => {
     await db.transaction(async (trx) => {
       if (call.customer_id) {
         contactCasBaselineAtClaim = await trx('customers')
@@ -9338,6 +9441,15 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // A deploy stamp (markInFlightForShutdown) is consumed by the
+            // claim that takes the row. A claim taken while this process is
+            // already draining stamps itself IN the claim write, so the stamp
+            // lands with the claim even if the forced exit kills the process
+            // before the post-commit check below (Codex r9 P2); that check
+            // covers the flag flipping while this transaction is open.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -9398,6 +9510,15 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // A deploy stamp (markInFlightForShutdown) is consumed by the
+            // claim that takes the row. A claim taken while this process is
+            // already draining stamps itself IN the claim write, so the stamp
+            // lands with the claim even if the forced exit kills the process
+            // before the post-commit check below (Codex r9 P2); that check
+            // covers the flag flipping while this transaction is open.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -9411,6 +9532,34 @@ const CallRecordingProcessor = {
           ? Number(claimedRows[0].processing_generation) : null;
       }
     });
+    // Post-commit drain check (Codex r8 P2) for a flag that flipped while
+    // the claim transaction was open. markInFlightForShutdown's
+    // token-fenced stamp cannot see a claim that has not committed yet: the
+    // visible row still carries the previous token, so Postgres returns 0
+    // rows without waiting. Both orders are covered: the drain flag flipped
+    // before this line runs (we stamp ourselves now, and the marker awaits
+    // this write through pendingClaimWrites), or it flips after (we were on
+    // the registry before the transaction and the row is committed, so the
+    // marker's UPDATE matches). Token-fenced, so a row a peer has since
+    // taken is left alone.
+    if (!claimBlocked && shuttingDown && isEnabled('callProcShutdownRelease')) {
+      await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() })
+        .catch((e) => logger.warn(`[call-proc] shutdown: self-stamp failed for ${maskSid(callSid)}: ${e.message}`));
+    }
+    })();
+    pendingClaimWrites.add(claimWrite);
+    try {
+      await claimWrite;
+    } catch (claimErr) {
+      unregisterClaim();
+      throw claimErr;
+    } finally {
+      pendingClaimWrites.delete(claimWrite);
+    }
+    if (claimBlocked) unregisterClaim();
     // A blocked claim did NO work — success: false so no caller can mistake
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
@@ -9445,7 +9594,8 @@ const CallRecordingProcessor = {
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
-    // The claim is ours from here. Beat while we work: transcription of a
+    // The claim is ours from here (registered for markInFlightForShutdown
+    // before the transaction above). Beat while we work: transcription of a
     // long recording is one multi-minute await with no natural checkpoints,
     // and without a beat the reclaim predicates cannot tell that pass from a
     // wedged one. unref() so a draining process never lingers for the timer.
@@ -10279,7 +10429,10 @@ const CallRecordingProcessor = {
     // lanes all use this one value, so a flip mid-pass can never stamp a cohort the prompt
     // did not render (or route on a block the prompt never carried).
     const assessmentLaneActive = commercialAssessmentBookingActive(call);
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
+    // GATE_CALL_EXTRACTION_SYSTEM_PROMPT, read ONCE for this pass for the same reason: the
+    // request layout and every prompt-version stamp for this call use this one value.
+    const systemPromptLayout = require('../config/feature-gates').callExtractionSystemPromptLive() === true;
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -10370,6 +10523,7 @@ const CallRecordingProcessor = {
           // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): read the
           // agent-proposed slot shape for the booking this lane can now clear.
           ...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),
+          systemPromptLayout,
         });
         // An impossible spoken caller number (no NANP line has an area
         // code starting 0 or 1) is dropped from the V2 extraction
@@ -11531,7 +11685,7 @@ const CallRecordingProcessor = {
           // canonical record. It must be consulted for the unit ask: the
           // adoption retains a V1 unit V2 dropped, so the AV verdict can
           // report a missing subpremise the record already has.
-          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted });
+          const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted, transcript: transcription });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           // The same model-flag suppression canAutoRoute applies (codex #4890
@@ -11921,7 +12075,7 @@ const CallRecordingProcessor = {
           try {
             bridgeTriageFlags = mergeTriageFlags(
               bridgeTriageFlags,
-              computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation })
+              computeDeterministicTriageFlags(v2Ext, { contactPhone, addressValidation: v2AddressValidation, transcript: transcription })
             );
           } catch (_e) { /* fall back to model flags only */ }
         }
@@ -12456,6 +12610,14 @@ const CallRecordingProcessor = {
       && !!String(extracted.last_name || '').trim()
       && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
+    // A family member who named the account holder by full name: ONE advisory card listing the live
+    // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
+    // pass creates a customer for the caller, writes nothing else.
+    if (!customerLinkOverride) {
+      await require('./call-family-name-link').fileFamilyAccountCard({
+        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
+      });
+    }
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
@@ -20155,6 +20317,13 @@ const CallRecordingProcessor = {
                     logger.warn(`[call-proc] booking-conflict admin notify failed for ${maskSid(callSid)}: ${notifyErr.message}`);
                   }
                 }
+                // Rain flag (GATE_CALL_BOOKING_RAIN_FLAG, dark): the same
+                // admin channel, one notice when this fresh visit is outdoor
+                // work in a rain window (call-booking-rain-flag.js). Advisory
+                // like the block above; it never throws and moves nothing.
+                await flagCallBookingRain({
+                  visit: svc, scheduledDate, windowStart, windowEnd, catalogRow: callBookingCatalogRow, callSid, db,
+                });
               }
               if ((attachedManualBookingId && attachSkippedFollowUpPlan) || disputeSkippedFollowUpPlan) {
                 // The call promised a follow-up treatment, but the primary is
@@ -21895,6 +22064,7 @@ const CallRecordingProcessor = {
         const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(v2ExtractionForAudit.triage_flags, v2ExtractionForAudit), v2AddressValidation);
         const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
           contactPhone,
+          transcript: transcription,
           addressValidation: v2AddressValidation,
           // Same merged record the live lane consulted — the reconstruction
           // must agree with it, or the shadow metrics count a unit ask the
@@ -22472,6 +22642,9 @@ const CallRecordingProcessor = {
         }
       }
 
+      // Suggest a last name to the office (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.
+      if (customerId) require('./call-last-name-lookup').enqueueCallLastNameLookup({ callLogId: call.id, customerId });
+
       // The window this booking call committed needs no capture step either:
       // the visit row carries source_call_log_id, written in the booking
       // transaction, and no-show-detector.js derives the promise from that
@@ -22695,7 +22868,95 @@ const CallRecordingProcessor = {
       throw procErr;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      inFlightPasses.delete(procToken);
     }
+  },
+
+  /** How many passes this process currently holds a claim for (tests, shutdown log). */
+  inFlightPassCount() {
+    return inFlightPasses.size;
+  },
+
+  /**
+   * SIGTERM path (server/index.js shutdown). Stamps every call_log row this
+   * process holds a claim for with metadata.shutdown_interrupted_at — one
+   * token-fenced UPDATE per pass, all at once, each bounded by `deadlineMs`.
+   * Nothing else changes: the dying pass keeps its claim, token and status
+   * until Railway kills it, so no second pass can overlap it. The stamp only
+   * shortens the reclaim window on the replacing pod from 10 quiet minutes to
+   * SHUTDOWN_RECLAIM_QUIET_MINUTES (reclaimableClaim), and the claim that
+   * takes the row clears it. Also marks this process as draining so a claim
+   * taken from here on stamps itself.
+   *
+   * No-op (counts only) while GATE_CALL_PROC_SHUTDOWN_RELEASE is off.
+   */
+  async markInFlightForShutdown({ deadlineMs = 5000 } = {}) {
+    const enabled = isEnabled('callProcShutdownRelease');
+    // Flag FIRST, snapshot second, with no await between: a pass whose claim
+    // commits after this snapshot reads the flag in its post-commit check and
+    // stamps itself; a pass that read the flag as false before this line is
+    // in the snapshot with a committed claim.
+    if (enabled) shuttingDown = true;
+    if (!enabled) return { enabled, inFlight: inFlightPasses.size, stamped: 0, failed: 0 };
+    const deadline = new Promise((resolve) => {
+      const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
+      if (typeof t.unref === 'function') t.unref();
+    });
+    const summary = { enabled, inFlight: 0, stamped: 0, failed: 0 };
+    const seen = new Set();
+    // One token-fenced stamp per entry, all concurrent, each racing the
+    // shared deadline. Returns the tokens whose stamp landed (1 row).
+    const stampEntries = async (entries) => {
+      const landed = new Set();
+      await Promise.all(entries.map(async ([procToken, entry]) => {
+        if (!seen.has(procToken)) { seen.add(procToken); summary.inFlight += 1; }
+        try {
+          const rows = await Promise.race([
+            db('call_log')
+              .where({ id: entry.callId })
+              .where('processing_token', procToken)
+              // Stamp AND beat in one statement: the pass is alive right now,
+              // and the 2-minute silence must start here, not at a beat that
+              // went stale behind a long provider call.
+              .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() }),
+            deadline,
+          ]);
+          if (rows === 'deadline') {
+            summary.failed += 1;
+            logger.warn(`[call-proc] shutdown: stamp for ${maskSid(entry.callSid)} did not land before the deadline`);
+          } else if (rows) {
+            landed.add(procToken);
+            summary.stamped += 1;
+            logger.info(`[call-proc] shutdown: stamped interrupted pass ${maskSid(entry.callSid)}`);
+          }
+          // 0 rows: the pass finished, a peer took the row, or the claim has
+          // not committed yet (the second pass below retries that one).
+        } catch (err) {
+          summary.failed += 1;
+          logger.warn(`[call-proc] shutdown: stamp failed for ${maskSid(entry.callSid)}: ${err.message}`);
+        }
+      }));
+      return landed;
+    };
+    // Pass 1: stamp the claims that exist now, CONCURRENTLY with the wait for
+    // claim writes blocked on a row lock when the flag flipped (Codex r11
+    // P1: that wait must not spend the budget before committed owners are
+    // stamped). A blocked claim that commits inside the budget then carries
+    // a visible token (and has self-stamped post-commit); pass 2 stamps it.
+    // One still blocked at the deadline is left to the legacy window.
+    const firstPass = stampEntries([...inFlightPasses.entries()]);
+    if (pendingClaimWrites.size) {
+      await Promise.race([Promise.allSettled([...pendingClaimWrites]), deadline]);
+    }
+    const landed = await firstPass;
+    const secondPass = [...inFlightPasses.entries()].filter(([procToken]) => !landed.has(procToken));
+    if (secondPass.length) {
+      // Only when there is budget left: at the deadline the race above
+      // resolves at once and would count every retry as failed.
+      const budgetLeft = await Promise.race([deadline, Promise.resolve('open')]);
+      if (budgetLeft === 'open') await stampEntries(secondPass);
+    }
+    return summary;
   },
 
   /**
@@ -22718,7 +22979,24 @@ const CallRecordingProcessor = {
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
-    const pending = await db('call_log')
+    const pending = await this.pendingCandidatesQuery();
+
+    const results = [];
+    for (const call of pending) {
+      try {
+        const result = await this.processRecording(call.twilio_call_sid);
+        results.push({ callSid: call.twilio_call_sid, ...result });
+      } catch (err) {
+        results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
+      }
+    }
+    return { ...summarizeBatch(results), results };
+  },
+
+  // The processAllPending candidate query, unexecuted (the predicates are raw
+  // SQL a mocked builder cannot evaluate; the live-PG suites run it as is).
+  pendingCandidatesQuery() {
+    return db('call_log')
       .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .where(function () {
         this.where(function () {
@@ -22752,7 +23030,10 @@ const CallRecordingProcessor = {
                     .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
                 });
             })
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            .andWhere(function quarantineBackstopAge() {
+              this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+                .orWhereRaw(stampedDeadClaimOrFalse());
+            });
         });
       })
       .where(function () {
@@ -22791,17 +23072,6 @@ const CallRecordingProcessor = {
       })
       .orderBy('created_at', 'desc')
       .limit(20);
-
-    const results = [];
-    for (const call of pending) {
-      try {
-        const result = await this.processRecording(call.twilio_call_sid);
-        results.push({ callSid: call.twilio_call_sid, ...result });
-      } catch (err) {
-        results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
-      }
-    }
-    return { ...summarizeBatch(results), results };
   },
 
   /**
@@ -23346,6 +23616,11 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  // Tests only: the drain flag is process-wide, so a suite that exercised the
+  // shutdown path resets it to play the replacing pod.
+  resetShutdownForTests() { shuttingDown = false; },
+  pendingClaimWriteCount: () => pendingClaimWrites.size,
+  reclaimableClaimSql: reclaimableClaim,
   legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
@@ -23487,6 +23762,7 @@ CallRecordingProcessor._test = {
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
   commercialAssessmentBookingActive,
+  callerIdNameForPrompt,
   outboundAutoBookingEnabled,
   commercialAssessmentRoutingOptions,
   commercialAssessmentBookableFor,

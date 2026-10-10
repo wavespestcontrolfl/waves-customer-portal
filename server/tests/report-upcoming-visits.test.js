@@ -2,11 +2,23 @@
 // GATE_REPORT_UPCOMING_VISITS): buildReportV1Data surfaces ALL of the
 // customer's upcoming scheduled visits across every program, for THIS
 // report's property, for the next 90 days, capped at 6, as
-// upcomingVisitsCard.visits[]: { serviceType, scheduledDate, windowStart }.
+// upcomingVisitsCard.visits[]: { serviceType, scheduledDate, windowStart }
+// (plus rescheduleUrl and merged: true while GATE_REPORT_PLAN_RESCHEDULE is on).
 // Distinct from nextAppointment (report's own service line only, unchanged).
 // Live-view only; stripped from pdf/static by stripLiveOnlyScheduleFields.
 
+// buildRescheduleLink reads the real DB (scheduled_services) — mocked here;
+// its own rules live in the reschedule-link tests. Default: a link per visit.
+jest.mock('../services/reschedule-link', () => ({
+  buildRescheduleLink: jest.fn(),
+}));
+const { buildRescheduleLink } = require('../services/reschedule-link');
 const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+
+beforeEach(() => {
+  buildRescheduleLink.mockReset();
+  buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+});
 
 // Relative to the real clock (the implementation's 90-day window is
 // Date.now()-based, not injectable) — never a hardcoded calendar date, which
@@ -219,7 +231,7 @@ const BASE_FIXTURES = {
 // (mode: 'live' with NO opt-in) skips the scan entirely.
 const LIVE = { mode: 'live', upcomingVisitsCard: true };
 
-afterEach(() => { delete process.env.GATE_REPORT_UPCOMING_VISITS; });
+afterEach(() => { delete process.env.GATE_REPORT_UPCOMING_VISITS; delete process.env.GATE_REPORT_PLAN_RESCHEDULE; delete process.env.GATE_LAWN_REPORT_CLARITY; });
 
 // P0 fix (codex round-2): the KEY itself, not just its value, must be
 // absent while the gate is dark — a null-valued key still changes every
@@ -278,6 +290,110 @@ test('gated + live: lists multi-program upcoming visits (pest, lawn, termite) fo
     serviceType: 'Lawn Care Treatment',
     scheduledDate: todayPlus(5),
     windowStart: '08:00:00',
+  });
+  // GATE_REPORT_PLAN_RESCHEDULE unset: byte-identical card, nothing minted.
+  expect(data.upcomingVisitsCard).not.toHaveProperty('merged');
+  expect(data.upcomingVisitsCard.visits.every((v) => !('rescheduleUrl' in v))).toBe(true);
+  expect(buildRescheduleLink).not.toHaveBeenCalled();
+});
+
+describe('per-visit rescheduleUrl (owner 2026-10-06, GATE_REPORT_PLAN_RESCHEDULE)', () => {
+  const fixtures = () => ({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+      { id: 'scheduled-lawn', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00' },
+      { id: 'scheduled-soon', customer_id: 'customer-1', scheduled_date: todayPlus(10), status: 'confirmed', service_type: 'Mosquito Service', window_start: '09:00:00' },
+      { id: 'scheduled-boom', customer_id: 'customer-1', scheduled_date: todayPlus(20), status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' },
+      { id: 'scheduled-nourl', customer_id: 'customer-1', scheduled_date: todayPlus(30), status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '11:00:00' },
+    ],
+  });
+
+  test('mints a link per visit, reusing the existing short link, and nulls tooSoonToMove / no-url / thrown mints without breaking the card', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    buildRescheduleLink.mockImplementation(async (id) => {
+      if (id === 'scheduled-soon') return { url: null, line: 'call us', tooSoonToMove: true };
+      if (id === 'scheduled-boom') throw new Error('mint failed');
+      if (id === 'scheduled-nourl') return { url: null, line: '' };
+      return { url: `https://short.test/l/${id}`, line: '' };
+    });
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-resched', makeKnex(fixtures()), LIVE);
+    const byType = Object.fromEntries(data.upcomingVisitsCard.visits.map((v) => [v.serviceType + v.scheduledDate, v.rescheduleUrl]));
+    expect(data.upcomingVisitsCard.visits.map((v) => v.rescheduleUrl)).toEqual([
+      'https://short.test/l/scheduled-lawn', null, null, null,
+    ]);
+    expect(Object.keys(byType)).toHaveLength(4);
+    expect(buildRescheduleLink).toHaveBeenCalledWith('scheduled-lawn', { customerId: 'customer-1', reuseExisting: true });
+  });
+
+  test('an in-progress visit (en_route / on_site) gets no link: the reschedule page would refuse it (codex #6088 r1)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+    const f = fixtures();
+    f.scheduled_services[1] = { ...f.scheduled_services[1], status: 'on_site' };
+    f.scheduled_services[2] = { ...f.scheduled_services[2], status: 'en_route' };
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-inprogress', makeKnex(f), LIVE);
+    const urls = Object.fromEntries(data.upcomingVisitsCard.visits.map((v) => [v.serviceType, v.rescheduleUrl]));
+    expect(urls['Lawn Care Treatment'] ?? null).toBeNull();
+    expect(urls['Mosquito Service'] ?? null).toBeNull();
+    expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-lawn', expect.anything());
+    expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-soon', expect.anything());
+  });
+
+  test('an unreviewed voice-agent booking (confirmed, customer_confirmed false) gets no link (codex #6088 r2)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+    const f = fixtures();
+    f.scheduled_services[1] = { ...f.scheduled_services[1], source_action: 'voice_agent', customer_confirmed: false };
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-voice', makeKnex(f), LIVE);
+    const urls = Object.fromEntries(data.upcomingVisitsCard.visits.map((v) => [v.serviceType, v.rescheduleUrl]));
+    expect(urls['Lawn Care Treatment'] ?? null).toBeNull();
+    expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-lawn', expect.anything());
+  });
+
+  test('a tooSoonToMove result is null even if a url were present', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    buildRescheduleLink.mockResolvedValue({ url: 'https://short.test/l/x', line: '', tooSoonToMove: true });
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-soon', makeKnex(fixtures()), LIVE);
+    expect(data.upcomingVisitsCard.visits.every((v) => v.rescheduleUrl === null)).toBe(true);
+  });
+
+  test('the ask-route shape (no opt-in) never mints a link', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    await buildReportV1Data(BASE_SERVICE, 'token-ask', makeKnex(fixtures()), { mode: 'live' });
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
+  test('merged: true rides on the card, and a link is minted per visit', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-merged', makeKnex(fixtures()), LIVE);
+    expect(data.upcomingVisitsCard.merged).toBe(true);
+    expect(data.upcomingVisitsCard.visits[0]).toEqual({
+      serviceType: 'Lawn Care Treatment',
+      scheduledDate: todayPlus(5),
+      windowStart: '08:00:00',
+      rescheduleUrl: 'https://short.test/l/scheduled-lawn',
+    });
+  });
+
+  test('the gate is strict: anything but exactly "true" is off (no merged, no field, no mint)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = '1';
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-strict', makeKnex(fixtures()), LIVE);
+    expect(data.upcomingVisitsCard).not.toHaveProperty('merged');
+    expect(data.upcomingVisitsCard.visits.some((v) => 'rescheduleUrl' in v)).toBe(false);
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
+  test('the reschedule fields are stripped from the pdf/static payload with the rest of the card', () => {
+    const stripped = stripLiveOnlyScheduleFields({ upcomingVisitsCard: { merged: true, visits: [{ rescheduleUrl: 'https://x.test/l/a' }] }, nextAppointment: {} });
+    expect(stripped).not.toHaveProperty('upcomingVisitsCard');
   });
 });
 
@@ -1071,4 +1187,113 @@ test('stripLiveOnlyScheduleFields removes upcomingVisitsCard for pdf/static rend
   stripLiveOnlyScheduleFields(data);
   expect(data).not.toHaveProperty('upcomingVisitsCard');
   expect(data.other).toBe(1);
+});
+
+// GATE_LAWN_REPORT_CLARITY (owner 2026-10-08): on a LAWN report the card shows
+// ONE visit, the next upcoming lawn visit at the report's property.
+describe('lawn report plan card: only the next lawn visit (GATE_LAWN_REPORT_CLARITY)', () => {
+  const LAWN_REPORT = { ...BASE_SERVICE, id: 'service-lawn', service_line: 'lawn', service_type: 'Lawn Care Treatment Program' };
+  const CURRENT = { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Lawn Care Treatment Program' };
+  const visit = (id, days, serviceType, extra = {}) => ({ id, customer_id: 'customer-1', scheduled_date: todayPlus(days), status: 'confirmed', service_type: serviceType, window_start: '08:00:00', ...extra });
+  const FOUR = () => ({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      CURRENT,
+      visit('v-pest', 3, 'Quarterly Pest Control Service'),
+      visit('v-lawn-1', 20, 'Lawn Care Treatment'),
+      visit('v-mosq', 25, 'Mosquito Service'),
+      visit('v-lawn-2', 50, 'Lawn Care Treatment'),
+    ],
+  });
+  const render = (service, fixtures, opts = LIVE) => buildReportV1Data(service, 'token-lawn-card', makeKnex(fixtures), opts);
+
+  test('gate off: a lawn report still lists every upcoming visit, exactly as before', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const data = await render(LAWN_REPORT, FOUR());
+    expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual([
+      'Quarterly Pest Control Service', 'Lawn Care Treatment', 'Mosquito Service', 'Lawn Care Treatment',
+    ]);
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
+  test('gate on: one visit, the next LAWN visit, though a pest visit comes first; the others are not listed', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const data = await render(LAWN_REPORT, FOUR());
+    expect(data.upcomingVisitsCard).toEqual({ visits: [{ serviceType: 'Lawn Care Treatment', scheduledDate: todayPlus(20), windowStart: '08:00:00' }] });
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
+  test('gate on with the plan merge: merged, and only that one visit gets a Reschedule link', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const data = await render(LAWN_REPORT, FOUR());
+    expect(data.upcomingVisitsCard).toEqual({
+      merged: true,
+      visits: [{ serviceType: 'Lawn Care Treatment', scheduledDate: todayPlus(20), windowStart: '08:00:00', rescheduleUrl: 'https://short.test/l/v-lawn-1' }],
+    });
+    expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: a lawn visit past the first six other visits is still found', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const others = Array.from({ length: 8 }, (_, n) => visit(`v-other-${n}`, 2 + n, 'Mosquito Service'));
+    const data = await render(LAWN_REPORT, { ...BASE_FIXTURES, scheduled_services: [CURRENT, ...others, visit('v-late-lawn', 60, 'Lawn Care Treatment')] });
+    expect(data.upcomingVisitsCard.visits).toEqual([{ serviceType: 'Lawn Care Treatment', scheduledDate: todayPlus(60), windowStart: '08:00:00' }]);
+  });
+
+  test('gate on, no upcoming lawn visit: an empty card, and no other line\'s visit in its place', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const fixtures = { ...BASE_FIXTURES, scheduled_services: [CURRENT, visit('v-pest', 3, 'Quarterly Pest Control Service'), visit('v-mosq', 9, 'Mosquito Service')] };
+    expect((await render(LAWN_REPORT, fixtures)).upcomingVisitsCard).toEqual({ visits: [] });
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    expect((await render(LAWN_REPORT, fixtures)).upcomingVisitsCard).toEqual({ visits: [], merged: true });
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a cancelled lawn visit, and a lawn visit at another of the customer\'s homes, are not the next lawn visit', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const PROP_A = { id: 'prop-a', customer_id: 'customer-1', address_line1: '100 Sample Trail', address_line2: null, city: 'Bradenton', zip: '34211' };
+    const PROP_B = { id: 'prop-b', customer_id: 'customer-1', address_line1: '20 Duplicate Way', address_line2: null, city: 'Nokomis', zip: '34275' };
+    const data = await render(LAWN_REPORT, {
+      ...BASE_FIXTURES,
+      customer_properties: [PROP_A, PROP_B],
+      scheduled_services: [
+        { ...CURRENT, property_id: 'prop-a' },
+        visit('v-cancelled', 4, 'Lawn Care Treatment', { status: 'cancelled', property_id: 'prop-a' }),
+        visit('v-other-home', 6, 'Lawn Care Treatment', { property_id: 'prop-b' }),
+        visit('v-this-home', 30, 'Lawn Care Treatment', { property_id: 'prop-a' }),
+      ],
+    });
+    expect(data.upcomingVisitsCard.visits.map((v) => v.scheduledDate)).toEqual([todayPlus(30)]);
+  });
+
+  test('gate on, the report\'s own link cannot be read: an empty card, never the customer mirror or another line', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const knex = makeKnexWithFailingReportLookup({ ...BASE_FIXTURES, scheduled_services: [visit('v-lawn', 5, 'Lawn Care Treatment')] }, LAWN_REPORT.scheduled_service_id);
+    const data = await buildReportV1Data(LAWN_REPORT, 'token-lawn-lookup', knex, LIVE);
+    expect(data.upcomingVisitsCard).toEqual({ visits: [] });
+  });
+
+  test('gate on: every other service line is unchanged (a pest report still lists all visits)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    const data = await render({ ...BASE_SERVICE, service_date: '2026-05-16' }, FOUR());
+    expect(data.upcomingVisitsCard.visits).toHaveLength(4);
+  });
+
+  test('the gate is strict, and the card still needs its own gate and the live opt-in', async () => {
+    process.env.GATE_LAWN_REPORT_CLARITY = '1';
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    expect((await render(LAWN_REPORT, FOUR())).upcomingVisitsCard.visits).toHaveLength(4);
+    process.env.GATE_LAWN_REPORT_CLARITY = 'true';
+    expect((await render(LAWN_REPORT, FOUR(), { mode: 'live' }))).not.toHaveProperty('upcomingVisitsCard');
+    delete process.env.GATE_REPORT_UPCOMING_VISITS;
+    expect((await render(LAWN_REPORT, FOUR()))).not.toHaveProperty('upcomingVisitsCard');
+  });
 });

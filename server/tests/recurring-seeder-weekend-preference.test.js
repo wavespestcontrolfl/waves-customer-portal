@@ -172,7 +172,10 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
   test('rebooker projects seasonal siblings with the live preference', () => {
     const rebookerSrc = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
     expect(rebookerSrc).toContain('const seriesSkipWeekends = !!parent.skip_weekends');
-    expect(rebookerSrc).toContain('|| await customerPrefersNoWeekends(conn, parent.customer_id);');
+    // The live read stays the default. A caller that projects many dates for
+    // one series (projectNextVisitDates) passes the value it just read live.
+    expect(rebookerSrc).toContain(': await customerPrefersNoWeekends(conn, parent.customer_id));');
+    expect(rebookerSrc).toContain(': !!(await customerPrefersNoWeekends(conn, parent.customer_id));');
     expect(rebookerSrc).toContain('{ skipWeekends: seriesSkipWeekends }');
   });
 });

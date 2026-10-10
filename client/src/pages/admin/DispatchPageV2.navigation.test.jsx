@@ -40,7 +40,7 @@ vi.mock('./ProjectsPage', () => ({ ProjectDetail: ({ projectId }) => <div>Existi
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service, onCompleteService }) => <button
   onClick={() => onCompleteService(service)}
 >Complete details {service.linkedProject?.id || 'unlinked'}</button> }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true, known: true }) }));
 vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout {visitId}</div> }));
 beforeEach(() => {
   projectModalState.props = null;

@@ -502,6 +502,38 @@ describe('VisitBriefPanel', () => {
     expect(screen.queryByText('Last visit')).not.toBeInTheDocument();
   });
 
+  it('shows a product the city holds back as a warning with the hold text, never as a dosed product', () => {
+    const message = 'LESCO Nutra-TECH T&O Micronutrient Package: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.';
+    render(
+      <VisitBriefPanel
+        stop={stopOf({ ...BASE_SERVICE, serviceType: 'Lawn Care Service' })}
+        detail={detailFor({
+          'svc-1': {
+            brief: {
+              brief: {
+                open_scope: null, customer_context: null, priorities: [], watch_items: [], last_visit: null, access: null,
+                product_guidance: {
+                  source: 'lawn_protocol_window',
+                  available: true,
+                  window: { title: 'June Nutra-TECH + Pre-Emergent', goal: 'Micronutrients and pre-emergent' },
+                  protocol_gates: [],
+                  products: [{ name: 'Dimension 2EW', ratePer1000: 0.5, rateUnit: 'fl oz', role: 'pre_emergent' }],
+                  conditional_products: [],
+                  held_products: [{ name: 'LESCO Nutra-TECH T&O Micronutrient Package', hold: true, message }],
+                },
+              },
+              type: 'visit_brief_v1',
+            },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(`⚠ ${message}`)).toBeInTheDocument();
+    expect(screen.queryByText(/Nutra-TECH T&O Micronutrient Package · /)).not.toBeInTheDocument();
+    expect(screen.getByText('• Dimension 2EW · 0.5 fl oz/1000 sq ft · pre_emergent')).toBeInTheDocument();
+  });
+
   it('shared-estimate deposit ledger renders ONCE; a dead annual prepay reads as standard billing', () => {
     const primary = { ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control', billingLane: null };
     const sibling = { ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service', billingLane: { prediction: { kind: 'invoice', amount: 150 } } };

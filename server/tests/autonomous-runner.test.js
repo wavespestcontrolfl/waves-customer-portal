@@ -5279,3 +5279,136 @@ describe('citability backfill retry feedback — every gate\'s one redraft hears
     expect(lines[1]).toContain('[Gate reported: planned_gaps_unresolved:comparison(structure_missing)]');
   });
 });
+
+describe('terminal writer: the draft step asks the terminal instead of an agent (GATE_CONTENT_WRITER_TERMINAL)', () => {
+  const claimedAt = new Date('2026-10-09T13:00:00Z');
+  const draft = { frontmatter: { title: 'Ant Control in Venice' }, body: 'Body text. '.repeat(40) };
+  const city = (id) => ({ id, action_type: 'create_or_refresh_city_service_page', page_type: 'city-service', created_at: new Date() });
+  const waiting = { ok: false, wait: true, code: 'terminal_draft_missing', reason: 'no draft on the terminal branch yet', agent_id: 'terminal-writer', session_id: null };
+  // `handed` = the stored brief the row already waits on (null = none yet);
+  // `composed` = what the builder returns when a fresh brief is needed;
+  // `source` = what the terminal's draft source answers (null = the agent writes).
+  function setup({ source = waiting, handed = null, composed = city('brief_fresh') }) {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_tw', action_type: composed.action_type, claimed_at: claimedAt }),
+      defer: jest.fn().mockResolvedValue(true), release: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true), complete: jest.fn().mockResolvedValue(true),
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, reason: 'the agent must not run' }) };
+    const briefBuilder = { compose: jest.fn().mockResolvedValue(composed) };
+    const runner = loadRunnerWith({ queue, briefBuilder, dispatcher });
+    const real = jest.requireActual('../services/content/terminal-writer');
+    const terminalWriter = {
+      ...real,
+      terminalWriterLive: () => true,
+      waitingBriefId: jest.fn().mockResolvedValue(handed ? handed.id : null),
+      draftSourceFor: jest.fn(() => (source ? { runWithBrief: jest.fn().mockResolvedValue(source) } : null)),
+    };
+    jest.doMock('../services/content/terminal-writer', () => terminalWriter);
+    jest.spyOn(runner, '_loadReviewedBrief').mockResolvedValue(handed);
+    return { queue, dispatcher, briefBuilder, runner, terminalWriter };
+  }
+  const reachGates = (runner) => {
+    jest.doMock('../services/content/editorial-evidence', () => ({
+      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('editorial'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED', findings: [] })),
+      reviewError: jest.fn(),
+    }));
+    return jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'reached_the_gates' });
+  };
+
+  test('first look at a row: a fresh brief is composed, the run waits on it, the claim is deferred, no agent session', async () => {
+    const { queue, dispatcher, briefBuilder, runner, terminalWriter } = setup({});
+    const before = Date.now();
+    const result = await runner.runNext();
+    expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_draft_missing', brief_id: 'brief_fresh' });
+    expect(briefBuilder.compose).toHaveBeenCalledTimes(1);
+    // nothing was handed out before this run, so the source is told there is no draft to read for it
+    expect(terminalWriter.draftSourceFor).toHaveBeenCalledWith('opp_tw', expect.objectContaining({ id: 'brief_fresh' }), { handed: false, dryRun: false });
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    const [id, availableAt, payload] = queue.defer.mock.calls[0];
+    expect(id).toBe('opp_tw');
+    expect(payload).toEqual({ claimToken: claimedAt });
+    expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(3 * 3600e3 - 1000);
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('a later look with no draft yet keeps the brief the row was handed: nothing is composed', async () => {
+    const { briefBuilder, runner, terminalWriter } = setup({ handed: city('brief_handed') });
+    const result = await runner.runNext();
+    expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', brief_id: 'brief_handed' });
+    expect(briefBuilder.compose).not.toHaveBeenCalled();
+    expect(terminalWriter.draftSourceFor).toHaveBeenCalledWith('opp_tw', expect.objectContaining({ id: 'brief_handed' }), { handed: true, dryRun: false });
+  });
+
+  test('a draft goes on to the gates under the brief it was written from; its revision rides the run for the cleanup after it is stored', async () => {
+    const { dispatcher, briefBuilder, runner } = setup({
+      source: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null },
+      handed: city('brief_handed'),
+    });
+    const onward = reachGates(runner);
+    await expect(runner.runNext()).resolves.toEqual({ outcome: 'reached_the_gates' });
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    expect(briefBuilder.compose).not.toHaveBeenCalled();
+    expect(onward.mock.calls[0][2]).toMatchObject({ brief_id: 'brief_handed', agent_id: 'terminal-writer', draft_payload: draft, terminal_draft_revision: 'sha_read' });
+  });
+
+  test('a draft that could not be read keeps the row waiting on the same brief', async () => {
+    const { queue, runner } = setup({ source: { ...waiting, code: 'terminal_draft_unreadable', reason: 'terminal draft could not be read: Bad Gateway' }, handed: city('brief_handed') });
+    const result = await runner.runNext();
+    expect(result).toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_draft_unreadable', brief_id: 'brief_handed' });
+    expect(queue.defer).toHaveBeenCalledTimes(1);
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('a handed brief that is too old, or no longer stored, is replaced by a fresh one', async () => {
+    const old = { ...city('brief_handed'), created_at: new Date(Date.now() - 8 * 24 * 3600e3) };
+    const aged = setup({ handed: old });
+    expect(await aged.runner.runNext()).toMatchObject({ outcome: 'deferred_terminal_draft', brief_id: 'brief_fresh' });
+    expect(aged.terminalWriter.draftSourceFor).toHaveBeenCalledWith('opp_tw', expect.objectContaining({ id: 'brief_fresh' }), { handed: false, dryRun: false });
+
+    const gone = setup({});
+    gone.terminalWriter.waitingBriefId.mockResolvedValue('brief_deleted');
+    expect(await gone.runner.runNext()).toMatchObject({ brief_id: 'brief_fresh' });
+  });
+
+  test('no terminal source for the brief (a title/meta rewrite, the gate off): the agent writes, and its run carries no draft revision', async () => {
+    const { dispatcher, runner } = setup({ source: null });
+    dispatcher.runWithBrief.mockResolvedValue({ ok: true, draft, agent_id: 'agent_1', session_id: 'sesn_1' });
+    const onward = reachGates(runner);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(onward.mock.calls[0][2].terminal_draft_revision).toBeUndefined();
+  });
+
+  test('settleTerminalWork: clean up what the runs took, then bring the item up to date (gate on: raise; gate off: close); a failure never throws', async () => {
+    const { runner, terminalWriter } = setup({});
+    Object.assign(terminalWriter, {
+      cleanupConsumedDrafts: jest.fn().mockResolvedValue(undefined),
+      raiseTerminalDue: jest.fn().mockResolvedValue({ due: 1 }),
+      closeTerminalItems: jest.fn().mockResolvedValue(0),
+    });
+    const runs = [{ id: 'run_1' }];
+    await runner.settleTerminalWork(runs);
+    expect(terminalWriter.cleanupConsumedDrafts).toHaveBeenCalledWith(runs);
+    expect(terminalWriter.raiseTerminalDue).toHaveBeenCalledTimes(1);
+    expect(terminalWriter.closeTerminalItems).not.toHaveBeenCalled();
+
+    terminalWriter.terminalWriterLive = () => false;
+    await runner.settleTerminalWork(runs);
+    expect(terminalWriter.closeTerminalItems).toHaveBeenCalledTimes(1);
+
+    terminalWriter.closeTerminalItems.mockRejectedValue(new Error('db down'));
+    await expect(runner.settleTerminalWork(runs)).resolves.toBeUndefined();
+  });
+
+  test('the drought alert is not sent while a blog waits for its terminal draft, and is sent otherwise', async () => {
+    const { runner, terminalWriter } = setup({});
+    const send = jest.spyOn(runner, '_sendBlogDroughtSms').mockResolvedValue(undefined);
+    terminalWriter.blogDraftRequested = jest.fn().mockResolvedValue(true);
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).not.toHaveBeenCalled();
+    terminalWriter.blogDraftRequested.mockResolvedValue(false);
+    await runner._reportBlogDrought([], { haltBeforeBlog: null });
+    expect(send).toHaveBeenCalledWith([], { haltBeforeBlog: null });
+  });
+});

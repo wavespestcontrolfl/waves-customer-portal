@@ -24,12 +24,17 @@ const {
   isInjectionProduct,
   deriveTreeShrubTreatments,
 } = require('./tree-shrub-closeout');
-const { etCalendarDayOf } = require('../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
+const { loadLiveRecurringObligationRows, ownershipKeysForRow } = require('./waveguard-existing-services');
+const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
+// ADDON_LINE_IS_PLAN_SQL names this table unaliased.
+const ADDONS = 'scheduled_service_addons';
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
 const ROTATION_WINDOW_DAYS = 60;
@@ -80,6 +85,8 @@ function treeShrubProductFlags(row, { serviceDate, zone }) {
 // cover: companion sections (the retired lawn+T&S combo) and grouped visits.
 async function treeShrubFastIneligibleReason(svc, profile, knex) {
   if (!profile) return 'profile_unavailable';
+  // An attached area add-on row is work this sheet cannot record (product and treated area).
+  if (svc.hasAreaAddOnRows) return 'area_addon_attached';
   if (!isTreeShrubFastProfile(profile)) return 'not_tree_shrub';
   if (profile.projectBacked || profile.requiresProject) return 'project_backed';
   if (Array.isArray(profile.companions) && profile.companions.length) return 'has_companions';
@@ -337,8 +344,8 @@ function buildTreeShrubWarnings({ catalogRows, applications, visitDate }) {
   return warnings;
 }
 
-// The ledger has no property column: scope through the record's visit, and keep
-// rows whose property cannot be determined (more warnings, never fewer).
+// Scope to the treated property: the one frozen on the ledger row, a legacy row without one through the
+// record's visit; keep rows whose property cannot be determined (more warnings, never fewer).
 async function loadRecentApplications(svc, visitDate, knex) {
   const since = new Date((dayNumber(visitDate) - PALM_FERTILIZER_SPACING_DAYS) * 86400000).toISOString().slice(0, 10);
   const query = knex('property_application_history as pah')
@@ -352,7 +359,11 @@ async function loadRecentApplications(svc, visitDate, knex) {
     .whereNull('pah.retracted_at')
     .where('pah.application_date', '>=', since)
     .where((q) => q.whereNull('ss.id').orWhereNot('ss.id', svc.id));
-  if (svc.property_id) query.where((q) => q.whereNull('ss.property_id').orWhere('ss.property_id', svc.property_id));
+  if (svc.property_id) {
+    query.where((q) => q.where('pah.property_id', svc.property_id)
+      .orWhere((legacy) => legacy.whereNull('pah.property_id')
+        .andWhere((visit) => visit.whereNull('ss.property_id').orWhere('ss.property_id', svc.property_id))));
+  }
   return query.select(
     'pah.application_date', 'pah.product_id', 'pah.moa_group as history_moa_group',
     knex.raw('COALESCE(pc.name, sp.product_name) as product_name'),
@@ -402,6 +413,48 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
       entries: passThrough,
       holds: keyed.map((item) => ({ name: item.name, reason: 'Application history is unavailable; check before applying.' })),
     };
+  }
+}
+
+/**
+ * True when this customer also has a live recurring mosquito service at THIS
+ * property: the T&S protocol asks for a scale / sooty mold / mite check at every
+ * visit of such an account. "Live" is the ownership lifecycle the pricing AI
+ * uses (loadLiveRecurringObligationRows: active customer, recurring, non-terminal,
+ * no callback or one-time source) and "mosquito" is its ownership family.
+ * Mosquito counts as a live row's own service or as a plan add-on line on one
+ * (service-library ADDON_LINE_IS_PLAN_SQL, the one plan add-on predicate), this visit's
+ * own add-on lines included. A row stamped with another property does not
+ * count; a row with no property link, or a visit with none, falls back to the
+ * customer level (a notice too many, never one too few). Any failure answers
+ * false and logs.
+ */
+async function loadJointMosquitoAccount(svc, knex, serviceId) {
+  try {
+    const here = (await loadLiveRecurringObligationRows(knex, svc.customer_id))
+      .filter((row) => !svc.property_id || !row.property_id || String(row.property_id) === String(svc.property_id));
+    const isMosquito = (row) => ownershipKeysForRow(row).includes('mosquito');
+    if (here.some((row) => String(row.id) !== String(svc.id) && isMosquito(row))) return true;
+    // This visit's own add-on lines count even when the lifecycle loader left the visit out (an
+    // overdue pending or confirmed visit is not a forward obligation, but this sheet still opens it).
+    // Only a recurring visit: on a one-time visit a NULL add-on cadence is one-off work, not a plan line.
+    const ownVisit = svc.is_recurring === true ? [svc.id] : [];
+    const visitIds = [...new Set([...here.map((row) => row.id), ...ownVisit].filter(Boolean).map(String))];
+    if (!visitIds.length) return false;
+    const addons = await knex(ADDONS)
+      .leftJoin('services as addon_service', 'addon_service.id', `${ADDONS}.service_id`)
+      .whereIn(`${ADDONS}.scheduled_service_id`, visitIds)
+      .whereRaw(ADDON_LINE_IS_PLAN_SQL)
+      .select(`${ADDONS}.service_name as addon_name`, `${ADDONS}.service_key_snapshot`, 'addon_service.service_key', 'addon_service.name as catalog_name');
+    return addons.some((line) => isMosquito({
+      service_key: line.service_key_snapshot || line.service_key,
+      service_name: line.catalog_name || line.addon_name,
+      service_type: line.addon_name,
+    }));
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[ts-fast-context] mosquito account check unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    return false;
   }
 }
 
@@ -473,6 +526,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
+    jointMosquitoAccount: await loadJointMosquitoAccount(svc, knex, serviceId),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
     // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate
@@ -481,7 +535,16 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // GATE_TS_PEST_CHECK: the "Live insects found?" block and its insect types.
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
+    ...await neonicCapKey(svc, catalog, knex),
   };
+}
+
+// GATE_TS_NEONIC_CAP: what is left of each capped product at this property this year. Gate off = no
+// read and no key. The year is today's (ET), the day an ordinary completion records and /complete
+// judges, not the scheduled day: a December visit closed in January spends January's allowance. A
+// backfill is chosen at submit, after this read; /complete judges that one on its backfilled day.
+async function neonicCapKey(svc, catalog, knex) {
+  return tsNeonicCapLive() ? { neonicCap: await buildNeonicCapContext(svc, etDateString(), catalog, knex) } : {};
 }
 
 // The sheet's watch list for the visit month: key, label, signal, referOnly.

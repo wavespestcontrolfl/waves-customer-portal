@@ -27,12 +27,19 @@ function isSupportProduct(p = {}) {
     .test(`${p.name || ''} ${p.activeIngredient || ''} ${p.kind || ''}`);
 }
 
-function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
+// The treatment's products split into the ones that make a treatment claim and the support
+// products (surfactants, PGRs). Null when nothing makes a claim.
+function splitProducts(treatment) {
   const products = (treatment && Array.isArray(treatment.products)) ? treatment.products : [];
-  if (!products.length) return null;
   const support = products.filter(isSupportProduct);
   const main = products.filter((p) => !isSupportProduct(p));
-  if (!main.length) return null;
+  return main.length ? { main, support } : null;
+}
+
+function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
+  const split = splitProducts(treatment);
+  if (!split) return null;
+  const { main, support } = split;
 
   // Active ingredient, not brand name (owner 2026-07-21 — brand names live
   // on the product cards; the narrative speaks in actives). Strip the label
@@ -50,9 +57,31 @@ function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
   const smartLower = (s) => String(s).split(/\s+/).map((w) => (
     /\d/.test(w) || (w.length <= 3 && /^[A-Z]+$/.test(w)) || isSymbolToken(w) ? w : w.toLowerCase()
   )).join(' ');
+  // A combination pre-emergent + fertilizer names its analysis in one of two
+  // shapes. The legacy catalog string carries it after the active
+  // ("prodiamine 0.43% + 15-0-15"): the percentage strip below would drop it
+  // and the report would name only the herbicide, so a bare N-P-K segment is
+  // pulled out first. The v13 catalog migration creates the same rows with the
+  // active alone ("Prodiamine" / "Dithiopyr") and the analysis only in the
+  // product name ("LESCO Stonewall 0.43% 15-0-15 ..."): for a pre-emergent
+  // whose active carries no analysis, read it from the name. A string with no
+  // percentage active ("24-0-11", "Nitrogen 20-0-0 + micros") is untouched.
+  const NPK_SEGMENT = /^\d{1,2}-\d{1,2}-\d{1,2}$/;
+  const NPK_IN_NAME = /(?:^|[^\d-])(\d{1,2}-\d{1,2}-\d{1,2})(?![\d-])/;
   const activeName = (p) => {
-    const active = String(p.activeIngredient || '').replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
-    return active ? smartLower(active) : p.name;
+    const raw = String(p.activeIngredient || '').trim();
+    const segments = raw.split(/\s*\+\s*/);
+    const fertilizer = segments.find((s) => NPK_SEGMENT.test(s));
+    const others = segments.filter((s) => !NPK_SEGMENT.test(s)).join(' + ');
+    const combined = fertilizer && /\d\s*%/.test(others);
+    const active = (combined ? others : raw).replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
+    if (!active) return p.name;
+    if (combined) return `${smartLower(active)} with ${fertilizer} fertilizer`;
+    if (p.kind === 'pre_emergent' && !fertilizer && !/\d{1,2}-\d{1,2}-\d{1,2}/.test(raw)) {
+      const fromName = NPK_IN_NAME.exec(String(p.name || ''));
+      if (fromName) return `${smartLower(active)} with ${fromName[1]} fertilizer`;
+    }
+    return smartLower(active);
   };
   // Every product applied the same way → say the method ONCE after the list.
   // Four "(broadcast application)" parentheticals in one sentence read as
@@ -69,6 +98,12 @@ function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
     ? names[0]
     : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
     + (sharedMethod ? ` (all applied as a ${sharedMethod})` : '');
+  return summarySentence(list, main, support, noTiming);
+}
+
+// "Today we applied {list}", then what the products target, the surfactant clause and the
+// systemic clause. Shared by the active-ingredient form above and the category form below.
+function summarySentence(list, main, support, noTiming) {
   const targets = [...new Set(
     main.flatMap((p) => (Array.isArray(p.targets) ? p.targets : []).map((t) => String(t || '').trim().toLowerCase()).filter(Boolean)),
   )].slice(0, 3);
@@ -97,4 +132,19 @@ function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
   return out;
 }
 
-module.exports = { buildTreatmentSummary, isSupportProduct, METHOD_PHRASES };
+// The same sentence naming product CATEGORIES, never an active ingredient or a product name
+// (GATE_LAWN_REPORT_COPY_FIXES, owner 2026-10-08), from the Visit Summary phrase table. A method
+// is said only when every product shares it. Chosen once by the caller; the form above is untouched.
+function buildCategoryTreatmentSummary(treatment, { noTiming = false } = {}) {
+  const split = splitProducts(treatment);
+  if (!split) return null;
+  const { main, support } = split;
+  const phrases = require('./lawn-visit-summary').appliedCategoryPhrases(main);
+  const method = METHOD_PHRASES[String(main[0].method || '').toLowerCase()] || null;
+  const shared = method && main.every((p) => METHOD_PHRASES[String(p.method || '').toLowerCase()] === method) ? method : null;
+  const joined = phrases.length <= 1 ? phrases.join('') : `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
+  const tag = shared ? (main.length > 1 ? ` (all applied as a ${shared})` : ` (${shared})`) : '';
+  return summarySentence(joined + tag, main, support, noTiming);
+}
+
+module.exports = { buildTreatmentSummary, buildCategoryTreatmentSummary, isSupportProduct, METHOD_PHRASES };

@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { ConfirmEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -375,6 +375,47 @@ describe('ConfirmEvidence — missing first name', () => {
   });
 });
 
+describe('FamilyEvidence — family account suggestions', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const B = '66666666-7777-4888-8999-000000000000';
+  const payload = {
+    flag: 'family_account_candidates',
+    caller_name: 'Dana Lee',
+    caller_phone: '+19415550101',
+    account_holder_name: 'Angelina Testerson',
+    holder_candidates: [
+      { id: A, name: 'Angelina Testerson', city: 'Sarasota', address_matches: true },
+      { id: B, name: 'Angelina Testerson', city: 'Bradenton', address_matches: false },
+    ],
+    customer_ids: [A, B],
+    reason: 'Confirm, then link the call to this account.',
+  };
+  it('shows the caller, the named holder, each account with the address mark, and an Open customer link per account', () => {
+    render(<FamilyEvidence payload={payload} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Sarasota · address matches')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Bradenton')).toBeInTheDocument();
+    expect(screen.getByText(/Confirm, then link the call to this account/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    expect(screen.queryByText(/Add first name on/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/more accounts share this name/)).not.toBeInTheDocument();
+  });
+  it('shows BOTH numbers when the calling number and the dictated callback differ', () => {
+    render(<FamilyEvidence payload={{ ...payload, caller_callback_phone: '+19415550102' }} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101 · callback \+19415550102/)).toBeInTheDocument();
+  });
+  it('says so when more accounts share the name than the card lists', () => {
+    render(<FamilyEvidence payload={{ ...payload, more_accounts: true }} />);
+    expect(screen.getByText(/more accounts share this name — search by name/)).toBeInTheDocument();
+  });
+  it('opens the server-resolved survivor for a merged candidate', () => {
+    render(<FamilyEvidence payload={payload} openCustomerIds={[B, A]} />);
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{
@@ -685,5 +726,70 @@ describe('street-level address hold: office confirm', () => {
     expect(await screen.findByText('Current visit address')).toBeInTheDocument();
     expect(screen.getByText('12 3rd Ave, Parrish, FL, 34219')).toBeInTheDocument();
     expect(screen.queryByText('1 23rd Ave, Parrish, FL, 34219')).not.toBeInTheDocument();
+  });
+});
+
+describe('Save to notes on second-contact cards', () => {
+  const contact = { name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com', role: 'property_owner' };
+  const card = (id, name, payload) => ({ ...ordinary, id, first_name: name, last_name: 'Contact', reason_code: 'secondary_contact_captured',
+    feedback_verdict: null, payload: { flag: 'secondary_contact_captured', ...payload } });
+  // The server marks the cards the action applies to; the screen only reads the flag.
+  const secondCard = { ...card('second', 'Second', { secondary_contact: contact }), can_save_contact_note: true };
+  const refused = [
+    card('unmarked', 'Unmarked', { secondary_contact: contact }),
+    { ...card('refused', 'Refused', { secondary_contact: { ...contact, wants_notifications: true } }), can_save_contact_note: false },
+  ];
+  const mirrorOnly = { ...card('mirror', 'Mirror', { secondary_contact: contact, secondary_contacts: [contact] }), can_save_contact_note: true };
+  let listItems;
+
+  beforeEach(() => {
+    listItems = [secondCard, mirrorOnly, ...refused, ordinary];
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: listItems, counts: { open: listItems.length, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+  });
+
+  it('shows the button only on a card the server marked as saveable', async () => {
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Second Contact');
+    const buttons = (name) => within(screen.getByText(name).closest('.py-4')).queryAllByRole('button', { name: 'Save to notes' });
+    expect(buttons('Second Contact')).toHaveLength(1);
+    expect(buttons('Mirror Contact')).toHaveLength(1);
+    for (const c of refused) expect(buttons(`${c.first_name} Contact`)).toHaveLength(0);
+    expect(buttons('Ordinary Card')).toHaveLength(0);
+  });
+
+  it('hides the button from a non-admin', async () => {
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    await screen.findByText('Second Contact');
+    expect(screen.queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
+  });
+
+  it('posts the displayed card version to the save-contact-note route and reloads the list', async () => {
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Second Contact')).closest('.py-4');
+    listItems = listItems.filter((i) => i.id !== 'second');
+    fireEvent.click(within(el).getByRole('button', { name: 'Save to notes' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
+      '/admin/triage/second/save-contact-note',
+      { method: 'POST', body: JSON.stringify({ expected_updated_at: secondCard.updated_at }) },
+    ));
+    await waitFor(() => expect(screen.queryByText('Second Contact')).not.toBeInTheDocument());
+  });
+
+  it('reloads and shows the server message on a stale card or a call with no linked customer', async () => {
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Second Contact')).closest('.py-4');
+    const err = Object.assign(new Error('Card changed since it was displayed — reload and review the latest'), { status: 409 });
+    adminFetch.mockImplementation(async (url) => {
+      if (url.includes('/save-contact-note')) throw err;
+      return { items: listItems, counts: { open: listItems.length, resolved: 0, dismissed: 0 } };
+    });
+    const listCalls = () => adminFetch.mock.calls.filter(([url]) => url.startsWith('/admin/triage?')).length;
+    const before = listCalls();
+    fireEvent.click(within(el).getByRole('button', { name: 'Save to notes' }));
+    expect(await screen.findByText(/Card changed since it was displayed/)).toBeInTheDocument();
+    expect(listCalls()).toBe(before + 1);
+    expect(screen.getByText('Second Contact')).toBeInTheDocument();
   });
 });

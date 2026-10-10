@@ -289,3 +289,36 @@ describe('replay vocabulary', () => {
     expect(shots.capturedUnderShotList(Array(7).fill(null))).toBe(false); // stays a legacy case (and is skipped by the cap, as before)
   });
 });
+
+describe('GATE_LAWN_PHOTO_LABEL_PICK helpers (pure, no gate read)', () => {
+  const shots = require('../services/lawn-photo-shots');
+
+  test('a pick is kept only for a real shot key on a photo in a slot, and only when it differs from the slot', () => {
+    expect(shots.normalizeLabelPick('shade', 'close_up')).toBe('close_up');
+    expect(shots.normalizeLabelPick('SHADE', ' Close_Up ')).toBe('close_up');
+    expect(shots.normalizeLabelPick('shade', 'shade')).toBeNull();
+    expect(shots.normalizeLabelPick('shade', 'garage')).toBeNull();
+    expect(shots.normalizeLabelPick('shade', null)).toBeNull();
+    expect(shots.normalizeLabelPick(null, 'close_up')).toBeNull();
+    expect(shots.normalizeLabelPick('garage', 'close_up')).toBeNull();
+  });
+
+  test('picks are read by photo position from the stored array or its JSON text; anything unreadable is no pick', () => {
+    const meta = [{ filename: 'a' }, { labelKey: 'close_up' }, { labelKey: 'garage' }, null];
+    expect(shots.labelPicksFromStored(meta)).toEqual([null, 'close_up', null, null]);
+    expect(shots.labelPicksFromStored(JSON.stringify(meta))).toEqual([null, 'close_up', null, null]);
+    expect(shots.labelPicksFromStored('not json')).toEqual([]);
+    expect(shots.labelPicksFromStored(null)).toEqual([]);
+  });
+
+  test('the customer wording of a pick is the shot list reportLabel; an unknown pick has none', () => {
+    expect(shots.pickedReportLabel('close_up')).toBe('Close-up');
+    expect(shots.pickedReportLabel('shade')).toBe('Shaded area');
+    expect(shots.pickedReportLabel('garage')).toBeNull();
+    expect(shots.pickedReportLabel(undefined)).toBeNull();
+  });
+
+  test('the shot list itself is unchanged: eight keys in the same order', () => {
+    expect(shots.SHOT_KEYS).toEqual(['front', 'back', 'side', 'close_up', 'blade_crown', 'hot_edge', 'shade', 'trouble']);
+  });
+});

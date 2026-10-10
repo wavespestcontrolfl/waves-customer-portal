@@ -80,7 +80,8 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   where product went down, the pests named and how the sprays went down
  *   are read from the note (services/visit-voice-facts.js) and sent as the
  *   visit's areas serviced (a product's area only when one place was
- *   heard), each product's targets and the sprays' method. Every other 'voice' fact is
+ *   heard), each product's targets and the sprays' method; a web sweep heard
+ *   there is sent as the pest protocol's sweep action. Every other 'voice' fact is
  *   still filled by tap; 'voice' marks the fact voice fill must write into
  *   (the tap path stays behind "Show all fields").
  * - prefill: defaulted from the protocol / product label / service config;
@@ -518,11 +519,12 @@ function genericCompletionFacts(opts = {}) {
     {
       key: 'protocol_actions_completed',
       label: 'Protocol actions completed',
-      capture: ['prefill', 'tap'],
+      capture: ['prefill', 'voice', 'tap'],
       storage: 'structured_notes.protocolActionsCompleted',
       writers: [COMPLETE_SERVICE],
       readers: withExtra('protocol_actions_completed', [{ file: REPORT_DATA, section: 'What we did (protocol action list)' }]),
       whenMissing: 'hidden',
+      notes: 'On the Fast Complete report flow the pest protocol\'s sweep action ("Swept eaves, window frames, door frames, and lanai") comes from the note, never a box (owner 2026-10-08): visit-voice-facts.js reads whether the technician swept webs today and the sheet sends the action with its exterior scope. The full form keeps its checkbox.',
     },
     {
       key: 'protocol_action_scopes_completed',
@@ -1440,7 +1442,7 @@ const VISIT_FACTS_CONTRACT = {
   cockroach: {
     label: 'Cockroach (typed cockroach form: control + German roach packages)',
     typedForm: 'cockroach',
-    catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial'],
+    catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial', 'vehicle_german_roach'],
     voiceFill: true,
     facts: [
       ...typedFormFacts('cockroach', {

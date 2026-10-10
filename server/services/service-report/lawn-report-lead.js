@@ -315,6 +315,8 @@ function leadWords(reportV2) {
       ? banner.observedRain.line : banner.forecastLine;
     if (typeof live === 'string' && live) parts.push(live);
   }
+  // GATE_LAWN_REPORT_CLARITY live-view sprinkler-setup invitation (water-in only).
+  if (banner && typeof banner.setupLine === 'string' && banner.setupLine) parts.push(banner.setupLine);
   if (lead) for (const strings of Object.values(LEAD_FIELDS)) parts.push(...strings(lead));
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
   const labelWords = lead

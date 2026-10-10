@@ -3,6 +3,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
+const { startCustomerRainRank, withDisplayTier, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
 const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
@@ -163,7 +164,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
 }
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const {
-  CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
+  CUSTOMER_HOUR_GRID, lunchBlockEnabled, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
@@ -302,6 +303,10 @@ function dateLabels(date) {
 }
 
 function compareRankedSlots(a, b) {
+  // Rain fit first (GATE_CUSTOMER_RAIN_RANK; every candidate is tier 0 with
+  // the gate off, so this key is inert): customer-rain-rank.js.
+  const rain = rainTierDiff(a, b);
+  if (rain !== 0) return rain;
   const scoreA = a.score ?? a.rank ?? 999999;
   const scoreB = b.score ?? b.rank ?? 999999;
   if (scoreA !== scoreB) return scoreA - scoreB;
@@ -550,8 +555,13 @@ function applyReserviceProfile({ rankProfile, candidates, today, totalFeasible }
   const bestFitByDate = new Map();
   for (const candidate of candidates) {
     const scoreOf = active ? reserviceAdjustedScore(candidate) : (candidate.rank ?? Infinity);
+    // The day's best fit follows the rain tier too (0 for every candidate
+    // unless customer-rain-rank.js stamped it; never under this profile).
+    const tier = candidate.rain_tier ?? 0;
     const current = bestFitByDate.get(candidate.date);
-    if (!current || scoreOf < current.score) bestFitByDate.set(candidate.date, { score: scoreOf, slotSig: candidate.slot_sig });
+    if (!current || tier < current.tier || (tier === current.tier && scoreOf < current.score)) {
+      bestFitByDate.set(candidate.date, { tier, score: scoreOf, slotSig: candidate.slot_sig });
+    }
   }
   const bestFitSigByDate = new Map([...bestFitByDate].map(([date, best]) => [date, best.slotSig]));
 
@@ -1648,6 +1658,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .catch(() => null)
     : null;
 
+  // Rain ranking (GATE_CUSTOMER_RAIN_RANK, dark): a tier per candidate just
+  // before the sort. The booking's rain fit and the forecast are read only
+  // once a candidate inside the next 3 dates exists. Today's order with the
+  // gate off, under the re-service profile, or on any failure.
+  const serviceLabels = normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
+  const rainRank = startCustomerRainRank({
+    serviceIdentity, serviceLabels, lat, lng, today, skip: reserviceRankIsActive(rankProfile), db,
+  });
+
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
   // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
   // self-serve caller resolves the request's zone FROM COORDINATES (not city
@@ -1661,7 +1680,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     lng,
     zoneSlug,
     durationMinutes: duration,
-    serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
+    serviceTypes: serviceLabels,
     // This booking's own expected-minutes credit — the same number the
     // mirror below and the commit probe use (offer/commit parity).
     expectedMinutes: candidateExpectedMinutes,
@@ -2053,7 +2072,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
-  const candidates = [...candidateMap.values()].sort(compareRankedSlots);
+  const candidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible,
@@ -2128,7 +2147,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // stops_that_day is internal ranking state (reserviceAdjustedScore) —
     // strip it here so every caller's payload shape stays byte-for-byte
     // identical to before this field existed.
-    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, ...slot }) => slot),
+    // rain_tier is internal ranking state too (customer-rain-rank.js); a
+    // tier above 0 rides out as display_tier, which the picker sorts by
+    // first (it re-sorts this list by nearby, then rank).
+    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, rain_tier, ...slot }) => withDisplayTier(slot, rain_tier)),
     days,
     nearby: days.some(d => d.nearby),
     total_feasible: totalFeasible,
@@ -2161,6 +2183,29 @@ function buildFunnelAvailability(args) {
   return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
 }
 
+// The customer a /book offer may be made to, or null. The ONE eligibility
+// predicate the texting AI's offers share (availabilityForExistingCustomer here,
+// services/scheduling/text-offer-times.js for the pin-based text callers):
+//   - active: true — the bearer resolver's own rule (middleware/auth.js
+//     resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
+//     /book, so the texting AI must not offer them times it could not commit;
+//   - createSelfBooking's own rule: under bookingCustomersOnly a row still in a
+//     pre-customer pipeline stage is not a verified customer and cannot book, so
+//     it is offered nothing either.
+// `internal` is for staff-side reads that only pick a date and never quote a
+// customer (the estimate converter's first service day): the account is not
+// signed in and its stage may not have moved yet, so only a deleted row is
+// refused.
+async function bookableOfferCustomer(customerId, { internal = false } = {}) {
+  if (!customerId) return null;
+  const query = db('customers').where(internal ? { id: customerId } : { id: customerId, active: true }).whereNull('deleted_at');
+  const customer = await query
+    .first('id', 'account_id', 'pipeline_stage', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  if (!customer) return null;
+  if (!internal && require('../config/feature-gates').isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
+  return customer;
+}
+
 // What the /book funnel would offer an EXISTING customer for one funnel
 // service (GET /availability with no date range: the customer's own booking
 // pin, the service's catalog duration, the default window) — null when there
@@ -2173,22 +2218,32 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
   if (!customerId || !funnelKey) return null;
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('selfBooking')) return null;
-  // active: true — the bearer resolver's own rule (middleware/auth.js
-  // resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
-  // /book, so the texting AI must not offer them times it could not commit.
-  const customer = await db('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
-    .first('id', 'account_id', 'pipeline_stage', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
-  // createSelfBooking's own rule: under bookingCustomersOnly a row still in a
-  // pre-customer pipeline stage is not a verified customer and cannot book, so
-  // it is offered nothing either.
-  if (customer && isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
+  const customer = await bookableOfferCustomer(customerId);
   const location = customer ? await customerBookingLocation(customer) : null;
   if (!location) return null;
+  return availabilityForPin({ lat: location.lat, lng: location.lng, serviceKey: funnelKey });
+}
+
+// The /book funnel's default offer for one map pin and one funnel service: the
+// service's catalog duration, the default window, a full block of hourly
+// windows on an open route day. The one tail availabilityForExistingCustomer
+// (a customer's own pin) and the text-side callers that hold only a pin
+// (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
+// so a text-offered time and the website's come from one finder. Null when
+// /book is off, the service is no funnel service or the pin is missing.
+async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
+  const funnelKey = normalizeBookingServiceKey(serviceKey);
+  // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
+  const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
+  if (!funnelKey || pin.some((v) => !Number.isFinite(v) || v === 0)) return null;
+  // `internal`: a staff-side date pick (the estimate converter) never depends on
+  // the PUBLIC funnel's kill switch; every customer-facing reader keeps it.
+  if (!internal && !require('../config/feature-gates').isEnabled('selfBooking')) return null;
   const config = await loadBookingConfig();
   const today = new Date();
   const { minDate, defaultTo } = bookingOfferWindow(config, today);
   return buildFunnelAvailability({
-    lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
+    lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open
     // (PublicBookingPage.jsx), so an open route day offers its full block of
@@ -4101,6 +4156,20 @@ async function createSelfBooking(payload = {}) {
           statusCode: 409,
           isOperational: true,
           code: 'SELF_SERVE_NOTICE',
+        });
+      }
+
+      // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16, owner ruling
+      // 2026-10-09): a signed 17:00 offer from before the gate flipped is
+      // refused, as the builder (customerWindowAdmits) no longer offers it.
+      // AFTER the idempotent replay above, like the notice check: a 17:00
+      // booking that committed before the flip still replays as success when
+      // its lost response is retried. No-op while unset.
+      if (pastCustomerLastStart(timeToMin(slot_start))) {
+        throw Object.assign(new Error('That time isn\'t available — please pick another slot.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_UNAVAILABLE',
         });
       }
 
@@ -7173,6 +7242,8 @@ module.exports._internals = {
   customerBookingLocation,
   buildBookingAvailability,
   availabilityForExistingCustomer,
+  availabilityForPin,
+  bookableOfferCustomer,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

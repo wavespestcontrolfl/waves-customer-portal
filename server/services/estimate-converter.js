@@ -14,7 +14,7 @@ const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
-const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
+const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
 const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
@@ -43,7 +43,7 @@ const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-serv
 // price the plan), and selectedTermiteAnnualPlanRows reads the accepted
 // program off the estimate's own stored data. Both dark by default, so this
 // import is inert everywhere the plan is not live.
-const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+const { termiteAnnualPlanSelectionEnabled, multiTechTextTimesLive } = require('../config/feature-gates');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 // Codex P0: the LIVE gate alone is wrong for an already-DELIVERED annual
 // offer — estimate-offer-version.js's own annualPlanPublicReplayBlocked
@@ -142,6 +142,36 @@ const RiderAcceptSeeding = require('./rider-accept-seeding');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
+// The website funnel service an accepted estimate's FIRST visit is, or '' when
+// the website engine cannot represent it. One funnel service only: every sold
+// recurring line must map (through the explicit sms-book-funnel-map table, never
+// a keyword guess) to the SAME funnel key. A combined or multi-service plan (pest
+// plus lawn never share a stop), a service /book does not book (bait stations,
+// bond, palm injection ...) and an estimate with no recurring line the table can
+// name all return '' and keep the old by-city engine for that estimate.
+function funnelKeyForEstimate(recurringServices, estimate) {
+  const map = require('./sms-book-funnel-map');
+  const lines = (Array.isArray(recurringServices) ? recurringServices : []).filter((svc) => svc && typeof svc === 'object');
+  if (!lines.length) return map.funnelKeyForServiceName(estimate?.service_interest);
+  const keys = lines.map((svc) => map.funnelKeyForCatalogKey(recurringServiceKey(svc)));
+  return keys.every(Boolean) && new Set(keys).size === 1 ? keys[0] : '';
+}
+
+// funnelKeyForEstimate for a stored estimate: its sold recurring lines and
+// service_interest, read the way convertEstimate reads them. The text drafter's
+// estimate-linked OPEN TIMES (GATE_MULTI_TECH_TEXT_TIMES) asks the website engine
+// for THIS estimate's service through it. '' = not representable.
+async function funnelKeyForEstimateId(estimateId, database = db) {
+  if (!estimateId) return '';
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) return '';
+  let estimateData = estimate.estimate_data;
+  if (typeof estimateData === 'string') {
+    try { estimateData = JSON.parse(estimateData); } catch { estimateData = {}; }
+  }
+  return funnelKeyForEstimate(recurringServicesFromEstimateData(estimateData || {}), estimate);
+}
+
 /**
  * Pick the first service date for a freshly-converted customer.
  *
@@ -154,25 +184,57 @@ const WAVEGUARD_SETUP_FEE = 99;
  *      can't resolve the customer's zone (empty city, new area) or when no
  *      tech is scheduled in that zone across the 14-day window.
  *
+ * With GATE_MULTI_TECH_TEXT_TIMES on and a single website funnel service for the
+ * estimate (funnelKeyForEstimate), step 1 reads the website booking engine (per
+ * technician, route-aware) instead of the by-city engine; any other estimate
+ * keeps the by-city engine. Step 2 is unchanged.
+ *
  * Returns a YYYY-MM-DD string ready for scheduled_services.scheduled_date.
  */
-async function pickFirstServiceDate(customer, estimateId) {
+async function pickFirstServiceDate(customer, estimateId, { serviceKey = '' } = {}) {
   try {
-    if (customer.city) {
-      const avail = await AvailabilityEngine.getAvailableSlots(customer.city, estimateId);
-      const first = avail?.days?.[0]?.date;
-      if (first) {
-        logger.info(`[estimate-converter] Snapped first service to route day ${first} (zone: ${avail.zone})`);
-        return first;
-      }
+    // GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): an estimate the
+    // website engine can represent (serviceKey) is placed by it; any other keeps
+    // the by-city engine. No usable pin or no open day falls to the + 7 days rule.
+    const found = multiTechTextTimesLive() && serviceKey
+      ? await websiteEngineFirstDay(customer, estimateId, serviceKey)
+      : await byCityFirstDay(customer, estimateId);
+    if (found) {
+      logger.info(`[estimate-converter] Snapped first service to route day ${found.date} (${found.via})`);
+      return found.date;
     }
   } catch (e) {
     logger.error(`[estimate-converter] Availability lookup failed, falling back: ${e.message}`);
   }
+  return fallbackFirstServiceDate(customer);
+}
 
-  // Fallback — today + 7, nudged off closed days (weekly days off + one-off
-  // blackouts) via the shared helper; was a Sunday-only snap before the
-  // weekly-days-off setting existed. Bounded walk, fail-open like the helper.
+// The first day the website booking engine (per technician, route-aware) has a
+// feasible start for THIS estimate's funnel service at the customer's pin, else
+// the middle of their city. `internal`: staff-side scheduling never depends on
+// the public funnel's kill switch (GATE_SELF_BOOKING) or on the account being
+// signed in. { date, via } or null.
+async function websiteEngineFirstDay(customer, estimateId, serviceKey) {
+  if (!customer.id && !customer.city) return null;
+  const offered = await require('./scheduling/text-offer-times').textOfferDays({
+    customerId: customer.id || null, estimateId, city: customer.city || null, serviceKey, internal: true,
+  });
+  const date = (offered?.days || []).find((d) => d.slots?.length)?.date;
+  return date ? { date, via: `website engine, ${serviceKey}, pin: ${offered.pinSource}` } : null;
+}
+
+// The old by-city engine's first day. { date, via } or null.
+async function byCityFirstDay(customer, estimateId) {
+  if (!customer.city) return null;
+  const avail = await AvailabilityEngine.getAvailableSlots(customer.city, estimateId);
+  const date = avail?.days?.[0]?.date;
+  return date ? { date, via: `zone: ${avail.zone}` } : null;
+}
+
+// Fallback — today + 7, nudged off closed days (weekly days off + one-off
+// blackouts) via the shared helper; was a Sunday-only snap before the
+// weekly-days-off setting existed. Bounded walk, fail-open like the helper.
+async function fallbackFirstServiceDate(customer) {
   const fallback = new Date(Date.now() + 7 * 86400000);
   let dateStr = fallback.toISOString().split('T')[0];
   try {
@@ -2367,6 +2429,9 @@ function isIgnorableSetupOneTimeItem(item = {}) {
 
 function isGeneralPestOneTimeItem(item = {}) {
   const service = String(item.service || '').toLowerCase();
+  // An area add-on is never the general one-time pest job ("Fire Ant Yard
+  // Treatment" would match the name test below on the word "ant").
+  if (service === 'area_addon') return false;
   if (service === 'one_time_pest' || service === 'pest_control') return true;
   if (service === 'german_roach') return false;
   const raw = oneTimeRawText(item);
@@ -2376,6 +2441,8 @@ function isGeneralPestOneTimeItem(item = {}) {
 
 function isLawnCareOneTimeItem(item = {}) {
   if (isIgnorableSetupOneTimeItem(item)) return true;
+  // Area add-ons take their family from the add-on key, not the display name.
+  if (String(item.service || '').toLowerCase() === 'area_addon') return areaAddOnConfig(item)?.category === 'lawn_care';
   return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(oneTimeRawText(item));
 }
 
@@ -7101,7 +7168,9 @@ const EstimateConverter = {
       // today in createTermForAnnualPrepay).
       if (annualPrepayTermStart) termStartDate = annualPrepayTermStart;
     } else {
-      const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
+      const firstServiceDate = await pickFirstServiceDate(customer, estimateId, {
+        serviceKey: multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '',
+      });
       termStartDate = firstServiceDate;
       // Earliest date actually inserted by the loop below — replaces the
       // picked date when a seasonal roll moved the real first visit.
@@ -8904,3 +8973,9 @@ module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody
 module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepositLocks;
 module.exports.isTermiteAnnualSignBeforePayAccept = isTermiteAnnualSignBeforePayAccept;
 module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsFor;
+module.exports.pickFirstServiceDate = pickFirstServiceDate;
+module.exports.funnelKeyForEstimate = funnelKeyForEstimate;
+module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;
+// One-time row classifiers (area add-on rows classify by key), exported for server/tests/area-addon-flow.test.js.
+module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
+module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;

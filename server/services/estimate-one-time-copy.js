@@ -25,6 +25,7 @@
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
+const { areaAddOnConfig } = require('./pricing-engine/constants');
 const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../../shared/estimate-purchased-warranty.cjs');
 const { GUARANTEE_COPY, copyAllowedInScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 
@@ -122,10 +123,42 @@ function copyKeyFromText(item = {}) {
   return null;
 }
 
+// Area add-ons (GATE_AREA_ADDONS) share one service key, so the pack key is
+// the add-on's own catalog key (area_addon_<addOnKey>). An unknown add-on key
+// resolves to no copy: no entry means no new claims.
+function areaAddOnCopyKey(item = {}) {
+  const key = areaAddOnConfig(item)?.serviceKey;
+  return key && PACK[key] ? key : null;
+}
+
+// One own visit holds every add-on on the estimate: only the line that carries
+// the visit's drive is "its own visit"; the others are done on that same visit.
+// A row stored before carriesVisitDrive existed has no flag and keeps the
+// own-visit wording.
+function areaAddOnVisitCopy(item = {}) {
+  if (item.visitContext === 'sameTripAddOn') return 'Priced for the same visit as your other booked service';
+  return item.carriesVisitDrive === false
+    ? 'Done on the same visit as your other add-on treatments'
+    : 'Priced as its own visit';
+}
+
+// Fills the tier and the visit context into an area add-on's bullets. A row
+// with no tier drops the bullet that names the area rather than print a blank.
+// Bullets of every other service carry no placeholder and come back unchanged.
+function fillAreaAddOnLines(lines = [], item = {}) {
+  const tier = Number(item.tierSqFt);
+  const area = tier > 0 ? `${tier.toLocaleString('en-US')} sq ft` : null;
+  const visit = areaAddOnVisitCopy(item);
+  return lines
+    .filter((line) => area || !line.includes('{Area}'))
+    .map((line) => line.replace('{Area}', area || '').replace('{Visit}', visit));
+}
+
 function oneTimeCopyKeyFor(item = {}) {
   if (!item || typeof item !== 'object') return null;
   if (item.kind === 'discount' || item.kind === 'included' || item.quoteRequired === true || item.kind === 'quote_required') return null;
   const service = String(item.service || '').toLowerCase().trim();
+  if (service === 'area_addon') return areaAddOnCopyKey(item);
   if (service) return SERVICE_KEY_TO_COPY[service] || null;
   return copyKeyFromText(item);
 }
@@ -301,6 +334,7 @@ function resolveOneTimeServiceCopy(item = {}, options = {}) {
   if (key === 'termite_trenching' && !purchasedTrenchingWarranty) {
     lines = lines.filter((line) => line !== PURCHASED_TRENCHING_WARRANTY_BULLET);
   }
+  lines = fillAreaAddOnLines(lines, item);
   // Dethatching: debris hauling is priced separately (cleanupLevel) — the
   // bullet rides only when the row says it is included (codex #3823 r3 P1).
   if (key === 'dethatching' && item.debrisRemovalIncluded !== true) {

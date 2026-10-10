@@ -104,3 +104,35 @@ describe('weather-forecast (NWS)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('coordinate caches are size-bounded (Codex #6126 r4)', () => {
+  const { cachePut, CACHE_MAX_ENTRIES } = _test;
+
+  test('past the bound, expired entries go first, then the oldest', () => {
+    const cache = new Map();
+    const now = Date.now();
+    cache.set('stale', { at: now - 60 * 60 * 1000, value: 1 });
+    for (let i = 0; i < CACHE_MAX_ENTRIES; i += 1) cachePut(cache, `k${i}`, { at: now, value: i }, 10 * 60 * 1000);
+    // One over the bound: the expired entry is dropped, every fresh one stays.
+    expect(cache.size).toBe(CACHE_MAX_ENTRIES);
+    expect(cache.has('stale')).toBe(false);
+    expect(cache.has('k0')).toBe(true);
+    // All fresh and one more: the oldest is evicted.
+    cachePut(cache, 'extra', { at: now, value: 'x' }, 10 * 60 * 1000);
+    expect(cache.size).toBe(CACHE_MAX_ENTRIES);
+    expect(cache.has('k0')).toBe(false);
+    expect(cache.has('extra')).toBe(true);
+  });
+
+  test('1,000 distinct points keep the hourly cache at the bound', async () => {
+    _test._hourlyCache.clear();
+    global.fetch = jest.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/points/')
+        ? { properties: { forecastHourly: 'https://api.weather.gov/x' } }
+        : { properties: { periods: [{ startTime: '2026-10-09T08:00:00-04:00', probabilityOfPrecipitation: { value: 10 } }] } }),
+    }));
+    for (let i = 0; i < 1000; i += 1) await getHourlyRainOutlook(27 + i / 100, -82.4);
+    expect(_test._hourlyCache.size).toBe(CACHE_MAX_ENTRIES);
+  });
+});
