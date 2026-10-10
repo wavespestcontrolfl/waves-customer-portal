@@ -405,6 +405,34 @@ const AUTOPAY_SKIP_REASONS = {
 // branch checks — the customer-SMS rollout gate and the template's active
 // toggle — BEFORE anything mints or enrolls (GH Codex #3812 r1 P1). Fail
 // closed on an unreadable template row.
+// The messaging policy's own verdict for the text the service would send
+// (purpose 'card_request', the Auto Pay setup text's purpose): STOP /
+// sms_enabled=false, the suppression list, or an unreadable consent state.
+// requestAutopaySetupLink mints the 30-day link row BEFORE sendCustomerMessage
+// refuses such a send (reason 'opted_out' / suppression), so a card that
+// promises a text must judge this read-only first (Codex r8 on #6266 P2).
+// Returns { code, error } or null; fails closed on an unreadable state.
+const AUTOPAY_SMS_CONSENT_BLOCKS = [
+  [/^SMS_OPTED_OUT$/, 'sms_opted_out', 'This customer has opted out of texts (STOP) — email the Auto Pay setup link or hand it to the composer instead'],
+  [/^SUPPRESSED_/, 'sms_suppressed', 'This number is on the texting suppression list — email the Auto Pay setup link or hand it to the composer instead'],
+  [/_LOOKUP_FAILED$/, 'sms_consent_check_uncertain', 'Could not read this customer\'s texting consent — try again in a moment'],
+];
+async function autopaySmsConsentBlock(customerId) {
+  const { PURPOSE_POLICY } = require('./messaging/policy');
+  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
+  let contactState = await loadContactState({ customerId });
+  const input = { customerId, to: contactState.customer?.phone || null, channel: 'sms', audience: 'customer', purpose: 'card_request' };
+  contactState = await loadSuppressionState(input, contactState);
+  for (const check of [checkSuppression, checkConsentForPurpose]) {
+    const result = await check(input, PURPOSE_POLICY.card_request, contactState);
+    if (result.ok) continue;
+    const [, code, error] = AUTOPAY_SMS_CONSENT_BLOCKS.find(([re]) => re.test(String(result.code || ''))) || [];
+    return code ? { code, error } : { code: 'sms_blocked', error: 'This customer cannot be texted the Auto Pay setup link right now — email it or hand it to the composer instead' };
+  }
+  return null;
+}
+
 async function autopaySmsLever() {
   if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return 'autopay_sms_gate_off';
   try {
@@ -3084,6 +3112,7 @@ module.exports = {
   composerOnlyLinkPresence,
   linkOwnersInBody,
   autopaySmsLever,
+  autopaySmsConsentBlock,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,
   consultationLinkRows,

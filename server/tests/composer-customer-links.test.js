@@ -165,6 +165,7 @@ const {
   autopayLinkSendCheck,
   composerOnlyLinkPresence,
   linkOwnersInBody,
+  autopaySmsConsentBlock,
   buildAppointmentPageLink,
   buildCardRequestLink,
   buildPrepGuideLink,
@@ -3322,6 +3323,35 @@ describe('composerOnlyLinkPresence', () => {
     expect(await composerOnlyLinkPresence(body)).toEqual({ present: false, kinds: [] });
     expect(await composerOnlyLinkPresence(body, { includeVerifyOnly: true })).toEqual({ present: false, kinds: [] });
     expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+});
+
+describe('autopaySmsConsentBlock', () => {
+  const { loadContactState, checkConsentForPurpose } = require('../services/messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('../services/messaging/validators/suppression');
+  const { PURPOSE_POLICY } = require('../services/messaging/policy');
+
+  test('runs the messaging policy\'s suppression + consent verdict for the Auto Pay text (purpose card_request), read-only, before any link exists (Codex r8 P2)', async () => {
+    expect(await autopaySmsConsentBlock('c2')).toBeNull();
+    expect(loadContactState).toHaveBeenCalledWith({ customerId: 'c2' });
+    const input = { customerId: 'c2', to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'card_request' };
+    expect(loadSuppressionState).toHaveBeenCalledWith(input, expect.any(Object));
+    expect(checkSuppression).toHaveBeenCalledWith(input, PURPOSE_POLICY.card_request, expect.any(Object));
+    expect(checkConsentForPurpose).toHaveBeenCalledWith(input, PURPOSE_POLICY.card_request, expect.any(Object));
+    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+
+  test('STOP, a suppressed number and an unreadable state each block with their own code; an unknown refusal still blocks', async () => {
+    checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'SMS_OPTED_OUT' });
+    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_opted_out', error: expect.stringMatching(/opted out of texts/) });
+    checkSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSED_MANUAL_DNC' });
+    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_suppressed' });
+    checkSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
+    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_consent_check_uncertain' });
+    checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'CONSENT_LOOKUP_FAILED' });
+    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_consent_check_uncertain' });
+    checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'NO_CONSENT_RECORD' });
+    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_blocked' });
   });
 });
 

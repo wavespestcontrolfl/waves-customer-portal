@@ -34,6 +34,7 @@ jest.mock('../services/composer-customer-links', () => ({
   composerOnlyLinkPresence: jest.fn(async () => ({ present: false, kinds: [] })),
   linkOwnersInBody: jest.fn(async () => ({ owners: [], unresolved: [] })),
   autopaySmsLever: jest.fn(async () => null),
+  autopaySmsConsentBlock: jest.fn(async () => null),
 }));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn(async () => ({ activeVersion: { id: 'v1' } })) }));
 jest.mock('../services/payment-method-consents', () => ({ findConsentedChargeableCard: jest.fn(async () => null) }));
@@ -209,6 +210,7 @@ describe('send_autopay_setup_link', () => {
     wireCustomer();
     const emailed = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID, delivery: 'email' }, { isAdmin: true });
     expect(emailed).toMatchObject({ preview: true, reaches: 'email to f***@example.com' });
+    expect(links.autopaySmsConsentBlock).toHaveBeenCalledTimes(1);
 
     wireCustomer({ ...CUSTOMER, email: null });
     expect((await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID, delivery: 'email' }, { isAdmin: true })).code).toBe('no_customer_email');
@@ -219,6 +221,13 @@ describe('send_autopay_setup_link', () => {
     links.autopaySmsLever.mockResolvedValueOnce('template_inactive');
     const dark = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID }, { isAdmin: true });
     expect(dark).toMatchObject({ blocked: true, code: 'template_inactive' });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+
+    wireCustomer();
+    links.autopaySmsConsentBlock.mockResolvedValueOnce({ code: 'sms_opted_out', error: 'This customer has opted out of texts (STOP) — email the Auto Pay setup link or hand it to the composer instead' });
+    const stopped = await executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID }, { isAdmin: true });
+    expect(stopped).toMatchObject({ blocked: true, code: 'sms_opted_out' });
+    expect(links.autopaySmsConsentBlock).toHaveBeenCalledWith(CUSTOMER_ID);
     expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
 
     wireCustomer();

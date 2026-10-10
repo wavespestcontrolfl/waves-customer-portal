@@ -243,9 +243,13 @@ const EMAIL_LIKE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const AUTOPAY_CHANNEL_PREFLIGHT = {
   async sms(customer) {
     if (!fullUsNumber(customer.phone)) return blocked('This customer has no full 10-digit US phone on file — nothing to text.', 'no_phone');
-    const { AUTOPAY_SKIP_REASONS, autopaySmsLever } = require('../composer-customer-links');
+    const { AUTOPAY_SKIP_REASONS, autopaySmsLever, autopaySmsConsentBlock } = require('../composer-customer-links');
     const lever = await autopaySmsLever();
-    return lever ? blocked(AUTOPAY_SKIP_REASONS[lever] || `Auto Pay texts are not available (${lever})`, lever) : null;
+    if (lever) return blocked(AUTOPAY_SKIP_REASONS[lever] || `Auto Pay texts are not available (${lever})`, lever);
+    // The service mints the link row before the SMS pipeline refuses an
+    // opt-out or a suppressed number: judge that verdict read-only first.
+    const consent = await autopaySmsConsentBlock(customer.id);
+    return consent ? blocked(consent.error, consent.code) : null;
   },
   async email(customer) {
     if (!EMAIL_LIKE_RE.test(String(customer.email || '').trim())) return blocked('This customer has no valid email on file — nothing to email.', 'no_customer_email');
