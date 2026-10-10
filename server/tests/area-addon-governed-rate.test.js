@@ -636,3 +636,20 @@ describe('requireEveryChemicalAddOnRecorded', () => {
     expect(src).toContain("requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });");
   });
 });
+
+// Codex round 54: the lightweight pest recap.
+describe('the pest recap and area add-ons', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
+  test('an add-on attached after the eligibility read is seen under the visit lock, and the stale recap is refused before anything is written', () => {
+    const lock = src.indexOf("// 0. Lock the service row");
+    const recheck = src.indexOf("const addOnAttachedUnderLock = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(trx, serviceId).catch(() => true);");
+    expect(lock).toBeGreaterThan(0);
+    expect(recheck).toBeGreaterThan(lock);
+    expect(src.slice(recheck, recheck + 260)).toContain("rejectReason = 'visit_identity_changed';");
+    expect(recheck).toBeLessThan(src.indexOf('// 0c. Re-check the stale-recap guard under the lock.'));
+  });
+  test('an add-on product row is not counted as a usual product of its host line', () => {
+    const sql = src.slice(src.indexOf('const COMMON_PRODUCTS_SQL = `'), src.indexOf('top_products AS ('));
+    expect(sql).toContain('AND sp.area_addon_key IS NULL');
+  });
+});

@@ -168,6 +168,8 @@ const COMMON_PRODUCTS_SQL = `
       JOIN products_catalog pc ON pc.id = sp.product_id
      WHERE pc.active = true
        AND sr.status = 'completed'
+       -- An area add-on's product row rides its host's record: it is the add-on's work, never the host line's usual product.
+       AND sp.area_addon_key IS NULL
        AND sr.service_line = ?
        AND sr.service_date BETWEEN ?::date AND ?::date
   ),
@@ -732,6 +734,15 @@ async function submitRecap({
     //     written (no transition, no record, no products, no SMS).
     if (NON_COMPLETABLE_STATUSES.has(lockedStatus)) {
       rejectReason = `service_${lockedStatus}`;
+      return;
+    }
+
+    // 0b2. An area add-on attached after the unlocked eligibility read (Update Details) is work the recap cannot record
+    //      (its product, rate and treated area) or bill through the normal completion: read again UNDER the visit lock,
+    //      and refuse the stale recap as a changed visit. A failed read is "has rows" (the full form), as before the lock.
+    const addOnAttachedUnderLock = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(trx, serviceId).catch(() => true);
+    if (addOnAttachedUnderLock) {
+      rejectReason = 'visit_identity_changed';
       return;
     }
 
