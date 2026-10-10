@@ -9436,11 +9436,9 @@ const CallRecordingProcessor = {
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
             // A deploy stamp (markInFlightForShutdown) is consumed by the
-            // claim that takes the row; a claim taken while this process is
-            // already draining stamps itself, since it dies with the process.
-            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
-              ? shutdownStampSql(trx)
-              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
+            // claim that takes the row. A claim taken while this process is
+            // draining re-stamps itself AFTER commit (below), never here.
+            metadata: trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -9502,11 +9500,9 @@ const CallRecordingProcessor = {
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
             // A deploy stamp (markInFlightForShutdown) is consumed by the
-            // claim that takes the row; a claim taken while this process is
-            // already draining stamps itself, since it dies with the process.
-            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
-              ? shutdownStampSql(trx)
-              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
+            // claim that takes the row. A claim taken while this process is
+            // draining re-stamps itself AFTER commit (below), never here.
+            metadata: trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -9525,6 +9521,21 @@ const CallRecordingProcessor = {
       throw claimErr;
     }
     if (claimBlocked) unregisterClaim();
+    // Post-commit drain check (Codex r8 P2). markInFlightForShutdown's
+    // token-fenced stamp cannot see a claim that has not committed yet: the
+    // visible row still carries the previous token, so Postgres returns 0
+    // rows without waiting. Both orders are covered here: the drain flag
+    // flipped before this line runs (we stamp ourselves now), or it flips
+    // after (we were on the registry before the transaction and the row is
+    // committed, so the marker's UPDATE matches). Token-fenced, so a row a
+    // peer has since taken is left alone.
+    if (!claimBlocked && shuttingDown && isEnabled('callProcShutdownRelease')) {
+      await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() })
+        .catch((e) => logger.warn(`[call-proc] shutdown: self-stamp failed for ${maskSid(callSid)}: ${e.message}`));
+    }
     // A blocked claim did NO work — success: false so no caller can mistake
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
@@ -22857,11 +22868,14 @@ const CallRecordingProcessor = {
    */
   async markInFlightForShutdown({ deadlineMs = 5000 } = {}) {
     const enabled = isEnabled('callProcShutdownRelease');
+    // Flag FIRST, snapshot second, with no await between: a pass whose claim
+    // commits after this snapshot reads the flag in its post-commit check and
+    // stamps itself; a pass that read the flag as false before this line is
+    // in the snapshot with a committed claim.
+    if (enabled) shuttingDown = true;
     const entries = [...inFlightPasses.entries()];
     const summary = { enabled, inFlight: entries.length, stamped: 0, failed: 0 };
-    if (!enabled) return summary;
-    shuttingDown = true;
-    if (!entries.length) return summary;
+    if (!enabled || !entries.length) return summary;
     const deadline = new Promise((resolve) => {
       const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
