@@ -1654,10 +1654,11 @@ class SmartRebooker {
     // (customer self-serve, SMS replies, rain-out/auto flows): the option
     // being confirmed may have been generated before the owner blocked the
     // date. Admin-initiated moves stay unblocked BY DESIGN — the owner can
-    // knowingly book his own day off from dispatch. Fail-open helper.
+    // knowingly book his own day off from dispatch. Fail-open helper, except
+    // for the nightly auto-dispatch move: it blocks when the list is unreadable.
     if (initiatedBy !== 'admin') {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(newDateStr)) {
+      if (await isBlackoutDate(newDateStr, undefined, { strict: initiatedBy === 'auto_dispatch' })) {
         throw Object.assign(new Error('That day is no longer available'), {
           statusCode: 409,
           isOperational: true,
