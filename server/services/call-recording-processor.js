@@ -6984,6 +6984,37 @@ function existingStructureTermiteWork(words) {
   return LIQUID_TERMITE_WORK_RE.test(words) && LIQUID_EXISTING_CONTEXT_RE.test(words)
     && !LIQUID_NEW_CONSTRUCTION_RE.test(words);
 }
+// Positive proof (Codex r11): a word list can never name every existing-
+// structure treatment (Bora-Care, borate, wood treatment, monitoring, bond),
+// so the service words are split into fragments and each fragment is
+// canonicalized. The pre-treat is proven the ONLY termite work when every
+// fragment that canonicalizes to a termite service is the pre-slab one (or a
+// plain "pre-treat" wording the pre-slab rule does not match, such as
+// "Termite Pretreatment Service"), and no fragment carries add-on wording.
+// A fragment that is some other termite service, or carries add-on wording,
+// keeps the unit card.
+const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also)\s+/i;
+const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b/i;
+const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|protection|bond|warranty|renewal|bait\w*|stations?)\b/i;
+const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+function serviceFragmentsOf(view) {
+  const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
+  const out = [view.requested_service, view.matched_service, view.specific_service_name];
+  for (const text of [view.call_summary, ...painPoints]) {
+    out.push(...String(text || '').split(SERVICE_FRAGMENT_SPLIT_RE));
+  }
+  return out.map((f) => String(f || '').trim()).filter(Boolean);
+}
+function pretreatIsOnlyTermiteWork(view) {
+  return serviceFragmentsOf(view).every((fragment) => {
+    if (TERMITE_ADDON_WORDING_RE.test(fragment)) return false;
+    const label = canonicalWavesService(fragment);
+    if (!label || !TERMITE_SERVICE_LABELS.has(label)) return true;
+    if (label === 'Pre-Slab Termidor') return true;
+    return PRETREAT_WORDING_RE.test(fragment) && label === 'Termite Inspection';
+  });
+}
+
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
 
 // Card-only companion to the waiver above (owner 2026-10-07), narrowed to
@@ -7024,16 +7055,20 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
     // negations are not reliable enough to suppress on).
     const text = [transcription, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
     // Pre-construction pre-treats only (PRE_CONSTRUCTION_SERVICE_KEYS): a new
-    // slab has no unit. The view's own service words may name only the
-    // termite family and no existing-structure termite work (spot, foam, bait,
-    // drill, station, trenching, rodding, perimeter or liquid-perimeter, inspection) — anything else heard on the call may target one unit.
+    // slab has no unit. The rule is positive proof over canonicalized
+    // service fragments (pretreatIsOnlyTermiteWork): every termite fragment
+    // must be the pre-slab service and none may carry add-on wording. The
+    // view's service words must also name only the termite family and no
+    // existing-structure work (existingStructureTermiteWork backstop) —
+    // anything else heard on the call may target one unit.
     // pain_points is the extractor's own list of what the caller wants fixed.
     // The raw transcript is NOT family-scanned: on the audited slab calls a
     // transcript-wide scan read stray words as another service family. It is
     // scanned in full for unit/suite wording below.
     const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
     const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
-    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords);
+    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords)
+      && pretreatIsOnlyTermiteWork(view);
     return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });

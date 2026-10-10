@@ -453,6 +453,14 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, pain_points: ['Slab pre-treat', 'rodding along the existing wall'] }, commercial)).toBe(false);
     expect(run({ ...slab, requested_service: 'slab pre-treat plus a liquid perimeter treatment' }, commercial)).toBe(false);
     expect(run({ ...slab, call_summary: 'Slab pre-treat and a termite inspection of the office' }, commercial)).toBe(false);
+    // Structured-field treatments the word list never named (r11): positive
+    // proof over canonicalized fragments keeps the card.
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'Bora-Care on the existing framing'] }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: 'Slab pre-treat plus Bora-Care on the existing framing' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Wants the slab pre-treat. Also asked about a termite bond renewal' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat and termite monitoring afterward' }, commercial)).toBe(false);
+    expect(run({ ...slab, specific_service_name: 'Termite Wood Treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, matched_service: 'Wood Treatment' }, commercial)).toBe(false);
     // Plain pre-treat wording still drops the card.
     expect(run({ ...slab, call_summary: 'Apply liquid termiticide before the slab pour' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, commercial)).toBe(true);
