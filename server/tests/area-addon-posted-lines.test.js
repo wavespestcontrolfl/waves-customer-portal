@@ -305,6 +305,23 @@ describe('Update Details: what the edit adds', () => {
       await expect(edit({ visit: own, estimate: only }, { updates: { primary_line_price: String(only.prices[WEB]) }, rowLines: [] })).resolves.toEqual({ keys: [WEB], added: [] });
     });
 
+    // Codex round 53: a discounted service changed INTO an add-on must not keep its primary-line discount.
+    test('the visit\'s own add-on carries no primary-line discount, inherited or written', async () => {
+      const only = estimateSelling([{ key: 'web_sweep' }]);
+      const discounted = visit({ line_discount_dollars: '15.00' });
+      const toAddOn = { service_key_snapshot: WEB, primary_line_price: only.prices[WEB] };
+      await expect(edit({ visit: discounted, estimate: only }, { updates: toAddOn, rowKeys: null })).rejects.toMatchObject({ status: 409, code: 'AREA_ADDON_NO_DISCOUNT' });
+      // the save clears it: allowed
+      await expect(edit({ visit: discounted, estimate: only }, { updates: { ...toAddOn, line_discount_dollars: null }, rowKeys: null })).resolves.toEqual({ keys: [WEB], added: [WEB] });
+      // a kept own add-on that the save discounts
+      const own = visit({ service_key_snapshot: WEB, primary_line_price: only.prices[WEB] });
+      await expect(edit({ visit: own, estimate: only }, { updates: { primary_line_price: only.prices[WEB], line_discount_dollars: 5 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
+      // a save that only writes a discount on the own add-on is judged too
+      await expect(edit({ visit: own, estimate: only }, { updates: { line_discount_dollars: 5 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
+      // a host's own discount is not the add-on's concern
+      await expect(edit({ visit: discounted, rowKeys: [WEB], rowPrices: only.prices, estimate: only }, { updates: {}, rowLines: [{ key: WEB, price: only.prices[WEB] }] })).resolves.toEqual({ keys: [WEB], added: [] });
+    });
+
     // Codex round 36: a price-only edit, and a visit the accept booked (no stored primary price: the estimate is the reference).
     test('a price-only edit of a visit whose own service is an add-on is judged, against the estimate when no primary price is stored', async () => {
       const only = estimateSelling([{ key: 'web_sweep' }]);

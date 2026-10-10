@@ -522,7 +522,7 @@ function editedAddOnPlan(visit, storedRowKeys, updates, posted) {
   const before = new Set([visit.service_key_snapshot, ...storedRowKeys]);
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
   // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit).
-  const ownPriced = isAreaAddOnCatalogKey(ownKey) && updates.primary_line_price !== undefined;
+  const ownPriced = isAreaAddOnCatalogKey(ownKey) && (updates.primary_line_price !== undefined || Number(updates.line_discount_dollars) > 0);
   // A host: the visit's own service is a field service a same-visit add-on can ride (isSameVisitHostKey). A non-add-on
   // ROW is an extra line, not the visit's host.
   const hasHost = isSameVisitHostKey(ownKey);
@@ -552,6 +552,14 @@ function assertAddOnGateOpenForAdding(estimate) {
   if (!estimate) return;
   const refusal = require('./pricing-engine/v1-legacy-mapper').gatedAddOnStaffRefusal(estimate.estimate_data, 'adding it to an appointment', { pricingAuthority: estimate.pricing_authority });
   if (refusal) throw postedRefusal(refusal.code, refusal.message);
+}
+
+// The visit's own service is an area add-on after the edit and its primary line holds a discount (`line_discount_dollars`:
+// what the save writes, else what the visit already stores).
+function ownAddOnDiscounted(plan, visit, updates) {
+  if (!isAreaAddOnCatalogKey(plan.ownKey)) return false;
+  const dollars = updates.line_discount_dollars !== undefined ? updates.line_discount_dollars : visit.line_discount_dollars;
+  return Number(dollars) > 0;
 }
 
 const priceLocked = (key) => postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
@@ -596,6 +604,11 @@ async function assertEditedAreaAddOns(trx, visitId, { updates = {}, rowKeys = nu
   const sold = soldAreaAddOnPrices(estimate);
   await assertKeptAddOnRowPrices(trx, visitId, plan.rowsAfter.filter((line) => !plan.added.includes(line.key) && line.price !== undefined), sold);
   if (keptOwnAddOnRepriced(plan, visit, updates, sold)) throw priceLocked(plan.ownKey);
+  // ... and the visit's own add-on carries no primary-line discount: one the save writes, or one the visit already holds
+  // (a discounted service changed INTO an add-on would otherwise keep that discount and bill below the estimate).
+  if (ownAddOnDiscounted(plan, visit, updates)) {
+    throw postedRefusal('AREA_ADDON_NO_DISCOUNT', `${nameOfServiceKey(plan.ownKey)} is priced by its estimate and is never discounted. Remove the discount from its line.`);
+  }
   // The add-on that carries the visit's drive and booking cost on the estimate stays while another sold add-on stays.
   if (estimate) assertCostCarrierKept(estimate, plan.finalKeys.map((key) => ({ key })), sold);
   // ... and a same-visit add-on stays on a visit whose own service is a host.
