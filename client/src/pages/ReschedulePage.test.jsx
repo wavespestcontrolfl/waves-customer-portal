@@ -793,6 +793,26 @@ describe('ReschedulePage collective anchoring', () => {
     await waitFor(() => expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument());
   });
 
+  it('move limits: a search that sends no noTimeSoon keeps the value the first load set', async () => {
+    const payload = reschedulablePayload({ moveLimit: { laterByOffice: false, noTimeSoon: true } });
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        return Promise.resolve(jsonResponse({ availability: payload.availability, summary: 'next friday', moveLimit: { laterByOffice: false } }));
+      }
+      if (!opts.method || opts.method === 'GET') return Promise.resolve(jsonResponse(payload));
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    expect(await screen.findByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'next friday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([u]) => String(u).includes('/find-slots'))).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
+  });
+
   it('move limits: a search that meets MOVE_LIMIT reloads the page into the text-us card', async () => {
     let getCalls = 0;
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {

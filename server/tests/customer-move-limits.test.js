@@ -36,7 +36,7 @@ function dbFor({ rows = [], completed = null, fail = false } = {}) {
 
 const visit = (overrides = {}) => ({
   id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2026-10-15', window_start: '09:00:00',
-  recurring_pattern: 'quarterly', recurring_interval_days: null, ...overrides,
+  recurring_pattern: 'quarterly', recurring_interval_days: null, is_recurring: true, ...overrides,
 });
 const NOW = new Date('2026-10-05T16:00:00Z');
 // Two standing moves: Oct 15 → Oct 22 → Oct 30.
@@ -107,6 +107,20 @@ describe('late-move limit', () => {
     expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: true, catalog_frequency: 'monthly' })).toBe(21);
     expect(allowanceDays({ recurring_pattern: 'custom', recurring_interval_days: 60, is_recurring: true, catalog_frequency: 'monthly' })).toBe(14);
     expect(allowanceDays({ recurring_pattern: null, is_recurring: null, recurring_parent_id: 'p-1', catalog_frequency: 'monthly' })).toBe(7);
+  });
+
+  test('a one-time visit that stores a cadence has no plan allowance', () => {
+    expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: false, recurring_parent_id: null })).toBeNull();
+    expect(allowanceDays({ recurring_pattern: 'monthly' })).toBeNull();
+    expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: null, recurring_parent_id: 'p-1' })).toBe(21);
+  });
+
+  test('a visit staff placed or hold (auto-dispatch lock): the customer\'s earlier moves do not stand', async () => {
+    const database = dbFor({ rows: twoMoves });
+    const limit = await loadMoveLimit(onOct30({ auto_dispatch_locked: true }), { database, now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-30', lastDate: '2026-11-20', firstVisitBlocked: false });
+    expect(customerMovesSince(twoMoves, onOct30({ auto_dispatch_locked: true }))).toEqual([]);
+    expect(customerMovesSince(twoMoves, onOct30())).toHaveLength(2);
   });
 
   test('the due date is the date before the customer\'s first move, not the date the visit is on now', async () => {
@@ -272,8 +286,9 @@ describe('the picker is never emptied', () => {
     expect(out.payload).toEqual({ moveLimit: { laterByOffice: false, noTimeSoon: false } });
   });
 
-  test('no whole-range list (the build failed): the list is returned as built with no key', () => {
-    expect(applyLimit(limit, null, availability, { rangeTo: '2026-11-20' })).toEqual({ availability, payload: {} });
+  test('no whole-range list (the limit date is not inside the range): nothing is dropped and no 7-day flag is sent', () => {
+    expect(applyLimit(limit, null, availability, { rangeTo: '2026-11-20' })).toEqual({ availability, payload: { moveLimit: { laterByOffice: false } } });
+    expect(applyLimit(null, null, availability, { rangeTo: '2026-11-20' })).toEqual({ availability, payload: {} });
     expect(lateLimitApplies(limit, null, '2026-11-20')).toBe(false);
   });
 
@@ -328,16 +343,16 @@ describe('reschedule-public wiring', () => {
 
   test('cadenceChangedSince: a changed pattern or interval on the locked row is a change, only with the gate set', () => {
     const { cadenceChangedSince } = router._test;
-    const svc = { recurring_pattern: 'quarterly', recurring_interval_days: null };
+    const svc = { recurring_pattern: 'quarterly', recurring_interval_days: null, is_recurring: true };
     const prev = process.env.GATE_RESCHEDULE_MOVE_LIMITS;
     try {
       process.env.GATE_RESCHEDULE_MOVE_LIMITS = 'true';
-      expect(cadenceChangedSince(svc, { recurring_pattern: 'quarterly', recurring_interval_days: null })).toBe(false);
-      expect(cadenceChangedSince(svc, { recurring_pattern: 'monthly', recurring_interval_days: null })).toBe(true);
-      expect(cadenceChangedSince({ recurring_pattern: 'custom', recurring_interval_days: 42 },
-        { recurring_pattern: 'custom', recurring_interval_days: '42' })).toBe(false);
-      expect(cadenceChangedSince({ recurring_pattern: 'custom', recurring_interval_days: 42 },
-        { recurring_pattern: 'custom', recurring_interval_days: 30 })).toBe(true);
+      expect(cadenceChangedSince(svc, { recurring_pattern: 'quarterly', recurring_interval_days: null, is_recurring: true })).toBe(false);
+      expect(cadenceChangedSince(svc, { recurring_pattern: 'monthly', recurring_interval_days: null, is_recurring: true })).toBe(true);
+      expect(cadenceChangedSince({ recurring_pattern: 'custom', recurring_interval_days: 42, is_recurring: true },
+        { recurring_pattern: 'custom', recurring_interval_days: '42', is_recurring: true })).toBe(false);
+      expect(cadenceChangedSince({ recurring_pattern: 'custom', recurring_interval_days: 42, is_recurring: true },
+        { recurring_pattern: 'custom', recurring_interval_days: 30, is_recurring: true })).toBe(true);
       delete process.env.GATE_RESCHEDULE_MOVE_LIMITS;
       expect(cadenceChangedSince(svc, { recurring_pattern: 'monthly' })).toBe(false);
     } finally {
@@ -366,6 +381,7 @@ describe('reschedule-public wiring', () => {
     // A limit at or past the end of the range drops nothing: no refusal.
     await expect(fullRangeForLimit(svc, { ...limit, lastDate: '2026-11-10' }, range, {})).resolves.toBeNull();
     await expect(fullRangeForLimit(svc, { ...limit, lastDate: null }, range, {})).resolves.toBeNull();
+    // No list is built when the limit date is not inside the range.
     // A limit date before the range: no time can be inside it, so no refusal.
     await expect(fullRangeForLimit(svc, { ...limit, lastDate: '2026-10-20' }, range, {})).resolves.toBeNull();
     // No limit: nothing is built.
@@ -401,8 +417,8 @@ describe('reschedule-public wiring', () => {
     expect(await visitChangedSince(svc, database)).toBe(true);
     answer({ ...svc, status: 'cancelled' });
     expect(await visitChangedSince(svc, database)).toBe(true);
-    answer({ ...svc, recurring_pattern: 'monthly' });
-    expect(await visitChangedSince({ ...svc, recurring_pattern: 'quarterly' }, database)).toBe(true);
+    answer({ ...svc, recurring_pattern: 'monthly', is_recurring: true });
+    expect(await visitChangedSince({ ...svc, recurring_pattern: 'quarterly', is_recurring: true }, database)).toBe(true);
     answer(undefined);
     expect(await visitChangedSince(svc, database)).toBe(true);
     expect(await visitChangedSince(svc, () => { throw new Error('db down'); })).toBe(true);

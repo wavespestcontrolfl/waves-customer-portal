@@ -19,7 +19,8 @@
 //     staff, weather, dispatch, the phone or text agent);
 //   - the visit is not where the customer's last move put it, or a move does
 //     not start where the move before it ended (the staff edit screen writes
-//     the row with no log row);
+//     the row with no log row), or staff set the visit's auto-dispatch lock
+//     (the edit screen sets it when staff choose a recurring visit's slot);
 //   - the customer rebooks a MISSED visit (a rebook, not a move: that row
 //     sets the appointment, and its date is the new due date).
 //
@@ -85,13 +86,18 @@ function catalogCadence(svc) {
   const stored = svc.recurring_pattern || null;
   if (stored && stored !== 'custom') return null;
   if (Number.parseInt(svc.recurring_interval_days, 10) > 0) return null;
-  // Plan rows only: a one-time visit of a quarterly service has no plan.
-  if (!svc.is_recurring && !svc.recurring_parent_id) return null;
   const frequency = normalizeRecurringPattern(svc.catalog_frequency) || svc.catalog_frequency || null;
   return CATALOG_CADENCES.has(frequency) ? frequency : null;
 }
 
+// A plan visit: the recurring root or one of its occurrences. The admin
+// creator can store a cadence on a one-time visit; that visit has no plan.
+function isPlanVisit(svc) {
+  return svc.is_recurring === true || svc.recurring_parent_id != null;
+}
+
 function allowanceDays(svc) {
+  if (!isPlanVisit(svc)) return null;
   // Legacy rows store aliases ('bi-monthly'); the shared normalizer reads
   // them. A value it does not place (monthly_nth_weekday) is passed as stored.
   const stored = svc.recurring_pattern || null;
@@ -131,6 +137,11 @@ function wasMissedRebook(row) {
 //   - When the visit is not where the last remaining move put it, Waves
 //     placed it since with no log row: nothing stands.
 function customerMovesSince(rows, svc) {
+  // Staff placed this visit on the edit screen (it sets the visit's
+  // auto_dispatch_locked and writes no log row), or staff hold it: the
+  // customer's earlier moves do not stand. This also covers a staff move away
+  // and back to the same slot, which the slot comparisons below cannot see.
+  if (svc?.auto_dispatch_locked === true) return [];
   let from = 0;
   rows.forEach((row, idx) => {
     if (!slotChanged(row)) return;
@@ -253,10 +264,13 @@ function noTimeSoon(availability, now = new Date()) {
 // The list a surface returns under a limit, and the payload keys that go
 // with it. `full` is the whole booking range (it decides whether the limit
 // applies); `shown` is the list being returned (the same object for GET, the
-// search window for find-slots). No limit, or no whole-range list: `shown`
-// as built and no key (fail open).
+// search window for find-slots). No limit: `shown` as built and no key.
+// A limit and no whole-range list: the caller found the limit cannot apply
+// without building it (its date is not inside the range), so nothing is
+// dropped and `noTimeSoon`, which needs that list, is not sent.
 function applyLimit(limit, full, shown, { rangeTo, now = new Date() } = {}) {
-  if (!limit || !full) return { availability: shown, payload: {} };
+  if (!limit) return { availability: shown, payload: {} };
+  if (!full) return { availability: shown, payload: { moveLimit: { laterByOffice: false } } };
   const applies = lateLimitApplies(limit, full, rangeTo);
   return {
     availability: applies ? withinLimit(shown, limit.lastDate) : shown,

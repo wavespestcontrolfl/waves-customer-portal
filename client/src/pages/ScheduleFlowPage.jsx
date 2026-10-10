@@ -472,8 +472,15 @@ function nextVisitShiftFor(data, slotDate) {
 // is the server's current answer for those days: take its next-visit dates
 // and its move limit whole, and show none when it sends none (the next visit
 // stopped being movable; the limit stopped applying).
-function withNextVisit(body) {
-  return { nextVisit: body?.nextVisit || null, moveLimit: body?.moveLimit || null };
+// `prev`: the page data being refreshed. A search whose limit needs no
+// whole-range list sends `moveLimit` without `noTimeSoon`; the value the
+// first load set then stays. No `moveLimit` at all clears the line.
+function withNextVisit(body, prev) {
+  const sent = body?.moveLimit || null;
+  const moveLimit = sent && sent.noTimeSoon === undefined
+    ? { ...sent, noTimeSoon: Boolean(prev?.moveLimit?.noTimeSoon) }
+    : sent;
+  return { nextVisit: body?.nextVisit || null, moveLimit };
 }
 
 function shortDateLabel(dateStr) {
@@ -1832,7 +1839,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (body.availability) {
       // The pick survives when the results still offer it (see the
       // availability effect above); otherwise that effect clears it.
-      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body) } : prev));
+      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1930,7 +1937,7 @@ export default function ScheduleFlowPage({ flow }) {
           if (body.lead) mergeData({ lead: body.lead });
         }
         if (body.availability) {
-          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body) } : prev));
+          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
         } else if (flow === 'inspection') {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper

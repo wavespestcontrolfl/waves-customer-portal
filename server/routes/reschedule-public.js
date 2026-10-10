@@ -183,7 +183,13 @@ async function pageEligibilityWithLimit(svc) {
 // shows nor commits a date the limit may hold back. A limit at or past the
 // end of the range drops nothing, so a failed build there applies none.
 async function fullRangeForLimit(svc, limit, range, config) {
-  if (!limit) return null;
+  // Only a limit date inside the range needs the list. One before the range
+  // leaves no time inside it, one at or past its end drops nothing, and a
+  // visit with no allowance has none: the answer is "not applied" unbuilt.
+  const inRange = limit?.lastDate
+    && limit.lastDate >= String(range.rangeFrom).slice(0, 10)
+    && limit.lastDate < String(range.rangeTo).slice(0, 10);
+  if (!inRange) return null;
   let full = null;
   try {
     full = await buildAvailabilityForService(svc, { ...range, config });
@@ -191,12 +197,7 @@ async function fullRangeForLimit(svc, limit, range, config) {
     logger.warn(`[reschedule-public] move-limit availability failed for ${svc.id}: ${err.message}`);
   }
   // No list (the build threw, or the address did not resolve this time).
-  // A limit date before the range leaves no time inside it, and one at or
-  // past the range's end drops nothing: neither needs the list.
-  const inRange = limit.lastDate
-    && limit.lastDate >= String(range.rangeFrom).slice(0, 10)
-    && limit.lastDate < String(range.rangeTo).slice(0, 10);
-  if (!full && inRange) {
+  if (!full) {
     throw Object.assign(new Error('Scheduling is unavailable right now. Please try again in a moment.'), {
       statusCode: 503, isOperational: true, code: 'LIMIT_UNAVAILABLE',
     });
@@ -428,6 +429,8 @@ function selectSvc(column, value, database = db) {
       's.visit_id',
       's.recurring_pattern',
       's.recurring_interval_days',
+      // Staff placed or hold this visit (move limits: the history resets).
+      's.auto_dispatch_locked',
       // A legacy plan row's cadence (move limits: catalogCadence).
       'sv.frequency as catalog_frequency',
       's.recurring_parent_id',
