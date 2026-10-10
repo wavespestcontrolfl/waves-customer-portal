@@ -2064,8 +2064,14 @@ async function requestedAreaAddOnServiceKeys(database, serviceId, serviceAddons)
 // price of the line, the visit's own included: a primary add-on booked at a stale price is refused too): area-addon-visit-rows assertPostedAreaAddOnsSold.
 const postedAreaAddOnLines = (pricing) => [
   { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null, discount: pricing.primaryDiscount || undefined },
-  ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base, discount: line.discount || undefined })),
+  // `credit`: the share of an APPOINTMENT discount the stack put on this line (an add-on takes none).
+  ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base, discount: line.discount || undefined, credit: line.appointmentCreditDollars })),
 ];
+// What the guard needs to judge an appointment-wide discount: the visit's final total and that discount's dollars.
+const postedAreaAddOnTotals = (pricing) => ({
+  finalPrice: pricing.finalPrice,
+  appointmentDiscountDollars: pricing.appointmentDiscount ? pricing.appointmentDiscount.discountDollars : 0,
+});
 
 // The Update Details save and the area add-ons (Codex round 18 P1): what the edit ADDS must be sold by the visit's source estimate
 // and never joins a repeating series (area-addon-visit-rows assertEditedAreaAddOns), and a visit that carries a limited add-on is
@@ -8924,7 +8930,7 @@ async function scheduleCreateHandler(req, res, next) {
       // The area add-ons the posted lines carry, against the estimate row this transaction holds locked (an estimate revised after
       // the modal built its request is refused here, with nothing inserted): a posted add-on the estimate does not sell, or sells at
       // another price, never books; fewer than sold is the office's choice. None posted: no query. A repeating series never carries one.
-      require('../services/area-addon-visit-rows').assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring });
+      require('../services/area-addon-visit-rows').assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });
       // ... and an add-on this estimate already has on an appointment is not booked from it a second time (one estimate sells
       // one application). Read inside this transaction, after the booking's customer lock.
       await require('../services/area-addon-visit-rows').assertAreaAddOnsNotYetBooked(trx, lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));
@@ -28413,7 +28419,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 
 router._test = {
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
-  areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED,
+  areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,

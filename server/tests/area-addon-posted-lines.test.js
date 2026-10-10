@@ -106,6 +106,30 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
     expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB], discount: { discountDollars: 0, discountAmount: 0 } }])).not.toThrow();
   });
 
+  // Codex round 55 (security): an appointment-wide discount must not reach an add-on.
+  describe('an appointment-wide discount', () => {
+    const message = 'Web Sweep is priced by its estimate and is never discounted. The discount on this appointment reaches it: remove the discount, or limit it to the other service.';
+    const web = () => ({ key: WEB, price: both.prices[WEB] });
+    test('an add-on-only visit with an appointment discount is refused (the reported $89 credit on an $89 Web Sweep)', () => {
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [web()], { totals: { finalPrice: 0, appointmentDiscountDollars: both.prices[WEB] } }))
+        .toThrow(expect.objectContaining({ status: 409, code: 'AREA_ADDON_NO_DISCOUNT', message }));
+    });
+    test('a share of it allocated to the add-on line is refused; a discount the host bears alone is allowed', () => {
+      const host = { key: 'one_time_pest', price: 150 };
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [host, { ...web(), credit: 5 }], { totals: { finalPrice: 150 + both.prices[WEB] - 20, appointmentDiscountDollars: 20 } }))
+        .toThrow(expect.objectContaining({ code: 'AREA_ADDON_NO_DISCOUNT' }));
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [host, web()], { totals: { finalPrice: 150 + both.prices[WEB] - 20, appointmentDiscountDollars: 20 } })).not.toThrow();
+      // larger than the host: it would eat into the add-on
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [host, web()], { totals: { finalPrice: both.prices[WEB] - 10, appointmentDiscountDollars: 160 } }))
+        .toThrow(expect.objectContaining({ code: 'AREA_ADDON_NO_DISCOUNT' }));
+    });
+    test('no appointment discount: nothing is judged; the route hands the totals over (source)', () => {
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [web()], { totals: { finalPrice: 0, appointmentDiscountDollars: 0 } })).not.toThrow();
+      expect(router._test.postedAreaAddOnTotals({ finalPrice: 59, appointmentDiscount: { discountDollars: 30 } })).toEqual({ finalPrice: 59, appointmentDiscountDollars: 30 });
+      expect(router._test.postedAreaAddOnTotals({ finalPrice: 59, appointmentDiscount: null })).toEqual({ finalPrice: 59, appointmentDiscountDollars: 0 });
+    });
+  });
+
   // Codex round 28: one estimate sells one application of an add-on.
   test('the same add-on twice (two lines, or the visit\'s own service and a line) is refused', () => {
     const message = 'Bed Pre-Emergent Weed Control is on this appointment more than once. An estimate sells one application: remove the extra line.';
@@ -173,17 +197,17 @@ describe('the staff booking transaction asks it of the locked row, before anythi
 
   test('the posted lines are the visit\'s own service and each add-on line with its gross price', () => {
     expect(postedAreaAddOnLines({ primaryServiceKey: WEB, addonLines: [{ serviceKey: BED, base: 99, price: 89 }, { serviceKey: null, base: null }] }))
-      .toEqual([{ key: WEB, price: null, discount: undefined }, { key: BED, price: 99, discount: undefined }, { key: null, price: null, discount: undefined }]);
+      .toEqual([{ key: WEB, price: null, discount: undefined }, { key: BED, price: 99, discount: undefined, credit: undefined }, { key: null, price: null, discount: undefined, credit: undefined }]);
     // Codex round 20: the visit's own service carries its gross price too, so a primary add-on at a stale price is refused.
     expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, addonLines: [] })).toEqual([{ key: WEB, price: 89, discount: undefined }]);
     // Codex round 52: each line's own discount rides along, so the guard can refuse a discounted add-on.
     const lineDiscount = { discountType: 'fixed', discountAmount: 10, discountDollars: 10 };
     expect(postedAreaAddOnLines({ primaryServiceKey: 'one_time_pest', primaryBase: 150, primaryDiscount: lineDiscount, addonLines: [{ serviceKey: WEB, base: 59, price: 49, discount: lineDiscount }] }))
-      .toEqual([{ key: 'one_time_pest', price: 150, discount: lineDiscount }, { key: WEB, price: 59, discount: lineDiscount }]);
+      .toEqual([{ key: 'one_time_pest', price: 150, discount: lineDiscount }, { key: WEB, price: 59, discount: lineDiscount, credit: undefined }]);
   });
 
   test('source order: the locked read, then the guard, then the first insert; the locked row carries pricing_authority', () => {
-    const call = "assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring });";
+    const call = "assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });";
     expect(src).toContain(call);
     expect(src.indexOf('lockedLinkedEstimate = freshLinkedEstimate;')).toBeLessThan(src.indexOf(call));
     expect(src.indexOf(call)).toBeLessThan(src.indexOf('[svc] = await trx(\'scheduled_services\').insert(adminCreateInsert).returning(\'*\');'));
@@ -316,6 +340,8 @@ describe('Update Details: what the edit adds', () => {
       // a kept own add-on that the save discounts
       const own = visit({ service_key_snapshot: WEB, primary_line_price: only.prices[WEB] });
       await expect(edit({ visit: own, estimate: only }, { updates: { primary_line_price: only.prices[WEB], line_discount_dollars: 5 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
+      // an appointment discount on a visit whose own service is an add-on has no host to bear it
+      await expect(edit({ visit: own, estimate: only }, { updates: { discount_dollars: 20 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
       // a save that only writes a discount on the own add-on is judged too
       await expect(edit({ visit: own, estimate: only }, { updates: { line_discount_dollars: 5 }, rowKeys: null })).rejects.toMatchObject({ code: 'AREA_ADDON_NO_DISCOUNT' });
       // a host's own discount is not the add-on's concern
@@ -468,7 +494,7 @@ describe('assertAreaAddOnsNotYetBooked', () => {
 
   test('the staff booking asks it right after the sold-lines guard, inside the transaction (source)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    const sold = src.indexOf('assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring });');
+    const sold = src.indexOf('assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });');
     const again = src.indexOf('assertAreaAddOnsNotYetBooked(trx, lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));');
     expect(again).toBeGreaterThan(sold);
     expect(again - sold).toBeLessThan(700);

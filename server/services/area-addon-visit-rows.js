@@ -391,6 +391,19 @@ function soldAreaAddOnPrices(estimate) {
   return prices;
 }
 
+// An appointment-wide discount (fixed, variable, free service) must be borne by the other services of the visit: no share of
+// it on an add-on line (`credit`, the discount stack's allocation), and the visit's final total still covers every add-on at
+// its full price (with no allocation, a discount larger than the other lines would otherwise eat into an add-on).
+function assertNoAppointmentDiscountOnAddOns(wanted, totals) {
+  if (!totals || !(Number(totals.appointmentDiscountDollars) > 0)) return;
+  const credited = wanted.find((line) => Number(line.credit) > 0);
+  const addOnGross = wanted.reduce((sum, line) => sum + (Number(line.price) || 0), 0);
+  const eaten = Number.isFinite(Number(totals.finalPrice)) && Number(totals.finalPrice) < addOnGross - 0.005;
+  if (!credited && !eaten) return;
+  const name = nameOfServiceKey((credited || wanted[0]).key);
+  throw postedRefusal('AREA_ADDON_NO_DISCOUNT', `${name} is priced by its estimate and is never discounted. The discount on this appointment reaches it: remove the discount, or limit it to the other service.`);
+}
+
 // A posted line that carries a discount of its own (`discount`: the route's line discount object).
 const lineIsDiscounted = (line) => Boolean(line && line.discount
   && [line.discount.discountDollars, line.discount.discountAmount].some((value) => Number(value) > 0));
@@ -404,7 +417,7 @@ const samePrice = (posted, sold) => Number.isFinite(Number(posted)) && posted !=
  * `estimate` is the row the caller holds locked (null when the visit has none). `recurring`: the visit is, or becomes, part of a
  * repeating series.
  */
-function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, wholeVisit = true } = {}) {
+function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, wholeVisit = true, totals = null } = {}) {
   const wanted = posted.filter((line) => line && isAreaAddOnCatalogKey(line.key));
   if (!wanted.length) return;
   const name = nameOfServiceKey(wanted[0].key);
@@ -434,6 +447,8 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, 
   // booking cost on the estimate must stay when any other sold add-on is booked. The others are priced as additional add-ons,
   // so a visit of only those would be sold with no trip cost in its price.
   if (wholeVisit) assertCostCarrierKept(estimate, wanted, sold);
+  // ... and no APPOINTMENT-wide discount reaches an add-on (`totals`, a booking only).
+  assertNoAppointmentDiscountOnAddOns(wanted, totals);
   // ... and an add-on sold for the SAME visit as a host service (no drive in its price) rides a visit that keeps a host.
   if (wholeVisit) assertSameVisitHostKept(estimate, wanted.map((line) => line.key), posted.some((line) => line && isSameVisitHostKey(line.key)));
 }
@@ -522,7 +537,8 @@ function editedAddOnPlan(visit, storedRowKeys, updates, posted) {
   const before = new Set([visit.service_key_snapshot, ...storedRowKeys]);
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
   // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit).
-  const ownPriced = isAreaAddOnCatalogKey(ownKey) && (updates.primary_line_price !== undefined || Number(updates.line_discount_dollars) > 0);
+  const ownPriced = isAreaAddOnCatalogKey(ownKey)
+    && (updates.primary_line_price !== undefined || Number(updates.line_discount_dollars) > 0 || Number(updates.discount_dollars) > 0);
   // A host: the visit's own service is a field service a same-visit add-on can ride (isSameVisitHostKey). A non-add-on
   // ROW is an extra line, not the visit's host.
   const hasHost = isSameVisitHostKey(ownKey);
@@ -558,8 +574,9 @@ function assertAddOnGateOpenForAdding(estimate) {
 // what the save writes, else what the visit already stores).
 function ownAddOnDiscounted(plan, visit, updates) {
   if (!isAreaAddOnCatalogKey(plan.ownKey)) return false;
-  const dollars = updates.line_discount_dollars !== undefined ? updates.line_discount_dollars : visit.line_discount_dollars;
-  return Number(dollars) > 0;
+  const written = (column) => (updates[column] !== undefined ? updates[column] : visit[column]);
+  // `discount_dollars` is the APPOINTMENT discount: on a visit whose own service is an add-on there is no host to bear it.
+  return Number(written('line_discount_dollars')) > 0 || Number(written('discount_dollars')) > 0;
 }
 
 const priceLocked = (key) => postedRefusal('AREA_ADDON_PRICE_LOCKED', `${nameOfServiceKey(key)} is priced by its estimate, so its price cannot be changed on the appointment. To change it, revise the estimate and book again from it.`);
