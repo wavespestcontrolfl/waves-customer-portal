@@ -133,6 +133,8 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     // a visit with no conflict (Codex #6207 r10 P2).
     ...normalBestOf(conflict, rows),
     ranked: qualifying.map((r) => r.cand),
+    // The same list with each slot's score and gain (road-check.js).
+    rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain })),
   };
 }
 

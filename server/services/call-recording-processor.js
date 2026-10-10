@@ -3787,11 +3787,60 @@ const FORCE_CLAIM_QUIET_MINUTES = 3;
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
+// A pass interrupted by a deploy (GATE_CALL_PROC_SHUTDOWN_RELEASE). At SIGTERM
+// every pass this process holds a claim for is STAMPED — nothing else changes:
+// the claim, token and status stay with the dying pass, so no second pass can
+// run while it is still alive (a released claim let the replacement pod resend
+// a DOI email the dying pass had just sent — Codex #6260 r4 P1). A stamped
+// claim becomes reclaimable after a SHORT heartbeat silence instead of the
+// 10-minute window: the pass beats every 60 s while alive and Railway kills
+// the old pod within 30 s of SIGTERM, so 2 quiet minutes on a stamped row is
+// proof the pass is dead, and a pass that somehow survived keeps beating and
+// is never taken. The claim that takes the row clears the stamp. The stamp
+// write refreshes the heartbeat in the same statement: the pass IS alive at
+// SIGTERM, and a beat that had gone stale behind a long provider call must not
+// make the row reclaimable during the old pod's last 25 seconds (Codex r5 P1).
+// The clause is read only while the gate is on: a gate-off pod after a rollback
+// ignores stamps a gate-on pod left behind (Codex r5 P1).
+const SHUTDOWN_RECLAIM_QUIET_MINUTES = 2;
+const SHUTDOWN_STAMP_KEY = 'shutdown_interrupted_at';
+const shutdownInterruptedClaim = "("
+  + `metadata ->> '${SHUTDOWN_STAMP_KEY}' IS NOT NULL`
+  + ` AND COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${SHUTDOWN_RECLAIM_QUIET_MINUTES} minutes'`
+  + ")";
+// The quarantine backstop's OUTER age gate (updated_at 10 min old) lets the
+// webhook's immediate path win; the claim itself refreshes updated_at, so a
+// deploy-stamped quarantined claim would wait the full window behind it
+// (Codex r6 P2). This alternative opens that gate for a stamped dead claim.
+const stampedDeadClaimOrFalse = () => (isEnabled('callProcShutdownRelease')
+  ? `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`
+  : 'FALSE');
 const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
+  + (isEnabled('callProcShutdownRelease') ? ` OR ${shutdownInterruptedClaim}` : '')
   + ")";
+// Passes this process currently holds a claim for (call_log.id → claim token),
+// so markInFlightForShutdown knows which rows to stamp. Filled right after the
+// claim, cleared in processRecording's outer finally.
+// Keyed by the pass TOKEN, not the call id: two contenders for one row (the
+// ring-first flow's duplicate webhook) register side by side, and the loser's
+// exit removes only its own entry, never the owner's (Codex r7 P1).
+const inFlightPasses = new Map();
+// Set at SIGTERM: a claim taken after this point is stamped by its own claim
+// write, since it will die with the process too.
+let shuttingDown = false;
+// Claim writes (transaction + post-commit self-stamp) still in flight. A
+// claim UPDATE can sit on a row lock across SIGTERM with its drain read
+// already taken as false; the marker waits for these, within its budget,
+// before it stamps, so a claim that commits inside the budget is visible to
+// the token-fenced stamp (Codex r10 P2).
+const pendingClaimWrites = new Set();
+const shutdownStampSql = (conn) => conn.raw(
+  `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
+  [new Date().toISOString()],
+);
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -9313,6 +9362,16 @@ const CallRecordingProcessor = {
     // in flight either commits before the lock (pre-claim, correctly the
     // baseline) or waits and lands post-claim, where the CAS stales it.
     let contactCasBaselineAtClaim = null;
+    // On the registry BEFORE the claim can commit: a SIGTERM that lands while
+    // the claim transaction is committing must still see this pass, or the
+    // stamp UPDATE snapshots an empty registry and the fresh claim dies
+    // unstamped (Codex r6 P2). The stamp UPDATE is token-fenced, so against
+    // an uncommitted claim it waits on the row lock and then stamps the
+    // committed row; against a claim that never commits it matches 0 rows.
+    // A refused or thrown claim leaves the registry below.
+    inFlightPasses.set(procToken, { callId: call.id, callSid });
+    const unregisterClaim = () => { inFlightPasses.delete(procToken); };
+    const claimWrite = (async () => {
     await db.transaction(async (trx) => {
       if (call.customer_id) {
         contactCasBaselineAtClaim = await trx('customers')
@@ -9382,6 +9441,15 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // A deploy stamp (markInFlightForShutdown) is consumed by the
+            // claim that takes the row. A claim taken while this process is
+            // already draining stamps itself IN the claim write, so the stamp
+            // lands with the claim even if the forced exit kills the process
+            // before the post-commit check below (Codex r9 P2); that check
+            // covers the flag flipping while this transaction is open.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -9442,6 +9510,15 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // A deploy stamp (markInFlightForShutdown) is consumed by the
+            // claim that takes the row. A claim taken while this process is
+            // already draining stamps itself IN the claim write, so the stamp
+            // lands with the claim even if the forced exit kills the process
+            // before the post-commit check below (Codex r9 P2); that check
+            // covers the flag flipping while this transaction is open.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -9455,6 +9532,34 @@ const CallRecordingProcessor = {
           ? Number(claimedRows[0].processing_generation) : null;
       }
     });
+    // Post-commit drain check (Codex r8 P2) for a flag that flipped while
+    // the claim transaction was open. markInFlightForShutdown's
+    // token-fenced stamp cannot see a claim that has not committed yet: the
+    // visible row still carries the previous token, so Postgres returns 0
+    // rows without waiting. Both orders are covered: the drain flag flipped
+    // before this line runs (we stamp ourselves now, and the marker awaits
+    // this write through pendingClaimWrites), or it flips after (we were on
+    // the registry before the transaction and the row is committed, so the
+    // marker's UPDATE matches). Token-fenced, so a row a peer has since
+    // taken is left alone.
+    if (!claimBlocked && shuttingDown && isEnabled('callProcShutdownRelease')) {
+      await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() })
+        .catch((e) => logger.warn(`[call-proc] shutdown: self-stamp failed for ${maskSid(callSid)}: ${e.message}`));
+    }
+    })();
+    pendingClaimWrites.add(claimWrite);
+    try {
+      await claimWrite;
+    } catch (claimErr) {
+      unregisterClaim();
+      throw claimErr;
+    } finally {
+      pendingClaimWrites.delete(claimWrite);
+    }
+    if (claimBlocked) unregisterClaim();
     // A blocked claim did NO work — success: false so no caller can mistake
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
@@ -9489,7 +9594,8 @@ const CallRecordingProcessor = {
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
-    // The claim is ours from here. Beat while we work: transcription of a
+    // The claim is ours from here (registered for markInFlightForShutdown
+    // before the transaction above). Beat while we work: transcription of a
     // long recording is one multi-minute await with no natural checkpoints,
     // and without a beat the reclaim predicates cannot tell that pass from a
     // wedged one. unref() so a draining process never lingers for the timer.
@@ -22762,7 +22868,95 @@ const CallRecordingProcessor = {
       throw procErr;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      inFlightPasses.delete(procToken);
     }
+  },
+
+  /** How many passes this process currently holds a claim for (tests, shutdown log). */
+  inFlightPassCount() {
+    return inFlightPasses.size;
+  },
+
+  /**
+   * SIGTERM path (server/index.js shutdown). Stamps every call_log row this
+   * process holds a claim for with metadata.shutdown_interrupted_at — one
+   * token-fenced UPDATE per pass, all at once, each bounded by `deadlineMs`.
+   * Nothing else changes: the dying pass keeps its claim, token and status
+   * until Railway kills it, so no second pass can overlap it. The stamp only
+   * shortens the reclaim window on the replacing pod from 10 quiet minutes to
+   * SHUTDOWN_RECLAIM_QUIET_MINUTES (reclaimableClaim), and the claim that
+   * takes the row clears it. Also marks this process as draining so a claim
+   * taken from here on stamps itself.
+   *
+   * No-op (counts only) while GATE_CALL_PROC_SHUTDOWN_RELEASE is off.
+   */
+  async markInFlightForShutdown({ deadlineMs = 5000 } = {}) {
+    const enabled = isEnabled('callProcShutdownRelease');
+    // Flag FIRST, snapshot second, with no await between: a pass whose claim
+    // commits after this snapshot reads the flag in its post-commit check and
+    // stamps itself; a pass that read the flag as false before this line is
+    // in the snapshot with a committed claim.
+    if (enabled) shuttingDown = true;
+    if (!enabled) return { enabled, inFlight: inFlightPasses.size, stamped: 0, failed: 0 };
+    const deadline = new Promise((resolve) => {
+      const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
+      if (typeof t.unref === 'function') t.unref();
+    });
+    const summary = { enabled, inFlight: 0, stamped: 0, failed: 0 };
+    const seen = new Set();
+    // One token-fenced stamp per entry, all concurrent, each racing the
+    // shared deadline. Returns the tokens whose stamp landed (1 row).
+    const stampEntries = async (entries) => {
+      const landed = new Set();
+      await Promise.all(entries.map(async ([procToken, entry]) => {
+        if (!seen.has(procToken)) { seen.add(procToken); summary.inFlight += 1; }
+        try {
+          const rows = await Promise.race([
+            db('call_log')
+              .where({ id: entry.callId })
+              .where('processing_token', procToken)
+              // Stamp AND beat in one statement: the pass is alive right now,
+              // and the 2-minute silence must start here, not at a beat that
+              // went stale behind a long provider call.
+              .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() }),
+            deadline,
+          ]);
+          if (rows === 'deadline') {
+            summary.failed += 1;
+            logger.warn(`[call-proc] shutdown: stamp for ${maskSid(entry.callSid)} did not land before the deadline`);
+          } else if (rows) {
+            landed.add(procToken);
+            summary.stamped += 1;
+            logger.info(`[call-proc] shutdown: stamped interrupted pass ${maskSid(entry.callSid)}`);
+          }
+          // 0 rows: the pass finished, a peer took the row, or the claim has
+          // not committed yet (the second pass below retries that one).
+        } catch (err) {
+          summary.failed += 1;
+          logger.warn(`[call-proc] shutdown: stamp failed for ${maskSid(entry.callSid)}: ${err.message}`);
+        }
+      }));
+      return landed;
+    };
+    // Pass 1: stamp the claims that exist now, CONCURRENTLY with the wait for
+    // claim writes blocked on a row lock when the flag flipped (Codex r11
+    // P1: that wait must not spend the budget before committed owners are
+    // stamped). A blocked claim that commits inside the budget then carries
+    // a visible token (and has self-stamped post-commit); pass 2 stamps it.
+    // One still blocked at the deadline is left to the legacy window.
+    const firstPass = stampEntries([...inFlightPasses.entries()]);
+    if (pendingClaimWrites.size) {
+      await Promise.race([Promise.allSettled([...pendingClaimWrites]), deadline]);
+    }
+    const landed = await firstPass;
+    const secondPass = [...inFlightPasses.entries()].filter(([procToken]) => !landed.has(procToken));
+    if (secondPass.length) {
+      // Only when there is budget left: at the deadline the race above
+      // resolves at once and would count every retry as failed.
+      const budgetLeft = await Promise.race([deadline, Promise.resolve('open')]);
+      if (budgetLeft === 'open') await stampEntries(secondPass);
+    }
+    return summary;
   },
 
   /**
@@ -22785,7 +22979,24 @@ const CallRecordingProcessor = {
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
-    const pending = await db('call_log')
+    const pending = await this.pendingCandidatesQuery();
+
+    const results = [];
+    for (const call of pending) {
+      try {
+        const result = await this.processRecording(call.twilio_call_sid);
+        results.push({ callSid: call.twilio_call_sid, ...result });
+      } catch (err) {
+        results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
+      }
+    }
+    return { ...summarizeBatch(results), results };
+  },
+
+  // The processAllPending candidate query, unexecuted (the predicates are raw
+  // SQL a mocked builder cannot evaluate; the live-PG suites run it as is).
+  pendingCandidatesQuery() {
+    return db('call_log')
       .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .where(function () {
         this.where(function () {
@@ -22819,7 +23030,10 @@ const CallRecordingProcessor = {
                     .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
                 });
             })
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            .andWhere(function quarantineBackstopAge() {
+              this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+                .orWhereRaw(stampedDeadClaimOrFalse());
+            });
         });
       })
       .where(function () {
@@ -22858,17 +23072,6 @@ const CallRecordingProcessor = {
       })
       .orderBy('created_at', 'desc')
       .limit(20);
-
-    const results = [];
-    for (const call of pending) {
-      try {
-        const result = await this.processRecording(call.twilio_call_sid);
-        results.push({ callSid: call.twilio_call_sid, ...result });
-      } catch (err) {
-        results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
-      }
-    }
-    return { ...summarizeBatch(results), results };
   },
 
   /**
@@ -23413,6 +23616,11 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  // Tests only: the drain flag is process-wide, so a suite that exercised the
+  // shutdown path resets it to play the replacing pod.
+  resetShutdownForTests() { shuttingDown = false; },
+  pendingClaimWriteCount: () => pendingClaimWrites.size,
+  reclaimableClaimSql: reclaimableClaim,
   legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
