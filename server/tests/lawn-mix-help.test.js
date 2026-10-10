@@ -344,27 +344,32 @@ describe('gallons sprayed at completion', () => {
     const withLawn = (lawnSqft) => ({ loadPlan: async () => ({ plan: { protocol: { structured: { id: 'protocol-1' } }, mixCalculator: { lawnSqft } } }) });
     const wholeLawn = () => ({ productId: P_CER, applicationMethod: 'broadcast_spray', areaValue: 1900, areaUnit: 'sqft' });
 
-    test('a whole-lawn row on the same completion caps it, and the mark says so', async () => {
+    test('with neither a visit area nor a lawn size known, the largest non-spot row caps it, and the mark says so', async () => {
       const products = [{ productId: P_CEL, sprayedGallons: 4 }, wholeLawn()];
-      expect(await run(products, withLawn(5000))).toBeNull();
+      expect(await run(products, withLawn(null))).toBeNull();
       expect(products[0]).toMatchObject({ areaValue: 1900, areaUnit: 'sqft' });
       expect(help.sprayedGallonsFreeze(products)).toEqual({
-        lawnSprayedGallons: { v: 1, rows: [{ productId: P_CEL, gallons: 4, carrierGalPer1000: 1, areaSqft: 1900, capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900 }] },
+        lawnSprayedGallons: { v: 1, rows: [{ productId: P_CEL, gallons: 4, carrierGalPer1000: 1, areaSqft: 1900, capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900, lawnAreaSource: 'whole_lawn_row' }] },
       });
       expect(products[1]).toEqual(wholeLawn());
     });
 
-    test('with no whole-lawn row, the lawn size on file caps it', async () => {
+    test('the lawn size on file caps it', async () => {
       const products = [{ productId: P_CEL, sprayedGallons: 4 }];
       expect(await run(products, withLawn(1900))).toBeNull();
       expect(products[0].areaValue).toBe(1900);
-      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ areaSqft: 1900, capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900 });
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ areaSqft: 1900, capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900, lawnAreaSource: 'plan' });
     });
 
-    test('the whole-lawn row wins over the size on file', async () => {
-      const products = [{ productId: P_CEL, sprayedGallons: 4 }, wholeLawn()];
-      await run(products, withLawn(1500));
-      expect(products[0].areaValue).toBe(1900);
+    test('a non-spot row is not proof of the whole lawn: a 5,000 sq ft broadcast row on a 10,000 sq ft lawn does not cap 7 gallons (7,000 sq ft)', async () => {
+      const products = [{ productId: P_CEL, sprayedGallons: 7 }, { productId: P_CER, applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' }];
+      expect(await run(products, withLawn(10000))).toBeNull();
+      expect(products[0].areaValue).toBe(7000);
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).not.toHaveProperty('capped');
+      // Nor does it override a validated visit area.
+      const viaVisit = [{ productId: P_CEL, sprayedGallons: 7 }, { productId: P_CER, applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' }];
+      await run(viaVisit, { ...withLawn(null), propertyServiceArea: { kind: 'lawn' }, readServiceArea: async () => 10000 });
+      expect(viaVisit[0].areaValue).toBe(7000);
     });
 
     test('spot rows only: the validated visit area the sheet submitted caps it, ahead of the lawn size on file', async () => {
@@ -374,13 +379,13 @@ describe('gallons sprayed at completion', () => {
       expect(await run(products, { ...withLawn(null), propertyServiceArea, actor: { technicianId: 't-1' }, readServiceArea })).toBeNull();
       expect(readServiceArea).toHaveBeenCalledWith(expect.objectContaining({ propertyServiceArea, actor: { technicianId: 't-1' } }));
       expect(products[0].areaValue).toBe(1900);
-      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900 });
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900, lawnAreaSource: 'visit_area' });
       const other = [{ productId: P_CEL, sprayedGallons: 4 }];
       await run(other, { ...withLawn(1500), propertyServiceArea, readServiceArea });
       expect(other[0].areaValue).toBe(1900);
     });
 
-    test('a visit area that fails validation, is absent, or sits behind a whole-lawn row is not read as the cap', async () => {
+    test('a visit area that fails validation or is absent is not read as the cap', async () => {
       const propertyServiceArea = { propertyId: 'prop-1', version: 'stale', kind: 'lawn', treatedSqft: 100 };
       const failed = [{ productId: P_CEL, sprayedGallons: 4 }];
       await run(failed, { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => null });
@@ -389,10 +394,6 @@ describe('gallons sprayed at completion', () => {
       await run(unknown, { propertyServiceArea, readServiceArea: async () => null });
       expect(unknown[0].areaValue).toBe(4000);
       const readServiceArea = jest.fn(async () => 100);
-      const rows = [{ productId: P_CEL, sprayedGallons: 4 }, wholeLawn()];
-      await run(rows, { propertyServiceArea, readServiceArea });
-      expect(readServiceArea).not.toHaveBeenCalled();
-      expect(rows[0].areaValue).toBe(1900);
       const absent = [{ productId: P_CEL, sprayedGallons: 4 }];
       await run(absent, { readServiceArea });
       expect(readServiceArea).not.toHaveBeenCalled();
@@ -421,13 +422,45 @@ describe('gallons sprayed at completion', () => {
       expect(reportFacts.frozenProductUseTexts({ lawnReportFacts: facts })).toEqual({ 'sp-1': 'Spot treatment, about 1,900 sq ft' });
     });
 
-    test('a place-limit refusal at a capped row says why, in the same shape and code; other refusals are untouched', async () => {
-      const limit = (productId) => ({ status: 400, payload: { error: 'Over the yearly amount. Choose another place, or take it off the sheet.', code: 'lawn_place_limit', productId, place: 'front', limitType: 'annual_max_rate' } });
+    test('a capped row\'s stated rate follows the capped area, and the limit check reads it', async () => {
+      const { proposedRow } = require('../services/lawn-trouble-areas');
+      const row = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz', totalAmount: 0.4, amountUnit: 'oz' };
+      expect(await run([row], withLawn(1900))).toBeNull();
+      expect(row.areaValue).toBe(1900);
+      expect(row.rate).toBe(0.2105);
+      expect(proposedRow(row)).toMatchObject({ application_rate: 0.2105, rate_unit: 'oz', area_treated_sqft: 1900 });
+      expect(help.sprayedGallonsFreeze([row]).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedRate: 0.085 });
+      // The amount's unit converts to the rate's (0.025 lb = 0.4 oz); a /1000sf suffix on the rate unit is kept as submitted.
+      const lb = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz/1000sf', totalAmount: 0.025, amountUnit: 'lb' };
+      await run([lb], withLawn(1900));
+      expect(lb).toMatchObject({ rate: 0.2105, rateUnit: 'oz/1000sf' });
+    });
+
+    test('a capped row whose amount unit cannot be reconciled with the rate unit has the rate cleared (amount over area runs); no amount or no rate leaves it alone', async () => {
+      const { proposedRow } = require('../services/lawn-trouble-areas');
+      const odd = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'lb', totalAmount: 1, amountUnit: 'gal' };
+      await run([odd], withLawn(1900));
+      expect(odd.rate).toBe('');
+      expect(proposedRow(odd).application_rate).toBeNull();
+      expect(help.sprayedGallonsFreeze([odd]).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedRate: 0.085 });
+      const noAmount = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz' };
+      await run([noAmount], withLawn(1900));
+      expect(noAmount.rate).toBe(0.085);
+      expect(help.sprayedGallonsFreeze([noAmount]).lawnSprayedGallons.rows[0]).not.toHaveProperty('uncappedRate');
+      const uncapped = { productId: P_CEL, sprayedGallons: 1, rate: 0.085, rateUnit: 'oz', totalAmount: 0.085, amountUnit: 'oz' };
+      await run([uncapped], withLawn(1900));
+      expect(uncapped.rate).toBe(0.085);
+    });
+
+    test('a yearly-amount refusal at a capped row says why, in the same shape and code; count, interval and other-product refusals are untouched', async () => {
+      const limit = (productId, limitType = 'annual_max_rate') => ({ status: 400, payload: { error: 'Over the yearly amount. Choose another place, or take it off the sheet.', code: 'lawn_place_limit', productId, place: 'front', limitType } });
       const deps = { knex: {}, svc: SVC, isLive: () => true, readStaged: async () => staged(), readSpotRows: async (knex, rows) => rows.filter((row) => !row.applicationMethod), ...withLawn(1900) };
       const products = [{ productId: P_CEL, sprayedGallons: 4, areaPlace: 'front' }];
       const out = await help.withSprayedGallons({ ...deps, products }, async () => limit(P_CEL));
       expect(out).toEqual({ status: 400, payload: { ...limit(P_CEL).payload, error: `${limit(P_CEL).payload.error} 4 gallons at 1 gal per 1,000 sq ft covers 4,000 sq ft, but the lawn is 1,900 sq ft; enter the gallons you actually sprayed or the area.` } });
-      // A refusal at another product, a row that was not capped and a pass are returned as they came.
+      for (const type of ['annual_max_apps', 'min_interval_days']) {
+        expect(await help.withSprayedGallons({ ...deps, products: [{ productId: P_CEL, sprayedGallons: 4 }] }, async () => limit(P_CEL, type))).toEqual(limit(P_CEL, type));
+      }
       expect(await help.withSprayedGallons({ ...deps, products: [{ productId: P_CEL, sprayedGallons: 4 }] }, async () => limit(P_ARENA))).toEqual(limit(P_ARENA));
       expect(await help.withSprayedGallons({ ...deps, products: [{ productId: P_CEL, sprayedGallons: 1 }] }, async () => limit(P_CEL))).toEqual(limit(P_CEL));
       expect(await help.withSprayedGallons({ ...deps, products }, async () => null)).toBeNull();
