@@ -36,6 +36,7 @@ const logger = require('../logger');
 const { buildTreatmentSummary, buildCategoryTreatmentSummary } = require('./treatment-summary');
 const { copyFixesLive } = require('./lawn-report-copy-fixes');
 const { buildLawnExpectations } = require('./lawn-expectations');
+const { stage1ExpectPlan } = require('./lawn-report-stage1');
 const { celsiusYtdCap } = require('../../config/lawn-expectations');
 
 const COPY_VERSION = 'lawn_report_v6_fixed_1';
@@ -174,6 +175,31 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const kept = [];
   let rowsUsed = 0;
   let words = 0;
+  // GATE_LAWN_REPORT_STAGE1_FIXES: a second line after the first row's (the weed line), from sentences that already
+  // exist: the insecticide row when a spot insecticide was applied, else the feeding row. Its one visible-change
+  // sentence is reserved first, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
+  const plan = stage1ExpectPlan(rows, products);
+  if (plan) {
+    const lineOf = (row, key) => row.sentences.find((s) => s && s.key === key && clean(s.text));
+    const piece = (row, key, sentence) => ({
+      id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
+    });
+    const firstLine = lineOf(plan.first, 'visibleChange');
+    const secondLine = lineOf(plan.second, 'visibleChange');
+    const reserve = countWords(secondLine.text);
+    if (countWords(firstLine.text) + reserve <= FIELD_CAPS.whatToExpect) {
+      kept.push(piece(plan.first, 'visibleChange', firstLine));
+      words += countWords(firstLine.text);
+      const nextLine = visitKnown ? lineOf(plan.first, 'byNextVisit') : null;
+      if (nextLine && words + countWords(nextLine.text) + reserve <= FIELD_CAPS.whatToExpect) {
+        kept.push(piece(plan.first, 'byNextVisit', nextLine));
+        words += countWords(nextLine.text);
+      }
+      kept.push(piece(plan.second, 'visibleChange', secondLine));
+      words += reserve;
+      rowsUsed = MAX_EXPECT_ROWS;
+    }
+  }
   for (const row of rows) {
     if (rowsUsed >= MAX_EXPECT_ROWS) break;
     const before = kept.length;

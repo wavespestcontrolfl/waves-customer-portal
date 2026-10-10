@@ -24,6 +24,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { stage1PayloadFlag, stage1PdfStamp, stage1TechTips } = require('./lawn-report-stage1');
 const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
@@ -2888,6 +2889,8 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   irrigationStamp += copyFixesPdfStamp();
   // The lawn report polish (GATE_LAWN_REPORT_POLISH) derives weekly inches from the owner's rate table, so its PDF key moves with it.
   irrigationStamp += polishPdfStamp();
+  // The lawn report stage 1 fixes (GATE_LAWN_REPORT_STAGE1_FIXES) change the damage finding and "What to expect", so its PDF key moves with it.
+  irrigationStamp += stage1PdfStamp();
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
@@ -7357,9 +7360,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the record froze tips. The technician's first name comes from the
     // visit's frozen technician row (owner: first name only, no sign-off);
     // the client composes the greeting from customerName.
-    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (protocol.techTips || []).length
+    // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): a frozen "add your irrigation settings" tip is left off beside a schedule on
+    // file (the same array comes back while the gate is off).
+    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (stage1TechTips(protocol.techTips, { serviceLine, reportV2 }) || []).length
       ? {
-        tips: protocol.techTips,
+        tips: stage1TechTips(protocol.techTips, { serviceLine, reportV2 }),
         technicianFirstName: String(service.technician_first_name || '').trim()
           || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
       }
@@ -7489,6 +7494,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
     // GATE_LAWN_REPORT_POLISH (lawn only): the key the page reads for the status card and the hero. Absent = byte-identical payload.
     ...lawnPolishPayload({ serviceLine, reportV2 }),
+    // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): the key the web page reads for the applied card and the hero contact lines. Absent = byte-identical payload.
+    ...stage1PayloadFlag(serviceLine),
     // GATE_LAWN_NEW_SOD_REPORT_CARD (lawn only): the New sod card, built from the block frozen at completion. Absent = byte-identical payload.
     ...lawnNewSodPayload({ serviceLine, structuredNotes: service.structured_notes }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
