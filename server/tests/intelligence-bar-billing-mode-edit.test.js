@@ -2,16 +2,23 @@
 // (owner D5 2026-10-06, GATE_IB_BILLING_MODE_EDIT). Proposal rules mirror the
 // customer page's PUT (billing-mode-rules.js), the card text, the commit-time
 // pin, and the gate.
-const mockState = { customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [] };
+const mockState = {
+  customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
+  // Eligibility / lock doubles and the order of the commit's reads.
+  cohortMiss: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+};
 
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'forUpdate']) q[m] = () => q;
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orderBy', 'limit']) q[m] = () => q;
+    q.forUpdate = () => { q.locked = true; return q; };
     q.select = (...cols) => { q.cols = cols; return q; };
     q.first = async (...cols) => {
       if (table === 'customers') {
         if (cols.length === 1 && cols[0]?.__raw) return { version: mockState.version };
+        // The dues cohort read (monthly-dues-eligibility.js applyDuesCohort).
+        if (Array.isArray(cols[0]) && mockState.cohortMiss) return null;
         return mockState.customer ? { ...mockState.customer, version: mockState.version } : null;
       }
       if (table === 'annual_prepay_terms') return mockState.term;
@@ -20,7 +27,11 @@ jest.mock('../models/db', () => {
     };
     q.then = (resolve, reject) => {
       let rows = [];
-      if (table === 'scheduled_services') rows = q.cols.includes('scheduled_date') ? mockState.unpriced : mockState.visits;
+      if (table === 'scheduled_services') {
+        rows = q.cols.includes('scheduled_date') ? mockState.unpriced : mockState.visits;
+        if (q.cols.flat().includes('payer_id')) mockState.log.push(q.locked ? 'visits:lock' : 'visits:read');
+      }
+      if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
       return Promise.resolve(rows).then(resolve, reject);
     };
     q.update = async (patch) => {
@@ -36,6 +47,19 @@ jest.mock('../models/db', () => {
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 });
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ...jest.requireActual('../services/annual-prepay-renewals'),
+  getActivelyCoveredCustomerIds: jest.fn(async () => mockState.covered),
+  getPaymentPendingCustomerIds: jest.fn(async () => mockState.pending),
+}));
+jest.mock('../services/autopay-eligibility', () => ({
+  ...jest.requireActual('../services/autopay-eligibility'),
+  customerOnAutopay: jest.fn(async () => mockState.chargeable),
+}));
+jest.mock('../utils/customer-billing-lock', () => ({
+  withCustomerBillingLock: jest.fn(),
+  tryClaimCustomerCollectionInTrx: jest.fn(async () => { mockState.log.push('claim'); return !mockState.claimHeld; }),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
@@ -57,6 +81,8 @@ const BASE = {
   waveguard_tier: null, waveguard_tier_source: null,
   payer_id: null, autopay_enabled: true, autopay_paused_until: null,
 };
+const MONTHLY_ARMED = { id: 'pay-1', description: 'Gold WaveGuard Monthly — Pat Sample' };
+const ONE_TIME_ARMED = { id: 'pay-2', description: 'Pest Control — Pat Sample' };
 const UNPRICED = { id: 's1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2099-01-05' };
 
 beforeEach(() => {
@@ -69,6 +95,12 @@ beforeEach(() => {
   mockState.unpriced = [];
   mockState.visits = [];
   mockState.updates = [];
+  mockState.cohortMiss = false;
+  mockState.covered = new Set();
+  mockState.pending = new Set();
+  mockState.chargeable = true;
+  mockState.claimHeld = false;
+  mockState.log = [];
 });
 afterAll(() => { delete process.env.GATE_IB_BILLING_MODE_EDIT; });
 
@@ -174,7 +206,7 @@ describe('refusals added in Codex round 1 on #6118', () => {
 
   test('leaving monthly membership while a failed payment retry is armed', async () => {
     mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
-    mockState.armed = { id: 'pay-1' };
+    mockState.armed = MONTHLY_ARMED;
     const r = await propose({ billing_mode: 'per_application', per_application_fee: 147 });
     expect(r).toMatchObject({ code: 'dues_retry_armed', error: expect.stringContaining('This customer has a dues retry scheduled — resolve it on the billing page first') });
     // Not leaving the monthly lane: no retry check.
@@ -285,7 +317,7 @@ describe('commit (update_customer executor)', () => {
   test('a retry armed after the card refuses under the lock', async () => {
     mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
     const pin = BillingModeChange.cardPin(mockState.customer, []);
-    mockState.armed = { id: 'pay-1' };
+    mockState.armed = MONTHLY_ARMED;
     const result = await executeTool('update_customer', {
       customer_id: CUSTOMER_ID, updates: { billing_mode: 'per_application', per_application_fee: 147 }, _ib_customer_version: 'v1', _ib_billing_pin: pin,
     });
@@ -327,6 +359,154 @@ describe('commit (update_customer executor)', () => {
     const off = await executeTool('update_customer', card());
     expect(off.error).toMatch(/GATE_IB_BILLING_MODE_EDIT/);
     expect(customerWrites()).toHaveLength(0);
+  });
+});
+
+describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => {
+  const MONTHLY = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+  const LEAVE = { billing_mode: 'per_application', per_application_fee: 147 };
+  const commit = (customer, updates, visits = []) => executeTool('update_customer', {
+    customer_id: CUSTOMER_ID, updates, _ib_customer_version: 'v1', _ib_billing_pin: BillingModeChange.cardPin(customer, visits),
+  });
+
+  describe('only a monthly dues retry blocks leaving the monthly lane (retry-collectibility isMonthlyObligationRow)', () => {
+    test('an armed one-time or per-application failed charge does not block, at the card or the commit', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.armed = ONE_TIME_ARMED;
+      expect((await propose(LEAVE)).error).toBeUndefined();
+      const result = await commit(MONTHLY, LEAVE);
+      expect(result.error).toBeUndefined();
+      expect(customerWrites()).toHaveLength(1);
+    });
+
+    test('an armed monthly dues retry still blocks (the sweep\'s own marker)', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.armed = [ONE_TIME_ARMED, MONTHLY_ARMED];
+      expect((await propose(LEAVE)).code).toBe('dues_retry_armed');
+    });
+  });
+
+  describe('the commit holds the billing-collection claim the collectors hold', () => {
+    test('a collector mid-charge refuses the commit: preview_changed, nothing written', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.claimHeld = true;
+      const result = await commit(MONTHLY, LEAVE);
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(result.error).toMatch(/billing collection is running.*nothing was updated/i);
+      expect(customerWrites()).toHaveLength(0);
+      expect(require('../utils/customer-billing-lock').tryClaimCustomerCollectionInTrx)
+        .toHaveBeenCalledWith(expect.anything(), CUSTOMER_ID);
+    });
+
+    test('the claim is taken before the retry check and the visit reads, inside the update transaction', async () => {
+      mockState.customer = { ...MONTHLY };
+      await commit(MONTHLY, LEAVE);
+      expect(mockState.log.slice(0, 3)).toEqual(['claim', 'visits:lock', 'visits:read']);
+    });
+
+    test('a retry armed after the card is caught under the claim', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.armed = MONTHLY_ARMED;
+      const result = await commit(MONTHLY, LEAVE);
+      expect(result.error).toMatch(/dues retry scheduled.*Nothing was updated/);
+      expect(mockState.log[0]).toBe('claim');
+    });
+
+    test('a proposal takes no claim (read only)', async () => {
+      mockState.customer = { ...MONTHLY };
+      await propose(LEAVE);
+      expect(mockState.log).not.toContain('claim');
+    });
+  });
+
+  describe('upcoming visits are locked FOR UPDATE at commit (the Schedule save\'s row lock)', () => {
+    test('locks first, then reads the projection; a visit edited after the card refuses', async () => {
+      mockState.customer = { ...BASE };
+      const pinned = BillingModeChange.cardPin(BASE, []);
+      mockState.visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '120.00', payer_id: null }];
+      const result = await executeTool('update_customer', {
+        customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: pinned,
+      });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(result.error).toMatch(/billing or upcoming visits changed since the card/);
+      expect(mockState.log).toEqual(['claim', 'visits:lock', 'visits:read']);
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('an unchanged projection commits, and the proposal reads without locking', async () => {
+      mockState.customer = { ...BASE };
+      const visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '120.00', payer_id: null }];
+      mockState.visits = visits;
+      expect((await propose(LEAVE)).error).toBeUndefined();
+      expect(mockState.log).toEqual(['visits:read']);
+      mockState.log = [];
+      const result = await commit(BASE, LEAVE, visits);
+      expect(result.error).toBeUndefined();
+      expect(mockState.log).toEqual(['claim', 'visits:lock', 'visits:read']);
+    });
+  });
+
+  describe('a move into monthly membership needs the dues run\'s full eligibility (monthly-dues-eligibility.js)', () => {
+    const into = () => { mockState.customer = { ...BASE, monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' }; };
+    const MOVE = { billing_mode: 'monthly_membership' };
+
+    test('an inactive or service-paused customer (outside the cohort) is refused', async () => {
+      into();
+      mockState.cohortMiss = true;
+      expect(await propose(MOVE)).toMatchObject({ code: 'dues_not_collectible', error: expect.stringContaining('inactive, no monthly rate, or service paused after failed payments') });
+    });
+
+    test('annual prepay covering today, or an unpaid annual prepay invoice, is refused', async () => {
+      into();
+      mockState.covered = new Set([CUSTOMER_ID]);
+      expect(await propose(MOVE)).toMatchObject({ code: 'dues_not_collectible', error: expect.stringContaining('An annual prepay term covers today') });
+      mockState.covered = new Set();
+      mockState.pending = new Set([CUSTOMER_ID]);
+      expect(await propose(MOVE)).toMatchObject({ code: 'dues_not_collectible', error: expect.stringContaining('annual prepay invoice is still unpaid') });
+    });
+
+    test('no chargeable saved method is refused, and an unreadable check fails closed', async () => {
+      into();
+      mockState.chargeable = false;
+      expect(await propose(MOVE)).toMatchObject({ code: 'dues_not_collectible', error: expect.stringContaining('no saved payment method the monthly dues run can charge') });
+      mockState.chargeable = true;
+      require('../services/annual-prepay-renewals').getPaymentPendingCustomerIds.mockRejectedValueOnce(new Error('db down'));
+      expect(await propose(MOVE)).toMatchObject({ code: 'dues_not_collectible', error: expect.stringContaining('Could not confirm') });
+    });
+
+    test('a fully collectible customer gets the card, with the dues line', async () => {
+      into();
+      const proposal = await propose(MOVE);
+      expect(proposal.error).toBeUndefined();
+      expect(proposal.display.next_visits[0]).toMatch(/\$55\.00 monthly rate is charged each month by the dues run/);
+    });
+
+    test('the same check runs again at the commit: collectible at the card, not at the commit', async () => {
+      into();
+      const pin = BillingModeChange.cardPin(mockState.customer, []);
+      mockState.chargeable = false;
+      const result = await executeTool('update_customer', {
+        customer_id: CUSTOMER_ID, updates: MOVE, _ib_customer_version: 'v1', _ib_billing_pin: pin,
+      });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(result.error).toMatch(/no saved payment method.*Nothing was updated/);
+      expect(customerWrites()).toHaveLength(0);
+    });
+  });
+
+  describe('the dues line follows eligibility for a customer already on monthly membership', () => {
+    const EDIT = { billing_mode: 'monthly_membership', per_application_fee: 99 };
+    test('collectible: the card says the rate is charged by the dues run', async () => {
+      mockState.customer = { ...MONTHLY };
+      expect((await propose(EDIT)).display.next_visits[0]).toMatch(/is charged each month by the dues run/);
+    });
+    test('not collectible: the card says the dues run does NOT charge it, and why', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.chargeable = false;
+      const line = (await propose(EDIT)).display.next_visits[0];
+      expect(line).toMatch(/\$55\.00 monthly rate is NOT charged by the dues run right now\. This customer has no saved payment method/);
+      expect(line).not.toMatch(/is charged each month by the dues run/);
+    });
   });
 });
 

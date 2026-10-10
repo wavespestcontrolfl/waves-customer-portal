@@ -23,17 +23,23 @@
  *         page sends the membership welcome email (the bar sends no message);
  *       * any edit for a customer with a Bill-To payer (on the customer or on
  *         an upcoming visit);
- *       * a move to monthly membership while Auto Pay is off or paused (the
- *         dues run skips them);
- *       * leaving monthly membership while a failed payment's retry is armed
- *         (the retry ladder stops for a non-monthly lane).
+ *       * a move to monthly membership for a customer the dues run would not
+ *         charge (monthly-dues-eligibility.js, the cron's own cohort and
+ *         guards: Auto Pay off or paused, inactive or service-paused, annual
+ *         prepay covering or pending, no chargeable saved method);
+ *       * leaving monthly membership while a failed MONTHLY dues payment's
+ *         retry is armed (the retry ladder stops for a non-monthly lane).
  *   - The card shows the billing type and fee before -> after in words, what
  *     the next visits are charged (billing-lane.js completion rules), and that
  *     no customer message is sent.
  *   - Pinned with the customer version: the billing fields, payer and Auto Pay
  *     state, and each upcoming visit's billing fields (the projection). At
  *     commit, under the customer row lock, a changed pin or a rule that no
- *     longer holds refuses as preview_changed.
+ *     longer holds refuses as preview_changed. The commit also holds the
+ *     customer's billing-collection claim (customer-billing-lock.js, the key
+ *     the dues cron and the retry sweep hold while they collect) and locks the
+ *     upcoming visits FOR UPDATE (the Schedule save's own row lock), so no
+ *     collector and no visit edit lands between the final check and the write.
  *
  * The write is the two columns only. The customer page's save also writes a
  * sensitive-field audit row for billing_mode and may send the membership
@@ -139,16 +145,25 @@ function billingPin(row) {
 const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'primary_line_price',
   'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id'];
 
-async function upcomingVisits(dbh, customerId) {
+const VISIT_LIMIT = 200;
+
+async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   const { etDateString } = require('../../utils/datetime-et');
-  return dbh('scheduled_services')
+  const base = () => dbh('scheduled_services')
     .where({ customer_id: customerId })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString())
-    .select(VISIT_COLUMNS)
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('id', 'asc')
-    .limit(200);
+    .select(VISIT_COLUMNS);
+  const ordered = () => base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_LIMIT);
+  if (!lock) return ordered();
+  // At commit: lock every candidate visit FOR UPDATE, the row lock the
+  // Schedule save takes (admin-schedule.js PUT /:id/update-details: customer
+  // row first, then the visit row), in id order so two writers locking more
+  // than one visit never cross. The projection is read AFTER the locks, with
+  // the card's own ordering and cut: a save that committed first is seen, and
+  // one that has not is held off until this transaction ends.
+  await base().orderBy('id', 'asc').forUpdate();
+  return ordered();
 }
 
 function visitsPin(visits) {
@@ -184,22 +199,31 @@ const SIDE_FLOW_CHECKS = [
   // visit keeps billing changes on the customer page.
   ({ row, visits }) => (row.payer_id || visits.some((v) => v.payer_id)
     ? refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer') : null),
-  // The monthly dues run skips a customer with Auto Pay off or paused
-  // (billing-cron.js GUARD 1 / GUARD 2, autopay-eligibility.js isPaused).
-  ({ row, laneAfter, laneBefore }) => {
+  // A move INTO monthly membership needs a customer the dues run would really
+  // charge: the cron's own cohort and guards plus a chargeable saved method
+  // (monthly-dues-eligibility.js, shared with billing-cron.js). Any reason the
+  // run would skip them refuses; the card never promises a charge the run
+  // will not make.
+  async ({ dbh, customerId, fields, laneAfter, laneBefore }) => {
     if (laneAfter !== 'monthly_membership' || laneBefore === 'monthly_membership') return null;
-    const { isPaused } = require('../autopay-eligibility');
-    return row.autopay_enabled === false || isPaused(row)
-      ? refuse('Turn on Auto Pay first; the monthly dues run skips customers without it. Nothing was proposed.', 'autopay_off') : null;
+    const verdict = await require('../monthly-dues-eligibility')
+      .monthlyDuesVerdict(dbh, customerId, { overrides: fields });
+    if (verdict.eligible) return null;
+    return ['skipped_disabled', 'skipped_paused'].includes(verdict.reason)
+      ? refuse('Turn on Auto Pay first; the monthly dues run skips customers without it. Nothing was proposed.', 'autopay_off')
+      : refuse(`${verdict.message} Fix that first. Nothing was proposed.`, 'dues_not_collectible');
   },
-  // Leaving the monthly lane stops the retry ladder of a failed dues charge
-  // (billing-cron.js LANE_NOT_MONTHLY). An armed retry (retry-collectibility.js
-  // armedRetryQuery, the sweep's own selection) is resolved first.
+  // Leaving the monthly lane stops the retry ladder of a failed MONTHLY dues
+  // charge (billing-cron.js LANE_NOT_MONTHLY). The sweep's own selection
+  // (retry-collectibility.js armedRetryQuery) narrowed by its own monthly
+  // classifier (isMonthlyObligationRow): a failed one-time or per-application
+  // charge keeps retrying whatever the lane, so it does not block the change.
   async ({ dbh, customerId, laneBefore, laneAfter }) => {
     if (laneBefore !== 'monthly_membership' || laneAfter === 'monthly_membership') return null;
-    const { armedRetryQuery } = require('../retry-collectibility');
-    const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).first('id');
-    return armed ? refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed') : null;
+    const { armedRetryQuery, isMonthlyObligationRow } = require('../retry-collectibility');
+    const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');
+    return (armed || []).some(isMonthlyObligationRow)
+      ? refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed') : null;
   },
   // The customer page's save sends the membership welcome email when an edit
   // turns a non-member into a member (admin-customers.js PUT, the
@@ -277,7 +301,7 @@ function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function nextVisitLines(row, fields, visits) {
+function nextVisitLines(row, fields, visits, dues = null) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
   const laneAfter = resolveBillingLane(after).mode;
@@ -298,7 +322,12 @@ function nextVisitLines(row, fields, visits) {
     ].filter(Boolean);
     lines.push(parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.');
   } else if (laneAfter === 'monthly_membership') {
-    lines.push(`The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run. Recurring plan visits are covered while Auto Pay is on or that month's dues are paid; a one-off visit with its own price still bills that price.`);
+    // Promised only when the dues run really charges this customer
+    // (monthly-dues-eligibility.js). A move into monthly is refused unless
+    // they are collectible; a customer already monthly is checked here.
+    lines.push(dues && !dues.eligible
+      ? `The ${money(after.monthly_rate)} monthly rate is NOT charged by the dues run right now. ${dues.message} Recurring plan visits are not covered by dues until that is fixed.`
+      : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run. Recurring plan visits are covered while Auto Pay is on or that month's dues are paid; a one-off visit with its own price still bills that price.`);
   } else {
     lines.push('Each completed visit is invoiced at its own scheduled price. No monthly dues charge.');
   }
@@ -324,13 +353,18 @@ async function billingEditProposal(customerId, updates, dbh = db) {
   const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields, visits);
   if (refusal) return refusal;
   const after = { ...row, ...parsed.fields };
+  // Already monthly: the move-in check above did not run, so ask the dues
+  // run's own eligibility whether the rate is really collected.
+  const dues = resolveBillingLane(after).mode === 'monthly_membership' && resolveBillingLane(row).mode === 'monthly_membership'
+    ? await require('../monthly-dues-eligibility').monthlyDuesVerdict(dbh, customerId, { overrides: parsed.fields })
+    : null;
   return {
     pin: cardPin(row, visits),
     version: row.version,
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: nextVisitLines(row, parsed.fields, visits),
+      next_visits: nextVisitLines(row, parsed.fields, visits, dues),
     },
   };
 }
@@ -355,9 +389,21 @@ function executorBillingEdit(updates, pin) {
 async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields, pin) {
   if (!Object.keys(fields).length) return;
   const changed = (message) => Object.assign(new Error(message), { previewChanged: true });
+  // The billing-collection claim: the same per-customer key the dues cron,
+  // the retry sweep and Charge now hold while they collect
+  // (customer-billing-lock.js). Transaction-scoped and non-blocking, as the
+  // invoice writers use it: a collector mid-charge refuses this card instead
+  // of this write waiting on Stripe, and while this transaction holds the
+  // claim no collector starts, so the retry-armed and eligibility checks
+  // below hold through the write.
+  const { tryClaimCustomerCollectionInTrx } = require('../../utils/customer-billing-lock');
+  if (!(await tryClaimCustomerCollectionInTrx(trx, customerId))) {
+    throw changed('A billing collection is running for this customer right now — nothing was updated. Try again in a minute.');
+  }
   // The customer's billing fields, payer and Auto Pay state, plus every
-  // upcoming visit's billing fields the card's projection was built from.
-  const visits = await upcomingVisits(trx, customerId);
+  // upcoming visit's billing fields the card's projection was built from,
+  // read with the visits locked FOR UPDATE (see upcomingVisits).
+  const visits = await upcomingVisits(trx, customerId, { lock: true });
   if (cardPin(lockedBefore, visits) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }

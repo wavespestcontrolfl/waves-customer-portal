@@ -37,7 +37,7 @@ const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
 const { isBillingDayMatch } = require('./billing-helpers');
-const { isPaused } = require('./autopay-eligibility');
+const DuesEligibility = require('./monthly-dues-eligibility');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 
@@ -487,16 +487,11 @@ const BillingCron = {
     // monthly lane and charged them. If the column were ever missing the
     // select throws and the whole run aborts — no charge is safer than a
     // wrong one.
-    const customers = await db('customers')
-      .where({ active: true })
-      .where('monthly_rate', '>', 0)
-      .whereNull('service_paused_at')
-      .whereNull('deleted_at')
-      .select(
-        'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
-        'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
-        'billing_day', 'billing_mode',
-      );
+    // The cohort and guards below are monthly-dues-eligibility.js — shared with
+    // the Intelligence Bar's billing type card so it never promises a charge
+    // this run skips.
+    const customers = await DuesEligibility.applyDuesCohort(db('customers'))
+      .select(...DuesEligibility.DUES_COHORT_COLUMNS);
 
     // Annual-prepay customers paid for the whole period up front. The paid
     // coverage term is the source of truth for billing suppression — they keep
@@ -522,17 +517,10 @@ const BillingCron = {
     for (const customer of customers) {
       try {
         // GUARD 1: autopay disabled — skip, log
-        if (customer.autopay_enabled === false) {
-          await logAutopay(customer.id, 'skipped_disabled');
-          skipped++;
-          continue;
-        }
-
         // GUARD 2: autopay paused — skip, log
-        if (isPaused(customer, now)) {
-          await logAutopay(customer.id, 'skipped_paused', {
-            details: { paused_until: customer.autopay_paused_until },
-          });
+        const autopaySkip = DuesEligibility.autopayGuard(customer, now);
+        if (autopaySkip) {
+          await logAutopay(customer.id, autopaySkip.event, autopaySkip.details ? { details: autopaySkip.details } : undefined);
           skipped++;
           continue;
         }
@@ -568,10 +556,9 @@ const BillingCron = {
         // 'per_visit' and 'one_time' are explicit owner-set lanes (billing
         // lane build, 2026-07-17): a customer classified into either must
         // never be monthly-charged no matter what tier/rate fields linger.
-        if (['per_application', 'annual_prepay', 'per_visit', 'one_time'].includes(customer.billing_mode)) {
-          await logAutopay(customer.id, 'skipped_billing_mode', {
-            details: { billing_mode: customer.billing_mode },
-          });
+        const laneSkip = DuesEligibility.laneGuard(customer);
+        if (laneSkip && laneSkip.event === 'skipped_billing_mode') {
+          await logAutopay(customer.id, laneSkip.event, { details: laneSkip.details });
           skipped++;
           continue;
         }
@@ -587,11 +574,8 @@ const BillingCron = {
         // divergence by construction. The skip is logged loudly so an
         // unclassified customer who enables autopay surfaces for the owner
         // to classify instead of silently double-billing.
-        const resolvedLane = resolveBillingLane(customer);
-        if (resolvedLane.mode !== 'monthly_membership') {
-          await logAutopay(customer.id, 'skipped_unclassified_lane', {
-            details: { resolved_mode: resolvedLane.mode, waveguard_tier: customer.waveguard_tier || null },
-          });
+        if (laneSkip) {
+          await logAutopay(customer.id, laneSkip.event, { details: laneSkip.details });
           skipped++;
           continue;
         }
@@ -599,8 +583,9 @@ const BillingCron = {
         // GUARD 4: active annual-prepay coverage — the customer paid for this
         // period up front. Skip even when active + monthly_rate > 0 + autopay
         // on; charging here would double-bill on top of the prepayment.
-        if (annualPrepayCoveredIds.has(String(customer.id))) {
-          await logAutopay(customer.id, 'skipped_annual_prepay');
+        const prepaySkip = DuesEligibility.prepayGuard(customer, annualPrepayCoveredIds, annualPrepayPendingIds);
+        if (prepaySkip && prepaySkip.event === 'skipped_annual_prepay') {
+          await logAutopay(customer.id, prepaySkip.event);
           skipped++;
           continue;
         }
@@ -608,8 +593,8 @@ const BillingCron = {
         // GUARD 5: pending annual-prepay commitment — office/customer still
         // needs to complete or cancel the annual invoice. Do not monthly-charge
         // in the meantime, even though active coverage has not started.
-        if (annualPrepayPendingIds.has(String(customer.id))) {
-          await logAutopay(customer.id, 'skipped_annual_prepay_pending');
+        if (prepaySkip) {
+          await logAutopay(customer.id, prepaySkip.event);
           skipped++;
           continue;
         }

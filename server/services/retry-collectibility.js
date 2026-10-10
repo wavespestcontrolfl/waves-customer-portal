@@ -511,6 +511,7 @@ module.exports = {
   DISPOSITIONS,
   loadRetryContext,
   armedRetryQuery,
+  isMonthlyObligationRow,
   classifyFailedPaymentRetry,
   hasUnresolvedSiblingStripeOutcome,
   deriveMonthlyChargeIdempotencyKey,
