@@ -70,7 +70,7 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
   });
 
   it('adds the last pre-emergent block the service built, judged against the saved sod date (or null with no record)', async () => {
-    mockState.lastPreEmergent = { line: 'Last pre-emergent by Waves: Example Product, Aug 1, 2026 (61 days ago).', warning: 'Example warning.' };
+    mockState.lastPreEmergent = [{ line: 'Last pre-emergent by Waves: Example Product, Aug 1, 2026 (61 days ago).', warning: 'Example warning.' }];
     let { body } = await getNewSod();
     expect(body.newSod.lastPreEmergent).toEqual(mockState.lastPreEmergent);
     expect(mockLastPreEmergentBlock).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', sodLaidOn: null, todayEt: etDateString() }));

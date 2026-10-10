@@ -400,7 +400,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     const WARNING = 'Its label delays seeding or sprigging 3 months after treatment. Sod laid on treated soil may root slowly. Tell the customer in writing today.';
 
     it('prints the line and the warning in the edit form, with no saved sod record needed', async () => {
-      stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: WARNING }] }, onPut: () => response({}) });
       await openEditor();
       expect(await screen.findByText(LINE)).toBeInTheDocument();
       expect(screen.getByTestId('sod-pre-emergent-warning')).toHaveTextContent(WARNING);
@@ -408,14 +408,14 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
 
     it('prints the read-the-label note for a product whose label wait the app does not hold', async () => {
       const NOTE = "The app does not hold this product's label wait for seeding or sod. Read the label.";
-      stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: null, note: NOTE } }, onPut: () => response({}) });
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: null, note: NOTE }] }, onPut: () => response({}) });
       await openEditor();
       expect(await screen.findByTestId('sod-pre-emergent-note')).toHaveTextContent(NOTE);
       expect(screen.queryByTestId('sod-pre-emergent-warning')).not.toBeInTheDocument();
     });
 
     it('prints only the line when the server sends no warning', async () => {
-      stubFetch({ newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: null } }, onPut: () => response({}) });
+      stubFetch({ newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: null }] }, onPut: () => response({}) });
       await openEditor();
       expect(await screen.findByText(LINE)).toBeInTheDocument();
       expect(screen.queryByTestId('sod-pre-emergent-warning')).not.toBeInTheDocument();
@@ -429,7 +429,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     });
 
     it('is hidden once a sod field is edited: it was judged against the saved sod date', async () => {
-      stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
+      stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: WARNING }] }, onPut: () => response({}) });
       await openEditor();
       expect(await screen.findByText(LINE)).toBeInTheDocument();
       fireEvent.change(dateInput(), { target: { value: '2026-10-02' } });
@@ -438,7 +438,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     });
 
     it('shows on the read view beside the saved sod record', async () => {
-      stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: { line: LINE, warning: WARNING } }, onPut: () => response({}) });
+      stubFetch({ prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole' }, newSod: { holdLines: [], lastPreEmergent: [{ line: LINE, warning: WARNING }] }, onPut: () => response({}) });
       render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
       await screen.findAllByText('Avery Customer');
       fireEvent.click(await screen.findByRole('button', { name: 'Property' }));

@@ -5021,9 +5021,11 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 // GET /api/admin/customers/:id/new-sod — the read-only hold lines beside the
 // new-sod fields in Customer 360 (office only; no write, no message to anyone):
 //   holdLines  the plain hold lines for the saved sod record ([] when none)
-//   lastPreEmergent  { line, warning, note } for the last pre-emergent Waves put on this home's lawn
-//              (warning is null unless it was under 91 days before the sod date, or before today
-//              when no sod date is saved), or null when there is none or it cannot be proven
+//   lastPreEmergent  [{ line, warning, note }] | null: one entry for each pre-emergent product Waves put on
+//              this home's lawn on the newest day it applied one. `warning` states that product's own label
+//              wait (only for a registration the app holds, and only inside the wait, counted to the sod
+//              date, or to today when no sod date is saved); `note` says to read the label when the app
+//              holds no wait for it. Both are null once the sod is confirmed rooted. null = none, or unproven
 // The form's render stamp for confirmedAsOf is the irrigation_home_changed_at
 // that GET /:id already returns on `preferences`.
 router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {

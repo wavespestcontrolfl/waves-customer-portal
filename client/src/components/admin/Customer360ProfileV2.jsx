@@ -7252,19 +7252,24 @@ function AccessPrefsSodHoldLines({ lines }) {
   );
 }
 
-// The last pre-emergent Waves put on this home's lawn, and the warning when it is too recent for sod (both strings
-// come from GET /new-sod). Nothing shows while the answer is loading, stale, failed or empty.
+// The last pre-emergent Waves put on this home's lawn (one entry for each product of that day), and the warning when
+// it is too recent for sod (every string comes from GET /new-sod). Nothing shows while the answer is loading, stale, failed or empty.
 function AccessPrefsLastPreEmergent({ info }) {
-  if (!info?.line) return null;
+  const entries = Array.isArray(info) ? info.filter((entry) => entry?.line) : [];
+  if (!entries.length) return null;
   return (
     <div className="mt-1 space-y-1" data-testid="sod-last-pre-emergent">
-      <div className="text-ui-label text-ink-secondary">{info.line}</div>
-      {info.warning && (
-        <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label" data-testid="sod-pre-emergent-warning">
-          {info.warning}
+      {entries.map((entry) => (
+        <div key={entry.line} className="space-y-1">
+          <div className="text-ui-label text-ink-secondary">{entry.line}</div>
+          {entry.warning && (
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label" data-testid="sod-pre-emergent-warning">
+              {entry.warning}
+            </div>
+          )}
+          {entry.note && <div className="text-ui-label text-ink-secondary" data-testid="sod-pre-emergent-note">{entry.note}</div>}
         </div>
-      )}
-      {info.note && <div className="text-ui-label text-ink-secondary" data-testid="sod-pre-emergent-note">{info.note}</div>}
+      ))}
     </div>
   );
 }
