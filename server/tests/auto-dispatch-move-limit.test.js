@@ -139,22 +139,31 @@ describe('needs-a-person notice', () => {
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('a complete run closes the notice of a loaded visit it no longer collects; any other notice stays', async () => {
+  // Codex #6253 r1 P2: a notice closes on PROOF (the run moved the visit, or
+  // evaluated it and read no conflict), never because a run did not collect it.
+  test('a notice closes only for a visit the run proved clear; a visit still collected stays', async () => {
     const bucket = new Map();
     notice.collect(bucket, visit('kept', '2026-11-01'), 'no_slot', { kind: 'overlap' });
-    audit.standingNoticeKeys.mockResolvedValue(new Set([
-      'auto-dispatch-needs-person:kept:2026-11-01', 'auto-dispatch-needs-person:fixed:2026-11-02', 'auto-dispatch-needs-person:notloaded:2026-11-03',
-    ]));
     const clearedOf = () => {
       const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
       audit.retireResolvedNotices.mock.calls[audit.retireResolvedNotices.mock.calls.length - 1][0].stillOpen(q);
-      return q.whereNotIn.mock.calls;
+      return { cleared: q.whereNotIn.mock.calls, sql: q.whereRaw.mock.calls.map(([text]) => text).join(' ') };
     };
-    await notice.raiseNotices(bucket, { complete: true, loadedIds: new Set(['kept', 'fixed']) });
-    expect(clearedOf()).toEqual([['s.id', ['fixed']]]);
-    // A run that failed part way clears nothing by evaluation.
-    await notice.raiseNotices(bucket, { complete: false, loadedIds: new Set(['kept', 'fixed']) });
-    expect(clearedOf()).toEqual([]);
+    await notice.raiseNotices(bucket, { clearedIds: new Set(['kept', 'fixed']) });
+    expect(clearedOf().cleared).toEqual([['s.id', ['fixed']]]);
+    // No proof (a degraded run, a skipped visit): nothing closes by evaluation.
+    await notice.raiseNotices(bucket, {});
+    expect(clearedOf().cleared).toEqual([]);
+    // The visit's own row decides the rest: its date, its status, and for a
+    // visit with no arrival time, whether it has one now.
+    expect(clearedOf().sql).toMatch(/scheduled_date::text = notifications\.metadata->>'scheduledDate'/);
+    expect(clearedOf().sql).toMatch(/<> 'unplaced' OR s\.window_start IS NULL/);
+  });
+
+  test('an empty run still closes what its proof allows, and raises nothing', async () => {
+    expect(await notice.raiseNotices(new Map(), { clearedIds: new Set(['fixed']) })).toBe(0);
+    expect(audit.retireResolvedNotices).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('a failed notice is logged, the rest still go, and nothing throws', async () => {
@@ -169,7 +178,7 @@ describe('needs-a-person notice', () => {
     const bucket = new Map();
     const conflicts = [{ kind: 'overlap' }, { kind: 'closed_day' }, null];
     let n = 0;
-    for (const kind of ['move_limit', 'no_near_slot', 'no_slot']) {
+    for (const kind of ['move_limit', 'no_near_slot', 'no_slot', 'not_moved']) {
       for (const conflict of conflicts) {
         if (!conflict && kind !== 'move_limit') continue;
         n += 1;
@@ -194,16 +203,24 @@ describe('needs-a-person notice', () => {
     audit.namedVisitAction.mockImplementation(async (_id, _templates, generic) => generic);
   });
 
-  test('only a conflict visit that auto-dispatch cannot fix is collected from an evaluation', () => {
+  // Codex #6253 r1: a list of reason codes missed two of them. One rule now:
+  // in conflict and not moved = a person is told; the reason picks the wording.
+  test('every visit left in conflict is collected, whatever the reason; no conflict, nothing', () => {
     const bucket = new Map();
     const conflict = { kind: 'overlap' };
-    notice.collectFromEvaluation(bucket, visit('a', '2026-11-01'), { reason_code: 'NO_SCORE_IMPROVEMENT', conflict });
-    notice.collectFromEvaluation(bucket, visit('b', '2026-11-01'), { reason_code: 'CONFLICT_NO_NEAR_SLOT', conflict: null });
-    notice.collectFromEvaluation(bucket, visit('c', '2026-11-01'), { reason_code: 'NO_DRIVE_SAVING', conflict });
+    notice.collectUnmoved(bucket, visit('a', '2026-11-01'), 'CONFLICT_NO_NEAR_SLOT', null);
+    notice.collectUnmoved(bucket, visit('b', '2026-11-01'), 'GROUP_MEMBER_GUARD', undefined);
     expect(bucket.size).toBe(0);
-    notice.collectFromEvaluation(bucket, visit('d', '2026-11-01'), { reason_code: 'CONFLICT_NO_NEAR_SLOT', conflict });
-    notice.collectFromEvaluation(bucket, visit('e', '2026-11-01'), { reason_code: 'NO_VALID_SLOT', conflict });
-    notice.collectFromEvaluation(bucket, visit('f', '2026-11-01'), { reason_code: 'NO_SLOT_MATCHING_PREFERENCE', conflict });
-    expect([...bucket.values()].map((i) => i.kind)).toEqual(['no_near_slot', 'no_slot', 'no_slot']);
+    const reasons = ['CONFLICT_NO_NEAR_SLOT', 'NO_VALID_SLOT', 'NO_SLOT_MATCHING_PREFERENCE', 'DRIFT_ANCHOR_STALE', 'MOVE_LIMIT_REACHED', 'GROUP_MEMBER_GUARD', 'ERROR', 'A_REASON_ADDED_LATER'];
+    reasons.forEach((reason, i) => notice.collectUnmoved(bucket, visit(`v${i}`, '2026-11-01'), reason, conflict));
+    expect([...bucket.values()].map((i) => i.kind)).toEqual(['no_near_slot', 'no_slot', 'no_slot', 'no_slot', 'move_limit', 'not_moved', 'not_moved', 'not_moved']);
+  });
+
+  test('a visit the run then moves is taken out again', () => {
+    const bucket = new Map();
+    notice.collectUnmoved(bucket, visit('a', '2026-11-01'), 'ERROR', { kind: 'overlap' });
+    notice.collectUnmoved(bucket, visit('b', '2026-11-01'), 'ERROR', { kind: 'overlap' });
+    notice.clear(bucket, visit('a', '2026-11-01'));
+    expect([...bucket.values()].map((i) => i.id)).toEqual(['b']);
   });
 });

@@ -3,22 +3,30 @@
  * itself (owner 2026-10-09: a forced move past the move limit raises an alert,
  * never moves silently).
  *
- * Three cases, collected during the run and raised once at its end:
- *   move_limit    the visit is in conflict (overlaps another stop, or sits on a
- *                 closed day) or has no arrival time yet, and has used all its
- *                 automatic moves (move-limit.js);
- *   no_near_slot  in conflict, and every free slot adds more drive than
- *                 config.conflictMaxAddedDriveMinutes (CONFLICT_NO_NEAR_SLOT);
- *   no_slot       in conflict, and no valid slot exists at all.
+ * A notice is raised for:
+ *   - a visit with no arrival time yet that has used all its automatic moves;
+ *   - EVERY visit the run saw in conflict (it overlaps another stop, or sits
+ *     on a closed day) and did not move, whatever the reason. The reason only
+ *     picks the wording:
+ *       move_limit    it has used all its automatic moves (move-limit.js);
+ *       no_near_slot  every free slot adds more drive than
+ *                     config.conflictMaxAddedDriveMinutes;
+ *       no_slot       no valid slot exists;
+ *       not_moved     anything else: a guard on a grouped sibling, a refused
+ *                     or failed write, a hold. One rule for all, so a new
+ *                     skip reason cannot leave a conflict unseen (Codex
+ *                     #6253 r1: a list of reasons missed two of them).
  *
- * One notice per visit and date (dedupe key below). The lane shares the
- * auto-dispatch ring allowance of 24 hours (audit.ringsLeft: all lanes and
- * runs together), soonest date first; a standing notice is refreshed free
- * and the rest wait for the next run. Raising is best effort: a failure is
- * logged and never fails the run.
+ * Collected during the run, raised once at its end. One notice per visit and
+ * date (dedupe key below). The lane shares the auto-dispatch ring allowance
+ * of 24 hours (audit.ringsLeft: all lanes and runs together), soonest date
+ * first; a standing notice is refreshed free and the rest wait for the next
+ * run. Raising is best effort: a failure is logged and never fails the run.
  *
- * A notice closes when its visit is cancelled or leaves the date, or when a
- * complete run loaded the visit and no longer collected it: closeResolved.
+ * A notice closes when its visit is cancelled, leaves the date or (no
+ * arrival time) gets a time, or when the run has PROOF the conflict is gone:
+ * it moved the visit, or evaluated it and read no conflict (closeResolved).
+ * A run that could not look at the visit closes nothing.
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
@@ -26,12 +34,14 @@ const { toDateStr } = require('./dates');
 const RESOLVED_TITLE = 'Visit placement alert resolved';
 const KEY_PREFIX = 'auto-dispatch-needs-person:';
 
-// evaluatePlacement reason codes that, on a visit in conflict, mean no move
-// is coming from auto-dispatch.
+// The wording for the reason codes that say why no slot was taken. Any other
+// reason on a visit in conflict is 'not_moved'.
 const REASON_KIND = {
+  MOVE_LIMIT_REACHED: 'move_limit',
   CONFLICT_NO_NEAR_SLOT: 'no_near_slot',
   NO_VALID_SLOT: 'no_slot',
   NO_SLOT_MATCHING_PREFERENCE: 'no_slot',
+  DRIFT_ANCHOR_STALE: 'no_slot',
 };
 
 const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
@@ -58,16 +68,23 @@ function collect(bucket, service, kind, conflict) {
   });
 }
 
-// A no_change evaluation of a visit in conflict that auto-dispatch cannot fix.
-function collectFromEvaluation(bucket, service, evalResult) {
-  const kind = REASON_KIND[evalResult.reason_code];
-  if (kind && evalResult.conflict) collect(bucket, service, kind, evalResult.conflict);
+// A visit in conflict that this run leaves where it is, for `reasonCode`.
+// No conflict: nothing to tell a person.
+function collectUnmoved(bucket, service, reasonCode, conflict) {
+  if (conflict) collect(bucket, service, REASON_KIND[reasonCode] || 'not_moved', conflict);
+}
+
+// The run moved the visit: nothing collected for it earlier in the run stands.
+function clear(bucket, service) {
+  for (const [key, item] of bucket) if (item.id === String(service.id)) bucket.delete(key);
 }
 
 function whyFor(item, spoken) {
   const [now, still] = PROBLEM[item.problem];
   if (item.kind === 'move_limit') return `The ${spoken} visit used all its automatic moves and ${still}.`;
-  const reason = item.kind === 'no_near_slot' ? 'every open slot adds too much drive' : 'no open slot fits it';
+  const reason = {
+    no_near_slot: 'every open slot adds too much drive', no_slot: 'no open slot fits it',
+  }[item.kind] || 'auto-dispatch did not move it';
   return `The ${spoken} visit ${now}, and ${reason}.`;
 }
 
@@ -99,27 +116,27 @@ async function raiseOne(item, raiseAdminAlert, shortDateET) {
     dedupeKey: item.key,
     refreshOnDedupe: true,
     metadata: {
-      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, kind: item.kind,
+      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, kind: item.kind, problem: item.problem,
     },
   });
 }
 
 // Close the notices that no longer apply. A notice stays open while its visit
-// is still live on the notice's date, unless this run LOADED the visit, looked
-// at every visit (`complete`) and did not collect it: then it moved off the
-// conflict or got a time. A visit the run did not load (inside the lock
-// window, or a run that failed part way) keeps its notice. Best effort.
-async function closeResolved(bucket, { nowDate, complete, loadedIds }) {
+// is still live on the notice's date (and, for a visit with no arrival time,
+// still has none), unless the run has proof the conflict is gone: `clearedIds`
+// holds the visits it moved, or evaluated and read no conflict for. A visit
+// the run skipped, failed on or never loaded keeps its notice, and so does
+// every visit of a run whose guard reads failed (Codex #6253 r1 P2). The
+// visit's own row decides the "no arrival time" case, so it needs no proof.
+async function closeResolved(bucket, { nowDate, clearedIds }) {
   try {
     const audit = require('./audit');
-    const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
-    const cleared = complete
-      ? [...standing].filter((key) => !bucket.has(key)).map((key) => key.slice(KEY_PREFIX.length).split(':')[0]).filter((id) => loadedIds.has(id))
-      : [];
+    const cleared = [...clearedIds].filter((id) => ![...bucket.values()].some((item) => item.id === id));
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
-        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed']);
+        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed'])
+          .whereRaw("(COALESCE(notifications.metadata->>'problem', '') <> 'unplaced' OR s.window_start IS NULL)");
         if (cleared.length) q.whereNotIn('s.id', cleared);
       },
       resolvedTitle: RESOLVED_TITLE,
@@ -133,9 +150,9 @@ async function closeResolved(bucket, { nowDate, complete, loadedIds }) {
 
 // Raise the collected notices: soonest date first, inside the shared ring
 // allowance. Returns how many writes rang. Never throws.
-async function raiseNotices(bucket, { nowDate = new Date(), complete = false, loadedIds = new Set() } = {}) {
+async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set() } = {}) {
   if (!bucket) return 0;
-  await closeResolved(bucket, { nowDate, complete, loadedIds });
+  await closeResolved(bucket, { nowDate, clearedIds });
   if (bucket.size === 0) return 0;
   let rang = 0;
   try {
@@ -161,5 +178,5 @@ async function raiseNotices(bucket, { nowDate = new Date(), complete = false, lo
 }
 
 module.exports = {
-  RESOLVED_TITLE, noticeKey, collect, collectFromEvaluation, raiseNotices,
+  RESOLVED_TITLE, noticeKey, collect, collectUnmoved, clear, raiseNotices,
 };

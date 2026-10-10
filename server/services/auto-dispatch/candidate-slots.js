@@ -767,43 +767,43 @@ function candidateFromSlot(slot, {
   };
 }
 
-const minToHHMM = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+// How many same-day starts one technician's day can hold at a 60-minute step.
+const SAME_DAY_STARTS_CAP = 24;
 
 /**
- * Every whole-hour start on the visit's OWN date, for a visit whose current
- * placement overlaps another stop (conflict.kind 'overlap'). The legacy slot
- * finder (find-time.js candidatesForDay) offers ONE start per gap in the day,
+ * Every whole-hour start on the visit's OWN date, with its own technician,
+ * for a visit whose current placement overlaps another stop (conflict.kind
+ * 'overlap'). The legacy slot finder offers ONE start per gap in the day,
  * the earliest feasible one, so a visit in overlap often saw one to three
- * candidates and took a far one. (Capacity mode, GATE_SCHEDULING_CAPACITY,
- * already enumerates every whole-hour start the route accepts, so it needs
- * nothing added; and without the shared model the added slots would carry no
- * route numbers, so nothing is added then either.) The slots below carry no
- * numbers of their own: they pass the same HARD filters as every find-time
- * slot (candidateFromSlot, flex admission), then the writer's own conflict
- * probe and the shared route model score (filterAndScoreSharedModelCandidates),
- * which drops the hours still taken. Only the visit's own technician, and not
- * the hour it already holds. A visit not in overlap gets nothing added.
+ * candidates and took a far one. This asks the SAME finder for every
+ * step-aligned start (`everyStepStart`), so each added hour has passed the
+ * finder's own checks: the drive in from the stop before it and out to the
+ * stop after it, the technician's time off, closed days. Nothing is built
+ * here by hand (Codex #6253 r1 P1: hand-built hours skipped those checks).
+ * The added slots then pass the same HARD filters as every other slot
+ * (candidateFromSlot, flex admission) and the writer's conflict probe.
+ *
+ * Nothing is added in capacity mode (GATE_SCHEDULING_CAPACITY already lists
+ * every start the route accepts), without the shared route model (the only
+ * mode this was measured in), for a visit not in overlap, or for a start the
+ * first search already returned.
  */
-function conflictSameDaySlots(service, current, slots) {
+async function conflictSameDaySlots(service, current, slots, findTimeArgs) {
   if (!current || !current.conflict || current.conflict.kind !== 'overlap' || !service.technician_id) return [];
   if (!autoDispatchSharedModelLive() || capacityEnabled()) return [];
-  const duration = service.estimated_duration_minutes || DEFAULT_DURATION;
   const techId = String(service.technician_id);
-  const offered = new Set(slots
-    .filter((s) => s.date === current.date && String(s.technician && s.technician.id) === techId)
-    .map((s) => s.start_time));
-  const extra = [];
-  for (let start = DAY_OPEN; start + duration <= DAY_CLOSE; start += 60) {
-    const startTime = minToHHMM(start);
-    if (startTime === current.start_time || offered.has(startTime)) continue;
-    extra.push({
-      date: current.date,
-      technician: { id: service.technician_id, name: null },
-      start_time: startTime,
-      end_time: minToHHMM(start + duration),
-    });
-  }
-  return extra;
+  const sameDayTech = (slot) => slot.date === current.date && String(slot.technician && slot.technician.id) === techId;
+  const offered = new Set(slots.filter(sameDayTech).map((slot) => slot.start_time));
+  const res = await findAvailableSlots({
+    ...findTimeArgs,
+    dateFrom: current.date,
+    dateTo: current.date,
+    technicianId: service.technician_id,
+    everyStepStart: true,
+    topN: SAME_DAY_STARTS_CAP,
+  });
+  return ((res && res.slots) || [])
+    .filter((slot) => sameDayTech(slot) && slot.start_time !== current.start_time && !offered.has(slot.start_time));
 }
 
 async function findValidCandidateSlots(service, prefs, baseCtx) {
@@ -940,7 +940,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // FLEX-TIER (Codex #4995): HARD — a destination inside the 73h freeze, or
   // on a date the window does not admit, never becomes a candidate (apply.js
   // re-checks both authoritatively, grouped members' derived starts included).
-  const admitted = flexRules.admit(slots.concat(conflictSameDaySlots(service, current, slots)), drops);
+  const admitted = flexRules.admit(slots.concat(await conflictSameDaySlots(service, current, slots, findTimeArgs)), drops);
   const hard = {
     service, prefs, ctx, category, siblingDates, drops,
   };

@@ -250,6 +250,21 @@ function conflictOf(current) {
   return current && current.conflict ? { conflict: current.conflict } : {};
 }
 
+// The conflict an evaluation read for the visit's current placement, on a
+// move or a no_change result alike; null when it read none.
+function conflictIn(evalResult) {
+  return evalResult.conflict || (evalResult.current && evalResult.current.conflict) || null;
+}
+
+// Proof for the needs-a-person notice closer: this run evaluated the visit
+// with the conflict read ON and found it placed and clear. Gate off, the
+// read never happened, so nothing is proven.
+function noteClear(run, service, evalResult) {
+  if (run.config.conflictMovesEnabled === true && !conflictIn(evalResult) && !moveRules.isUnplacedDueDate(service)) {
+    run.clearedIds.add(String(service.id));
+  }
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
     current, candidates, drops, skipped,
@@ -703,6 +718,8 @@ async function moveLimitGate(service, ctx, run, counts) {
     // Required lazily, like apply.js's conflict re-read.
     const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, ctx);
     if (conflict || moveRules.isUnplacedDueDate(service)) needsPerson.collect(run.needsPerson, service, 'move_limit', conflict);
+    // Read with the conflict gate on, and clear: proof for the notice closer.
+    else if (ctx.conflictMoves === true) run.clearedIds.add(String(service.id));
   }
   return skip;
 }
@@ -979,7 +996,7 @@ async function evaluateServiceForRun(service, run) {
 
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
   totals.evaluated++;
-  needsPerson.collectFromEvaluation(run.needsPerson, service, evalResult);
+  noteClear(run, service, evalResult);
 
   // A grouped move is only as legal as its siblings (Codex #4995 r4 P2) —
   // preview the apply-time member guard now, in every mode (Codex #6055 r2:
@@ -990,6 +1007,9 @@ async function evaluateServiceForRun(service, run) {
     : null;
   const noChange = evalResult.kind === 'no_change' ? evalResult : refusal && guardSkipReason(refusal);
   if (noChange) {
+    // In conflict and staying put, whatever the reason (a sibling's guard
+    // included): a person is told.
+    needsPerson.collectUnmoved(run.needsPerson, service, noChange.reason_code, conflictIn(evalResult));
     return audit.logDecision(run.runId, {
       action: 'no_change', service, reason_code: noChange.reason_code, reason_description: noChange.reason_description, ...evalResult.audit,
     });
@@ -1093,6 +1113,7 @@ async function applyPlannedMove(pm, run, attempt) {
   }
   const guardSkip = await recheckPlannedMove(pm, run);
   if (guardSkip) {
+    needsPerson.collectUnmoved(run.needsPerson, pm.service, guardSkip.code, conflictIn(pm.result));
     return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: guardSkip.code, reason_description: guardSkip.description, ...pm.result.audit });
   }
 
@@ -1103,8 +1124,8 @@ async function applyPlannedMove(pm, run, attempt) {
 
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
-  needsPerson.collectFromEvaluation(run.needsPerson, pm.service, fresh);
   if (fresh.kind !== 'move') {
+    needsPerson.collectUnmoved(run.needsPerson, pm.service, fresh.reason_code, conflictIn(fresh));
     // Re-scoring against the live schedule no longer clears the bar (an
     // earlier apply this run captured the gain, or the row changed).
     return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: fresh.reason_code, reason_description: `No longer qualifies on live re-evaluation — ${fresh.reason_description}`, ...fresh.audit });
@@ -1133,6 +1154,9 @@ async function applyPlannedMove(pm, run, attempt) {
     rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
   });
   totals.changed += result.movedCount || 1;
+  // Moved: proof for the notice closer, and nothing collected earlier stands.
+  run.clearedIds.add(String(pm.service.id));
+  needsPerson.clear(run.needsPerson, pm.service);
   // A SLOT_TAKEN fallback (Codex pre-push P1) can land on a DIFFERENT
   // candidate than `fresh.best` — re-derive the audit from whichever one
   // `result.applied` says actually moved, never the first-tried placement.
@@ -1163,6 +1187,8 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
   const failedMembers = Array.isArray(applyErr.failedMembers) ? applyErr.failedMembers : [];
   for (const id of failedMembers) run.quarantinedIds.add(String(id));
   logger.error(`[auto-dispatch] apply failed for ${pm.service.id}: ${applyErr.message}`);
+  // The write was refused or failed: a visit in conflict stays in conflict.
+  needsPerson.collectUnmoved(run.needsPerson, pm.service, 'ERROR', conflictIn(fresh || pm.result));
   try {
     await audit.logDecision(run.runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...failedPlacementAudit(fresh, pm, run.lockBoundary, applyErr), error: applyErr.message });
   } catch (_) { /* swallow */ }
@@ -1255,14 +1281,13 @@ async function runAutoDispatch(opts = {}) {
     pinOkIds: new Set(),
     missingGeoWanted: [], // visits to raise a missing-pin notice for at the run's end
     pass1Complete: false,
-    loadedIds: new Set(), // every visit this run loaded (needs-a-person notice close)
+    clearedIds: new Set(), // visits this run moved, or evaluated and read no conflict for (notice close)
   };
 
   try {
     run.capabilityFor = makeCapabilityFn(await loadCapabilityMap());
     const loadBoundary = resolveLoadBoundary(run.guardMode, nowDate, lockBoundary, today);
     const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
-    for (const loaded of services) run.loadedIds.add(String(loaded.id));
 
     // Guard-mode bulk context: reminder-freeze + (tiers') drift anchors or
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
@@ -1307,7 +1332,7 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
-  await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, complete: run.pass1Complete, loadedIds: run.loadedIds });
+  await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
