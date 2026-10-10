@@ -47,7 +47,36 @@ async function unpricedFutureBillableVisits(dbh, customerId) {
       .select('id', 'service_type', 'is_callback', 'scheduled_date')
       .orderBy('scheduled_date', 'asc')
       .limit(100);
-    return rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
+    const billable = rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
+    return [...billable, ...await unpricedOngoingSeries(dbh, customerId, new Set(billable.map((r) => String(r.id))))];
+  } catch { return []; }
+}
+
+// Ongoing recurring plans (the series root with recurring_ongoing = true) the
+// nightly top-up would still extend, whose root carries no price: their next
+// visits would be minted unpriced even when no live occurrence is left today.
+// The selector is the top-up's own (recurring-series-topup.js
+// eligibleSeriesParentIds), narrowed to this customer. Same exemptions as the
+// visits above. Returned with series: true. A failed read here adds nothing
+// (fail open, like the visit read).
+async function unpricedOngoingSeries(dbh, customerId, alreadyListed) {
+  try {
+    const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+    const { eligibleSeriesParentIds } = require('./recurring-series-topup');
+    const ids = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
+    if (!ids.length) return [];
+    const roots = await dbh('scheduled_services')
+      .whereIn('id', ids)
+      .where(function unpriced() {
+        this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
+      })
+      .where(function notPrepaid() {
+        this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
+      })
+      .select('id', 'service_type', 'is_callback', 'scheduled_date');
+    return roots
+      .filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type))
+      .map((r) => ({ ...r, series: true }));
   } catch { return []; }
 }
 
@@ -74,8 +103,16 @@ async function liveAnnualPrepayTerm(dbh, customerId) {
 
 function unpricedVisitsRefusal(mode, billable) {
   const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
-  const plural = billable.length !== 1;
-  return `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`;
+  const visits = billable.filter((r) => !r.series);
+  const series = billable.length - visits.length;
+  if (!series) {
+    const plural = visits.length !== 1;
+    return `${laneLabel} bills each visit's own price — ${visits.length} upcoming visit${plural ? 's' : ''} (first ${visits[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`;
+  }
+  const lead = visits.length
+    ? `${visits.length} upcoming visit${visits.length !== 1 ? 's' : ''} (first ${visits[0].scheduled_date}) and `
+    : '';
+  return `${laneLabel} bills each visit's own price — ${lead}${series} ongoing recurring plan${series !== 1 ? 's' : ''} ${visits.length || series !== 1 ? 'have' : 'has'} no price, so the next visits would complete unbilled. Price or end ${visits.length || series !== 1 ? 'them' : 'it'} before switching.`;
 }
 
 /**

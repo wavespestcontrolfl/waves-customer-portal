@@ -187,11 +187,30 @@ function stillDue(prediction) {
     ? Math.round((Number(prediction.amount) || 0) * 100) / 100 : 0;
 }
 
-function visitPrediction(customer, v) {
+// How completion would collect: Auto Pay chargeable (the saved-method walk
+// the dues run and charge() use) and GATE_COMPLETION_AUTOPAY_CHARGE. Both
+// feed predictCompletionBilling's invoice-versus-auto-charge choice, so the
+// card names the method the way completion will pick it. Pinned with the card.
+const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false };
+
+async function chargeContext(dbh, customerId, row) {
+  let autopayActive = false;
+  try {
+    autopayActive = await require('../autopay-eligibility').customerOnAutopay({
+      id: customerId, autopay_enabled: row.autopay_enabled, autopay_paused_until: row.autopay_paused_until,
+    }, { db: dbh });
+  } catch { /* unreadable: the card says invoiced */ }
+  return { autopayActive: !!autopayActive, gate: !!require('../../config/feature-gates').isEnabled('completionAutopayCharge') };
+}
+
+const dayOf = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10));
+
+function visitPrediction(customer, v, charge = NO_CHARGE_CONTEXT) {
   return predictCompletionBilling({
     lane: resolveBillingLane(customer).mode,
     billingMode: customer.billing_mode || null,
-    autopayActive: false,
+    autopayActive: charge.autopayActive,
+    completionAutopayChargeEnabled: charge.gate,
     estimatedPrice: v.estimated_price,
     primaryLinePrice: v.primary_line_price,
     monthlyRate: customer.monthly_rate,
@@ -205,37 +224,41 @@ function visitPrediction(customer, v) {
   });
 }
 
-// Upcoming visits with their own positive price that completion will collect
-// under `customer`'s lane: { date, service, price, prepaid, due }.
-function pricedVisitCharges(customer, visits) {
+const METHOD_WORDS = { auto_charge: 'charged to the saved card', invoice: 'invoiced' };
+
+// Upcoming visits with their own positive price that completion will still
+// collect under `customer`'s lane: { date, service, price, prepaid, due,
+// method }, all from the one prediction.
+function pricedVisitCharges(customer, visits, charge) {
   const out = [];
   for (const v of visits || []) {
     if (!(Number(v.estimated_price) > 0)) continue;
-    const p = visitPrediction(customer, v);
+    const p = visitPrediction(customer, v, charge);
     const due = stillDue(p);
     if (!(due > 0)) continue;
     out.push({
-      date: v.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : String(v.scheduled_date ?? '').slice(0, 10),
+      date: dayOf(v.scheduled_date),
       service: v.service_type || 'Visit',
       price: Number(v.estimated_price),
       prepaid: Number(v.prepaid_amount) > 0 ? Number(v.prepaid_amount) : 0,
       due,
+      method: METHOD_WORDS[p.kind] || 'invoiced',
     });
   }
   return out;
 }
 
-function balanceChanges(row, fields, visits) {
+function balanceChanges(row, fields, visits, charge) {
   const after = { ...row, ...fields };
   const out = [];
   for (const v of visits || []) {
     if (!(Number(v.prepaid_amount) > 0)) continue;
-    const before = visitPrediction(row, v);
-    const next = visitPrediction(after, v);
+    const before = visitPrediction(row, v, charge);
+    const next = visitPrediction(after, v, charge);
     if (stillDue(before) === stillDue(next)) continue;
     out.push({
       id: String(v.id),
-      date: v.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : String(v.scheduled_date ?? '').slice(0, 10),
+      date: dayOf(v.scheduled_date),
       service: v.service_type || 'Visit',
       prepaid: Number(v.prepaid_amount),
       before: stillDue(before),
@@ -246,10 +269,11 @@ function balanceChanges(row, fields, visits) {
   return out;
 }
 
-// `fields` (the edit) makes the pin carry those balances too.
-function cardPin(row, visits, fields = {}) {
-  const balances = balanceChanges(row, fields, visits).map((b) => [b.id, b.before, b.after]);
-  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}`;
+// `fields` (the edit) and `charge` make the pin carry those balances and the
+// collection method too.
+function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT) {
+  const balances = balanceChanges(row, fields, visits, charge).map((b) => [b.id, b.before, b.after]);
+  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}|${+charge.autopayActive}${+charge.gate}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -377,63 +401,80 @@ function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-function nextVisitLines(row, fields, visits, dues = null) {
+// Up to BALANCE_LINES lines, then one exact aggregate line (count and total).
+function capped(items, lineOf, restOf) {
+  const lines = items.slice(0, BALANCE_LINES).map(lineOf);
+  if (items.length > BALANCE_LINES) lines.push(restOf(items.slice(BALANCE_LINES)));
+  return lines;
+}
+
+const sum = (items, key) => items.reduce((n, i) => n + i[key], 0);
+
+// One renderer for every lane that collects per visit. Data, not branches:
+// the head line each lane opens with, and the detail builders each lane adds.
+const LANE_HEAD = {
+  per_application: ({ after }) => `Each completed visit is charged its own scheduled price, or ${money(after.per_application_fee)} when it has none — auto-charged to the saved card when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.`,
+  monthly_membership: ({ after, dues }) => (dues && !dues.eligible
+    // Promised only when the dues run really charges this customer
+    // (monthly-dues-eligibility.js); a move into monthly is refused unless
+    // they are collectible, a customer already monthly is checked here.
+    ? `The ${money(after.monthly_rate)} monthly rate is NOT charged by the dues run right now. ${dues.message} Recurring plan visits are not covered by dues until that is fixed.`
+    : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run. Recurring plan visits are covered while Auto Pay is on or that month's dues are paid; a one-off visit with its own price still bills that price.`),
+  per_visit: ({ charge }) => `Each completed visit is ${charge.autopayActive && charge.gate ? 'charged to the saved card' : 'invoiced'} at its own scheduled price. No monthly dues charge.`,
+};
+
+// Lines for a per application customer's unpriced visits (counts) and for
+// every collected-per-visit lane's priced visits (each one, from the same
+// predictCompletionBilling result as the counts and the pin).
+const feeCountLines = ({ after, visits }) => {
+  const c = perApplicationVisitCounts(visits, after.per_application_fee);
+  const parts = [
+    c.fee && `${plural(c.fee, 'visit', 'visits')} at ${money(after.per_application_fee)}`,
+    c.own && `${plural(c.own, 'visit', 'visits')} at its own price`,
+    c.partly && `${plural(c.partly, 'visit is', 'visits are')} partly prepaid (the rest is charged)`,
+    c.none && `${plural(c.none, 'visit bills', 'visits bill')} nothing`,
+    c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
+  ].filter(Boolean);
+  return [parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.'];
+};
+
+const pricedLines = ({ after, visits, charge }) => capped(
+  pricedVisitCharges(after, visits, charge),
+  (v) => `Priced visit on ${v.date} (${v.service}): ${money(v.price)} scheduled${v.prepaid > 0 ? `, ${money(v.due)} remaining after ${money(v.prepaid)} paid` : ''} — ${v.method} at completion.`,
+  (rest) => `${plural(rest.length, 'more priced visit', 'more priced visits')}: ${money(sum(rest, 'due'))} ${rest.some((v) => v.prepaid > 0) ? 'remaining' : 'scheduled'} in all — ${[...new Set(rest.map((v) => v.method))].join(' or ')} at completion.`,
+);
+
+// The balance a partly prepaid visit still has due, before -> after.
+const balanceLines = ({ row, fields, visits, charge }) => capped(
+  balanceChanges(row, fields, visits, charge),
+  (b) => `Partly prepaid visit on ${b.date} (${b.service}): ${money(b.prepaid)} paid; still due at completion ${money(b.before)}${b.coveredByDues ? ' (covered by monthly dues)' : ''} → ${money(b.after)}.`,
+  (rest) => `${plural(rest.length, 'more partly prepaid visit', 'more partly prepaid visits')}: still due at completion ${money(sum(rest, 'before'))} → ${money(sum(rest, 'after'))} in all.`,
+);
+
+const LANE_DETAILS = {
+  per_application: [feeCountLines, pricedLines],
+  per_visit: [pricedLines],
+};
+
+const DUES_STOP = 'Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.';
+
+function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
+  // one_time and any other explicit lane bill like per_visit.
   const laneAfter = resolveBillingLane(after).mode;
   if (!('billing_mode' in fields) && laneAfter !== 'per_application') {
     // A fee-only edit on a customer not billed per application.
     return [`The fee is used only while the customer is billed per application. This customer stays ${laneWords(row)}, so their next visits are charged the same as today.`];
   }
-  const lines = [];
-  if (laneAfter === 'per_application') {
-    lines.push(`Each completed visit is charged its own scheduled price, or ${money(after.per_application_fee)} when it has none — auto-charged to the saved card when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.`);
-    const c = perApplicationVisitCounts(visits, after.per_application_fee);
-    const parts = [
-      c.fee && `${plural(c.fee, 'visit', 'visits')} at ${money(after.per_application_fee)}`,
-      c.own && `${plural(c.own, 'visit', 'visits')} at its own price`,
-      c.partly && `${plural(c.partly, 'visit is', 'visits are')} partly prepaid (the rest is charged)`,
-      c.none && `${plural(c.none, 'visit bills', 'visits bill')} nothing`,
-      c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
-    ].filter(Boolean);
-    lines.push(parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.');
-    // Each explicitly priced visit with its price: the visit's own price wins
-    // over the fee and is collected at completion (auto-charged to the saved
-    // card when Auto Pay is on), so the office sees the dollars. Amounts are
-    // predictCompletionBilling's, from fields the card pin already carries
-    // (estimated_price and the prepayment).
-    const priced = pricedVisitCharges(after, visits);
-    for (const v of priced.slice(0, BALANCE_LINES)) {
-      lines.push(`Priced visit on ${v.date} (${v.service}): ${money(v.price)} is collected at completion${v.prepaid > 0 ? ` (${money(v.due)} after ${money(v.prepaid)} paid)` : ''}.`);
-    }
-    if (priced.length > BALANCE_LINES) {
-      const rest = priced.slice(BALANCE_LINES);
-      lines.push(`${plural(rest.length, 'more priced visit', 'more priced visits')}: ${money(rest.reduce((n, v) => n + v.due, 0))} collected at completion in all.`);
-    }
-  } else if (laneAfter === 'monthly_membership') {
-    // Promised only when the dues run really charges this customer
-    // (monthly-dues-eligibility.js). A move into monthly is refused unless
-    // they are collectible; a customer already monthly is checked here.
-    lines.push(dues && !dues.eligible
-      ? `The ${money(after.monthly_rate)} monthly rate is NOT charged by the dues run right now. ${dues.message} Recurring plan visits are not covered by dues until that is fixed.`
-      : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run. Recurring plan visits are covered while Auto Pay is on or that month's dues are paid; a one-off visit with its own price still bills that price.`);
-  } else {
-    lines.push('Each completed visit is invoiced at its own scheduled price. No monthly dues charge.');
-  }
-  // The balance a partly prepaid visit still collects, before -> after, from
-  // the completion path's own math (balanceChanges).
-  const moved = balanceChanges(row, fields, visits);
-  for (const b of moved.slice(0, BALANCE_LINES)) {
-    lines.push(`Partly prepaid visit on ${b.date} (${b.service}): ${money(b.prepaid)} paid; still collected at completion ${b.coveredByDues ? `${money(b.before)} (covered by monthly dues)` : money(b.before)} → ${money(b.after)}.`);
-  }
-  if (moved.length > BALANCE_LINES) {
-    const rest = moved.slice(BALANCE_LINES);
-    lines.push(`${plural(rest.length, 'more partly prepaid visit', 'more partly prepaid visits')}: still collected at completion ${money(rest.reduce((n, b) => n + b.before, 0))} → ${money(rest.reduce((n, b) => n + b.after, 0))} in all.`);
-  }
-  if (laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership') {
-    lines.push('Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.');
-  }
-  return lines;
+  const key = LANE_HEAD[laneAfter] ? laneAfter : 'per_visit';
+  const ctx = { row, fields, after, visits, dues, charge };
+  return [
+    LANE_HEAD[key](ctx),
+    ...(LANE_DETAILS[key] || []).flatMap((build) => build(ctx)),
+    ...balanceLines(ctx),
+    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [DUES_STOP] : []),
+  ];
 }
 
 /**
@@ -457,13 +498,14 @@ async function billingEditProposal(customerId, updates, dbh = db) {
   const dues = resolveBillingLane(after).mode === 'monthly_membership' && resolveBillingLane(row).mode === 'monthly_membership'
     ? await require('../monthly-dues-eligibility').monthlyDuesVerdict(dbh, customerId, { overrides: parsed.fields })
     : null;
+  const charge = await chargeContext(dbh, customerId, row);
   return {
-    pin: cardPin(row, visits, parsed.fields),
+    pin: cardPin(row, visits, parsed.fields, charge),
     version: row.version,
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: nextVisitLines(row, parsed.fields, visits, dues),
+      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge),
     },
   };
 }
@@ -478,6 +520,28 @@ function executorBillingEdit(updates, pin) {
   if (!pin) return { error: 'This card has no billing check on it. Ask again for a fresh card. Nothing was changed.', preview_changed: true };
   const parsed = parseBillingEdit(updates);
   return parsed.error ? { error: parsed.error, preview_changed: true } : parsed;
+}
+
+/**
+ * Commit, first: the per-customer annual-prepay advisory lock every term
+ * writer takes (admin-customers.js ANNUAL_PREPAY_LOCK_NS, via
+ * lockAndAssertNoAnnualPrepayOverlap; the prepay-on-book and termite paths;
+ * rate-review-apply's tryAnnualPrepayLock). The TRY form, taken before the
+ * customer row lock: the term writers hold this lock and then write the
+ * customers row, so waiting here with the row held would be a cycle, and a
+ * try never waits. A miss means a prepay term is being created or confirmed
+ * for this customer right now: refuse, ask again. Lock order of the whole
+ * update: property-preferences advisory, customer comms, annual-prepay (try),
+ * customers row, billing-collection claim (try), visit rows by id.
+ */
+async function lockAnnualPrepayBeforeRow(trx, customerId, fields) {
+  if (!Object.keys(fields || {}).length) return;
+  const { ANNUAL_PREPAY_LOCK_NS } = require('../../routes/admin-customers')._private;
+  const res = await trx.raw('SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked', [ANNUAL_PREPAY_LOCK_NS, String(customerId)]);
+  const row = res && res.rows ? res.rows[0] : (Array.isArray(res) ? res[0] : null);
+  if (!(row && (row.locked === true || row.locked === 't'))) {
+    throw Object.assign(new Error('An annual prepay is being created or confirmed for this customer right now — nothing was updated. Ask again in a minute.'), { previewChanged: true });
+  }
 }
 
 /**
@@ -503,7 +567,7 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   // upcoming visit's billing fields the card's projection was built from,
   // read with the visits locked FOR UPDATE (see upcomingVisits).
   const visits = await upcomingVisits(trx, customerId, { lock: true });
-  if (cardPin(lockedBefore, visits, fields) !== pin) {
+  if (cardPin(lockedBefore, visits, fields, await chargeContext(trx, customerId, lockedBefore)) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
   const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits);
@@ -523,5 +587,6 @@ module.exports = {
   billingEditProposal,
   executorBillingEdit,
   assertBillingEditUnderLock,
+  lockAnnualPrepayBeforeRow,
   money,
 };

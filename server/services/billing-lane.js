@@ -1805,7 +1805,32 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
   };
 }
 
+// Completion's in-lock lane check. Completion reads the customer's billing type
+// and per-application fee at entry and decides the invoice amount from them,
+// minutes before the mint; a lane edit (the customer page's save or the
+// Intelligence Bar card) committing in between would settle the visit on the
+// OLD lane. Call this inside the mint transaction, under the visit row lock
+// and the customer lock the mint takes (invoice.js recheckInTrx): it re-reads
+// the lane and refuses with a retryable 409 when it moved, so the retry bills
+// on the new lane. Skipped when the entry read did not carry the lane columns.
+async function refuseBillingLaneDriftInTrx(trx, svc) {
+  if (!svc || !svc.customer_id || svc.cust_billing_mode === undefined) return;
+  const live = await trx('customers').where({ id: svc.customer_id }).first('billing_mode', 'per_application_fee');
+  if (!live) return;
+  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+  const modeMoved = (live.billing_mode || null) !== (svc.cust_billing_mode || null);
+  const feeMoved = live.billing_mode === 'per_application'
+    && cents(live.per_application_fee) !== cents(svc.cust_per_application_fee);
+  if (!modeMoved && !feeMoved) return;
+  const e = new Error("This customer's billing type changed while the visit was being completed — nothing was billed. Complete it again.");
+  e.status = 409;
+  e.statusCode = 409;
+  e.code = 'BILLING_LANE_CHANGED';
+  throw e;
+}
+
 module.exports = {
+  refuseBillingLaneDriftInTrx,
   stampedZeroFreeLive,
   BILLING_MODES,
   hasAuthoritativeZeroPrice,

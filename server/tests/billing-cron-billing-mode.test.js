@@ -14,22 +14,28 @@
 let mockCustomers = [];
 let mockTermRows = [];
 let mockScheduledNotices = [];
+// When set, the under-lock re-read of the customer returns this row (a change committed after the run-start read).
+let mockFreshRow = null;
 
 jest.mock('../models/db', () => {
-  function thenableFor(resultFn) {
+  function thenableFor(resultFn, firstFn) {
     const b = {};
     for (const m of [
       'where', 'andWhere', 'orWhere', 'whereIn', 'whereNot', 'whereNull',
       'whereNotNull', 'whereRaw', 'distinct', 'select', 'orderBy', 'update',
       'insert', 'returning', 'count', 'pluck', 'join', 'leftJoin',
     ]) b[m] = () => b;
-    b.first = () => Promise.resolve(null);
+    // where('id', x) / where({ id: x }) remembers the id so customers.first()
+    // can answer the under-lock re-read (monthly-dues-eligibility guards).
+    const baseWhere = b.where;
+    b.where = (...a) => { if (a[0] === 'id') b.__id = a[1]; else if (a[0] && a[0].id !== undefined) b.__id = a[0].id; return baseWhere(...a); };
+    b.first = () => Promise.resolve(firstFn ? firstFn(b) : null);
     b.then = (resolve, reject) => Promise.resolve(resultFn()).then(resolve, reject);
     return b;
   }
   const db = jest.fn((table) => {
     if (table === 'sms_log') return { insert: async (row) => { mockScheduledNotices.push(row); } };
-    if (table === 'customers') return thenableFor(() => mockCustomers);
+    if (table === 'customers') return thenableFor(() => mockCustomers, (q) => mockFreshRow || mockCustomers.find((c) => String(c.id) === String(q.__id)) || null);
     if (String(table).startsWith('annual_prepay_terms')) return thenableFor(() => mockTermRows);
     return thenableFor(() => []);
   });
@@ -67,6 +73,7 @@ beforeEach(() => {
   mockCustomers = [];
   mockTermRows = [];
   mockScheduledNotices = [];
+  mockFreshRow = null;
   jest.clearAllMocks();
   StripeService.charge.mockReset();
   StripeService.chargeOneTime.mockReset();
@@ -93,6 +100,26 @@ describe('processMonthlyBilling — billing_mode guard', () => {
       metadata: expect.objectContaining({ notificationEventKey: meta.notificationEventKey }),
     }));
     expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
+  });
+
+  test('a billing type changed after the run-start read is caught under the claim: no dues charge, skip logged (shared guards re-run on the fresh row)', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-RACE', billing_mode: 'monthly_membership' }];
+    mockFreshRow = { ...mockCustomers[0], billing_mode: 'per_application' };
+
+    const result = await BillingCron.processMonthlyBilling();
+
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+    expect(logAutopay).toHaveBeenCalledWith('cust-RACE', 'skipped_billing_mode', { details: { billing_mode: 'per_application' } });
+    expect(result.charged).toBe(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  test('Auto Pay turned off after the run-start read: skipped under the claim', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-RACE2', billing_mode: 'monthly_membership' }];
+    mockFreshRow = { ...mockCustomers[0], autopay_enabled: false };
+    await BillingCron.processMonthlyBilling();
+    expect(logAutopay).toHaveBeenCalledWith('cust-RACE2', 'skipped_disabled', undefined);
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
   });
 
   test('per_application customer is skipped and never reaches the charge path', async () => {

@@ -233,6 +233,18 @@ function collectMonthlyDuesUnderLock(customer, period) {
     const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customer.id, period.monthKey, db);
     if (unresolvedOutcome.blocked) return { unresolvedOutcome };
 
+    // The cohort and lane guards ran on the run-start row, before this lock.
+    // A billing-type edit (customer page, Intelligence Bar) or an Auto Pay /
+    // service-pause change committed since would otherwise charge dues on a
+    // stale lane: re-read the customer under the claim and re-run the shared
+    // guards (monthly-dues-eligibility.js) on the fresh row.
+    const freshCustomer = await DuesEligibility.applyDuesCohort(db('customers').where('id', customer.id))
+      .first(...DuesEligibility.DUES_COHORT_COLUMNS);
+    const guardSkip = freshCustomer
+      ? (DuesEligibility.autopayGuard(freshCustomer, new Date()) || DuesEligibility.laneGuard(freshCustomer))
+      : { event: 'skipped_not_in_dues_cohort' };
+    if (guardSkip) return { guardSkip };
+
     const service = await require('./stripe');
     // Codex round-1 P1: shared attempt-scoped key derivation
     // (retry-collectibility.js) — the SAME source charge-now uses, so
@@ -626,6 +638,12 @@ const BillingCron = {
         // claim keeps it until a confirmed collection or a durable deferral row (below); a
         // hold skip manages it inside deferMonthlyForCollectionHold.
         if (!lockOutcome.holdSkipped && !lockOutcome.claimHeldElsewhere) pendingHoldDeferrals.delete(String(customer.id));
+
+        if (lockOutcome.guardSkip) {
+          await logAutopay(customer.id, lockOutcome.guardSkip.event, lockOutcome.guardSkip.details ? { details: lockOutcome.guardSkip.details } : undefined);
+          skipped++;
+          continue;
+        }
 
         if (lockOutcome.unresolvedOutcome) {
           await alertUnresolvedMonthlyOutcome(customer, monthKey, lockOutcome.unresolvedOutcome);
@@ -1292,7 +1310,11 @@ const BillingCron = {
           // of charged again.
           const lockOutcome = await withCustomerBillingLock(payment.customer_id, async () => {
             if (obligationMonth) {
-              const recheck = await classifyFailedPaymentRetry({ payment, customer, ctx });
+              // The customer row is re-read under the lock: a lane edit since
+              // the sweep's first read must change this verdict (the
+              // classifier's LANE_NOT_MONTHLY / paused / disabled guards).
+              const lockedCustomer = await db('customers').where({ id: payment.customer_id }).first();
+              const recheck = await classifyFailedPaymentRetry({ payment, customer: lockedCustomer || customer, ctx });
               if (recheck.reason === RETRY_REASONS.ALREADY_COLLECTED) {
                 return { alreadyCollected: recheck.collectedByPaymentId || payment.id };
               }

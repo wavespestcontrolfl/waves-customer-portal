@@ -69,7 +69,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -11891,6 +11891,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         })
           ? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)
           : null;
+        // The mint's in-lock check: the covered-member guard, then the
+        // customer's billing lane re-read under the lock against the lane
+        // this completion decided the amount from (a lane edit committed
+        // since entry 409s retryably, never settles on the old lane).
+        const mintRecheckInTrx = async (trx) => {
+          if (coveredMemberMintGuard) await coveredMemberMintGuard(trx);
+          await refuseBillingLaneDriftInTrx(trx, svc);
+        };
         // An unpriced membership plan visit billed at monthly_rate IS that
         // month's dues: stamp the month on the invoice so the month's other
         // plan visits see it covered (monthlyDuesCollected). The month is the
@@ -11961,7 +11969,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
-          recheckInTrx: coveredMemberMintGuard,
+          recheckInTrx: mintRecheckInTrx,
           // Live replay mints prove the row price hasn't moved since this
           // completion derived its amount (codex #3344 r2) — a WaveGuard
           // reprice landing mid-completion 409s and the retry bills fresh
@@ -12080,7 +12088,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? svc
               : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
             allowPriceMovement: false,
-            recheckInTrx: coveredMemberMintGuard,
+            recheckInTrx: mintRecheckInTrx,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,

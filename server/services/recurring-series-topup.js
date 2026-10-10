@@ -57,13 +57,17 @@ function horizonDaysFromEnv() {
 // v1's annual-prepay exclusion — see topupSeriesSkipReason in
 // admin-schedule.js), so a stale or borderline row here costs nothing
 // beyond one extra no-op per-series call.
-async function eligibleSeriesParentIds(conn) {
+// `customerId` narrows it to one customer's series (billing-mode-rules.js asks
+// which ongoing plans the nightly top-up would still extend); the sweep passes
+// none.
+async function eligibleSeriesParentIds(conn, { customerId = null } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   if (!cols.recurring_ongoing) return [];
-  return conn('scheduled_services')
+  const q = conn('scheduled_services')
     .where({ is_recurring: true, recurring_ongoing: true })
-    .whereNull('recurring_parent_id')
-    .pluck('id');
+    .whereNull('recurring_parent_id');
+  if (customerId) q.where('customer_id', customerId);
+  return q.pluck('id');
 }
 
 // Run one series through the top-up loop.

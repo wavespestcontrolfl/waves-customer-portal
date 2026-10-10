@@ -1454,6 +1454,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         || Object.keys(billingEdit.fields).length > 0) {
         await lockCustomerComms(trx, customerId);
       }
+      // …then the per-customer annual-prepay lock every term writer takes
+      // (billing-mode-change.js; billing edits only), still before the row.
+      await BillingModeChange.lockAnnualPrepayBeforeRow(trx, customerId, billingEdit.fields);
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
