@@ -165,13 +165,20 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
  * active hold a no-text statement placed on that number lifts, whichever call placed it (codex
  * #6112 r7 P2: a shared office or relay line gets one hold row per call, and the send boundary
  * blocks on ANY active row for the number). A hold whose source call carries a plain
- * disclaimed-number card (callback_number_needed WITHOUT the no_text_hold marker) is an independent
- * "that is not my number" statement and is left alone — that card has its own Resolve. Returns the
+ * disclaimed-number card (callback_number_needed WITHOUT the no_text_hold marker, or marked
+ * ownership_disclaimed) that is still open, in progress or dismissed is an independent "that is not my
+ * number" statement and is NOT touched: that card's own Resolve verifies the number. A RESOLVED
+ * ownership card already verified it, so that call's no-text hold joins the release (codex r9 P2). Returns the
  * source call ids whose holds cleared, so the caller can lift those calls' visit-level holds too.
  */
 async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, clearedBy = null, reason, conn = db }) {
   const key = holdPhoneKey(phoneE164);
   if (!key) return [];
+  // The exclusion is built only when a call id is given: a bare `? IS NULL` binding has no type
+  // Postgres can infer (42P18 rolled the whole release back; codex r9 P1).
+  const exceptSql = exceptCallLogId ? 'AND h.source_call_log_id <> ?' : '';
+  const params = [clearedBy ? String(clearedBy).slice(0, 100) : null, reason ? String(reason).slice(0, 100) : null, key];
+  if (exceptCallLogId) params.push(exceptCallLogId);
   const result = await conn.raw(
     `UPDATE ${TABLE} h
         SET cleared_at = now(),
@@ -180,14 +187,15 @@ async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, cle
             updated_at = now()
       WHERE h.phone_e164 = ?
         AND h.cleared_at IS NULL
-        AND (? IS NULL OR h.source_call_log_id <> ?)
+        ${exceptSql}
         AND EXISTS (SELECT 1 FROM triage_items t
                      WHERE t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs')
         AND NOT EXISTS (SELECT 1 FROM triage_items d
                          WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
+                           AND d.status <> 'resolved'
                            AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})
       RETURNING h.source_call_log_id`,
-    [clearedBy ? String(clearedBy).slice(0, 100) : null, reason ? String(reason).slice(0, 100) : null, key, exceptCallLogId, exceptCallLogId],
+    params,
   );
   return (result?.rows || []).map((r) => r.source_call_log_id);
 }

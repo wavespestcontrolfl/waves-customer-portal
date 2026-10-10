@@ -106,8 +106,18 @@ describe('clearNoTextHoldsForPhone', () => {
     expect(sql).toContain("d.reason_code = 'callback_number_needed'");
     // a plain disclaimer card OR a dual-signal card marked ownership_disclaimed keeps that call's hold
     expect(sql).toContain("(COALESCE(d.payload->>'no_text_hold', '') <> 'true' OR COALESCE(d.payload->>'ownership_disclaimed', '') = 'true')");
-    expect(sql).toContain('h.source_call_log_id <> ?');
-    expect(params).toEqual(['office', 'verified_same_number', '+19415551234', 7, 7]);
+    expect(sql).toContain('AND h.source_call_log_id <> ?');
+    expect(sql).not.toContain('IS NULL OR');
+    expect(sql).toContain("d.status <> 'resolved'"); // a RESOLVED ownership card verified the number: that call joins the release
+    expect(params).toEqual(['office', 'verified_same_number', '+19415551234', 7]);
+  });
+
+  test('without an excluded call the exclusion clause is omitted entirely (no untyped null binding)', async () => {
+    const raw = jest.fn(async () => ({ rows: [] }));
+    await Holds.clearNoTextHoldsForPhone({ phoneE164: '+19415551234', clearedBy: 'office', reason: 'verified_same_number', conn: { raw } });
+    const [sql, params] = raw.mock.calls[0];
+    expect(sql).not.toContain('source_call_log_id <>');
+    expect(params).toEqual(['office', 'verified_same_number', '+19415551234']);
   });
 
   test('a non-dialable number clears nothing', async () => {

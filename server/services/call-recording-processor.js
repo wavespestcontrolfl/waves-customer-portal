@@ -11013,6 +11013,11 @@ const CallRecordingProcessor = {
     // scheduled_services.callback_number_hold_at once the visit is booked so
     // the reminder cron can honor the same hold days later.
     let callbackNumberNeededHoldActive = false;
+    // What the SMS gate read BEFORE a number hold forced v2SmsBlocked true (the TCPA verdict in
+    // enforce mode, nothing in shadow). Restored when the office's "Line can get texts" lands while
+    // this pass is still running (codex #6112 r9 P2), so the per-pass blockers follow the durable hold.
+    let v2SmsBlockedBeforeHold = false;
+    let v2SmsClearedByImpliedConsentBeforeHold = false;
     // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
     // the decision point — the same statement that flips the boolean above
     // — before the card is published and before any further awaited work,
@@ -11772,6 +11777,8 @@ const CallRecordingProcessor = {
           // keeps the original behavior.
           const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);
           if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {
+            v2SmsBlockedBeforeHold = v2SmsBlocked;
+            v2SmsClearedByImpliedConsentBeforeHold = v2SmsClearedByImpliedConsent;
             v2SmsBlocked = true;
             v2SmsClearedByImpliedConsent = false;
             // P1-C: this hold must outlive the confirmation send — the
@@ -12115,6 +12122,8 @@ const CallRecordingProcessor = {
         // below is about to file from, so shadow mode behaves exactly like
         // enforce mode for this one signal.
         if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
+          v2SmsBlockedBeforeHold = v2SmsBlocked;
+          v2SmsClearedByImpliedConsentBeforeHold = v2SmsClearedByImpliedConsent;
           v2SmsBlocked = true;
           v2SmsClearedByImpliedConsent = false;
           callbackNumberNeededHoldActive = true;
@@ -13065,6 +13074,8 @@ const CallRecordingProcessor = {
         // carried on with SMS enabled; codex r7 P1): a known no-text line would get later texts and
         // the review reason would point at a card that was never inserted. Arm hold + card here,
         // in one transaction, with the same fence and the same abandon-on-lost-claim.
+        v2SmsBlockedBeforeHold = v2SmsBlocked;
+        v2SmsClearedByImpliedConsentBeforeHold = v2SmsClearedByImpliedConsent;
         v2SmsBlocked = true;
         v2SmsClearedByImpliedConsent = false;
         callbackNumberNeededHoldActive = true;
@@ -13072,6 +13083,21 @@ const CallRecordingProcessor = {
         if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2CanonicalExtraction }))) return abandonToPeer('the disclaimed-number hold write');
       } else {
         await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });
+        // "Line can get texts" may have landed while this pass ran: the route cleared the durable
+        // hold and closed the early card. Follow it — the per-pass blockers go back to what the SMS
+        // gate read before the hold, so the confirmation and dropped-call texts are not skipped on a
+        // line the office just verified (codex r9 P2). Read after the locked refresh; a read error
+        // keeps the hold (fail closed).
+        try {
+          const Holds = require('./disclaimed-number-holds');
+          const own = await db(Holds.TABLE).where({ source_call_log_id: call.id }).orderBy('held_at', 'desc').first('cleared_at');
+          if (own && own.cleared_at) {
+            callbackNumberNeededHoldActive = false;
+            v2SmsBlocked = v2SmsBlockedBeforeHold;
+            v2SmsClearedByImpliedConsent = v2SmsClearedByImpliedConsentBeforeHold;
+            logger.info(`[call-proc] no-text hold for ${maskSid(callSid)} was released by the office during the pass — per-pass SMS blockers follow it`);
+          }
+        } catch (_e) { /* hold stays: fail closed */ }
       }
       if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
     }

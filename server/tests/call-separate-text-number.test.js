@@ -259,6 +259,17 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
       'await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });']) expect(section).toContain(line);
   });
 
+  test('a "Line can get texts" release that lands during the pass is honored: the per-pass blockers go back to the pre-hold SMS verdict', () => {
+    const at = src.indexOf('await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });');
+    const section = src.slice(at, at + 1500);
+    expect(section).toContain("const own = await db(Holds.TABLE).where({ source_call_log_id: call.id }).orderBy('held_at', 'desc').first('cleared_at');");
+    expect(section).toContain('if (own && own.cleared_at) {');
+    expect(section).toContain('callbackNumberNeededHoldActive = false;');
+    expect(section).toContain('v2SmsBlocked = v2SmsBlockedBeforeHold;');
+    // every hold site records the pre-hold verdict first
+    expect(src.split('v2SmsBlockedBeforeHold = v2SmsBlocked;').length - 1).toBe(3);
+  });
+
   test('"Line can get texts" releases every no-text hold on the verified line, not only this call\'s, and leaves plain disclaimed-number holds alone', () => {
     const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
     const at = holds.indexOf('async function clearNoTextHoldsForPhone(');
