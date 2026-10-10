@@ -3338,6 +3338,7 @@ module.exports = {
   serviceMayForceAssessment,
   isWholeStructureService,
   UNIT_LEVEL_WORDING_RE,
+  EXISTING_SERVICE_INTENTS,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,

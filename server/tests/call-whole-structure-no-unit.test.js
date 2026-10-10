@@ -468,6 +468,10 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, pain_points: ['slab pre-treat + trenching'] }, commercial)).toBe(false);
     expect(run({ ...slab, call_summary: 'Slab pre-treat and annual termite protection plan' }, commercial)).toBe(false);
     expect(run({ ...slab, pain_points: ['slab pre-treat', 'termite warranty renewal'] }, commercial)).toBe(false);
+    // Existing-structure context is a cue whatever the treatment word is (r14).
+    expect(run({ ...slab, call_summary: 'Slab pre-treat plus soil treatment around the existing home' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat plus a termite barrier around the existing structure' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['slab pre-treat', 'barrier treatment of the building'] }, commercial)).toBe(false);
     // Plain pre-treat wording still drops the card.
     expect(run({ ...slab, call_summary: 'Termite protection before the slab pour' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'New-construction termite protection' }, commercial)).toBe(true);
@@ -476,6 +480,17 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(run({ ...slab, call_summary: 'Termidor pre-slab treatment' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Apply liquid termiticide before the slab pour' }, commercial)).toBe(true);
     expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, commercial)).toBe(true);
+  });
+
+  test('only a new-service intent can drop the card (r14)', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    const withIntent = (service_intent) => ({ property: { property_type: 'commercial' }, service_request: { service_intent } });
+    const callback = { ...slab, call_summary: 'Existing customer needs a pre-treatment callback' };
+    expect(run(callback, withIntent('follow_up_existing_service'))).toBe(false);
+    expect(run(callback, withIntent('complaint_or_callback'))).toBe(false);
+    expect(run(slab, withIntent('cancellation_request'))).toBe(false);
+    expect(run(slab, withIntent('preventative_one_time'))).toBe(true);
+    expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, withIntent('preventative_one_time'))).toBe(true);
   });
 
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
