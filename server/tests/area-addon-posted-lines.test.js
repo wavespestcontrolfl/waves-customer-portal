@@ -123,6 +123,10 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
       expect(() => rows.assertPostedAreaAddOnsSold(both, [host, web()], { totals: { finalPrice: both.prices[WEB] - 10, appointmentDiscountDollars: 160 } }))
         .toThrow(expect.objectContaining({ code: 'AREA_ADDON_NO_DISCOUNT' }));
     });
+    test('a share allocated to a PRIMARY add-on line is refused too', () => {
+      expect(() => rows.assertPostedAreaAddOnsSold(both, [{ ...web(), credit: 6 }, { key: 'one_time_pest', price: 400 }], { totals: { finalPrice: 400 + both.prices[WEB] - 20, appointmentDiscountDollars: 20 } }))
+        .toThrow(expect.objectContaining({ code: 'AREA_ADDON_NO_DISCOUNT' }));
+    });
     test('no appointment discount: nothing is judged; the route hands the totals over (source)', () => {
       expect(() => rows.assertPostedAreaAddOnsSold(both, [web()], { totals: { finalPrice: 0, appointmentDiscountDollars: 0 } })).not.toThrow();
       expect(router._test.postedAreaAddOnTotals({ finalPrice: 59, appointmentDiscount: { discountDollars: 30 } })).toEqual({ finalPrice: 59, appointmentDiscountDollars: 30 });
@@ -197,13 +201,15 @@ describe('the staff booking transaction asks it of the locked row, before anythi
 
   test('the posted lines are the visit\'s own service and each add-on line with its gross price', () => {
     expect(postedAreaAddOnLines({ primaryServiceKey: WEB, addonLines: [{ serviceKey: BED, base: 99, price: 89 }, { serviceKey: null, base: null }] }))
-      .toEqual([{ key: WEB, price: null, discount: undefined }, { key: BED, price: 99, discount: undefined, credit: undefined }, { key: null, price: null, discount: undefined, credit: undefined }]);
+      .toEqual([{ key: WEB, price: null, discount: undefined, credit: undefined }, { key: BED, price: 99, discount: undefined, credit: undefined }, { key: null, price: null, discount: undefined, credit: undefined }]);
     // Codex round 20: the visit's own service carries its gross price too, so a primary add-on at a stale price is refused.
-    expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, addonLines: [] })).toEqual([{ key: WEB, price: 89, discount: undefined }]);
+    expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, addonLines: [] })).toEqual([{ key: WEB, price: 89, discount: undefined, credit: undefined }]);
+    // Codex round 59: the primary line's share of an appointment discount rides along too.
+    expect(postedAreaAddOnLines({ primaryServiceKey: WEB, primaryBase: 89, primaryAppointmentCreditDollars: 12, addonLines: [] })).toEqual([{ key: WEB, price: 89, discount: undefined, credit: 12 }]);
     // Codex round 52: each line's own discount rides along, so the guard can refuse a discounted add-on.
     const lineDiscount = { discountType: 'fixed', discountAmount: 10, discountDollars: 10 };
     expect(postedAreaAddOnLines({ primaryServiceKey: 'one_time_pest', primaryBase: 150, primaryDiscount: lineDiscount, addonLines: [{ serviceKey: WEB, base: 59, price: 49, discount: lineDiscount }] }))
-      .toEqual([{ key: 'one_time_pest', price: 150, discount: lineDiscount }, { key: WEB, price: 59, discount: lineDiscount, credit: undefined }]);
+      .toEqual([{ key: 'one_time_pest', price: 150, discount: lineDiscount, credit: undefined }, { key: WEB, price: 59, discount: lineDiscount, credit: undefined }]);
   });
 
   test('source order: the locked read, then the guard, then the first insert; the locked row carries pricing_authority', () => {
@@ -516,6 +522,8 @@ describe('assertAreaAddOnsNotYetBooked', () => {
     const editLock = src.indexOf('await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);');
     expect(editLock).toBeGreaterThan(0);
     expect(editLock).toBeLessThan(src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);'));
+    // Codex round 59: and before the stop locks of the address change
+    expect(editLock).toBeLessThan(src.indexOf('if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);'));
   });
 
   test('the reads run under a transaction lock keyed on the estimate (two bookings of one estimate are serialized)', async () => {

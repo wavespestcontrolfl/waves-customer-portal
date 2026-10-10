@@ -2063,7 +2063,7 @@ async function requestedAreaAddOnServiceKeys(database, serviceId, serviceAddons)
 // The visit's own service and each add-on line of a staff booking as the area add-on guard reads them (catalog key; the gross
 // price of the line, the visit's own included: a primary add-on booked at a stale price is refused too): area-addon-visit-rows assertPostedAreaAddOnsSold.
 const postedAreaAddOnLines = (pricing) => [
-  { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null, discount: pricing.primaryDiscount || undefined },
+  { key: pricing.primaryServiceKey, price: pricing.primaryBase ?? null, discount: pricing.primaryDiscount || undefined, credit: pricing.primaryAppointmentCreditDollars },
   // `credit`: the share of an APPOINTMENT discount the stack put on this line (an add-on takes none).
   ...pricing.addonLines.map((line) => ({ key: line.serviceKey, price: line.base, discount: line.discount || undefined, credit: line.appointmentCreditDollars })),
 ];
@@ -2906,6 +2906,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   let finalAddonLines = addonLines;
   let appointmentDiscount = null;
   let finalAppointmentDollars = 0;
+  // The share of the appointment discount the stack puts on the PRIMARY line (0 with no stack): the area add-on guard reads it.
+  let finalPrimaryAppointmentCredit = 0;
   let resolvedAppointmentDiscount = null;
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
@@ -3028,6 +3030,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
           : { ...line, price: restated.net, appointmentCreditDollars: restated.appointmentDiscountDollars };
       });
       finalAppointmentDollars = stacked.appointmentDiscountDollars;
+      finalPrimaryAppointmentCredit = stacked.lines[0].appointmentDiscountDollars || 0;
       finalPrice = stacked.total;
     }
   }
@@ -3042,6 +3045,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     primaryServiceKey: serviceRecord?.service_key || null,
     primaryServiceCategory: serviceRecord?.category || null,
     primaryDiscount: finalPrimaryDiscount,
+    primaryAppointmentCreditDollars: finalPrimaryAppointmentCredit,
     addonLines: finalAddonLines,
     appointmentDiscount: appointmentDiscount ? {
       discountId: appointmentDiscount.id,
@@ -14428,6 +14432,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // combined lock and customer row first now runs to completion before
       // the other can proceed.
       if (commsPeek) await trx('customers').where({ id: commsPeek.customer_id }).forUpdate().first('id');
+      // Lock order: the estimate's add-on lock BEFORE the stop locks and the place locks an address change takes (the
+      // booking takes the estimate lock first and reaches the stop lock later, through maybeGroupRow).
+      if (addressPlan) {
+        const linked = await trx('scheduled_services').where({ id: req.params.id }).first('source_estimate_id');
+        await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);
+      }
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
       if (addressPartnersQuery) {
         const lockedPartners = await addressPartnersQuery.clone();
@@ -14742,11 +14752,6 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
 
       // The edited visit's add-ons are judged at the destination as the save will leave them (its rows are replaced below).
       // (It rides the plan: `editedVisit`, read by appointment-address assertAreaAddOnLimitsAtDestination.)
-      // Lock order: the estimate's add-on lock BEFORE the place locks the address change takes (the booking's order).
-      if (addressPlan) {
-        const linked = await trx('scheduled_services').where({ id: req.params.id }).first('source_estimate_id');
-        await areaAddOnRows.lockEstimateAddOns(trx, linked && linked.source_estimate_id);
-      }
       if (addressPlan) addressPlan.editedVisit = { id: req.params.id, ownKey: updates.service_key_snapshot, scheduledDate: updates.scheduled_date, rowKeys: Array.isArray(replaceAddons) ? replaceAddons.map((line) => line && line.serviceKey) : undefined };
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
