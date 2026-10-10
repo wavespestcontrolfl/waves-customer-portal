@@ -179,6 +179,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   // exist: the insecticide row when a spot insecticide was applied, else the feeding row. Its one visible-change
   // sentence is reserved first, so the first row's long by-next-visit sentence gives way when the two would pass the cap.
   const plan = stage1ExpectPlan(rows, products);
+  let stage1Used = false;
   if (plan) {
     const lineOf = (row, key) => row.sentences.find((s) => s && s.key === key && clean(s.text));
     const piece = (row, key, sentence) => ({
@@ -198,6 +199,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
       kept.push(piece(plan.second, 'visibleChange', secondLine));
       words += reserve;
       rowsUsed = MAX_EXPECT_ROWS;
+      stage1Used = true;
     }
   }
   for (const row of rows) {
@@ -231,7 +233,8 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     else picked.push({ id: piece.id, keys: [piece.key] });
   });
   const sentences = kept.map((piece) => ({ key: piece.key, text: piece.text, needsVisit: piece.needsVisit, gapBased: piece.gapBased }));
-  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences };
+  // `stage1` marks a block built with the stage 1 second line; it freezes with the entry so the PDF key can follow it.
+  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences, ...(stage1Used ? { stage1: true } : {}) };
 }
 
 /**
@@ -254,15 +257,17 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   let expectSentences = [];
+  let stage1Expect = false;
   try {
     const expect = buildWhatToExpect(reportV2, ctx, deps);
     fields.whatToExpect = expect.text;
     expectRows = expect.rows;
     expectSentences = expect.sentences;
+    stage1Expect = expect.stage1 === true;
   } catch (err) {
     logger.warn(`[lawn-copy-v6] expectations failed: ${err.message}`);
   }
-  return { fields, expectRows, expectSentences };
+  return { fields, expectRows, expectSentences, ...(stage1Expect ? { stage1Expect: true } : {}) };
 }
 
 // ── Freeze (first writer wins, per assessment) ─────────────────────────────
@@ -389,6 +394,7 @@ async function resolveLawnCopyV6ForRender({
     expectRows: built.expectRows,
     // What the by-next-visit sentences were timed for (replayFields).
     expectSentences: built.expectSentences,
+    ...(built.stage1Expect ? { stage1Expect: true } : {}),
     nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);

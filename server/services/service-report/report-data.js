@@ -24,7 +24,7 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
-const { stage1PayloadFlag, stage1PdfStamp, stage1TechTips } = require('./lawn-report-stage1');
+const { stage1PayloadFlag, stage1KeyStamp, stage1TechTips } = require('./lawn-report-stage1');
 const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
@@ -2889,8 +2889,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   irrigationStamp += copyFixesPdfStamp();
   // The lawn report polish (GATE_LAWN_REPORT_POLISH) derives weekly inches from the owner's rate table, so its PDF key moves with it.
   irrigationStamp += polishPdfStamp();
-  // The lawn report stage 1 fixes (GATE_LAWN_REPORT_STAGE1_FIXES) change the damage finding and "What to expect", so its PDF key moves with it.
-  irrigationStamp += stage1PdfStamp();
+  // The lawn report stage 1 fixes (GATE_LAWN_REPORT_STAGE1_FIXES) change the damage finding and "What to expect", so its PDF key moves with it
+  // (and follows a frozen v6 entry that carries the second line, whatever the gate says now).
+  irrigationStamp += await stage1KeyStamp(service, knex);
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.

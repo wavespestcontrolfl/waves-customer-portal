@@ -25,9 +25,43 @@ function stage1Live() {
   return typeof featureGates.lawnReportStage1FixesLive === 'function' && featureGates.lawnReportStage1FixesLive();
 }
 
-/** The PDF cache-key part: moves the key only while the gate is live. */
-function stage1PdfStamp() {
-  return stage1Live() ? ':s1=1' : '';
+/**
+ * The PDF cache-key part. The gate itself moves the key (':s1=1'). The "What to expect" second line is also FROZEN in the
+ * v6 copy (structured_notes.lawnCopyV6[assessment].stage1Expect), and a render replays it whatever the gate says, so a
+ * record that carries a frozen stage 1 entry keeps a key part after the gate is unset (':s1f=1'): a PDF cached before the
+ * flip is never served for a document that now prints the second line. Pure; `notes` is the record's structured_notes.
+ */
+function stage1PdfStamp(notes = null) {
+  if (stage1Live()) return ':s1=1';
+  return frozenStage1Expect(notes) ? ':s1f=1' : '';
+}
+
+/** True when any frozen v6 copy entry of the record carries the stage 1 marker. */
+function frozenStage1Expect(notes) {
+  let value = notes;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return false; }
+  }
+  const map = value && typeof value === 'object' ? value.lawnCopyV6 : null;
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return false;
+  return Object.values(map).some((entry) => entry && typeof entry === 'object' && entry.stage1Expect === true);
+}
+
+/**
+ * The key part for a render: from the SAME service row the render loads when it carries structured_notes, from the
+ * record only for a partial lookup row (and only while the gate is off: a live gate needs no read). An unreadable record
+ * stamps a one-off value (re-render, never a stale hit).
+ */
+async function stage1KeyStamp(service, knex) {
+  if (stage1Live()) return ':s1=1';
+  try {
+    const notes = service && Object.prototype.hasOwnProperty.call(service, 'structured_notes')
+      ? service.structured_notes
+      : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
+    return stage1PdfStamp(notes);
+  } catch {
+    return `:s1f=err${require('crypto').randomBytes(4).toString('hex')}`;
+  }
 }
 
 /** The payload key the web page reads (applied card, hero contact lines): lawn only. */
@@ -47,6 +81,8 @@ function isSpotMethod(value) {
   if (/trunk|inject|foliar|pin|granular|bait|gel|glue|station|fog|ulv|broadcast|perimeter|band/.test(normalized)) return false;
   return normalized.includes('spot');
 }
+
+const INSECTICIDE_FAMILY = 'insecticide';
 
 // ── 1. The damage finding names the pest ────────────────────────────────────
 
@@ -85,14 +121,25 @@ function spotSqft(app) {
   return value != null && value > 0 && (unit === 'sqft' || unit === 'squarefeet') ? value : null;
 }
 
+// The expectation table's own mode for a product (config/lawn-expectations.js): a product locked to "preventive"
+// (Acelepryn) is never a treatment of a finding, so it never produces a "found and treated" sentence. A product the table
+// does not map has no known mode, so it counts as none. Curative = in the insecticide family and not preventive-locked.
+function isCurativeInsecticide(name) {
+  const { classifyLawnProduct } = require('./lawn-expectations');
+  const cls = classifyLawnProduct(name);
+  return Boolean(cls) && cls.family === INSECTICIDE_FAMILY && cls.modeLock !== 'preventive';
+}
+
 /**
  * The first spot insecticide row whose recorded target is a known pest, or null:
- * { kind: 'chinch' | 'caterpillars', app, sqft }. A row with an inferred method (a legacy row) is never a spot row.
+ * { kind: 'chinch' | 'caterpillars', app, sqft }. A row with an inferred method (a legacy row) is never a spot row, and a
+ * row whose product the expectation table locks to preventive mode never counts.
  */
 function targetedSpotInsecticide(applications, classifyProduct) {
   for (const app of Array.isArray(applications) ? applications : []) {
     if (!app || app.methodInferred === true || !isSpotMethod(appMethod(app))) continue;
     if (classifyProduct(app).kind !== 'insecticide') continue;
+    if (!isCurativeInsecticide(appProductName(app))) continue;
     const targets = Array.isArray(app.targets) ? app.targets : [];
     const kind = targets.map(pestKindOfTarget).find(Boolean);
     if (kind) return { kind, app, sqft: spotSqft(app) };
@@ -125,8 +172,15 @@ function damageWords(applications, classifyProduct) {
   };
   if (hit.sqft != null) {
     const copyFixes = typeof featureGates.lawnReportCopyFixesLive === 'function' && featureGates.lawnReportCopyFixesLive();
-    const what = copyFixes ? TIE_PRODUCT_PHRASES.insecticide : appProductName(hit.app);
-    if (what) words.wavesAction = `Applied ${what} to about ${Math.round(hit.sqft).toLocaleString('en-US')} sq ft.`;
+    const area = Math.round(hit.sqft).toLocaleString('en-US');
+    const name = copyFixes ? null : appProductName(hit.app);
+    // The catalog name is staff-edited text: the composed sentence goes through the same full customer-copy screen the other
+    // sentence composers use (banned wording, access codes), and a name that fails it falls back to the category phrase.
+    const named = name ? `Applied ${name} to about ${area} sq ft.` : null;
+    const { customerCopyViolations } = require('./technician-report-copy');
+    words.wavesAction = named && customerCopyViolations(named).length === 0 && customerCopyViolations(name).length === 0
+      ? named
+      : `Applied ${TIE_PRODUCT_PHRASES.insecticide} to about ${area} sq ft.`;
   }
   return words;
 }
@@ -157,7 +211,6 @@ function applyStage1Fixes(v2, args, classifyProduct) {
 
 // The expectation rows that can print second, in priority order, by the engine's row family: the insecticide row when
 // a spot insecticide was applied, else the feeding row. Both families already exist in config/lawn-expectations.js.
-const INSECTICIDE_FAMILY = 'insecticide';
 const FEED_FAMILIES = Object.freeze(['granular_fertilizer', 'potassium_feed']);
 
 const hasLine = (row, key) => Boolean(row && Array.isArray(row.sentences) && row.sentences.some((s) => s && s.key === key && clean(s.text)));
@@ -177,8 +230,10 @@ function stage1ExpectPlan(rows, products) {
   const first = list[0];
   const spotInsecticide = (Array.isArray(products) ? products : [])
     .some((p) => p && p.kind === 'insecticide' && isSpotMethod(p.method));
+  // The insecticide line is the CURATIVE row only (owner 2026-10-09): a spot insecticide with no target, or a product the
+  // table locks to preventive, gets no insecticide line and the feeding row is considered instead.
   const wanted = [
-    ...(spotInsecticide ? [(row) => row.family === INSECTICIDE_FAMILY] : []),
+    ...(spotInsecticide ? [(row) => row.id === 'insecticide_curative'] : []),
     ...FEED_FAMILIES.map((family) => (row) => row.family === family),
   ];
   for (const matches of wanted) {
@@ -218,6 +273,8 @@ function stage1TechTips(tips, { serviceLine, reportV2 } = {}) {
 module.exports = {
   stage1Live,
   stage1PdfStamp,
+  stage1KeyStamp,
+  frozenStage1Expect,
   stage1PayloadFlag,
   isSpotMethod,
   pestKindOfTarget,

@@ -65,6 +65,18 @@ describe('the gate reader', () => {
     expect(stage1.stage1PdfStamp()).toBe(':s1=1');
   });
 
+  test('gate off, a frozen stage 1 copy entry: the key part still follows the record (:s1f=1)', () => {
+    gateOff();
+    const notes = (entry) => JSON.stringify({ lawnCopyV6: { 'la-1': entry } });
+    expect(stage1.stage1PdfStamp(notes({ v: 1, stage1Expect: true }))).toBe(':s1f=1');
+    expect(stage1.stage1PdfStamp({ lawnCopyV6: { 'la-1': { stage1Expect: true } } })).toBe(':s1f=1');
+    expect(stage1.stage1PdfStamp(notes({ v: 1 }))).toBe('');
+    expect(stage1.stage1PdfStamp('not json')).toBe('');
+    expect(stage1.stage1PdfStamp(null)).toBe('');
+    gateOn();
+    expect(stage1.stage1PdfStamp(notes({ v: 1 }))).toBe(':s1=1');
+  });
+
   test('a partial feature-gates mock means off, never a crash', () => {
     jest.isolateModules(() => {
       jest.doMock('../config/feature-gates', () => ({}));
@@ -168,6 +180,38 @@ describe('change 1: the damage finding names the targeted pest', () => {
     }
   });
 
+  test('a product the expectation table locks to preventive (Acelepryn) with a target never makes the found-and-treated card', () => {
+    gateOn();
+    const acelepryn = { ...ARENA, product: { name: 'Acelepryn Insecticide', category: 'insecticide', active_ingredient: 'chlorantraniliprole' }, targets: ['Fall armyworms'] };
+    const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [acelepryn] }));
+    expect(card).toMatchObject(OLD);
+    expect(card.wavesAction).toBe('Documented the areas for comparison next visit.');
+  });
+
+  test('a product the expectation table does not map has no known mode: unchanged', () => {
+    gateOn();
+    const unmapped = { ...ARENA, product: { name: 'Unlisted Insecticide 9000', category: 'insecticide' } };
+    expect(damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [unmapped] }))).toMatchObject(OLD);
+  });
+
+  test('a mapped product whose staff-edited name fails the screen falls back to the category phrase', () => {
+    gateOn();
+    const real = require('../services/service-report/lawn-expectations');
+    const spy = jest.spyOn(real, 'classifyLawnProduct').mockReturnValue({ family: 'insecticide', modeLock: undefined });
+    try {
+      for (const name of ['Arena (safe for pets) 50 WDG', 'Arena gate code 4821', 'Arena guaranteed results']) {
+        const app = { ...ARENA, product: { ...ARENA.product, name } };
+        const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [app] }));
+        expect(card.wavesAction).toBe(`Applied ${TIE_PRODUCT_PHRASES.insecticide} to about 500 sq ft.`);
+        expect(customerCopyViolations(card.wavesAction)).toEqual([]);
+        expect(card.wavesAction).not.toMatch(/4821|safe|guarantee/i);
+      }
+      // a clean name still prints
+      const clean = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [ARENA] }));
+      expect(clean.wavesAction).toBe('Applied Arena 50 WDG to about 500 sq ft.');
+    } finally { spy.mockRestore(); }
+  });
+
   test('no damage finding on the report (stress card healthy): nothing is added', () => {
     gateOn();
     const healthy = baseAssessment({ scores: { ...baseAssessment().scores, stressDamage: 90 } });
@@ -258,6 +302,23 @@ describe('change 2: a second "What to expect" line', () => {
     expect(out.rows.map((r) => r.id)).toEqual(['herbicide_celsius', 'insecticide_curative']);
   });
 
+  test('curative insecticide row only: a spot insecticide with no target gets no insecticide line; the feeding row prints', () => {
+    gateOn();
+    const untargeted = { ...ARENA_P, targets: [] };
+    const out = build([CELSIUS, untargeted, FEED]);
+    expect(out.rows.map((r) => r.id)).toEqual(['herbicide_celsius', 'granular_fertilizer']);
+    expect(out.text).not.toMatch(/insects/);
+    // and with no feeding product either, the engine's own selection stands (the weed line alone)
+    expect(build([CELSIUS, untargeted]).rows.map((r) => r.id)).toEqual(['herbicide_celsius']);
+  });
+
+  test('curative insecticide row only: a preventive-locked product (Acelepryn) with a target gets no insecticide line', () => {
+    gateOn();
+    const acelepryn = { name: 'Acelepryn Insecticide', kind: 'insecticide', method: 'spot_treatment', targets: ['Fall armyworms'] };
+    const out = build([CELSIUS, acelepryn, FEED]);
+    expect(out.rows.map((r) => r.id)).toEqual(['herbicide_celsius', 'granular_fertilizer']);
+  });
+
   test('an insecticide that was not a spot row does not take the second line; the feeding row does', () => {
     gateOn();
     const out = build([CELSIUS, { ...ARENA_P, method: 'broadcast_spray' }, FEED]);
@@ -310,6 +371,14 @@ describe('change 2: a second "What to expect" line', () => {
     const built = v6.buildLawnCopyV6({ snapshot: {}, treatment: { products: [CELSIUS, ARENA_P] } }, ctx);
     expect(built.expectSentences.map((s) => s.key)).toEqual(['visibleChange', 'visibleChange']);
     expect(built.fields.whatToExpect).toMatch(/insects causing the damage\.$/);
+    expect(built.stage1Expect).toBe(true);
+  });
+
+  test('the freeze marker is set only for a block built with the second line', () => {
+    gateOn();
+    expect(v6.buildLawnCopyV6({ snapshot: {}, treatment: { products: [CELSIUS] } }, ctx)).not.toHaveProperty('stage1Expect');
+    gateOff();
+    expect(v6.buildLawnCopyV6({ snapshot: {}, treatment: { products: [CELSIUS, ARENA_P] } }, ctx)).not.toHaveProperty('stage1Expect');
   });
 });
 
@@ -510,6 +579,22 @@ describe('payload flag, PDF key and tips on the real report builder (in-memory r
     expect(await sig('tree_shrub')).toBe('');
     gateOff();
     expect(await sig('lawn')).toBe(off);
+  });
+
+  test('gate off, a record whose frozen v6 copy carries the stage 1 second line: the PDF key still moves; one without it does not', async () => {
+    const notes = (entry) => JSON.stringify({ lawnCopyV6: { 'la-cur': entry } });
+    const sig = async (structuredNotes) => (await resolveCanonicalLawnRender(
+      { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-10-08', structured_notes: structuredNotes },
+      makeKnex(fixtures()),
+    )).signature;
+    gateOff();
+    const plain = await sig(notes({ v: 1, assessmentId: 'la-cur' }));
+    const frozen = await sig(notes({ v: 1, assessmentId: 'la-cur', stage1Expect: true }));
+    expect(frozen).not.toBe(plain);
+    expect(await sig(undefined)).toBe(plain);
+    gateOn();
+    // live gate and gate off with the frozen marker are different documents (the damage card), so different keys
+    expect(await sig(notes({ v: 1, assessmentId: 'la-cur', stage1Expect: true }))).not.toBe(frozen);
   });
 
   describe('tips from your tech beside a 20-minute schedule on file', () => {
