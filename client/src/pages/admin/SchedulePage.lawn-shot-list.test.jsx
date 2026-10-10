@@ -24,6 +24,7 @@ const service = {
 
 let assessRequests;
 let shotListEnabled;
+let labelPickEnabled;
 let holdRead;
 let readResult;
 let lookupGate;
@@ -47,6 +48,7 @@ class FixtureImage {
 }
 
 beforeEach(async () => {
+  labelPickEnabled = false;
   assessRequests = [];
   holdRead = null;
   readResult = null;
@@ -67,7 +69,7 @@ beforeEach(async () => {
     if (url.includes('lawn-assessment/service/')) {
       if (lookupFails) throw new Error('lookup failed');
       if (lookupGate) await lookupGate;
-      data = shotListEnabled ? { shotListEnabled: true, assessment: null } : { assessment: null };
+      data = shotListEnabled ? { shotListEnabled: true, ...(labelPickEnabled ? { labelPickEnabled: true } : {}), assessment: null } : { assessment: null };
     }
     if (url.includes('lawn-assessment/history')) data = { history: [] };
     if (url.includes('lawn-assessment/assess')) {
@@ -406,5 +408,69 @@ describe('gate off', () => {
       { data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'trouble' },
       { data: 'cGhvdG8=', mimeType: 'image/jpeg' },
     ]);
+  });
+});
+
+describe('GATE_LAWN_PHOTO_LABEL_PICK (labelPickEnabled from the lookup)', () => {
+  beforeEach(() => { shotListEnabled = true; });
+
+  it('gate off: no customer-label chooser and the payload has no labelKey, however the slots are set', async () => {
+    mount();
+    await addFiles(['a', 'b']);
+    fireEvent.change(await screen.findByLabelText('Slot for photo 1'), { target: { value: 'shade' } });
+    expect(screen.queryByLabelText(/Shown to the customer as/)).toBeNull();
+    expect(screen.queryByText('Customer sees')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(assessRequests).toHaveLength(1));
+    expect(assessRequests[0].photos).toEqual([
+      { data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'shade' },
+      { data: 'cGhvdG8=', mimeType: 'image/jpeg' },
+    ]);
+  });
+
+  it('gate on: a chooser on each photo in a slot, defaulting to the slot wording, over the eight customer labels', async () => {
+    labelPickEnabled = true;
+    mount();
+    await addFiles(['a', 'b']);
+    fireEvent.change(await screen.findByLabelText('Slot for photo 1'), { target: { value: 'shade' } });
+    const chooser = await screen.findByLabelText('Shown to the customer as, photo 1');
+    expect(chooser.value).toBe('shade');
+    expect(Array.from(chooser.options).map((o) => o.textContent)).toEqual([
+      'Front yard', 'Back yard', 'Side yard', 'Close-up', 'Blade close-up', 'Sunny edge', 'Shaded area', 'Trouble spot',
+    ]);
+    // A photo with no slot has nothing to override.
+    expect(screen.queryByLabelText('Shown to the customer as, photo 2')).toBeNull();
+  });
+
+  it('gate on: an untouched chooser sends no labelKey; a changed one sends the shot key beside the zone', async () => {
+    labelPickEnabled = true;
+    mount();
+    await addFiles(['a', 'b']);
+    fireEvent.change(await screen.findByLabelText('Slot for photo 1'), { target: { value: 'shade' } });
+    fireEvent.change(screen.getByLabelText('Slot for photo 2'), { target: { value: 'front' } });
+    fireEvent.change(await screen.findByLabelText('Shown to the customer as, photo 1'), { target: { value: 'close_up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(assessRequests).toHaveLength(1));
+    expect(assessRequests[0].photos).toEqual([
+      { data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'shade', labelKey: 'close_up' },
+      { data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'front' },
+    ]);
+  });
+
+  it('gate on: choosing the slot wording again clears the pick, and moving the photo to another slot drops it', async () => {
+    labelPickEnabled = true;
+    mount();
+    await addFiles(['a']);
+    fireEvent.change(await screen.findByLabelText('Slot for photo 1'), { target: { value: 'shade' } });
+    const chooser = await screen.findByLabelText('Shown to the customer as, photo 1');
+    fireEvent.change(chooser, { target: { value: 'close_up' } });
+    expect(chooser.value).toBe('close_up');
+    fireEvent.change(chooser, { target: { value: 'shade' } });
+    fireEvent.change(chooser, { target: { value: 'close_up' } });
+    fireEvent.change(screen.getByLabelText('Slot for photo 1'), { target: { value: 'hot_edge' } });
+    expect((await screen.findByLabelText('Shown to the customer as, photo 1')).value).toBe('hot_edge');
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await waitFor(() => expect(assessRequests).toHaveLength(1));
+    expect(assessRequests[0].photos).toEqual([{ data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'hot_edge' }]);
   });
 });

@@ -741,7 +741,7 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
     .slice(0, photoLimit)
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
-    .map((p) => ({ url: p.url, label: photoZoneLabel(p.zone) }));
+    .map((p) => ({ url: p.url, label: p.labelPicked || photoZoneLabel(p.zone) }));
   // The stock "No additional observations from the photo review." placeholder
   // is not a summary: it would print as a visible sentence under the photos
   // (web strip and PDF), so it collapses to null like an empty summary.
