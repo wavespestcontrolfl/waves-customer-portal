@@ -501,9 +501,43 @@ function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = 
   return lines;
 }
 
+/**
+ * GATE_LAWN_WATER_IN_RAIN, read time only: a water-in frozen with BOTH generic figures ("spray heads about 30 minutes a zone
+ * and rotors about 80 minutes": no head type was on file) says the amount first, then the same two figures:
+ * "...by Sat 9 AM: about ½ inch — around 30 minutes on spray heads or 80 on rotors." The minutes are the ones the
+ * instruction was frozen with (one rate table, minutesFor); nothing is recomputed. Anything else comes back as the very same
+ * object: a head type or a measured rate on file (one figure), mixed heads on file, an amount-only instruction (owner
+ * 2026-10-08: minutes only when the customer's setup gives them), a hold-only or none instruction, or lines that are not
+ * the generic ones (an older record).
+ */
+function withAmountLine(instruction) {
+  if (!instruction || typeof instruction !== 'object' || !Array.isArray(instruction.lines)) return instruction;
+  if (!['water_in', 'hold_then_water_in'].includes(instruction.state) || instruction.amountOnly === true) return instruction;
+  const m = instruction.minutes;
+  const spray = m && Number(m.spray);
+  const rotor = m && Number(m.rotor);
+  if (!m || m.measured != null || m.unknown === true || !Number.isFinite(spray) || !Number.isFinite(rotor) || spray <= 0 || rotor <= 0) return instruction;
+  const amount = formatInches(instruction.waterInInches);
+  if (!amount) return instruction;
+  const clause = `spray heads about ${spray} minutes a zone and rotors about ${rotor} minutes`;
+  const tail = `about ${amount} — around ${spray} minutes on spray heads or ${rotor} on rotors.`;
+  const lines = instruction.lines.slice();
+  const afterHold = lines.findIndex((line) => typeof line === 'string' && line.startsWith('After that, water in today’s treatment by ') && line.endsWith(`: run ${clause}.`));
+  if (afterHold >= 0) {
+    lines[afterHold] = `${lines[afterHold].slice(0, -`run ${clause}.`.length)}${tail}`;
+    return { ...instruction, lines };
+  }
+  const runAt = lines.findIndex((line) => line === `Run ${clause}.`);
+  if (runAt < 1 || !(typeof lines[runAt - 1] === 'string' && lines[runAt - 1].startsWith('Water in today’s treatment by ') && lines[runAt - 1].endsWith('.'))) return instruction;
+  lines[runAt - 1] = `${lines[runAt - 1].slice(0, -1)}: ${tail}`;
+  lines.splice(runAt, 1);
+  return { ...instruction, lines };
+}
+
 module.exports = {
   buildWateringInstruction,
   composeBannerLines,
+  withAmountLine,
   formatInches,
   SETUP_INVITE_LINE,
   normalizeMowHoldDays,
