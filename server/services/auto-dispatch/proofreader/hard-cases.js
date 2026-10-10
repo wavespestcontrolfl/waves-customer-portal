@@ -13,6 +13,8 @@
  * A missed promise is the error that matters: the model said allow where
  * the answer is hold or stop.
  */
+const { etOffsetIso } = require('../../../utils/datetime-et');
+
 const slot = (date, windowStart, windowEnd, technician = 'Sam') => ({
   date, windowStart, windowEnd, technician,
 });
@@ -187,11 +189,12 @@ const HARD_CASES = [
   },
 ];
 
-// A case as the record the model call takes: ids added, nothing unread.
+// A case as the record the model call takes: ids added, nothing unread,
+// times in Eastern with the offset (as record.js writes them).
 function recordOf(hardCase) {
-  const entries = hardCase.entries.map((row, i) => ({ id: `E${i + 1}`, ...row }));
+  const entries = hardCase.entries.map((row, i) => ({ id: `E${i + 1}`, ...row, at: row.at ? etOffsetIso(row.at) : null }));
   return {
-    entries, unread: [], cut: 0, chars: entries.reduce((sum, row) => sum + row.text.length, 0), tooLong: false,
+    entries, unread: [], split: 0, chars: entries.reduce((sum, row) => sum + row.text.length, 0), tooLong: false,
   };
 }
 

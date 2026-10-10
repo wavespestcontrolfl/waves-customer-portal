@@ -14,7 +14,8 @@
  *      model sees only words that existed before the move. Undated notes on
  *      file are read as they are today.
  *
- * It reads the database and writes two files in --out. It changes no visit,
+ * The console shows ids and counts, never a customer name. It reads the
+ * database and writes two files in --out. It changes no visit,
  * sends nothing, and raises no notification. The model calls are recorded
  * in the call ledger like any other call.
  *
@@ -141,7 +142,7 @@ async function replayMove(row, arms, { db, proofreader, toDateStr }) {
     moved_at: new Date(row.created_at).toISOString(),
     move_reason: row.reason_code,
     move,
-    record: { entries: record.entries.length, chars: record.chars, cut: record.cut, unread: record.unread, too_long: record.tooLong },
+    record: { entries: record.entries.length, chars: record.chars, split: record.split, unread: record.unread, too_long: record.tooLong },
     arms: {},
   };
   for (const arm of arms) {
@@ -168,7 +169,8 @@ function printMoves(rows, arms) {
   rows.forEach((row) => {
     const stops = arms.filter((arm) => row.arms[arm.label].verdict !== 'allow');
     if (!stops.length) return;
-    console.log(`\n  ${row.customer} · ${row.move.service} · ${row.move.from.weekday} ${row.move.from.date} ${row.move.from.arrival_window} -> ${row.move.to.weekday} ${row.move.to.date} ${row.move.to.arrival_window}`);
+    // Ids only on the console: the name stays in the output file (--out).
+    console.log(`\n  move ${row.audit_id} · ${row.move.service} · ${row.move.from.weekday} ${row.move.from.date} ${row.move.from.arrival_window} -> ${row.move.to.weekday} ${row.move.to.date} ${row.move.to.arrival_window}`);
     arms.forEach((arm) => {
       const r = row.arms[arm.label];
       console.log(`    ${arm.label}: ${r.verdict} (${r.why})${r.quote ? ` "${r.quote}"` : ''}${r.reason ? ` — ${r.reason}` : ''}`);

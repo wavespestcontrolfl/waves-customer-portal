@@ -11,6 +11,11 @@
  * listed in `unread` (the verdict is then never "allow"), it does not fail
  * the record. A call with a recording and no transcript is unread too.
  *
+ * Nothing is cut. A text longer than MAX_ENTRY_CHARS becomes several entries
+ * (`split` counts them), each starting a little before the last one ended, so
+ * a statement near the end of a long call is still read. Every `at` is an
+ * Eastern time with its offset, as the prompt tells the model.
+ *
  * `asOf` exists for the replay: a past move is judged on the words that
  * existed before it. The nightly run passes the run's own time.
  *
@@ -24,10 +29,15 @@
 const logger = require('../../logger');
 const { redactAccessCodes } = require('../../context-aggregator');
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
+const { resolveEmailCustomerLink } = require('../../email/email-customer-link');
+const { etOffsetIso } = require('../../../utils/datetime-et');
 
-// One entry's longest text. An email body past this is almost always the
-// quoted thread, whose messages are entries of their own; a cut is counted.
+// One entry's longest text. A longer one is split into parts, never cut
+// (Codex #6258 r1: a restriction near the end of a long call was dropped).
 const MAX_ENTRY_CHARS = 12000;
+// Each part repeats this much of the part before it, so a statement that
+// falls on a boundary is whole in one of the two.
+const PART_OVERLAP_CHARS = 600;
 // The whole record's limit. Past it no model is asked and the verdict is
 // "unknown" (measured 2026-10-09 over 112 customers: median 6k, max 56k).
 const MAX_RECORD_CHARS = 300000;
@@ -39,15 +49,30 @@ const INTERACTION_COPIES = ['sms_outbound', 'email_outbound'];
 const PROGRAM_RESCHEDULERS = ['system', 'auto_dispatch'];
 
 const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
-const iso = (value) => (value ? new Date(value).toISOString() : null);
+// Eastern wall time with its offset: the prompt says every time is Eastern,
+// so "this Friday" in an evening text is read against the right day.
+const eastern = (value) => (value ? etOffsetIso(value) : null);
+const msOf = (value) => (value ? new Date(value).getTime() : null);
 
+function partsOf(body) {
+  if (body.length <= MAX_ENTRY_CHARS) return [body];
+  const parts = [];
+  for (let from = 0; from < body.length; from += MAX_ENTRY_CHARS - PART_OVERLAP_CHARS) {
+    parts.push(body.slice(from, from + MAX_ENTRY_CHARS));
+    if (from + MAX_ENTRY_CHARS >= body.length) break;
+  }
+  return parts;
+}
+
+// The entries of one stored text: one, or its parts when it is long. `ms`
+// (sort key) and `split` are dropped before the record is returned.
 function entry(channel, from, at, text) {
   const body = redactAccessCodes(clean(text));
-  if (!body) return null;
-  const cut = body.length > MAX_ENTRY_CHARS;
-  return {
-    channel, from, at: iso(at), text: cut ? `${body.slice(0, MAX_ENTRY_CHARS)} [cut]` : body, ...(cut ? { cut: true } : {}),
-  };
+  if (!body) return [];
+  const parts = partsOf(body);
+  return parts.map((part, i) => ({
+    channel, from, at: eastern(at), ms: msOf(at), text: parts.length > 1 ? `[part ${i + 1} of ${parts.length}] ${part}` : part, ...(parts.length > 1 && i > 0 ? { split: true } : {}),
+  }));
 }
 
 async function readTexts(conn, { customerId, asOf }) {
@@ -66,33 +91,45 @@ async function readTexts(conn, { customerId, asOf }) {
   });
 }
 
-// Mail the sync linked to the customer, plus the unlinked mail of the same
-// threads and mail sent to the customer's address: our own replies are stored
-// with no customer (measured 2026-10-09: 3,062 sent mails, none linked).
+// Mail the sync linked to the customer, plus our own replies. A sent mail is
+// stored with no customer (measured 2026-10-09: 3,062 sent mails, none
+// linked), so each unlinked mail of the customer's threads, or one that names
+// the customer's address, is put to the ONE linkage rule the mail lanes share
+// (email-customer-link.js: To, Cc and Bcc parsed as addresses; a mixed
+// thread or a second customer among the recipients links to nobody). Only a
+// mail that rule gives to this customer is read (Codex #6258 r1).
+//
+// A mail synced before Cc/Bcc were captured (196 of the 211 unlinked mails in
+// customer threads, 2026-10-09) is asked with an empty Cc/Bcc: the thread
+// and To rules still apply in full. Without that, nearly every staff reply
+// on file would be left out of the record.
 async function readEmails(conn, { customerId, asOf, customerEmail }) {
-  const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'subject', 'body_text', 'snippet', 'received_at'];
+  const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'snippet', 'received_at'];
   const live = (query) => query.where('received_at', '<', asOf).whereNull('quarantined_at')
     .whereRaw("COALESCE(classification, '') <> 'spam'");
   const linked = await live(conn('emails').where({ customer_id: customerId })).select(columns);
   const threads = [...new Set(linked.map((row) => row.gmail_thread_id).filter(Boolean))];
   const address = clean(customerEmail).toLowerCase();
-  let replies = [];
+  let candidates = [];
   if (threads.length || address) {
-    replies = await live(conn('emails').whereNull('customer_id'))
+    candidates = await live(conn('emails').whereNull('customer_id'))
       .where(function ours() {
         if (threads.length) this.whereIn('gmail_thread_id', threads);
-        if (address) this.orWhereRaw("position(? in lower(COALESCE(to_address, ''))) > 0", [address]);
+        // A coarse pre-filter only; resolveEmailCustomerLink decides.
+        if (address) this.orWhereRaw("position(? in lower(concat_ws(' ', to_address, cc_address, bcc_address))) > 0", [address]);
       })
       .select(columns);
   }
-  const seen = new Set();
-  return [...linked, ...replies]
-    .filter((row) => (seen.has(row.id) ? false : seen.add(row.id)))
-    .map((row) => {
-      const fromCustomer = !!row.customer_id || (!!address && clean(row.from_address).toLowerCase().includes(address));
-      const body = clean(row.body_text) || clean(row.snippet);
-      return entry('email', fromCustomer ? 'customer' : 'staff', row.received_at, body ? `${clean(row.subject)}: ${body}` : '');
-    });
+  const replies = [];
+  for (const row of candidates) {
+    const owner = await resolveEmailCustomerLink(conn, { ...row, cc_address: row.cc_address ?? '', bcc_address: row.bcc_address ?? '' });
+    if (owner != null && String(owner) === String(customerId)) replies.push(row);
+  }
+  const mail = (row, from) => {
+    const body = clean(row.body_text) || clean(row.snippet);
+    return entry('email', from, row.received_at, body ? `${clean(row.subject)}: ${body}` : '');
+  };
+  return [...linked.map((row) => mail(row, 'customer')), ...replies.map((row) => mail(row, 'staff'))];
 }
 
 async function readCalls(conn, { customerId, asOf }, unread) {
@@ -104,7 +141,7 @@ async function readCalls(conn, { customerId, asOf }, unread) {
   return rows.map((row) => {
     const said = entry('call', 'both', row.created_at, row.transcription);
     // A recording nobody has turned into words yet: the record is incomplete.
-    if (!said && row.recording_sid) unread.push({ channel: 'call', at: iso(row.created_at), reason: 'not_transcribed' });
+    if (!said.length && row.recording_sid) unread.push({ channel: 'call', at: eastern(row.created_at), reason: 'not_transcribed' });
     return said;
   });
 }
@@ -133,13 +170,28 @@ async function readTechNotes(conn, { customerId, asOf }) {
   return rows.map((row) => entry('technician_note', 'staff', row.created_at, row.technician_notes));
 }
 
+// The offer row is written when the offer is sent; the customer's reply
+// lands on it later, at sms_responded_at. Each is bounded by its own time
+// (Codex #6258 r1: a replay read replies that did not exist yet).
 async function readRescheduleReplies(conn, { customerId, asOf }) {
   const rows = await conn('reschedule_log').where({ customer_id: customerId }).where('created_at', '<', asOf)
-    .select('initiated_by', 'customer_response_text', 'notes', 'created_at');
+    .select('initiated_by', 'customer_response_text', 'sms_responded_at', 'notes', 'created_at');
+  const before = (at) => !!at && new Date(at).getTime() < new Date(asOf).getTime();
   return rows.flatMap((row) => [
-    entry('reschedule_reply', 'customer', row.created_at, row.customer_response_text),
-    PROGRAM_RESCHEDULERS.includes(row.initiated_by) ? null : entry('note', 'staff', row.created_at, row.notes),
+    before(row.sms_responded_at) ? entry('reschedule_reply', 'customer', row.sms_responded_at, row.customer_response_text) : [],
+    PROGRAM_RESCHEDULERS.includes(row.initiated_by) ? [] : entry('note', 'staff', row.created_at, row.notes),
   ]);
+}
+
+// What the customer wrote in the portal's request form ("schedule_change"
+// is one of its categories). These rows are not copied anywhere else.
+async function readPortalRequests(conn, { customerId, asOf }) {
+  const rows = await conn('service_requests').where({ customer_id: customerId }).where('created_at', '<', asOf)
+    .select('category', 'subject', 'description', 'created_at');
+  return rows.map((row) => entry(
+    'portal_request', 'customer', row.created_at,
+    [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
+  ));
 }
 
 // The customer's file notes and the notes on the visit and its series.
@@ -165,11 +217,11 @@ async function readUndatedNotes(conn, { customer, serviceId }) {
 const SOURCES = [
   ['text', readTexts], ['email', readEmails], ['call', readCalls], ['note', readInteractions],
   ['note', readStaffNotes], ['technician_note', readTechNotes], ['reschedule_reply', readRescheduleReplies],
-  ['customer_file_note', readUndatedNotes],
+  ['portal_request', readPortalRequests], ['customer_file_note', readUndatedNotes],
 ];
 
 /**
- * @returns {{ entries: Array<{id,channel,from,at,text}>, unread: Array<{channel,at?,reason}>, cut: number, chars: number, tooLong: boolean }}
+ * @returns {{ entries: Array<{id,channel,from,at,text}>, unread: Array<{channel,at?,reason}>, split: number, chars: number, tooLong: boolean }}
  */
 async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = new Date() }) {
   const unread = [];
@@ -188,18 +240,18 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
   };
   for (const [channel, read] of SOURCES) {
     try {
-      found.push(...(await read(conn, args, unread)).filter(Boolean));
+      found.push(...(await read(conn, args, unread)).flat(2));
     } catch (err) {
       unread.push({ channel, reason: 'read_failed' });
       logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${err.message}`);
     }
   }
   // Undated notes first, then oldest to newest.
-  found.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
-  const entries = found.map(({ cut: _cut, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
+  found.sort((a, b) => (a.ms ?? -1) - (b.ms ?? -1));
+  const entries = found.map(({ split: _split, ms: _ms, ...rest }, i) => ({ id: `E${i + 1}`, ...rest }));
   const chars = entries.reduce((sum, row) => sum + row.text.length, 0);
   return {
-    entries, unread, cut: found.filter((row) => row.cut).length, chars, tooLong: chars > MAX_RECORD_CHARS,
+    entries, unread, split: found.filter((row) => row.split).length, chars, tooLong: chars > MAX_RECORD_CHARS,
   };
 }
 
