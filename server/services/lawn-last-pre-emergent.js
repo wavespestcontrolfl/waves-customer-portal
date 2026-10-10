@@ -15,6 +15,8 @@
  *     chain the sod holds use (visitIsAtSodHome: the visit's address stamp, property link or creating
  *     estimate; a visit with no evidence counts only on a proven single-premises account). A stamp on
  *     the home's street that omits the unit takes the home's unit first (inheritReferenceUnit).
+ *     The property the application ledger froze at completion (property_application_history.property_id)
+ *     decides alone when it exists, so a visit repointed later does not move its history.
  *     Anything unproven is left out, and a failed read gives no block at all: never a wrong date.
  *   - The newest day, with no row limit: applications on or before the reference day are read newest
  *     first until a day has one proven at this home; every pre-emergent product of that day is listed.
@@ -90,7 +92,10 @@ function wordsFor(row, { date, referenceDay, sodDate, rooted }) {
 
 // A pre-emergent, judged from what the application row itself froze at completion (name, category, ingredient) by
 // the sheet's one classifier. The current catalog is not read: a later rename or correction cannot rewrite history.
-const isPreEmergent = (row) => classesOf({ name: row.product_name, category: row.product_category, active_ingredient: row.active_ingredient }).includes('preEmergent');
+// A row whose snapshot has no ingredient is still known by its exact EPA registration (LABEL_WAITS), or by an ingredient
+// word in its frozen product name ("Prodiamine 65 WDG").
+const isPreEmergent = (row) => !!LABEL_WAITS[String(row.epa_reg_number || '').trim()]
+  || classesOf({ name: row.product_name, category: row.product_category, active_ingredient: row.active_ingredient || row.product_name }).includes('preEmergent');
 
 // Every product applied on this customer's visits on or before the reference day, newest visit first. No product
 // filter and no row limit in SQL: the rows are classified from their own snapshots.
@@ -98,6 +103,9 @@ function applicationRows(knex, customerId, referenceDay) {
   return knex('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+    // The application ledger freezes the treated property at completion (one row per service product).
+    .leftJoin('property_application_history as pah', 'pah.service_product_id', 'sp.id')
+    .whereNull('pah.retracted_at')
     .where('sr.customer_id', customerId)
     .whereIn('sr.status', VISIT_STATUSES)
     .where('sr.service_date', '<=', referenceDay)
@@ -106,13 +114,15 @@ function applicationRows(knex, customerId, referenceDay) {
       'sp.product_name', 'sp.product_category', 'sp.active_ingredient', 'sp.epa_reg_number',
       'sr.service_date', 'sr.service_line', 'sr.service_type',
       'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
-      'ss.property_id', 'ss.source_estimate_id',
+      'ss.property_id', 'ss.source_estimate_id', 'pah.property_id as treated_property_id',
     );
 }
 
 const isLawnVisit = (row) => (row.service_line || detectServiceLine(row.service_type)) === 'lawn';
 
-// The visit as visitIsAtSodHome reads it: the customer's own address plus the visit's scope columns.
+// The visit as visitIsAtSodHome reads it: the customer's own address plus the application's scope. The property the
+// ledger froze at completion decides alone when it exists (a visit repointed later must not move its history); a
+// legacy row with none falls back to the visit's own stamp, property link and estimate.
 function visitAt(customer, row) {
   const home = {
     service_address_line1: customer.address_line1,
@@ -132,9 +142,9 @@ function visitAt(customer, row) {
     cust_address_line2: customer.address_line2,
     cust_city: customer.city,
     cust_zip: customer.zip,
-    property_id: row.property_id,
-    source_estimate_id: row.source_estimate_id,
-    ...(row.service_address_line1 ? inheritReferenceUnit(stamp, home) : stamp),
+    ...(row.treated_property_id
+      ? { property_id: row.treated_property_id, source_estimate_id: null, service_address_line1: null, service_address_line2: null, service_address_city: null, service_address_zip: null }
+      : { property_id: row.property_id, source_estimate_id: row.source_estimate_id, ...(row.service_address_line1 ? inheritReferenceUnit(stamp, home) : stamp) }),
   };
 }
 

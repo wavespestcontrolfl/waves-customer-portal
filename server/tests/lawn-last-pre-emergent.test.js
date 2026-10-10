@@ -26,7 +26,7 @@ function fakeKnex(tables) {
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereIn', 'whereNotNull', 'leftJoin', 'join', 'orderBy', 'select']) {
+    for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'leftJoin', 'join', 'orderBy', 'select']) {
       chain[m] = (...args) => {
         if (m === 'where' && typeof args[0] === 'function') { args[0].call({ whereIn: (...a) => { calls.push([table, 'whereIn', ...a]); return { orWhereNull: (...b) => { calls.push([table, 'orWhereNull', ...b]); } }; } }); return chain; }
         calls.push([table, m, ...args]);
@@ -108,6 +108,16 @@ describe('the words', () => {
     const { result } = await block({ rows: [app({ service_date: '2026-10-08' })] });
     expect(result.line).toContain('(1 day ago).');
     expect(`${result.line} ${result.warning}`).not.toMatch(/forbid|prohibit|must not/i);
+  });
+
+  it('a snapshot with no ingredient is still known by its exact EPA registration, or by an ingredient word in its name', async () => {
+    const byEpa = await block({ rows: [app({ active_ingredient: null, service_date: '2026-09-20' })] });
+    expect(byEpa.result.line).toContain('Dimension 2EW, Sep 20, 2026');
+    expect(byEpa.result.warning).toMatch(/3 months after one application/);
+    const byName = await block({ rows: [app({ product_name: 'Prodiamine 65 WDG', active_ingredient: null, epa_reg_number: null, service_date: '2026-09-20' })] });
+    expect(byName.result.note).toMatch(/Read the label/);
+    const neither = await block({ rows: [app({ product_name: 'Unknown Product', active_ingredient: null, epa_reg_number: null })] });
+    expect(neither.result).toBeNull();
   });
 
   it('another dithiopyr product (a different EPA registration, or none) gets the note, never the Dimension wait', async () => {
@@ -216,6 +226,27 @@ describe('this home only', () => {
       extra: { customer_properties: { address_line1: '100 Example Court', address_line2: null, city: 'Bradenton', zip: '34201' } },
     });
     expect(mine.result.line).toContain('Aug 1, 2026');
+  });
+
+  it('the property frozen on the application ledger decides alone: a visit repointed later does not move its history', async () => {
+    // The visit now points at this home, but the application was made at another property.
+    const moved = await block({
+      rows: [app({ treated_property_id: 'prop-2' })],
+      extra: { customer_properties: { address_line1: '9 Other Lane', address_line2: null, city: 'Sarasota', zip: '34236' } },
+    });
+    expect(moved.result).toBeNull();
+    // The visit now points elsewhere, but the application was made at this home.
+    const stays = await block({
+      rows: [app({ ...OTHER_STAMP, treated_property_id: 'prop-1' })],
+      extra: { customer_properties: { address_line1: '100 Example Court', address_line2: null, city: 'Bradenton', zip: '34201' } },
+    });
+    expect(stays.result.line).toContain('Aug 1, 2026');
+  });
+
+  it('a retracted application is not read (the ledger join filters it)', async () => {
+    const { knex } = await block({ rows: [app()] });
+    expect(knex.calls).toContainEqual(['service_products as sp', 'whereNull', 'pah.retracted_at']);
+    expect(knex.calls).toContainEqual(['service_products as sp', 'leftJoin', 'property_application_history as pah', 'pah.service_product_id', 'sp.id']);
   });
 
   it('a visit with no address evidence counts only on a single-premises account', async () => {
