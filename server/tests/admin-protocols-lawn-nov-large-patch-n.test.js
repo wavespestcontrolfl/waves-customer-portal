@@ -105,6 +105,35 @@ describe('active fungus mapped, gate on', () => {
   });
 });
 
+describe('the text staff read agrees with the cut (codex #6256 r1 P1)', () => {
+  const STALE = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 3.1 lb per 1,000 sq ft (0.75 lb N), spreader';
+
+  test('cut: the line, the visit primary and the objective all state 0.5 lb N / 2.1 lb, none still says 3.1 lb or "N rate: 0.75"', async () => {
+    const body = await sheet();
+    const stated = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped';
+    expect(bag(body).raw).toBe(stated);
+    expect(body.visit.primary).toBe(stated);
+    expect(body.visit.objective).toMatch(/^N rate: 0\.5 lb N \(active fungus mapped; normal 0\.75 lb N\)\. Spreader visit\./);
+    const text = JSON.stringify([body.items, body.selectedItems, body.visit]);
+    expect(text).not.toContain('3.1 lb per 1,000');
+    expect(text).not.toContain('N rate: 0.75 lb N.');
+    // The product is still the same matched catalog row and still selected.
+    expect(bag(body).product.name).toBe(F24);
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+  });
+
+  test('not cut: the recipe text is the stale-free original, byte for byte', async () => {
+    mockLoadActive.mockResolvedValue([]);
+    const body = await sheet();
+    expect(bag(body).raw).toBe(STALE);
+    expect(body.visit.primary).toBe(STALE);
+    expect(body.visit.objective).toMatch(/^N rate: 0\.75 lb N\. Spreader visit\./);
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    mockLoadActive.mockResolvedValue([{ type: 'fungus' }]);
+    expect((await sheet()).visit.primary).toBe(STALE);
+  });
+});
+
 describe('everything else keeps the visit\'s own 0.75 lb N (3.125 lb per 1,000), with no note', () => {
   const expectNormal = async (query = {}) => {
     const body = await sheet(query);

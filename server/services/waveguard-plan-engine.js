@@ -737,27 +737,51 @@ function parseVisitNutrientTargets(notes) {
 }
 
 // GATE_LAWN_NOV_LARGE_PATCH_N: does the visit's property have an ACTIVE mapped trouble area of this type? A gate that is off, a visit
-// with no property, or a read that fails is "no" (the normal target stands); a failed read logs its code only.
+// with no property, or a read that fails is "no" (the normal target stands); a failed read logs its code only. The property
+// resolution and the read share ONE savepoint, so a query that fails inside either cannot leave a transaction (packet closeout)
+// aborted for the planner queries after it.
 async function hasActiveTroubleArea(knex, service, type) {
   const areas = require('./lawn-trouble-areas');
   try {
-    const propertyId = await areas.propertyOf(knex, service);
-    return Boolean(propertyId) && (await savepointRead(knex, (k) => areas.loadActive(k, propertyId))).some((area) => area.type === type);
+    const found = await savepointRead(knex, async (k) => {
+      const propertyId = await areas.propertyOf(k, service);
+      return propertyId ? areas.loadActive(k, propertyId) : [];
+    });
+    return found.some((area) => area.type === type);
   } catch (err) {
     logger.warn(`[plan] trouble areas unreadable for ${service?.id}: ${err?.code || err?.name || 'Error'}`);
     return false;
   }
 }
 
+// The recipe text of a visit whose nitrogen target was cut, so what staff read (the line's `raw`, the visit's primary and notes) agrees
+// with the amount the plan computes. Rewrites only the shapes the v13 recipe uses; a line or note the pattern does not match stays as
+// written (the cut and the line note still apply: the amount and the note are never dependent on this text).
+const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N\)/;
+const NITROGEN_NOTE = /\bN\s+rate:?\s*(\d+(?:\.\d+)?)\s*lb\s*N/i;
+function fungusAdjustedVisit(visit, cut) {
+  const primary = typeof visit.primary !== 'string' ? visit.primary : visit.primary.split('\n').map((line) => {
+    const found = line.match(NITROGEN_LINE);
+    if (!found || !(Number(found[2]) > cut)) return line;
+    const rate = ((Number(found[1]) * cut) / Number(found[2])).toFixed(1);
+    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N)`)}, active fungus mapped`;
+  }).join('\n');
+  const notes = typeof visit.notes !== 'string' ? visit.notes
+    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => (Number(normal) > cut ? `N rate: ${cut} lb N (active fungus mapped; normal ${normal} lb N)` : whole));
+  return { ...visit, primary, notes };
+}
+
 // The ONE place a visit's nutrient targets come from, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the
-// completion defaults, the yearly limit check and the Fast Complete planned amount all read the same number. `nitrogenCut` is the
-// reduced N target when GATE_LAWN_NOV_LARGE_PATCH_N changed it (see config/lawn-v13-nitrogen-targets.js), else null. Never raises
-// a target; gate off, not v13, no matching month or no active mapped area = the visit's own target, untouched.
-async function visitNutrientTargets(knex, service, { notes, month, v13Active }) {
-  const targets = parseVisitNutrientTargets(notes);
-  const rule = v13Active && featureGates.lawnNovLargePatchNLive() ? V13_TROUBLE_N_TARGETS.find((entry) => entry.month === MONTH_ABBR.indexOf(month) + 1) : null;
-  if (!rule || !(targets.targetNPer1000 > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType))) return { targets, nitrogenCut: null };
-  return { targets: { ...targets, targetNPer1000: rule.targetNPer1000 }, nitrogenCut: rule.targetNPer1000 };
+// completion defaults, the yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the
+// lines are parsed from (an adjusted copy when GATE_LAWN_NOV_LARGE_PATCH_N cut the nitrogen target: see config/lawn-v13-nitrogen-targets.js;
+// else the visit itself), its targets, and `nitrogenCut` (the reduced N target, else null). Never raises a target; gate off, not v13,
+// no matching month or no active mapped area = the visit and its target, untouched. Call it BEFORE the visit's lines are parsed.
+async function visitNutrientTargets(knex, service, { visit, month, v13Active }) {
+  const targets = parseVisitNutrientTargets(visit?.notes);
+  const rule = v13Active && visit && featureGates.lawnNovLargePatchNLive() ? V13_TROUBLE_N_TARGETS.find((entry) => entry.month === MONTH_ABBR.indexOf(month) + 1) : null;
+  if (!rule || !(targets.targetNPer1000 > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType))) return { visit, targets, nitrogenCut: null };
+  const cut = rule.targetNPer1000;
+  return { visit: fungusAdjustedVisit(visit, cut), targets: { ...targets, targetNPer1000: cut }, nitrogenCut: cut };
 }
 
 // The line note for a nitrogen bag sized for the reduced target (in the line's gateNotes, the way the Fast Complete sheet and the
@@ -2045,24 +2069,25 @@ async function buildPlanForService(serviceId, options = {}) {
   // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
   // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
   // from the booked service; unknown keeps the 12x step and warns.
-  const { visit, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
+  const { visit: recipeStep, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
   const assignedProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
-  const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   // The April and June bermuda removal step: its three spot lines join the visit's secondary
   // list (opt-in lines, like every other spot product).
   const step = await bermuda.resolve({ structuredProtocol: assignedProtocol, trackKey, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
   // The protocol products this appointment reads: the assigned window's, with the appointment month's step rows when
   // the visit moved across months. The rows, the completion defaults and the ledger all read this one list.
   const structuredProtocol = step.protocol(assignedProtocol);
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
+  // through v13LineState (one decision per line) and keeps its protocol product.
+  const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
+  // The visit the lines are parsed from: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated.
+  const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active });
+  const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
     ...step.lines,
   ];
-  // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
-  // through v13LineState (one decision per line) and keeps its protocol product.
-  const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  const { targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { notes: visit?.notes, month, v13Active });
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
   // own protocol row supplies its rate, its sunny-turf limit and its gates.
   const v13Rows = v13ProtocolRows(structuredProtocol);

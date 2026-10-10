@@ -83,6 +83,10 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
       expect(item.mix.ratePer1000).toBeCloseTo(2.0833, 3);
       expect(item.mix.amount).toBeCloseTo(20.833, 2);
       expect(item.gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: NOTE });
+      // The recipe text staff read (item.raw, the visit) states the same cut, never the stale 3.1 lb / 0.75 lb N.
+      expect(item.raw).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped');
+      expect(item.product.name).toBe(F24);
+      expect(JSON.stringify(result.protocol)).not.toContain('3.1 lb per 1,000');
       const defaulted = bagOf(result.completionDefaults.items);
       expect(defaulted.mix.ratePer1000).toBeCloseTo(2.0833, 3);
       expect(defaulted.mix.amount).toBeCloseTo(20.833, 2);
@@ -119,8 +123,15 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     for (const result of [gateOff, areasOff]) {
       const item = bagOf(result.mixCalculator.items);
       expect(item.mix.ratePer1000).toBeCloseTo(3.125, 3);
+      expect(item.raw).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 3.1 lb per 1,000 sq ft (0.75 lb N), spreader');
       expect(JSON.stringify(result)).not.toContain('activeFungusNitrogen');
     }
+  });
+
+  test('inside a transaction (packet closeout) the plan reads the areas through a savepoint and still cuts', async () => {
+    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true }));
+    expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(2.0833, 3);
   });
 
   test('a failed trouble-area read keeps the normal target and the plan still builds', async () => {

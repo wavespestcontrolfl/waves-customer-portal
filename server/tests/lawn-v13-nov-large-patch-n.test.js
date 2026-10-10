@@ -20,8 +20,15 @@ beforeEach(() => { jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedVal
 afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
 const service = { id: 'svc-1', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' };
-const NOV_NOTES = v13.st_augustine.visits.find((visit) => visit.month === 'Nov').notes;
-const targetsFor = (args = {}) => engine.visitNutrientTargets({}, service, { notes: NOV_NOTES, month: 'Nov', v13Active: true, ...args });
+const NOV_VISIT = v13.st_augustine.visits.find((visit) => visit.month === 'Nov');
+const NOV_NOTES = NOV_VISIT.notes;
+// `notes` overrides the recipe's notes; the returned visit is dropped unless a test asks for it (the targets and the cut are the contract).
+const run = (args = {}) => {
+  const notes = 'notes' in args ? args.notes : NOV_NOTES;
+  const { visit = { ...NOV_VISIT, notes }, notes: _notes, ...rest } = args;
+  return engine.visitNutrientTargets({}, service, { visit, month: 'Nov', v13Active: true, ...rest });
+};
+const targetsFor = async (args = {}) => { const { visit: _visit, ...found } = await run(args); return found; };
 
 describe('lawnNovLargePatchNLive', () => {
   test.each([[undefined, false], ['', false], ['1', false], ['TRUE', false], ['false', false], ['true', true]])('the variable %j gives %s, read at call time', (value, expected) => {
@@ -101,9 +108,95 @@ describe('visitNutrientTargets', () => {
     expect(logged).toContain('ECONNRESET');
     expect(logged).not.toContain('secret detail');
     mockLoadActive.mockReset().mockResolvedValue([{ type: 'fungus' }]);
-    expect((await engine.visitNutrientTargets({}, { id: 'x', property_id: null }, { notes: NOV_NOTES, month: 'Nov', v13Active: true })).nitrogenCut).toBeNull();
-    expect((await engine.visitNutrientTargets({}, null, { notes: NOV_NOTES, month: 'Nov', v13Active: true })).nitrogenCut).toBeNull();
+    expect((await engine.visitNutrientTargets({}, { id: 'x', property_id: null }, { visit: NOV_VISIT, month: 'Nov', v13Active: true })).nitrogenCut).toBeNull();
+    expect((await engine.visitNutrientTargets({}, null, { visit: NOV_VISIT, month: 'Nov', v13Active: true })).nitrogenCut).toBeNull();
+    expect((await engine.visitNutrientTargets({}, service, { visit: null, month: 'Nov', v13Active: true })).nitrogenCut).toBeNull();
     expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+});
+
+describe('the visit text staff read agrees with the cut (codex #6256 r1 P1)', () => {
+  const PRIMARY = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 3.1 lb per 1,000 sq ft (0.75 lb N), spreader';
+
+  test('the November recipe line is the shape the rewrite expects, in every track', () => {
+    for (const track of Object.values(v13)) expect(track.visits.find((visit) => visit.month === 'Nov').primary).toBe(PRIMARY);
+  });
+
+  test('cut: the primary line states 2.1 lb per 1,000 and 0.5 lb N and why; the notes state 0.5 lb N and the normal figure; the rest is untouched', async () => {
+    const found = await run();
+    expect(found.visit.primary).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped');
+    expect(found.visit.notes).toBe(NOV_NOTES.replace('N rate: 0.75 lb N', 'N rate: 0.5 lb N (active fungus mapped; normal 0.75 lb N)'));
+    expect(found.visit.notes).toContain('Spreader visit. Fertilizer safety:');
+    expect(found.visit.secondary).toBe(NOV_VISIT.secondary);
+    expect(found.visit.tiers).toBe(NOV_VISIT.tiers);
+    // The adjusted notes alone yield the cut target, and the recipe object itself is not mutated.
+    expect(engine.parseVisitNutrientTargets(found.visit.notes)).toEqual({ targetNPer1000: 0.5, targetKPer1000: null });
+    expect(NOV_VISIT.primary).toBe(PRIMARY);
+    expect(found.visit).not.toBe(NOV_VISIT);
+  });
+
+  test('the rewritten line classifies the same and still matches the same catalog product (raw is no identity key)', async () => {
+    const { visit } = await run({ visit: NOV_VISIT });
+    expect(visit.primary).not.toBe(PRIMARY);
+    expect(engine.classifyProtocolLine(visit.primary, 'base')).toEqual(engine.classifyProtocolLine(PRIMARY, 'base'));
+    const catalog = [{ id: 'f24', name: 'LESCO 24-0-11 with PolyPlus OPTI', aliases: [], analysis_n: 24 }, { id: 'f10', name: 'LESCO 10-0-22', aliases: [], analysis_n: 10 }];
+    expect(engine.matchCatalogProduct({ raw: PRIMARY, exactName: true }, catalog)?.id).toBe('f24');
+    expect(engine.matchCatalogProduct({ raw: visit.primary, exactName: true }, catalog)?.id).toBe('f24');
+  });
+
+  test('nothing is rewritten when the cut does not apply: the same visit object comes back', async () => {
+    mockLoadActive.mockResolvedValue([]);
+    expect((await run({ visit: NOV_VISIT })).visit).toBe(NOV_VISIT);
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    expect((await run({ visit: NOV_VISIT })).visit).toBe(NOV_VISIT);
+  });
+
+  test('text the pattern does not match stays as written, and the cut and the target still apply (no silent half override)', async () => {
+    const odd = { ...NOV_VISIT, primary: 'LESCO 24-0-11 with PolyPlus OPTI \u2014 about 3 lb, spreader', notes: 'Spreader visit. N rate 0.75 pounds.' };
+    // The notes still state a target the parser reads, but the wording is not the recipe's: the target is forced to the cut.
+    const found = await engine.visitNutrientTargets({}, service, { visit: { ...odd, notes: 'N app @ 0.75 lb N/1K. Spreader visit.' }, month: 'Nov', v13Active: true });
+    expect(found.nitrogenCut).toBe(0.5);
+    expect(found.targets.targetNPer1000).toBe(0.5);
+    expect(found.visit.primary).toBe(odd.primary);
+    expect(found.visit.notes).toBe('N app @ 0.75 lb N/1K. Spreader visit.');
+  });
+
+  test('a line already at or under the cut is left alone', () => {
+    return engine.visitNutrientTargets({}, service, { visit: { ...NOV_VISIT, primary: 'Bag \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader', notes: 'N rate: 0.75 lb N.' }, month: 'Nov', v13Active: true }).then((found) => {
+      expect(found.visit.primary).toBe('Bag \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader');
+    });
+  });
+});
+
+describe('the property read and the trouble-area read share one savepoint (codex #6256 r1 P2)', () => {
+  const areas = require('../services/lawn-trouble-areas');
+  const transaction = (log) => ({ isTransaction: true, raw: jest.fn(async (sql) => { log.push(sql.replace(/fail_soft_[0-9a-f]+/, 'SP')); }) });
+
+  test('on a transaction the property resolution runs INSIDE the savepoint, before the area read', async () => {
+    const log = [];
+    areas.propertyOf.mockImplementationOnce(async () => { log.push('propertyOf'); return service.property_id; });
+    mockLoadActive.mockImplementationOnce(async () => { log.push('loadActive'); return [{ type: 'fungus' }]; });
+    const found = await engine.visitNutrientTargets(transaction(log), service, { visit: NOV_VISIT, month: 'Nov', v13Active: true });
+    expect(found.nitrogenCut).toBe(0.5);
+    expect(log).toEqual(['SAVEPOINT SP', 'propertyOf', 'loadActive', 'RELEASE SAVEPOINT SP']);
+  });
+
+  test('a property query that fails rolls the savepoint back, so the transaction stays usable; the normal target stands', async () => {
+    const log = [];
+    areas.propertyOf.mockImplementationOnce(async () => { log.push('propertyOf'); throw Object.assign(new Error('aborted'), { code: '25P02' }); });
+    const found = await engine.visitNutrientTargets(transaction(log), service, { visit: NOV_VISIT, month: 'Nov', v13Active: true });
+    expect(found.nitrogenCut).toBeNull();
+    expect(found.visit).toBe(NOV_VISIT);
+    expect(log).toEqual(['SAVEPOINT SP', 'propertyOf', 'ROLLBACK TO SAVEPOINT SP', 'RELEASE SAVEPOINT SP']);
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+
+  test('a failure in the area read rolls back the same way', async () => {
+    const log = [];
+    mockLoadActive.mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'ECONNRESET' }));
+    const found = await engine.visitNutrientTargets(transaction(log), service, { visit: NOV_VISIT, month: 'Nov', v13Active: true });
+    expect(found.nitrogenCut).toBeNull();
+    expect(log).toEqual(['SAVEPOINT SP', 'ROLLBACK TO SAVEPOINT SP', 'RELEASE SAVEPOINT SP']);
   });
 });
 
