@@ -13608,6 +13608,7 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim

@@ -34,8 +34,11 @@
  *     metadata.initiated_via = 'intelligence_bar' through its existing insert
  *     (status failed/canceled excluded; refunded still counts);
  *   - charge_invoice approvals for OTHER invoices consumed today whose outcome is
- *     unknown or not yet recorded (another card in flight, or a charge Stripe may
- *     have taken with no payment row): each counts as the full $500, fail closed.
+ *     unknown or not yet recorded AND whose invoice has an unresolved saved-card
+ *     charge claim (stripe_invoice_charge_attempts claimed / ambiguous) and no bar
+ *     payment row yet (a charge that is running, or one Stripe may have taken with
+ *     no payment row): each counts as the full $500, fail closed. A confirmed card
+ *     still waiting for its turn has claimed nothing, so it is not counted.
  * Inside the charge transaction the check runs again after a transaction-scoped
  * advisory lock (one key for every bar charge), so two cards confirmed at once
  * are serialized: the second sees the first's payment row, or its in-flight
@@ -55,6 +58,11 @@ const { isCardMethodType } = require('../stripe-pricing');
 const PER_CHARGE_CAP_CENTS = 50000;
 const DAILY_CAP_CENTS = 150000;
 const CAP_LOCK_KEY = 'ib-invoice-charge-daily-cap';
+// One bar charge runs at a time, from before its cap preflight until its charge returns.
+// A second confirmed card waits here BEFORE it claims anything, so the first charge never
+// counts it as a reservation and the second sees the first's committed payment.
+const CONFIRM_LOCK_KEY = 'ib-invoice-charge-confirm';
+const CONFIRM_LOCK_WAIT = '20s';
 // Refusals the charge guard throws inside the charge transaction start with this,
 // so the commit can tell them from the route's own 400s (the route returns only the message).
 const CAP_REFUSAL_PREFIX = 'Bar charge limit:';
@@ -185,6 +193,20 @@ async function sendRefusal(invoice, dueCents) {
 // The same recipients the Invoices page shows before Send (GET /:id/recipients):
 // the text goes to the customer's phone, the email to the billing recipient; a
 // payer-billed invoice goes to the payer's billing inbox and is never texted.
+function sendNote(invoice, delivered) {
+  if (invoice.sent_at) return `Already sent on ${etStamp(invoice.sent_at)}. This sends it again.`;
+  if (delivered) return `Already delivered (invoice status ${invoice.status}). This sends it again.`;
+  return 'Not sent before.';
+}
+
+// What the send also does when the visit closeout gate is on (disclosed on the card, pinned in _version).
+function closeoutLine(closeout) {
+  const visit = `${closeout.serviceType || 'visit'} on ${closeout.date}`;
+  return closeout.resuming
+    ? `Sending this invoice also finishes a closeout already started for the linked visit (${visit}): completes its remaining steps; no completion text, report, review request or charge`
+    : `Sending this invoice also completes the linked visit (${visit}) and creates its service record; no completion text, report, review request or charge`;
+}
+
 function sendLegs(who, invoice, dueCents) {
   const phone = who.payerBilled ? null : (who.primaryContact?.phone || null);
   const email = who.emailRecipient?.email ? String(who.emailRecipient.email).trim().toLowerCase() : null;
@@ -213,9 +235,21 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   const legs = sendLegs(who, invoice, dueCents);
   if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
   const totalCents = toCents(invoice.total);
-  // Never delivered on any channel: the send is a FIRST delivery, so the route's own
-  // first-delivery semantics make a send that loses a race with another delivery a no-op.
-  const firstDelivery = !invoice.sent_at && !invoice.sms_sent_at && !invoice.email_sent_at;
+  // The claim path's own delivered test (invoice.js alreadyDeliveredForFirstSend: any delivery
+  // stamp, or a sent / viewed / overdue / paid / prepaid status): not delivered means this send is
+  // a FIRST delivery, so the route's first-delivery semantics make a send that loses a race with
+  // another delivery a no-op. Delivered means a resend, and the card says so.
+  const delivered = require('../invoice').alreadyDeliveredForFirstSend(invoice);
+  const firstDelivery = !delivered;
+  // GATE_INVOICE_ISSUED_CLOSES_VISIT: a delivered invoice quietly completes the open visit it
+  // bills. Probed with the closeout's own function (the one the receipt-resend card uses), for the
+  // 'sent' trigger the Send handler runs. A probe that cannot read fails closed.
+  let closeout;
+  try {
+    closeout = await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger: 'sent' });
+  } catch {
+    return refusal('This invoice cannot be sent from the bar right now: the linked visit\'s closeout could not be checked.', 'closeout_check_failed', { invoice_id: invoice.id });
+  }
   const recipients = { phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email };
   return {
     ...(forSend ? { sendRecipients: recipients } : {}),
@@ -232,7 +266,8 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     channels: [legs.phone && 'text', legs.email && 'email'].filter(Boolean).join(' and '),
     text: legs.text,
     email: legs.emailLine,
-    send_note: invoice.sent_at ? `Already sent on ${etStamp(invoice.sent_at)}. This sends it again.` : 'Not sent before.',
+    send_note: sendNote(invoice, delivered),
+    ...(closeout ? { visit_closeout: closeoutLine(closeout) } : {}),
     review_request: 'No review request is sent.',
     // The Send handler's own effects the card must name (the bar skips the credit step).
     effects_note: 'No account credit is applied by this send. If the visit is cancelled before the send runs, nothing is sent and the invoice is held for review (never voided by the bar).',
@@ -246,6 +281,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       version_digest: approvedInvoiceVersionDigest(invoice),
       sent: msOf(invoice.sent_at),
       first_delivery: firstDelivery,
+      // The linked visit the delivery would complete (null = none): a change is drift.
+      closeout_visit: closeout?.visitId || null,
+      closeout_resuming: closeout?.resuming === true,
       payer_id: invoice.payer_id || null,
       recipients: digest(recipients),
     },
@@ -364,7 +402,21 @@ async function chargedTodayCents(database = db, { excludeInvoiceId = null, day =
   const uncertain = database('ib_pending_actions')
     .where({ tool_name: 'charge_invoice', status: 'confirmed' })
     .whereRaw("(consumed_at AT TIME ZONE 'America/New_York')::date = ?::date", [day])
-    .where((b) => b.whereNull('result').orWhereRaw("result->>'outcome_unknown' = 'true'"));
+    .where((b) => b.whereNull('result').orWhereRaw("result->>'outcome_unknown' = 'true'"))
+    // The charge path's own durable claim: money may be moving or may have moved.
+    .whereExists(function claimed() {
+      this.select(database.raw('1')).from('stripe_invoice_charge_attempts as a')
+        .whereRaw("a.invoice_id::text = ib_pending_actions.params->>'invoice_id'")
+        .whereIn('a.status', ['claimed', 'ambiguous']).whereNull('a.resolved_at');
+    })
+    // Once the payment row exists the paid sum above already counts it.
+    .whereNotExists(function counted() {
+      this.select(database.raw('1')).from('payments as p')
+        .whereRaw("p.invoice_id::text = ib_pending_actions.params->>'invoice_id'")
+        .whereRaw("p.metadata->>'initiated_via' = 'intelligence_bar'")
+        .where('p.payment_date', day)
+        .whereNotIn('p.status', ['failed', 'canceled', 'cancelled']);
+    });
   if (excludeInvoiceId) uncertain.whereRaw("COALESCE(params->>'invoice_id', '') <> ?", [String(excludeInvoiceId)]);
   const row = await uncertain.count({ n: '*' }).first();
   return toCents(paid?.total) + (Number(row?.n) || 0) * PER_CHARGE_CAP_CENTS;
@@ -507,6 +559,8 @@ async function buildChargePlan(input) {
       credit_cents: creditNowCents,
       due_cents: toCents(invoiceAmountDue(invoice)),
       invoice_version: msOf(invoice.updated_at),
+      // Amount due, credit and lines: the charge compares this with the locked row before Stripe.
+      version_digest: approvedInvoiceVersionDigest(invoice),
       payment_method_id: card.id,
       card: digest({
         pm: card.stripe_payment_method_id, brand: card.card_brand || null, last4: card.last_four || null,
@@ -520,6 +574,13 @@ async function buildChargePlan(input) {
   };
 }
 
+function chargeNote(json, amount) {
+  if (json.status !== 'paid') return `Charge of ${amount} is processing.`;
+  if (json.receiptQueued === true) return `Charged ${amount}. The invoice is paid; the receipt is queued.`;
+  if (json.receiptQueued === false) return `Charged ${amount}. The invoice is paid, but the receipt was NOT queued. Send it from the invoice page.`;
+  return `Charged ${amount}. The invoice is paid.`;
+}
+
 // The charge-card handler's reply, in the tool's words.
 function chargeOutcome(plan, status, json = {}) {
   const base = { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number };
@@ -531,7 +592,9 @@ function chargeOutcome(plan, status, json = {}) {
     return {
       ...base, success: true, charged: true, payment_id: json.paymentId, payment_status: json.status,
       amount, card: `${json.brand || 'Card'} •••• ${json.last4 || '????'}`,
-      note: json.status === 'paid' ? `Charged ${amount}. The invoice is paid; the receipt is queued.` : `Charge of ${amount} is processing.`,
+      // Only what the charge reported: receiptQueued is true when a receipt job exists, false when queuing failed.
+      ...(json.status === 'paid' && json.receiptQueued === false ? { receipt_queued: false } : {}),
+      note: chargeNote(json, amount),
     };
   }
   const message = String(json.error || 'charge failed');
@@ -539,11 +602,31 @@ function chargeOutcome(plan, status, json = {}) {
   if (json.orphan || json.ambiguous || json.in_progress) return { ...base, outcome_unknown: true, code: json.code, error: message };
   if (message.startsWith(CAP_REFUSAL_PREFIX)) return { ...base, blocked: true, code: 'charge_limit', error: `Nothing was charged: ${message}` };
   // Every other route refusal is pre-Stripe (stripe.js releases the claim): no money moved.
-  return { ...base, error: `Nothing was charged: ${message}`, code: json.code || 'charge_refused', preview_changed: /changed|Review the updated total/i.test(message) };
+  return { ...base, error: `Nothing was charged: ${message}`, code: json.code || 'charge_refused', preview_changed: json.code === 'approved_version_changed' || /changed|Review the updated total/i.test(message) };
 }
 
 async function commitCharge(input, actionContext) {
   const pinned = input._verified_invoice_charge_version;
+  if (!pinned) return { error: 'Use the confirmation card to approve this charge.', code: 'approval_required' };
+  // Held for the whole confirmed run (a transaction-scoped advisory lock on its own connection).
+  // Waiting for it claims nothing, so a card queued behind another is not a reservation.
+  const lockWait = await db.transaction(async (gate) => {
+    try {
+      await gate.raw(`SET LOCAL lock_timeout = '${CONFIRM_LOCK_WAIT}'`);
+      await gate.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CONFIRM_LOCK_KEY]);
+    } catch (err) {
+      if (err?.code === '55P03') return { busy: true };
+      throw err;
+    }
+    return { run: await runCharge(input, pinned, actionContext) };
+  });
+  if (lockWait.busy) {
+    return refusal('Another charge from the bar is still being processed, so nothing was charged. Wait a minute, then ask for a fresh confirmation card.', 'charge_busy');
+  }
+  return lockWait.run;
+}
+
+async function runCharge(input, pinned, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(input, pinned, buildChargePlan, { what: 'charge', changed: 'Nothing was charged' });
   if (refused) return refused;
   const { status, json } = await require('../../routes/admin-invoices').chargeInvoiceFromBar({
@@ -553,6 +636,9 @@ async function commitCharge(input, actionContext) {
     body: { paymentMethodId: pinned.payment_method_id, expectedTotal: pinned.charge_cents / 100 },
     actor: { technicianId: actionContext?.technicianId || null },
     chargeGuard: chargeLockGuard({ invoiceId: plan.invoice_id, customerId: plan.customer_id }),
+    // The invoice row the card showed (edit time + amount due / lines digest): checked under the
+    // charge's own invoice lock, before any Stripe call.
+    version: { updatedAtMs: pinned.invoice_version, digest: pinned.version_digest },
   });
   const result = chargeOutcome(plan, status, json || {});
   logger.info(`[intelligence-bar:invoice-actions] charge ${plan.invoice_id}: ${result.payment_status || result.code || 'done'}`);
@@ -572,6 +658,7 @@ function cardLines(toolName, preview) {
       { kind: 'comms', text: preview.text },
       { kind: 'comms', text: preview.email },
       { kind: 'operational', text: preview.send_note },
+      ...(preview.visit_closeout ? [{ kind: 'operational', text: preview.visit_closeout }] : []),
       { kind: 'operational', text: preview.review_request },
       { kind: 'billing', text: preview.effects_note },
     ];

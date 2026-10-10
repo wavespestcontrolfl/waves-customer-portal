@@ -1935,7 +1935,7 @@ async function invoiceChargeCardHandler(req, res, next) {
         expectedTotal,
         // The Invoices page overrides a dispute hold and records it; the bar never does:
         // with the override off, a held customer is refused inside the charge transaction
-        // before any override trail (recordHoldOverride) can be written.
+        // before any override trail can be written.
         operatorOverride: !req.ibChargeGuard,
         overrideTrail: {
           actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
@@ -1943,7 +1943,7 @@ async function invoiceChargeCardHandler(req, res, next) {
         },
         // Set only by chargeInvoiceFromBar (never an HTTP field): the bar's caps,
         // rechecked under the charge lock, and the payment row's provenance stamp.
-        ...(req.ibChargeGuard ? { assertUnderChargeLock: req.ibChargeGuard, initiatedVia: 'intelligence_bar' } : {}),
+        ...(req.ibChargeGuard ? { assertUnderChargeLock: req.ibChargeGuard, initiatedVia: 'intelligence_bar', expectedVersion: req.ibChargeVersion || null } : {}),
       },
     );
     res.json({ success: true, ...result });
@@ -1970,6 +1970,11 @@ async function invoiceChargeCardHandler(req, res, next) {
         code: err.code,
         ambiguous: true,
       });
+    }
+    // The bar's approved invoice version no longer matches the locked row: refused before
+    // any Stripe call (the same coded shape the bar's send claim refusal uses).
+    if (err.code === 'approved_version_changed') {
+      return res.status(400).json({ error: err.message, code: err.code });
     }
     if (err.code === 'STRIPE_CHARGE_IN_PROGRESS') {
       return res.status(409).json({
@@ -3780,8 +3785,9 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
   return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
 }
 // chargeGuard: async (trx, { totalCents, invoice }) — the bar's caps, run under the charge lock.
-function chargeInvoiceFromBar({ invoiceId, body, actor, chargeGuard }) {
-  return runInvoiceHandler(invoiceChargeCardHandler, barRequest(invoiceId, body, actor, { ibChargeGuard: chargeGuard }));
+// version: { updatedAtMs, digest } — the invoice row the card showed, checked under the charge's invoice lock.
+function chargeInvoiceFromBar({ invoiceId, body, actor, chargeGuard, version }) {
+  return runInvoiceHandler(invoiceChargeCardHandler, barRequest(invoiceId, body, actor, { ibChargeGuard: chargeGuard, ibChargeVersion: version || null }));
 }
 
 module.exports = router;

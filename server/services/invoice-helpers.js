@@ -433,6 +433,17 @@ function approvedInvoiceVersionDigest(invoice) {
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 32);
 }
 
+// Whether an invoice row is still the version an approval showed: the same edit time
+// (to the millisecond) and the same amount-due / lines digest. Used by the bar's charge under
+// its invoice lock; the send claim applies the same two checks inside its own UPDATE.
+function invoiceMatchesApprovedVersion(invoice, version) {
+  if (!version) return true;
+  const editedAt = invoice && invoice.updated_at ? new Date(invoice.updated_at).getTime() : null;
+  const approvedAt = version.updatedAtMs === null || version.updatedAtMs === undefined ? null : Number(version.updatedAtMs);
+  const sameTime = approvedAt === null ? editedAt === null : (editedAt !== null && Math.floor(editedAt) === Math.floor(approvedAt));
+  return sameTime && (!version.digest || approvedInvoiceVersionDigest(invoice) === version.digest);
+}
+
 module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -465,6 +476,7 @@ module.exports = {
   hasCollectibleAmountDue,
   invoiceAmountDue,
   approvedInvoiceVersionDigest,
+  invoiceMatchesApprovedVersion,
   invoiceDepositCreditCents,
   invoicePrincipalCents,
   formatCardLine,

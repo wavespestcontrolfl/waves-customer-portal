@@ -140,6 +140,56 @@ describe('the approved recipients reach each send leg (source contract)', () => 
   });
 });
 
+describe('the approved invoice version at the charge (PR #6117 round-2 P1, source contract + helper)', () => {
+  const { invoiceMatchesApprovedVersion, approvedInvoiceVersionDigest } = require('../services/invoice-helpers');
+  const row = { total: '129.00', credit_applied: '0.00', line_items: [{ description: 'Quarterly Pest Control', amount: 129 }], updated_at: new Date('2099-01-01T12:00:00.250Z') };
+  const version = { updatedAtMs: new Date('2099-01-01T12:00:00.250Z').getTime(), digest: approvedInvoiceVersionDigest(row) };
+
+  test('the helper matches only the same edit time and the same amount due / lines', () => {
+    expect(invoiceMatchesApprovedVersion(row, version)).toBe(true);
+    expect(invoiceMatchesApprovedVersion(row, null)).toBe(true);
+    expect(invoiceMatchesApprovedVersion({ ...row, updated_at: new Date('2099-01-01T12:00:09Z') }, version)).toBe(false);
+    expect(invoiceMatchesApprovedVersion({ ...row, credit_applied: '20.00' }, version)).toBe(false);
+    expect(invoiceMatchesApprovedVersion({ ...row, line_items: [{ description: 'Other', amount: 129 }] }, version)).toBe(false);
+  });
+
+  test('chargeInvoiceWithSavedCard compares it with the LOCKED row after the collectible checks and before account credit, quotes and Stripe', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/stripe.js'), 'utf8');
+    const fn = src.slice(src.indexOf('  async chargeInvoiceWithSavedCard('));
+    const check = fn.indexOf('invoiceMatchesApprovedVersion(lockedInvoice, expectedVersion)');
+    expect(check).toBeGreaterThan(-1);
+    expect(fn.indexOf('assertInvoiceCollectible(lockedInvoice);')).toBeLessThan(check);
+    expect(fn.indexOf('applyAccountCreditToInvoice({ invoiceId }, trx)')).toBeGreaterThan(check);
+    expect(fn.indexOf('paymentIntents.create')).toBeGreaterThan(check);
+    expect(fn.slice(check, check + 400)).toContain("code: 'approved_version_changed'");
+  });
+
+  test('the route hands the bar\'s version to the charge and answers a version refusal as a coded 400; the page never sets it', async () => {
+    StripeService.chargeInvoiceWithSavedCard.mockResolvedValue({ paymentId: 'pay-1' });
+    await router.chargeInvoiceFromBar({ invoiceId: 'inv-1', body: { paymentMethodId: 'pm-1' }, actor: {}, chargeGuard: jest.fn(), version });
+    expect(StripeService.chargeInvoiceWithSavedCard.mock.calls[0][2].expectedVersion).toEqual(version);
+    await post('/inv-1/charge-card', { paymentMethodId: 'pm-1', ibChargeVersion: version, expectedVersion: version });
+    expect(StripeService.chargeInvoiceWithSavedCard.mock.calls[1][2].expectedVersion).toBeUndefined();
+    StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('Invoice changed after it was approved'), { code: 'approved_version_changed' }));
+    await expect(router.chargeInvoiceFromBar({ invoiceId: 'inv-1', body: { paymentMethodId: 'pm-1' }, actor: {}, chargeGuard: jest.fn(), version }))
+      .resolves.toEqual({ status: 400, json: { error: 'Invoice changed after it was approved', code: 'approved_version_changed' } });
+  });
+});
+
+describe('the receipt outcome the charge reports (PR #6117 round-2 P2, source contract)', () => {
+  test('receiptQueued is set from the enqueue result and from its failure, never from the charge outcome, and reaches the return value', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/stripe.js'), 'utf8');
+    const fn = src.slice(src.indexOf('  async chargeInvoiceWithSavedCard('), src.indexOf('  // PAYMENT HISTORY'));
+    expect(fn).toContain('receiptQueued = enqueueResult.enqueued === true || enqueueResult.deduped === true;');
+    // The enqueue failure is still swallowed (the charge is paid), but now recorded.
+    const catchAt = fn.indexOf('Card-on-file receipt queue failed');
+    expect(fn.slice(catchAt - 300, catchAt)).toContain('receiptQueued = false;');
+    expect(fn).toContain('...(receiptQueued === undefined ? {} : { receiptQueued, ...(receiptQueued ? {} : { receiptQueueError }) }),');
+    // It is only set inside the paid branch: a processing charge reports nothing about a receipt.
+    expect(fn.indexOf("if (status === 'paid') {")).toBeLessThan(fn.indexOf('receiptQueued = enqueueResult'));
+  });
+});
+
 describe('chargeInvoiceFromBar', () => {
   test('runs the charge-card handler: the same StripeService call as the page, plus the cap guard and the stamp', async () => {
     StripeService.chargeInvoiceWithSavedCard.mockResolvedValue({ paymentId: 'pay-1', status: 'paid', amount: 132.87 });
@@ -153,7 +203,8 @@ describe('chargeInvoiceFromBar', () => {
     expect(page).toEqual({ status: 200, json: { success: true, paymentId: 'pay-1', status: 'paid', amount: 132.87 } });
     expect(bar).toEqual(page);
     expect(barCall.slice(0, 2)).toEqual(['inv-1', 'pm-1']);
-    const { assertUnderChargeLock, initiatedVia, ...barOptions } = barCall[2];
+    const { assertUnderChargeLock, initiatedVia, expectedVersion, ...barOptions } = barCall[2];
+    expect(expectedVersion).toBeNull();
     expect(assertUnderChargeLock).toBe(chargeGuard);
     expect(initiatedVia).toBe('intelligence_bar');
     // Same options as the page (the trail's ip / user agent are request facts the bar has none of).

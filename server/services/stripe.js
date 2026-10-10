@@ -2135,6 +2135,11 @@ const StripeService = {
   // opts.assertUnderChargeLock — async (trx, { totalCents, invoice }) run inside
   // the charge transaction, under the invoice lock, after the final surcharged
   // total is known and before any Stripe call; a throw refuses the charge.
+  // opts.expectedVersion — { updatedAtMs, digest } of the invoice row the caller's
+  // approval showed (the Intelligence Bar's charge_invoice card). Compared with the
+  // LOCKED invoice row before account credit, any quote or Stripe call: an edit or a
+  // partial credit since the card (same total or not) refuses the charge with
+  // code approved_version_changed. Null = unchanged for every other caller.
   // opts.initiatedVia — 'intelligence_bar' stamps payments.metadata.initiated_via
   // and the PaymentIntent's metadata (the webhook's fallback payment insert copies
   // it), so the bar's daily charge cap counts those rows. Both null = unchanged.
@@ -2149,7 +2154,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, assertUnderChargeLock = null, initiatedVia = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, assertUnderChargeLock = null, initiatedVia = null, expectedVersion = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2257,6 +2262,9 @@ const StripeService = {
         // assertInvoiceCollectible right below.)
         assertLockedInvoiceNotPayerBilled(lockedInvoice);
         assertInvoiceCollectible(lockedInvoice);
+        if (expectedVersion && !require('./invoice-helpers').invoiceMatchesApprovedVersion(lockedInvoice, expectedVersion)) {
+          throw Object.assign(new Error('Invoice changed after it was approved (amount due, lines or edit time). Nothing was charged.'), { code: 'approved_version_changed' });
+        }
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
         // (r8 P1: the fully-covered-by-credit early return would otherwise
@@ -3217,6 +3225,11 @@ const StripeService = {
     }
 
     logger.info(`[stripe] Card-on-file charge succeeded: $${total} for invoice ${invoice.invoice_number}, PI ${paymentIntent.id}`);
+    // Whether the paid receipt was queued (true) or the enqueue failed (false, with the
+    // message). The charge is paid either way; this only reports what happened. Undefined
+    // when no receipt is owed yet (a processing charge).
+    let receiptQueued;
+    let receiptQueueError;
     if (status === 'paid') {
       try {
         await require('./invoice-followups').stopOnPayment(invoiceId);
@@ -3252,6 +3265,9 @@ const StripeService = {
           customerInitiated,
           ...(deferReceiptDelivery ? { nextAttemptAt: deferredUntil } : {}),
         });
+        // enqueued, or deduped onto the job the webhook already queued: both mean a job exists.
+        receiptQueued = enqueueResult.enqueued === true || enqueueResult.deduped === true;
+        if (!receiptQueued) receiptQueueError = String(enqueueResult.reason || 'receipt job was not created');
         if (deferReceiptDelivery && !enqueueResult.enqueued) {
           // The payment_intent.succeeded webhook enqueues the same invoice
           // immediately and the queue dedupes on invoice_id — if the webhook
@@ -3272,6 +3288,8 @@ const StripeService = {
             : { delayMs: 1000, limit: 5 },
         );
       } catch (err) {
+        receiptQueued = false;
+        receiptQueueError = String(err.message || err).slice(0, 200);
         logger.error(`[stripe] Card-on-file receipt queue failed for invoice ${invoice.invoice_number}: ${err.message}`);
       }
       // Fire-and-forget: a card-on-file settle may release a payment-held
@@ -3288,6 +3306,7 @@ const StripeService = {
       surcharge,
       last4: card.last_four,
       brand: card.card_brand,
+      ...(receiptQueued === undefined ? {} : { receiptQueued, ...(receiptQueued ? {} : { receiptQueueError }) }),
     };
   },
 
