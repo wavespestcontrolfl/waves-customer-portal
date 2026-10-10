@@ -26,6 +26,10 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'repair_closeout',
   // resend_receipt previews name the customer and masked recipients.
   'resend_receipt',
+  // The customer-link writes name the customer and a masked number/inbox,
+  // and return a customer-facing bearer URL + SMS line.
+  'create_customer_link',
+  'send_autopay_setup_link',
   // The billing writes name the customer, a card's last four, and an invoice's
   // printed address (before and after).
   'remove_saved_payment_method',

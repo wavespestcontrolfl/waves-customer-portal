@@ -22,6 +22,12 @@ const path = require('path');
 const crypto = require('crypto');
 
 process.env.GATE_EDIT_APPT_ADDRESS = 'true';
+// send_autopay_setup_link's preview runs the Auto Pay service's own eligibility
+// read, which refuses before the gate while the lane is dark.
+process.env.GATE_AUTOPAY_SETUP_LINK = 'true';
+// Its default delivery (sms) preflights the customer-SMS gate and the text
+// template's active toggle, read-only, before offering a card.
+process.env.GATE_AUTOPAY_CUSTOMER_SMS = 'true';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => {
@@ -155,6 +161,8 @@ const WRITE_TWO_STEP = [
   'merge_customers',
   'repair_closeout',
   'resend_receipt',
+  'create_customer_link',
+  'send_autopay_setup_link',
   'remove_saved_payment_method',
   'correct_invoice_address',
   'update_lead_contact',
@@ -641,6 +649,19 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }],
     // resend_receipt's preview reads the paid invoice and the receipt resolvers
     // (spied below — their own paths are covered by intelligence-bar-receipt-resend.test.js).
+    // create_customer_link's preview reads only the customer (the composer
+    // handler it runs at commit is never reached unconfirmed).
+    ['customer-link-tools', 'executeCustomerLinkTool', 'create_customer_link', { customer_id: '00000000-0000-0000-0000-00000000f101', kind: 'pay_balance' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f101', first_name: 'Link', last_name: 'Fixture', phone: '9415550100', email: 'link@example.com', deleted_at: null }],
+    }],
+    // send_autopay_setup_link's preview runs setupLinkIneligibility (customer,
+    // payer exemption, saved-method reads) — a per-application customer with no
+    // payer and no saved method is eligible, so the preview reaches the gate.
+    ['customer-link-tools', 'executeCustomerLinkTool', 'send_autopay_setup_link', { customer_id: '00000000-0000-0000-0000-00000000f102' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f102', first_name: 'Auto', last_name: 'Fixture', phone: '9415550100', email: 'auto@example.com',
+        billing_mode: 'per_application', autopay_enabled: false, autopay_paused_until: null, payer_id: null, deleted_at: null }],
+      sms_templates: [{ template_key: 'autopay_setup_link', is_active: true }],
+    }],
     ['receipt-resend-tools', 'executeReceiptResendTool', 'resend_receipt', { invoice_id: '00000000-0000-0000-0000-00000000f001' }, {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f001', invoice_number: 'WPC-2026-0900', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null, paid_at: new Date('2026-10-01T15:00:00Z') }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.com', phone: '9415550100' }],
@@ -1025,6 +1046,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // explicitly opts out of live smoke; its preview is exercised above. So does
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link']);
   });
 });

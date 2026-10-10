@@ -163,6 +163,8 @@ const {
   buildConsultationLink,
   buildAutopaySetupLink,
   autopayLinkSendCheck,
+  composerOnlyLinkPresence,
+  linkOwnersInBody,
   buildAppointmentPageLink,
   buildCardRequestLink,
   buildPrepGuideLink,
@@ -3262,5 +3264,100 @@ describe('wrapped /l/ codes are judged by their target (SMS link wrap)', () => {
     expect(await immediateOnlyLinkSendCheck('See wavespest.co/l/wrapabc123')).toMatchObject({ present: true });
     wire({ target: `${PORTAL}/prep/${PREP}`, kind: 'service_report' });
     expect((await bearerLinkSendCheck('See wavespest.co/l/wrapabc123', OTHER, { trustedCustomerId: 'c1' })).ok).toBe(false);
+  });
+});
+
+// Read-only presence of the composer-only kinds (the IB's send guard runs this
+// at proposal time, before any card): detection by path shape, one read of
+// appointment_card_requests to tell a visit card request from an Auto Pay
+// link, and never the card funnel (Codex r3 on #6266 P1).
+describe('composerOnlyLinkPresence', () => {
+  test('detects contract, prep, statement and project-report links without touching the funnel', async () => {
+    mockBuilders = {};
+    const body = [
+      'Sign here: portal.wavespestcontrol.com/contract/AbCdEfGhIjKlMnOpQrSt',
+      'prep: portal.wavespestcontrol.com/prep/0123456789abcdef0123456789abcdef',
+      `statement: portal.wavespestcontrol.com/pay/statement/${'a'.repeat(64)}`,
+      'report: portal.wavespestcontrol.com/report/project/pat-abc123def456',
+    ].join(' ');
+    const out = await composerOnlyLinkPresence(body);
+    expect(out.present).toBe(true);
+    expect(out.kinds.sort()).toEqual(['contract', 'prep_guide', 'project_report', 'statement']);
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a /secure link is a card request only when its row is the visit lane; plain text and Auto Pay links are not present', async () => {
+    mockBuilders = { appointment_card_requests: chainBuilder({ firstRow: { kind: 'visit' } }) };
+    const visit = await composerOnlyLinkPresence('Secure your visit: portal.wavespestcontrol.com/secure/AbCdEfGhIjKlMnOpQrStUv');
+    expect(visit).toEqual({ present: true, kinds: ['card_request'] });
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+
+    mockBuilders = { appointment_card_requests: chainBuilder({ firstRow: { kind: 'customer' } }) };
+    const autopay = await composerOnlyLinkPresence('Set up Auto Pay: portal.wavespestcontrol.com/secure/AbCdEfGhIjKlMnOpQrStUv');
+    expect(autopay).toEqual({ present: false, kinds: [] });
+
+    mockBuilders = {};
+    mockDb.mockClear();
+    expect(await composerOnlyLinkPresence('Running 15 minutes late, sorry!')).toEqual({ present: false, kinds: [] });
+    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+
+  test('includeVerifyOnly also flags appointment, report and receipt links (an email reply may carry none)', async () => {
+    mockBuilders = {};
+    const body = 'Visit: portal.wavespestcontrol.com/appointment/AbCdEfGhIjKlMnOpQrSt report: portal.wavespestcontrol.com/report/AbCdEfGhIjKlMnOpQrSt receipt: portal.wavespestcontrol.com/receipt/AbCdEfGhIjKlMnOpQrSt';
+    expect(await composerOnlyLinkPresence(body)).toEqual({ present: false, kinds: [] });
+    const flagged = await composerOnlyLinkPresence(body, { includeVerifyOnly: true });
+    expect(flagged.present).toBe(true);
+    expect(flagged.kinds.sort()).toEqual(['appointment', 'portal_link', 'receipt', 'service_report']);
+    expect(requestCardForAppointment).not.toHaveBeenCalled();
+    // Any owned portal link, an unresolvable short code included, is flagged for that sender.
+    expect(await composerOnlyLinkPresence('Pay here: portal.wavespestcontrol.com/l/zz99zz', { includeVerifyOnly: true })).toEqual({ present: true, kinds: ['portal_link'] });
+    expect(await composerOnlyLinkPresence('Pay here: portal.wavespestcontrol.com/l/zz99zz')).toEqual({ present: false, kinds: [] });
+    expect(await composerOnlyLinkPresence('See you Tuesday!', { includeVerifyOnly: true })).toEqual({ present: false, kinds: [] });
+  });
+
+  test('a third-party URL with a protected-looking path is nobody\'s bearer', async () => {
+    mockBuilders = {};
+    const body = 'See https://example.com/contract/AbCdEfGhIjKlMnOpQrSt and https://example.com/l/abc and https://example.com/secure/AbCdEfGhIjKlMnOpQrStUv';
+    expect(await composerOnlyLinkPresence(body)).toEqual({ present: false, kinds: [] });
+    expect(await composerOnlyLinkPresence(body, { includeVerifyOnly: true })).toEqual({ present: false, kinds: [] });
+    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  });
+});
+
+describe('linkOwnersInBody', () => {
+  test('resolves each generated bearer to its customer, owned hosts only, and reports what it cannot match', async () => {
+    mockBuilders = {
+      scheduled_services: chainBuilder({ firstRow: { customer_id: 'cust-visit' } }),
+      customers: chainBuilder({ firstRow: { id: 'cust-reservice' } }),
+      invoices: chainBuilder({ firstRow: { customer_id: 'cust-invoice' } }),
+      estimates: chainBuilder({ firstRow: null }),
+      referral_promoters: chainBuilder({ firstRow: { customer_id: 'cust-referral' } }),
+    };
+    const body = [
+      'move: portal.wavespestcontrol.com/reschedule/AbCdEfGhIjKlMnOpQrSt',
+      'again: portal.wavespestcontrol.com/reservice/AbCdEfGhIjKlMnOpQrSt',
+      'pay: portal.wavespestcontrol.com/pay/AbCdEfGhIjKlMnOpQrSt',
+      'estimate: portal.wavespestcontrol.com/estimate/AbCdEfGhIjKlMnOpQrSt',
+      'refer: portal.wavespestcontrol.com/r/WAVES123',
+      'not ours: https://example.com/pay/AbCdEfGhIjKlMnOpQrSt',
+    ].join(' ');
+    const out = await linkOwnersInBody(body);
+    expect(out.owners.map((o) => [o.kind, o.customerId])).toEqual([
+      ['reschedule', 'cust-visit'], ['reservice', 'cust-reservice'], ['pay', 'cust-invoice'], ['referral', 'cust-referral'],
+    ]);
+    expect(out.unresolved).toEqual([{ kind: 'estimate', token: 'AbCdEfGhIjKlMnOpQrSt' }]);
+    expect(await linkOwnersInBody('See you Tuesday!')).toEqual({ owners: [], unresolved: [] });
+  });
+
+  test('an unpaid invoice short code is judged by its stored /pay target; a code with no row is unresolved', async () => {
+    mockBuilders = {
+      short_codes: chainBuilder({ firstRow: { code: 'py222', target_url: 'https://portal.wavespestcontrol.com/pay/AbCdEfGhIjKlMnOpQrSt' } }),
+      invoices: chainBuilder({ firstRow: { customer_id: 'cust-invoice' } }),
+    };
+    const out = await linkOwnersInBody('You can view and pay your balance securely here: portal.wavespestcontrol.com/l/py222');
+    expect(out).toEqual({ owners: [{ kind: 'pay', token: 'AbCdEfGhIjKlMnOpQrSt', customerId: 'cust-invoice' }], unresolved: [] });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await linkOwnersInBody('Pay here: portal.wavespestcontrol.com/l/gone99')).toEqual({ owners: [], unresolved: [{ kind: 'short_link', token: 'gone99' }] });
   });
 });

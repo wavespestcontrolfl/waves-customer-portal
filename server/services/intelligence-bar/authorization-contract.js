@@ -106,6 +106,11 @@ const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_pay
 // vendor/partner/unattributed mail too, and a reply to those is not
 // customer contact — the flag derives from the pinned email's customer
 // attribution (preview.pinned_recipient.linked_customer) instead.
+// customer-link-tools.js writes: contact derives from the preview's own
+// notifies_customer (true = the chosen delivery sends; 'may' = a conditional
+// enrollment confirmation), never from the name alone — inline builds send
+// nothing.
+const CUSTOMER_LINK_TOOL_NAMES = new Set(['create_customer_link', 'send_autopay_setup_link']);
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
@@ -994,6 +999,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The portal's own Auto Pay-off / payment-method-removed notices, only
       // when their gate is on and an email is on file (the plan says which).
       || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
+      // The Auto Pay setup link's text/email delivery (true), or the
+      // enrollment confirmation an auto-secure may email ('may') — for the
+      // inline delivery and for a card_request link (customer-link-tools.js).
+      || (CUSTOMER_LINK_TOOL_NAMES.has(toolName) && (preview?.notifies_customer === true || preview?.notifies_customer === 'may'))
       || tierUpgradeEmail
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
@@ -1004,6 +1013,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
+    if (CUSTOMER_LINK_TOOL_NAMES.has(toolName)) {
+      contactLabel = preview?.notifies_customer === true
+        ? 'Customer will be contacted'
+        : 'Customer may be contacted (Auto Pay enrollment confirmation email, only if a consented saved card is enrolled instead of a link)';
+    }
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,

@@ -1330,6 +1330,12 @@ async function sendSms(input) {
 
   if (!phone) return { error: 'No phone number' };
 
+  // A customer link the composer's send seam must carry stays with the
+  // composer (claims, activation, sent marks live in its /sms route);
+  // re-checked at commit, like consent, since a card can sit open.
+  const linkRefusal = await customerLinkSendRefusal(message, phone, custId || null);
+  if (linkRefusal) return linkRefusal;
+
   // Routed through the customer-message middleware. This is Virginia's
   // daily-driver send path, so the validators apply consistently:
   // suppression list, sms_enabled, no customer-emoji, segment metadata.
@@ -1447,6 +1453,96 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
   }
 }
 
+// The composer's /sms route is the ONE sender that verifies and records the
+// customer links its Insert Link sheet builds (composer-customer-links.js):
+// an Auto Pay setup link is re-checked and reclassified there; a card
+// request's one-text-ever claim, a prepared contract's activation, prep-guide
+// and statement sent marks, a project report's delivery claim and a
+// consultation's lead binding all happen in that route. The bar's text tools
+// can reach none of that bookkeeping, so a body carrying one of those links is
+// refused here with a pointer to the composer (or, for Auto Pay, to
+// send_autopay_setup_link). Links the seam only verifies (appointment page,
+// service report, receipt) are verified the same way and allowed; a
+// verification failure refuses with the seam's own words. Any other text
+// passes untouched (the checks read nothing for a body with no portal link).
+// Fail closed on an unreadable check, as the route does (503).
+//
+// Three phases (Codex r3 on #6266 P1 + security P2): 'proposal' runs only
+// the READ-ONLY checks (composerOnlyLinkPresence, autopayLinkSendCheck) so
+// that asking for a card can never commit anything; 'commit' adds the seam's
+// ownership verification (bearerLinkSendCheck) for the links it only
+// verifies — by then every composer-only kind has already been refused, so
+// its stateful card-request branch (requestCardForAppointment) is never
+// reached; 'email' (send_email_reply) has no recipient phone to bind a
+// bearer to — Gmail answers the sender's address, which attribution does not
+// prove is the customer's — so it refuses EVERY owned portal link (the
+// verify-only bearers, unknown short codes, all of it) and runs no seam check.
+const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it. Text it from the composer. Nothing was sent.';
+const EMAIL_BEARER_REFUSAL = 'An email reply cannot carry a portal link (appointment page, report, receipt, pay, estimate, card request, contract, prep guide, statement, project report, consultation, or a short link) — the reply goes to the sender\'s address, which may not be the customer\'s. Text it to the customer\'s own number instead (send_sms, or the Communications composer). Nothing was sent.';
+const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — send it with send_autopay_setup_link (delivery sms) or from the Communications composer, which verifies the link at send time. Nothing was sent.';
+const links = () => require('../composer-customer-links');
+// The checks, in order; the first refusal wins. Each is read-only except the
+// seam's own verification, which only the 'commit' phase runs.
+async function composerOnlyLinkCheck({ body, email }) {
+  const found = await links().composerOnlyLinkPresence(body, { includeVerifyOnly: email });
+  return found.present ? { error: email ? EMAIL_BEARER_REFUSAL : COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+}
+async function autopayLinkCheck({ body, toLast10, customerId, email }) {
+  const autopay = await links().autopayLinkSendCheck(body, toLast10, { trustedCustomerId: customerId });
+  return autopay.present ? { error: email ? EMAIL_BEARER_REFUSAL : AUTOPAY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+}
+// Every generated bearer the seam does not verify itself (reschedule, track,
+// re-service, pay, estimate, referral) must belong to the recipient's account
+// — a link built for one customer never rides a text to another, whatever the
+// model paired.
+async function linkOwnerCheck({ body, customerId }) {
+  const { owners, unresolved } = await links().linkOwnersInBody(body);
+  if (unresolved.length) return { error: 'A customer link in this text matches no customer record — remove it and build a fresh one. Nothing was sent.', code: 'customer_link_unverified' };
+  if (!owners.length) return null;
+  if (!customerId) return { error: 'This text carries a customer link, but the recipient is not a known customer — send it to that customer\'s own number (pick the customer). Nothing was sent.', code: 'customer_link_recipient' };
+  const accountKey = (row) => String(row?.account_id || row?.id || '');
+  const recipient = await db('customers').where({ id: customerId }).first('id', 'account_id');
+  const ownerRows = await db('customers').whereIn('id', [...new Set(owners.map((o) => o.customerId))]).select('id', 'account_id');
+  const byId = new Map(ownerRows.map((r) => [String(r.id), r]));
+  const foreign = owners.some((o) => accountKey(byId.get(o.customerId)) !== accountKey(recipient));
+  return !recipient || foreign
+    ? { error: 'A customer link in this text belongs to a different customer than the recipient — remove it; build the link for this customer instead. Nothing was sent.', code: 'customer_link_owner_mismatch' }
+    : null;
+}
+async function bearerSeamCheck({ body, toLast10, customerId, usDestination }) {
+  const bearer = await links().bearerLinkSendCheck(body, toLast10, { trustedCustomerId: customerId, usDestination });
+  if (!bearer.ok) return { error: `${bearer.error} Nothing was sent.`, code: 'customer_link_refused' };
+  const composerRecorded = bearer.cards || bearer.contracts || bearer.statements || bearer.preps || bearer.projectReports || bearer.consultationLeadId;
+  return composerRecorded ? { error: COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+}
+const LINK_CHECKS_BY_PHASE = {
+  proposal: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  email: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  commit: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
+};
+async function customerLinkSendRefusal(message, phone, customerId, { phase = 'commit' } = {}) {
+  const body = String(message || '');
+  if (!body.trim()) return null;
+  const digits = String(phone || '').replace(/\D/g, '');
+  const toLast10 = digits.slice(-10);
+  // Masked: the refusal rides into model context (and the email path's result).
+  const refuse = (error, code) => ({ success: false, error, blocked: true, code, sent_to: toLast10.length >= 4 ? `***${toLast10.slice(-4)}` : null });
+  const ctx = {
+    body, toLast10, customerId: customerId || null, email: phase === 'email',
+    usDestination: digits.length === 10 || (digits.length === 11 && digits.startsWith('1')),
+  };
+  try {
+    for (const check of LINK_CHECKS_BY_PHASE[phase] || LINK_CHECKS_BY_PHASE.commit) {
+      const refusal = await check(ctx);
+      if (refusal) return refuse(refusal.error, refusal.code);
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:comms] customer link pre-send check failed — refusing: ${err.message}`);
+    return refuse('Could not verify a customer link in this message — nothing was sent. Try again in a moment.', 'customer_link_unverified');
+  }
+}
+
 /**
  * Proposal-time refusal for send_sms, so no card is offered for a text that
  * cannot go out: an opted-out or suppressed number, in the same wording the
@@ -1463,6 +1559,8 @@ async function sendSmsProposalRefusal(params = {}) {
   if (!params.message) return null;
   const recipient = await resolveSmsRecipient(params);
   if (recipient.error || !recipient.phone) return null;
+  const linkRefusal = await customerLinkSendRefusal(params.message, recipient.phone, recipient.custId || null, { phase: 'proposal' });
+  if (linkRefusal) return linkRefusal;
   const verdict = await smsConsentVerdict({ customerId: recipient.custId || null, phone: recipient.phone, message: params.message, messageType });
   if (!verdict) return null;
   return blockedSmsResponse(verdict, { messageType, phone: recipient.phone, customerName: recipient.customerName || params.customer_name || null });
@@ -1877,4 +1975,4 @@ async function getPartnerCallHistory(input = {}) {
   };
 }
 
-module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer, sendSmsProposalRefusal };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer, sendSmsProposalRefusal, customerLinkSendRefusal };
