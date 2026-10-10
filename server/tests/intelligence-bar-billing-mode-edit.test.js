@@ -11,8 +11,10 @@ const mockState = {
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orderBy', 'limit']) q[m] = () => q;
-    q.forUpdate = () => { q.locked = true; return q; };
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orWhereRaw', 'orderBy', 'limit']) q[m] = () => q;
+    // where(fn) runs its callback (the live-visit clause is built that way).
+    q.where = (f) => { if (typeof f === 'function') f.call(q, q); return q; };
+    q.forUpdate = () => { q.locked = true; if (table === 'customers') mockState.log.push('customers:row'); return q; };
     q.select = (...cols) => { q.cols = cols; return q; };
     q.first = async (...cols) => {
       if (table === 'customers') {
@@ -42,7 +44,10 @@ jest.mock('../models/db', () => {
     return q;
   };
   const db = jest.fn((table) => build(table));
-  db.raw = jest.fn(() => ({ __raw: true }));
+  db.raw = jest.fn((sql, args) => {
+    if (Array.isArray(args) && String(args[0]).startsWith('customer-comms:')) mockState.log.push('comms');
+    return { __raw: true };
+  });
   db.transaction = jest.fn(async (cb) => cb(db));
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
@@ -401,7 +406,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
     test('the claim is taken before the retry check and the visit reads, inside the update transaction', async () => {
       mockState.customer = { ...MONTHLY };
       await commit(MONTHLY, LEAVE);
-      expect(mockState.log.slice(0, 3)).toEqual(['claim', 'visits:lock', 'visits:read']);
+      expect(mockState.log.slice(0, 5)).toEqual(['comms', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
     });
 
     test('a retry armed after the card is caught under the claim', async () => {
@@ -409,7 +414,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       mockState.armed = MONTHLY_ARMED;
       const result = await commit(MONTHLY, LEAVE);
       expect(result.error).toMatch(/dues retry scheduled.*Nothing was updated/);
-      expect(mockState.log[0]).toBe('claim');
+      expect(mockState.log.indexOf('claim')).toBeGreaterThan(mockState.log.indexOf('customers:row'));
     });
 
     test('a proposal takes no claim (read only)', async () => {
@@ -429,7 +434,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       });
       expect(result).toMatchObject({ preview_changed: true });
       expect(result.error).toMatch(/billing or upcoming visits changed since the card/);
-      expect(mockState.log).toEqual(['claim', 'visits:lock', 'visits:read']);
+      expect(mockState.log).toEqual(['comms', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
       expect(customerWrites()).toHaveLength(0);
     });
 
@@ -442,7 +447,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       mockState.log = [];
       const result = await commit(BASE, LEAVE, visits);
       expect(result.error).toBeUndefined();
-      expect(mockState.log).toEqual(['claim', 'visits:lock', 'visits:read']);
+      expect(mockState.log).toEqual(['comms', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
     });
   });
 
@@ -507,6 +512,87 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       expect(line).toMatch(/\$55\.00 monthly rate is NOT charged by the dues run right now\. This customer has no saved payment method/);
       expect(line).not.toMatch(/is charged each month by the dues run/);
     });
+  });
+});
+
+describe('Codex round 4 on #6118', () => {
+  const LEAVE = { billing_mode: 'per_application', per_application_fee: 147 };
+
+  test('new visits are fenced out: the customer comms lock comes before the customer row lock, then the collection claim, then the visit locks', async () => {
+    mockState.customer = { ...BASE };
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: BillingModeChange.cardPin(BASE, [], LEAVE),
+    });
+    expect(result.error).toBeUndefined();
+    expect(mockState.log).toEqual(['comms', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
+    // A non-billing edit takes no comms lock here.
+    mockState.log = [];
+    await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: { city: 'Sample City' } });
+    expect(mockState.log).not.toContain('comms');
+  });
+
+  test('an en_route or on_site visit with no price blocks per_visit like a pending one (the customer page rule)', async () => {
+    const BillingModeRules = require('../services/billing-mode-rules');
+    // The predicate is the lifecycle guard's: the query is built with its clause.
+    const lifecycle = require('../services/customer-lifecycle-guard');
+    const spy = jest.spyOn(lifecycle, 'whereVisitRowLive');
+    mockState.customer = { ...BASE, billing_mode: 'per_application', per_application_fee: '91.00' };
+    mockState.unpriced = [{ id: 's9', service_type: 'Pest Control', is_callback: false, scheduled_date: '2026-10-09', status: 'on_site' }];
+    const r = await propose({ billing_mode: 'per_visit' });
+    expect(r).toMatchObject({ code: 'billing_mode_rule', error: expect.stringContaining('has no price and would complete unbilled') });
+    expect(spy).toHaveBeenCalled();
+    spy.mockClear();
+    await BillingModeRules.unpricedFutureBillableVisits(require('../models/db'), CUSTOMER_ID);
+    expect(spy).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    // The card's own visit read (projection, payer check) uses it too.
+    spy.mockClear();
+    await propose({ per_application_fee: 99 });
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('the live-visit clause both queries use lists en_route and on_site (real SQL)', () => {
+    const knex = jest.requireActual('knex')({ client: 'pg' });
+    const sql = knex('scheduled_services').where(function live() {
+      require('../services/customer-lifecycle-guard').whereVisitRowLive(this, '2026-10-10');
+    }).toString();
+    expect(sql).toContain("\"status\" = 'en_route'");
+    expect(sql).toContain("\"status\" = 'on_site'");
+    expect(sql).toContain("\"status\" = 'pending'");
+  });
+
+  test('a $100 prepayment on an unpriced visit: the card shows the balance moving from $0.00 to $47.00, and the pin carries it', async () => {
+    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    const visit = {
+      id: 'v7', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: null, primary_line_price: null,
+      prepaid_amount: '100.00', prepaid_method: 'cash', is_callback: false, service_type: 'Pest Control', payer_id: null, is_recurring: true,
+    };
+    mockState.visits = [visit];
+    const proposal = await propose(LEAVE);
+    expect(proposal.error).toBeUndefined();
+    expect(proposal.display.next_visits).toContain('Partly prepaid visit on 2099-01-05 (Pest Control): $100.00 paid; still collected at completion $0.00 → $47.00.');
+    // Pinned: the same visit with a different prepayment changes the balance, so the pin differs.
+    const pinTwo = BillingModeChange.cardPin(mockState.customer, [{ ...visit, prepaid_amount: '120.00' }], LEAVE);
+    expect(pinTwo).not.toBe(proposal.pin);
+    expect(proposal.pin).toContain('"v7",0,47');
+    // Commit with the same state succeeds; a changed prepayment refuses.
+    const ok = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
+    });
+    expect(ok.error).toBeUndefined();
+    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    mockState.visits = [{ ...visit, prepaid_amount: '120.00' }];
+    const stale = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
+    });
+    expect(stale).toMatchObject({ preview_changed: true });
+  });
+
+  test('a priced visit with a partial prepayment shows no balance line (its own price wins in every lane)', async () => {
+    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    mockState.visits = [{ id: 'v8', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '120.00', prepaid_amount: '50.00', prepaid_method: 'cash', service_type: 'Pest Control' }];
+    const lines = (await propose(LEAVE)).display.next_visits;
+    expect(lines.some((l) => l.startsWith('Partly prepaid visit'))).toBe(false);
   });
 });
 

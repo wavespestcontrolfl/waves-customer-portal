@@ -1445,7 +1445,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customerId)],
       );
-      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+      // A billing type / fee edit joins it too (billing-mode-change.js): a
+      // Schedule booking INSERTs visits under this same lock, so taking it
+      // here, before the customer row lock (the order the booking and
+      // customer-comms-lock.js document), fences new visits out until this
+      // transaction ends.
+      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined
+        || Object.keys(billingEdit.fields).length > 0) {
         await lockCustomerComms(trx, customerId);
       }
       // Row lock serializes overlapping address edits (see the Customers

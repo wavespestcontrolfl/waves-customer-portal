@@ -19,20 +19,25 @@ const MONTHLY_NEEDS_RATE = 'Set a monthly rate before selecting Monthly membersh
 const PER_APPLICATION_NEEDS_FEE = 'Set a per-application fee before selecting Per application — visits would complete unbilled';
 const ANNUAL_NEEDS_TERM = 'Annual prepay requires a PAID term covering today — the lane stamps automatically when the annual invoice is paid';
 
-// Future pending/confirmed visits with no positive price, which complete
+// Live visits (not yet completed) with no positive price, which complete
 // unbilled in a per-visit lane (completionInvoiceAmount refuses the
-// monthly-rate fallback there). Callbacks, always-free service types, and
-// prepaid-stamped visits are exempt — they complete without an invoice by
-// design in every lane. Errors return [] — fail OPEN (completion logging
-// backstops) rather than hard-locking saves.
+// monthly-rate fallback there). "Live" is the lifecycle guard's own clause
+// (customer-lifecycle-guard.js whereVisitRowLive): pending / confirmed /
+// rescheduled upcoming rows AND en_route / on_site visits, which can still
+// complete against the new lane, plus a tracker that leads a stale status.
+// Callbacks, always-free service types, and prepaid-stamped visits are
+// exempt — they complete without an invoice by design in every lane. Errors
+// return [] — fail OPEN (completion logging backstops) rather than
+// hard-locking saves.
 async function unpricedFutureBillableVisits(dbh, customerId) {
   try {
     const { etDateString } = require('../utils/datetime-et');
     const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+    const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+    const todayEt = etDateString();
     const rows = await dbh('scheduled_services')
       .where({ customer_id: customerId })
-      .whereIn('status', ['pending', 'confirmed'])
-      .where('scheduled_date', '>=', etDateString())
+      .where(function live() { whereVisitRowLive(this, todayEt); })
       .where(function unpriced() {
         this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
       })

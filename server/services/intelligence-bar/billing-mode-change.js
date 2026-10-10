@@ -143,16 +143,20 @@ function billingPin(row) {
 // The upcoming visits the card's projection and the payer check read, in a
 // stable order. Their billing fields are pinned (visitsPin) with the card.
 const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'primary_line_price',
-  'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id'];
+  'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id', 'is_recurring'];
 
 const VISIT_LIMIT = 200;
 
 async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   const { etDateString } = require('../../utils/datetime-et');
+  // Every live visit that can still complete against the new lane: the
+  // lifecycle guard's own clause (en_route / on_site included), the same one
+  // billing-mode-rules.js uses for the unpriced-visit check.
+  const { whereVisitRowLive } = require('../customer-lifecycle-guard');
+  const today = etDateString();
   const base = () => dbh('scheduled_services')
     .where({ customer_id: customerId })
-    .whereIn('status', ['pending', 'confirmed'])
-    .where('scheduled_date', '>=', etDateString())
+    .where(function live() { whereVisitRowLive(this, today); })
     .select(VISIT_COLUMNS);
   const ordered = () => base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_LIMIT);
   if (!lock) return ordered();
@@ -174,8 +178,58 @@ function visitsPin(visits) {
   })));
 }
 
-function cardPin(row, visits) {
-  return `${billingPin(row)}|${visitsPin(visits)}`;
+// What completing each partly prepaid visit would still collect, before and
+// after the edit, from the completion path's own math
+// (billing-lane.js predictCompletionBilling: the same precedence completion
+// uses, prepayment netted once). Only visits whose balance moves.
+function stillDue(prediction) {
+  return ['invoice', 'auto_charge', 'payer'].includes(prediction.kind)
+    ? Math.round((Number(prediction.amount) || 0) * 100) / 100 : 0;
+}
+
+function visitPrediction(customer, v) {
+  return predictCompletionBilling({
+    lane: resolveBillingLane(customer).mode,
+    billingMode: customer.billing_mode || null,
+    autopayActive: false,
+    estimatedPrice: v.estimated_price,
+    primaryLinePrice: v.primary_line_price,
+    monthlyRate: customer.monthly_rate,
+    perApplicationFee: customer.per_application_fee,
+    isRecurring: !!v.is_recurring,
+    isCallback: !!v.is_callback,
+    serviceType: v.service_type,
+    payerBilled: false,
+    prepaidAmount: v.prepaid_amount,
+    prepaidMethod: v.prepaid_method,
+  });
+}
+
+function balanceChanges(row, fields, visits) {
+  const after = { ...row, ...fields };
+  const out = [];
+  for (const v of visits || []) {
+    if (!(Number(v.prepaid_amount) > 0)) continue;
+    const before = visitPrediction(row, v);
+    const next = visitPrediction(after, v);
+    if (stillDue(before) === stillDue(next)) continue;
+    out.push({
+      id: String(v.id),
+      date: v.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : String(v.scheduled_date ?? '').slice(0, 10),
+      service: v.service_type || 'Visit',
+      prepaid: Number(v.prepaid_amount),
+      before: stillDue(before),
+      after: stillDue(next),
+      coveredByDues: before.kind === 'covered_membership',
+    });
+  }
+  return out;
+}
+
+// `fields` (the edit) makes the pin carry those balances too.
+function cardPin(row, visits, fields = {}) {
+  const balances = balanceChanges(row, fields, visits).map((b) => [b.id, b.before, b.after]);
+  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -297,6 +351,8 @@ function perApplicationVisitCounts(rows, fee) {
   return counts;
 }
 
+const BALANCE_LINES = 5;
+
 function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -331,6 +387,16 @@ function nextVisitLines(row, fields, visits, dues = null) {
   } else {
     lines.push('Each completed visit is invoiced at its own scheduled price. No monthly dues charge.');
   }
+  // The balance a partly prepaid visit still collects, before -> after, from
+  // the completion path's own math (balanceChanges).
+  const moved = balanceChanges(row, fields, visits);
+  for (const b of moved.slice(0, BALANCE_LINES)) {
+    lines.push(`Partly prepaid visit on ${b.date} (${b.service}): ${money(b.prepaid)} paid; still collected at completion ${b.coveredByDues ? `${money(b.before)} (covered by monthly dues)` : money(b.before)} → ${money(b.after)}.`);
+  }
+  if (moved.length > BALANCE_LINES) {
+    const rest = moved.slice(BALANCE_LINES);
+    lines.push(`${plural(rest.length, 'more partly prepaid visit', 'more partly prepaid visits')}: still collected at completion ${money(rest.reduce((n, b) => n + b.before, 0))} → ${money(rest.reduce((n, b) => n + b.after, 0))} in all.`);
+  }
   if (laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership') {
     lines.push('Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.');
   }
@@ -359,7 +425,7 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     ? await require('../monthly-dues-eligibility').monthlyDuesVerdict(dbh, customerId, { overrides: parsed.fields })
     : null;
   return {
-    pin: cardPin(row, visits),
+    pin: cardPin(row, visits, parsed.fields),
     version: row.version,
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
@@ -404,7 +470,7 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   // upcoming visit's billing fields the card's projection was built from,
   // read with the visits locked FOR UPDATE (see upcomingVisits).
   const visits = await upcomingVisits(trx, customerId, { lock: true });
-  if (cardPin(lockedBefore, visits) !== pin) {
+  if (cardPin(lockedBefore, visits, fields) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
   const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits);
