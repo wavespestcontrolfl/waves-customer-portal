@@ -792,6 +792,19 @@ function pinnedRecipientDisplay(params, preview) {
   return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
 }
 
+// delete_duplicate_customer: the fingerprint-verified preview's content pins
+// (route-owned, `_`-prefixed): the archived record's pin, and the other record
+// on the card as { id, version } - both asserted under the row locks inside
+// the archive transaction. A preview without a pin yields none.
+function deleteDuplicatePins(livePreview) {
+  const pins = {};
+  if (!livePreview?._version) return pins;
+  pins._approved_version = String(livePreview._version);
+  const keeper = livePreview.duplicate_of;
+  if (keeper?.customer_id && keeper?.version) pins._approved_keeper = { id: String(keeper.customer_id), version: String(keeper.version) };
+  return pins;
+}
+
 const PINNED_DISPLAY_BUILDERS = {
   delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
@@ -4511,18 +4524,11 @@ async function commitPendingAction(req, { id, contractHash }) {
           || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
           execParams._verified_stops = livePreview.stops;
         }
+        if (action.tool_name === 'delete_duplicate_customer') Object.assign(execParams, deleteDuplicatePins(livePreview));
         // merge_customers: the fingerprint-verified preview's pins (both
         // customer versions + the disclosed effects fingerprint) ride to
         // the executor so it validates the APPROVED snapshot under its own
         // locks — never a freshly sampled one.
-        if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) {
-          execParams._approved_version = String(livePreview._version);
-          // The other record on the card: id and version, asserted under the
-          // pair lock inside the archive transaction.
-          if (livePreview.duplicate_of?.customer_id && livePreview.duplicate_of?.version) {
-            execParams._approved_keeper = { id: String(livePreview.duplicate_of.customer_id), version: String(livePreview.duplicate_of.version) };
-          }
-        }
         if (action.tool_name === 'merge_customers' && livePreview?.winner_version && livePreview?.loser_version) {
           execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };
           if (typeof livePreview.effects_fingerprint === 'string') execParams._approved_effects = livePreview.effects_fingerprint;

@@ -432,7 +432,7 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
   {
     name: 'delete_duplicate_customer',
     description: `Delete ONE empty duplicate customer record: a stub, such as an "Unknown" record created from a call, that shares a real customer's phone. Only for a record that holds nothing: no visits, service records, invoices, payments, saved cards or Stripe profile, estimates, leads, calls, texts or emails, plan rates, monthly rate or plan, portal login, referral or credit balance, no notes, gate code or other field the stub creator does not write, and no saved property beyond one auto-created primary.
-Prefer merge_customers whenever the duplicate has ANY history or data — this tool refuses such a record and names what it found. It also refuses a record the duplicate queue does not list as a mergeable duplicate, and a record linked to the real customer only by a shared email.
+Prefer merge_customers whenever the duplicate has ANY history or data — this tool refuses such a record and names what it found. It also refuses a record the duplicate queue does not list as a confirmed duplicate (a possible match, such as a different name, is for merge_customers), and a record linked to the real customer only by a shared email.
 The record is ARCHIVED ONLY (the customer page's delete): nothing is merged or moved and the real customer is not touched. An admin can restore it afterward from the customer record (restore route). The first call returns a PREVIEW card naming the record, the real customer it duplicates (unchanged), and each check. Nothing changes until the operator confirms. No customer message is sent.`,
     input_schema: {
       type: 'object',

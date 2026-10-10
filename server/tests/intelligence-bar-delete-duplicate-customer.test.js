@@ -123,6 +123,9 @@ const COLUMN_ROWS = [
   ['referred_by_customer_id', null], ['reservice_token', "encode(gen_random_bytes(32), 'hex'::text)"], ['autopay_enabled', 'false'],
   ['tags', "'{}'::jsonb"], ['sms_opt_out_reason', "'none'::text"],
 ].map(([column_name, column_default]) => ({ column_name, column_default, is_generated: 'NEVER' }));
+// The content pins the card carries: a fingerprint of the allow-listed columns.
+const stubPin = (row = baseStub()) => emptyLoser.contentFingerprint(row);
+const keeperPin = (row = baseWinner()) => emptyLoser.contentFingerprint(row);
 const eligibleVerdict = (winnerId = TWIN_ID) => ({ winnerId, eligible: true, code: 'eligible', reason: null, candidate: {} });
 
 const run = (input, ctx = {}) => executeCustomerLifecycleTool('delete_duplicate_customer', input, ctx);
@@ -179,9 +182,9 @@ describe('preview (empty stub)', () => {
       preview: true,
       customer_id: STUB_ID,
       stub: { name: 'Unknown', phone_masked: '(***) ***-0199', email_masked: null, created_on: '2026-10-01' },
-      duplicate_of: { customer_id: TWIN_ID, name: 'Jordan Sample', phone_masked: '(***) ***-0199', email_masked: 'j***@example.com', created_on: '2025-03-14', version: '2026-09-01 08:00:00.000001+00' },
+      duplicate_of: { customer_id: TWIN_ID, name: 'Jordan Sample', phone_masked: '(***) ***-0199', email_masked: 'j***@example.com', created_on: '2025-03-14', version: keeperPin() },
       customer_message: 'No customer message is sent',
-      _version: '2026-10-01 12:00:00.000001+00',
+      _version: stubPin(),
     });
     expect(Object.values(result.checks).every((v) => v === 'none')).toBe(true);
     expect(Object.keys(result.checks)).toEqual(expect.arrayContaining(['Visits', 'Service records', 'Invoices', 'Payments, saved cards, Stripe profile',
@@ -218,11 +221,11 @@ describe('the retained record comes from ONE queue build (finding 5)', () => {
     const result = await preview();
     expect(result.duplicate_of.customer_id).toBe(TWIN_ID);
     expect(mockDuplicateWinnerFor).toHaveBeenCalledTimes(1);
-    expect(mockDuplicateWinnerFor).toHaveBeenCalledWith(STUB_ID, db);
+    expect(mockDuplicateWinnerFor).toHaveBeenCalledWith(STUB_ID, db, { requireSameIdentity: true });
   });
 
   test('a confirmed call with the card pins builds the queue once, under the pair lock', async () => {
-    await run({ customer_id: STUB_ID, _approved_version: baseStub().version, _approved_keeper: { id: TWIN_ID, version: baseWinner().version } }, { confirmed: true, technicianId: 'admin-7' });
+    await run({ customer_id: STUB_ID, _approved_version: stubPin(), _approved_keeper: { id: TWIN_ID, version: keeperPin() } }, { confirmed: true, technicianId: 'admin-7' });
     expect(mockDuplicateWinnerFor).toHaveBeenCalledTimes(1);
     expect(mockPairLock.mock.invocationCallOrder[0]).toBeLessThan(mockDuplicateWinnerFor.mock.invocationCallOrder[0]);
   });
@@ -499,9 +502,9 @@ describe('B. linked rows: the customers table pointing at it, non-FK links, unre
 });
 
 describe('C. commit: archive only, decisive checks in the archive transaction in a fixed order', () => {
-  const KEEPER = { id: TWIN_ID, version: '2026-09-01 08:00:00.000001+00' };
+  const KEEPER = { id: TWIN_ID, version: keeperPin() };
   const approved = (extra = {}) => run(
-    { customer_id: STUB_ID, _approved_version: '2026-10-01 12:00:00.000001+00', _approved_keeper: KEEPER, ...extra },
+    { customer_id: STUB_ID, _approved_version: stubPin(), _approved_keeper: KEEPER, ...extra },
     { confirmed: true, technicianId: 'admin-7' },
   );
 
@@ -512,6 +515,8 @@ describe('C. commit: archive only, decisive checks in the archive transaction in
       customerId: STUB_ID,
       actor: { technicianId: 'admin-7', userAgent: 'intelligence-bar:delete_duplicate_customer' },
       precheck: expect.any(Function),
+      // The retained record's row is locked with the archived one, in id order.
+      alsoLock: TWIN_ID,
     });
     expect(result).toMatchObject({ success: true, customer_id: STUB_ID, deleted: true, customer_message: 'No customer message is sent' });
     expect(result.restore).toBe('Restorable: an admin can restore it from the customer record (restore route); nothing is moved or merged.');
@@ -522,7 +527,7 @@ describe('C. commit: archive only, decisive checks in the archive transaction in
     expect(dedupe).not.toContain('emptyLoserRefusal');
   });
 
-  test('lock order inside the archive transaction: pair lock, then the queue verdict, then both versions, then the emptiness scan', async () => {
+  test('lock order inside the archive transaction: both row locks (handler), pair lock, queue verdict, both content pins, emptiness scan', async () => {
     const order = [];
     mockPairLock.mockImplementation(async (trx, a, b) => { order.push(['pair_lock', trx === db, a, b]); });
     mockDuplicateWinnerFor.mockImplementation(async (id, conn) => { order.push(['verdict', id, conn === db]); return eligibleVerdict(); });
@@ -533,6 +538,8 @@ describe('C. commit: archive only, decisive checks in the archive transaction in
       ['verdict', STUB_ID, true],
       ['scan'],
     ]);
+    // The verdict is the same-identity one, and the pair lock precedes it.
+    expect(mockDuplicateWinnerFor).toHaveBeenLastCalledWith(STUB_ID, db, { requireSameIdentity: true });
     // The pair lock call precedes the verdict call precedes the scan.
     expect(mockPairLock.mock.invocationCallOrder[0]).toBeLessThan(mockDuplicateWinnerFor.mock.invocationCallOrder.at(-1));
     expect(mockDuplicateWinnerFor.mock.invocationCallOrder.at(-1)).toBeLessThan(mockLoserAutoBlockers.mock.invocationCallOrder.at(-1));
@@ -554,6 +561,29 @@ describe('C. commit: archive only, decisive checks in the archive transaction in
     expect(await approved({ _approved_keeper: { id: TWIN_ID, version: '2026-08-30 08:00:00+00' } })).toMatchObject({ code: 'keeper_version_changed', preview_changed: true });
     // The approved pins themselves pass.
     expect(await approved()).toMatchObject({ success: true });
+  });
+
+  test('P1 content pin: an allowed-field edit that does NOT bump updated_at refuses, on the stub and on the retained record', async () => {
+    // Customer 360 saves these columns without touching updated_at.
+    const stubBefore = baseStub();
+    db.__state.stub = { ...stubBefore, first_name: 'Edited' };
+    expect(db.__state.stub.updated_at).toBe(stubBefore.updated_at);
+    expect(await approved()).toMatchObject({ code: 'version_changed', preview_changed: true });
+    db.__state.stub = baseStub();
+    db.__state.winner = { ...baseWinner(), email: 'moved.sample@example.com' };
+    expect(await approved()).toMatchObject({ code: 'keeper_version_changed', preview_changed: true });
+    db.__state.winner = baseWinner();
+    expect(await approved()).toMatchObject({ success: true });
+    // The pin covers exactly the allow-listed columns: a change to one of them
+    // changes it, a column outside the list (checked by the emptiness scan) or
+    // the card's own aliases do not.
+    const base = stubPin(baseStub());
+    for (const column of emptyLoser.STUB_CREATOR_COLUMNS) {
+      const edited = { ...baseStub(), [column]: column === 'active' ? false : `changed-${column}` };
+      if (column === 'id') continue;
+      expect(stubPin(edited)).not.toBe(base);
+    }
+    expect(stubPin({ ...baseStub(), crm_notes: 'x', version: 'other', created_on: '1999-01-01' })).toBe(base);
   });
 
   test('the other record deleted after the card: refused', async () => {
@@ -607,6 +637,40 @@ describe('C. commit: archive only, decisive checks in the archive transaction in
   });
 });
 
+describe('P1 same identity only: a possible match is not a confirmed duplicate', () => {
+  const POSSIBLE = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+  const possible = { winnerId: TWIN_ID, eligible: false, code: 'possible_match_only', reason: POSSIBLE, candidate: { tier: 'yellow', reasons: ['name_conflict'] } };
+
+  test('the preview asks the queue for the same-identity verdict and refuses a yellow candidate with the queue wording', async () => {
+    mockDuplicateWinnerFor.mockResolvedValue(possible);
+    const result = await preview();
+    expect(result).toMatchObject({ code: 'not_a_mergeable_duplicate', pair_code: 'possible_match_only', error: expect.stringContaining(POSSIBLE) });
+    expect(result.error).not.toMatch(/Jordan|Sample/);
+    expect(mockDuplicateWinnerFor).toHaveBeenCalledWith(STUB_ID, db, { requireSameIdentity: true });
+    // A green candidate passes the same call.
+    mockDuplicateWinnerFor.mockResolvedValue(eligibleVerdict());
+    expect((await preview()).preview).toBe(true);
+  });
+
+  test('a pair that turns yellow after the card refuses under the pair lock, and nothing is archived', async () => {
+    mockArchiveCustomerAsAdmin.mockImplementation(async ({ precheck }) => {
+      mockDuplicateWinnerFor.mockResolvedValue(possible);
+      await precheck(db);
+      throw new Error('unreachable: the archive must not run');
+    });
+    const result = await run({ customer_id: STUB_ID, _approved_version: stubPin(), _approved_keeper: { id: TWIN_ID, version: keeperPin() } }, { confirmed: true, technicianId: 'admin-7' });
+    expect(result).toMatchObject({ code: 'possible_match_only', preview_changed: true });
+  });
+
+  test('the delete tool is the only caller of the strict read; merge paths keep the default', () => {
+    for (const file of ['routes/admin-customer-duplicates.js', 'services/intelligence-bar/customer-lifecycle-tools.js', 'services/customer-merge-tools.js']) {
+      const full = path.join(__dirname, '..', file);
+      if (fs.existsSync(full)) expect(fs.readFileSync(full, 'utf8')).not.toContain('requireSameIdentity');
+    }
+    expect(fs.readFileSync(path.join(__dirname, '..', 'services', 'duplicate-customer-delete.js'), 'utf8')).toContain('requireSameIdentity: true');
+  });
+});
+
 describe('D. restore wording and the remaining window', () => {
   test('the card and the result say restore route, nothing moved or merged, and name the same-window limit', async () => {
     const p = await preview();
@@ -629,7 +693,7 @@ describe('pins and card contract', () => {
     const a = await preview();
     const same = await preview();
     expect(AuthorizationContract.previewFingerprint(same)).toBe(AuthorizationContract.previewFingerprint(a));
-    db.__state.stub = { ...baseStub(), version: '2026-10-01 12:05:00.000001+00' };
+    db.__state.stub = { ...baseStub(), zip: '34209' };
     expect(AuthorizationContract.previewFingerprint(await preview())).not.toBe(AuthorizationContract.previewFingerprint(a));
     db.__state.stub = baseStub();
     db.__state.winner = { ...baseWinner(), email: 'other.sample@example.com' };
@@ -637,7 +701,7 @@ describe('pins and card contract', () => {
     expect(twinChanged.preview).toBe(true);
     expect(AuthorizationContract.previewFingerprint(twinChanged)).not.toBe(AuthorizationContract.previewFingerprint(a));
     // A different retained record, or a new version of it, also changes the card.
-    db.__state.winner = { ...baseWinner(), version: '2026-09-02 08:00:00.000001+00' };
+    db.__state.winner = { ...baseWinner(), city: 'Sarasota' };
     expect(AuthorizationContract.previewFingerprint(await preview())).not.toBe(AuthorizationContract.previewFingerprint(a));
   });
 
@@ -683,9 +747,9 @@ describe('wiring', () => {
     expect(adminOnly).toContain("'delete_duplicate_customer'");
     expect(src).toMatch(/filter\(t => deleteDuplicateCustomerEnabled\(\) \|\| t\.name !== 'delete_duplicate_customer'\)/);
     expect(src).toMatch(/delete_duplicate_customer: \(params, preview\) => \(preview\?\.preview === true && preview\.card \? preview\.card : null\)/);
-    // The fingerprint-verified preview's record version rides to the executor.
-    expect(src).toContain("if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) {");
-    expect(src).toContain('execParams._approved_version = String(livePreview._version);');
+    // The fingerprint-verified preview's content pins ride to the executor.
+    expect(src).toContain("if (action.tool_name === 'delete_duplicate_customer') Object.assign(execParams, deleteDuplicatePins(livePreview));");
+    expect(src).toContain('pins._approved_version = String(livePreview._version);');
   });
 
   test('the canonical delete and its restore route exist; the adapter runs the named delete handler with the precheck after the row lock', () => {
@@ -693,7 +757,8 @@ describe('wiring', () => {
     expect(src).toContain("router.delete('/:id', requireAdmin, customerArchiveHandler);");
     expect(src).toContain("router.patch('/:id/restore', requireAdmin, async (req, res, next) => {");
     expect(src).toMatch(/async function archiveCustomerAsAdmin\([\s\S]*?customerArchiveHandler\(req, res, reject\)/);
-    expect(src).toContain("await trx('customers').where({ id: req.params.id }).forUpdate().first();\n        if (req.archivePrecheck) await req.archivePrecheck(trx);");
+    expect(src).toContain("await trx('customers').whereIn('id', [req.params.id, req.archiveAlsoLock]).orderBy('id').forUpdate().select('id');");
+    expect(src).toMatch(/forUpdate\(\)\.first\(\);\n        \}\n        if \(req\.archivePrecheck\) await req\.archivePrecheck\(trx\);/);
     expect(src).toContain('router.archiveCustomerAsAdmin = archiveCustomerAsAdmin;');
   });
 
@@ -701,7 +766,7 @@ describe('wiring', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-intelligence-bar.js'), 'utf8');
     expect(src).toContain('delete execParams._approved_version;');
     expect(src).toContain('delete execParams._approved_keeper;');
-    expect(src).toMatch(/execParams\._approved_keeper = \{ id: String\(livePreview\.duplicate_of\.customer_id\), version: String\(livePreview\.duplicate_of\.version\) \}/);
+    expect(src).toMatch(/pins\._approved_keeper = \{ id: String\(keeper\.customer_id\), version: String\(keeper\.version\) \}/);
   });
 
   test('find_duplicates never suggests a deleted record (every grouping filters deleted_at)', () => {

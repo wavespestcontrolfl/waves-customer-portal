@@ -3952,6 +3952,42 @@ describe('duplicateWinnerFor', () => {
     expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'dismissals_unreadable' });
   });
 
+  describe('requireSameIdentity (the delete tool): a possible match is not a confirmed duplicate', () => {
+    const nameConflict = { id: 'dddddddd-0000-0000-0000-000000000005', first_name: 'Other', last_name: 'Winner', phone: '5550100123', address_line1: null, zip: null, pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+    const POSSIBLE = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+
+    it('refuses a yellow name-conflict candidate, while the default read (merge_customers) still accepts it', async () => {
+      installDb(route({ customers: [winner, nameConflict] }));
+      const strict = await dedupe.duplicateWinnerFor(nameConflict.id, undefined, { requireSameIdentity: true });
+      expect(strict).toMatchObject({ winnerId: winner.id, eligible: false, code: 'possible_match_only', reason: POSSIBLE });
+      expect(strict.candidate.reasons).toContain('name_conflict');
+      expect(await dedupe.duplicateWinnerFor(nameConflict.id)).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+      expect(await dedupe.duplicatePairEligibility(winner.id, nameConflict.id)).toMatchObject({ eligible: true });
+    });
+
+    it('refuses a candidate demoted by group_has_identity_conflict (a second identity on the same line)', async () => {
+      installDb(route({ customers: [winner, shell, nameConflict] }));
+      const strict = await dedupe.duplicateWinnerFor(shell.id, undefined, { requireSameIdentity: true });
+      expect(strict.candidate.reasons).toContain('group_has_identity_conflict');
+      expect(strict).toMatchObject({ eligible: false, code: 'possible_match_only', reason: POSSIBLE });
+      expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ eligible: true });
+    });
+
+    it('accepts a green same-identity candidate', async () => {
+      installDb(route({ customers: [winner, shell] }));
+      const strict = await dedupe.duplicateWinnerFor(shell.id, undefined, { requireSameIdentity: true });
+      expect(strict).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+      expect(strict.candidate.tier).toBe('green');
+    });
+
+    it('keeps the address and red refusals ahead of it', async () => {
+      installDb(route({ customers: [winner, addressConflict] }));
+      expect(await dedupe.duplicateWinnerFor(addressConflict.id, undefined, { requireSameIdentity: true })).toMatchObject({ code: 'address_conflict' });
+      installDb(route({ customers: [winner, stranger] }));
+      expect(await dedupe.duplicateWinnerFor(stranger.id, undefined, { requireSameIdentity: true })).toMatchObject({ code: 'red_pair' });
+    });
+  });
+
   it('agrees with duplicatePairEligibility on the same fixtures', async () => {
     installDb(route({ customers: [winner, shell] }));
     const single = await dedupe.duplicatePairEligibility(winner.id, shell.id);

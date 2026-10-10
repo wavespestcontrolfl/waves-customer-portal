@@ -174,6 +174,22 @@ const STUB_CREATOR_COLUMNS = new Set([
   'pipeline_stage', 'pipeline_stage_changed_at', 'nearest_location_id',
   'active', 'created_at', 'updated_at', 'deleted_at',
 ]);
+// The content pin for the delete card: a SHA-256 over every allow-listed
+// column of the row (the same sorted-key hash the IB confirm path uses for
+// its other pins, authorization-contract contractHash). updated_at alone is
+// not enough: the Customer 360 save changes these fields without bumping it.
+// A column outside the list is covered for the archived record by the
+// emptiness scan, and does not appear on the card for the retained one.
+function contentFingerprint(row) {
+  const { contractHash } = require('./intelligence-bar/authorization-contract');
+  const picked = {};
+  for (const column of [...STUB_CREATOR_COLUMNS].sort()) {
+    const value = row[column];
+    picked[column] = value instanceof Date ? value.toISOString() : (value === undefined ? null : value);
+  }
+  return contractHash(picked);
+}
+
 // Keys the callers add to the row they pass in (not columns).
 const ROW_ALIASES = new Set(['version', 'created_on']);
 
@@ -300,19 +316,14 @@ async function countTable(table, customerId, conn = db, columns = ['customer_id'
   }
 }
 
-// Every check's result for one customer. `found` maps a check key to the
-// list of things found ("2 scheduled_services", "a portal login"); an empty
-// list is a clean check. A count that could not be read is "could not be
-// checked" — it blocks, like a found row (fail closed). `conn` is the
-// archive transaction on the commit's locked re-check.
-async function readEmptiness(stub, conn = db, winner = null) {
-  const { loserAutoBlockers, previewMergeEffects, nonFkMergeRewrites, REPOINT_EXCLUDED_TABLES } = require('./customer-dedupe');
-  const found = Object.fromEntries(CHECKS.map((c) => [c.key, []]));
-  const add = (key, text) => { if (!found[key].includes(text)) found[key].push(text); };
-  const countText = (table, n) => (n === 'unknown' ? `${table} (could not be checked)` : `${n} ${table}`);
+const countText = (table, n) => (n === 'unknown' ? `${table} (could not be checked)` : `${n} ${table}`);
 
-  const blockers = await loserAutoBlockers(conn, stub);
-  for (const blocker of blockers) {
+// The readers below each add findings to ctx.add(checkKey, text). They run in
+// the order of READERS (blocker names first: the moving-rows reader replaces a
+// blocker's "<table> rows" text with the table's real count).
+async function readBlockers({ stub, conn, add }) {
+  const { loserAutoBlockers } = require('./customer-dedupe');
+  for (const blocker of await loserAutoBlockers(conn, stub)) {
     const label = BLOCKER_LABELS[blocker];
     if (label) {
       const check = CHECKS.find((c) => c.blockers?.includes(blocker));
@@ -323,65 +334,104 @@ async function readEmptiness(stub, conn = db, winner = null) {
       add(categoryFor(table), blocker.endsWith('(check failed)') ? `${table} (could not be checked)` : `${table} rows`);
     }
   }
+}
 
-  const winnerId = winner ? winner.id : stub.id;
-  const { moving } = await previewMergeEffects(conn, winnerId, stub.id);
+// One moving table. A table the blocker list already named reads once, with its count.
+async function readMovingTable({ stub, conn, add, found }, key, n) {
+  if (key === 'customer_properties' && n === 1) {
+    const [property] = await conn('customer_properties').where({ customer_id: stub.id }).select('*');
+    const edits = property ? primaryPropertyEdits(property, stub) : ['could not be read'];
+    if (edits.length) add('properties', `1 customer_properties (${edits.join(', ')})`);
+    return;
+  }
+  const category = categoryFor(key);
+  found[category] = found[category].filter((t) => t !== `${key} rows`);
+  add(category, countText(key, n));
+}
+
+async function readMovingRows(ctx) {
+  const { previewMergeEffects } = require('./customer-dedupe');
+  const { moving } = await previewMergeEffects(ctx.conn, ctx.winner ? ctx.winner.id : ctx.stub.id, ctx.stub.id);
   for (const [key, n] of Object.entries(moving || {})) {
     // fk_sweep: 'unknown' (the table list itself failed) lands in `other`
     // as "could not be checked", like any unreadable count.
-    if (key === 'total_rows' || key === 'non_fk_rewrites') continue;
-    if (DERIVED_TABLES.has(key)) continue;
-    if (key === 'customer_properties' && n === 1) {
-      const [property] = await conn('customer_properties').where({ customer_id: stub.id }).select('*');
-      const edits = property ? primaryPropertyEdits(property, stub) : ['could not be read'];
-      if (!edits.length) continue;
-      add('properties', `1 customer_properties (${edits.join(', ')})`);
-      continue;
-    }
-    // A table the blocker list already named reads once, with its count.
-    const category = categoryFor(key);
-    found[category] = found[category].filter((t) => t !== `${key} rows`);
-    add(category, countText(key, n));
+    if (key === 'total_rows' || key === 'non_fk_rewrites' || DERIVED_TABLES.has(key)) continue;
+    await readMovingTable(ctx, key, n);
   }
+}
 
-  // Every table the merge sweep skips on purpose (REPOINT_EXCLUDED_TABLES:
-  // plan rates, credit allocations, location reviews, merge journal and
-  // dismissals), read from the engine's own list so a new exclusion is
-  // counted too. An unknown key column reads "could not be checked".
+// Every table the merge sweep skips on purpose (REPOINT_EXCLUDED_TABLES:
+// plan rates, credit allocations, location reviews, merge journal and
+// dismissals), read from the engine's own list so a new exclusion is
+// counted too. An unknown key column reads "could not be checked".
+async function readExcludedTables({ stub, conn, add }) {
+  const { REPOINT_EXCLUDED_TABLES } = require('./customer-dedupe');
   for (const table of REPOINT_EXCLUDED_TABLES) {
     const n = await countTable(table, stub.id, conn, EXCLUDED_TABLE_KEYS[table]);
     if (n !== 0) add(categoryFor(table), countText(table, n));
   }
+}
 
-  // History a merge rewrites that no customer_id column names. 'unknown'
-  // (a count that failed) blocks like a found row.
+// History a merge rewrites that no customer_id column names. 'unknown'
+// (a count that failed) blocks like a found row.
+async function readNonFkRewrites({ stub, conn, winner, add }) {
+  const { nonFkMergeRewrites } = require('./customer-dedupe');
   const nonFk = await nonFkMergeRewrites(conn, winner || stub, stub);
   for (const [key, n] of Object.entries(nonFk || {})) {
     if (NON_HISTORY_REWRITE_KEYS.has(key)) continue;
     add(categoryFor(key), n === 'unknown' ? `${key} (could not be checked)` : `${n} ${key}`);
   }
+}
+
+async function readAccount({ stub, conn, add }) {
   for (const text of await readAccountMembers(stub, conn)) add('account', text);
+}
 
-  // A. Fields: every column outside the stub creator's list is NULL or its
-  // schema default. Unreadable schema refuses.
-  try {
-    for (const column of await readFieldFindings(stub, conn)) add('fields', holdsText(column));
-  } catch (err) {
-    logger.warn(`[intelligence-bar] delete_duplicate_customer: field check failed: ${err.message}`);
-    add('fields', 'the record fields could not be checked');
+// A. Fields: every column outside the stub creator's list is NULL or its
+// schema default. Unreadable schema refuses.
+async function readFields({ stub, conn, add }) {
+  for (const column of await readFieldFindings(stub, conn)) add('fields', holdsText(column));
+}
+
+// B (self references). Other customer rows pointing at this one.
+async function readSelfReferences({ stub, conn, add }) {
+  for (const column of await customerSelfReferenceColumns(conn)) {
+    const n = await countTable('customers', stub.id, conn, [column]);
+    if (n !== 0) add('customer_links', n === 'unknown' ? `customers.${column} (could not be checked)` : `${n} customers.${column}`);
   }
+}
 
-  // B (self references). Other customer rows pointing at this one.
-  try {
-    for (const column of await customerSelfReferenceColumns(conn)) {
-      const n = await countTable('customers', stub.id, conn, [column]);
-      if (n !== 0) add('customer_links', n === 'unknown' ? `customers.${column} (could not be checked)` : `${n} customers.${column}`);
+// { name, read, failure }: `failure` (optional) is { key, text }, the finding
+// recorded when the reader itself throws and the rest must still run. Readers
+// without one let the error propagate (a refusal the caller sees).
+const READERS = [
+  { name: 'blockers', read: readBlockers },
+  { name: 'moving rows', read: readMovingRows },
+  { name: 'excluded tables', read: readExcludedTables },
+  { name: 'non-column rewrites', read: readNonFkRewrites },
+  { name: 'account members', read: readAccount },
+  { name: 'fields', read: readFields, failure: { key: 'fields', text: 'the record fields could not be checked' } },
+  { name: 'self references', read: readSelfReferences, failure: { key: 'customer_links', text: 'the customer pointer columns could not be checked' } },
+];
+
+// Every check's result for one customer. `found` maps a check key to the
+// list of things found ("2 scheduled_services", "a portal login"); an empty
+// list is a clean check. A count that could not be read is "could not be
+// checked" — it blocks, like a found row (fail closed). `conn` is the
+// archive transaction on the commit's locked re-check.
+async function readEmptiness(stub, conn = db, winner = null) {
+  const found = Object.fromEntries(CHECKS.map((c) => [c.key, []]));
+  const add = (key, text) => { if (!found[key].includes(text)) found[key].push(text); };
+  const ctx = { stub, conn, winner, found, add };
+  for (const reader of READERS) {
+    try {
+      await reader.read(ctx);
+    } catch (err) {
+      if (!reader.failure) throw err;
+      logger.warn(`[intelligence-bar] delete_duplicate_customer: ${reader.name} check failed: ${err.message}`);
+      add(reader.failure.key, reader.failure.text);
     }
-  } catch (err) {
-    logger.warn(`[intelligence-bar] delete_duplicate_customer: customer self-reference check failed: ${err.message}`);
-    add('customer_links', 'the customer pointer columns could not be checked');
   }
-
   return found;
 }
 
@@ -403,6 +453,7 @@ module.exports = {
   readEmptiness,
   notEmptyRefusal,
   STUB_CREATOR_COLUMNS,
+  contentFingerprint,
   parseColumnDefault,
   valueMatchesDefault,
   readFieldFindings,

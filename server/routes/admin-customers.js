@@ -5329,7 +5329,16 @@ async function customerArchiveHandler(req, res, next) {
     let relink;
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
-        await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        if (req.archiveAlsoLock) {
+          // A caller that also depends on a second customer row (the bar's
+          // duplicate delete reads its retained twin) locks both rows in ONE
+          // statement, ascending id: the order the merge engine takes the
+          // same two rows in (customer-dedupe.js), so a delete and a merge on
+          // the pair cannot deadlock. The lock is held to commit.
+          await trx('customers').whereIn('id', [req.params.id, req.archiveAlsoLock]).orderBy('id').forUpdate().select('id');
+        } else {
+          await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        }
         if (req.archivePrecheck) await req.archivePrecheck(trx);
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
@@ -5383,10 +5392,13 @@ async function customerArchiveHandler(req, res, next) {
 // `precheck(trx)`, when given, runs inside the archive transaction right
 // after the customer row lock and before any write; a throw rolls the
 // archive back and rejects (the bar re-checks the pair and "still empty"
-// there). HTTP requests never carry it. Restore is PATCH /:id/restore below.
-async function archiveCustomerAsAdmin({ customerId, actor = {}, precheck = null }) {
+// there). `alsoLock` (a second customer id) is locked with the archived row,
+// both in ascending id order, and held to commit. HTTP requests never carry
+// either. Restore is PATCH /:id/restore below.
+async function archiveCustomerAsAdmin({ customerId, actor = {}, precheck = null, alsoLock = null }) {
   const req = {
     archivePrecheck: precheck,
+    archiveAlsoLock: alsoLock,
     params: { id: customerId },
     technicianId: actor.technicianId || null,
     ip: null,

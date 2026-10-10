@@ -1225,7 +1225,15 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
 // The verdict on ONE phone-queue candidate (null = the pair is not listed).
 // Shared by duplicatePairEligibility and duplicateWinnerFor so both read a
 // candidate the same way.
-function phoneCandidateVerdict(candidate) {
+// `requireSameIdentity` (the delete tool): a candidate whose reasons name an
+// identity conflict (a different name, or a phone group that holds more than
+// one identity) is a POSSIBLE match, not a confirmed duplicate, and is refused.
+// Address and loser-history reasons keep their own refusals (the address one
+// below; the history one is the delete tool's emptiness scan).
+const NON_IDENTITY_REASON_RE = /^(address_|loser_has_)/;
+const POSSIBLE_MATCH_REASON = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+
+function phoneCandidateVerdict(candidate, { requireSameIdentity = false } = {}) {
   if (!candidate) {
     return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
   }
@@ -1234,6 +1242,9 @@ function phoneCandidateVerdict(candidate) {
   }
   if (candidate.reasons.some((r) => r.startsWith('address_'))) {
     return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
+  }
+  if (requireSameIdentity && candidate.reasons.some((r) => !NON_IDENTITY_REASON_RE.test(r))) {
+    return { eligible: false, code: 'possible_match_only', reason: POSSIBLE_MATCH_REASON, candidate };
   }
   return { eligible: true, code: 'eligible', reason: null, candidate };
 }
@@ -1244,7 +1255,7 @@ function phoneCandidateVerdict(candidate) {
 // that lists `loserId` as a candidate (an eligible one wins over a refused
 // one), or { winnerId: null, eligible: false, code: 'not_in_queue' } when no
 // group lists it. Same dismissal fail-closed rule as duplicatePairEligibility.
-async function duplicateWinnerFor(loserId, database = db) {
+async function duplicateWinnerFor(loserId, database = db, { requireSameIdentity = false } = {}) {
   let groups;
   try {
     groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
@@ -1256,7 +1267,7 @@ async function duplicateWinnerFor(loserId, database = db) {
   for (const group of groups) {
     const candidate = group.candidates.find((c) => c.loser.id === loserId);
     if (!candidate) continue;
-    const verdict = { winnerId: group.winner.id, ...phoneCandidateVerdict(candidate) };
+    const verdict = { winnerId: group.winner.id, ...phoneCandidateVerdict(candidate, { requireSameIdentity }) };
     if (verdict.eligible) return verdict;
     refused = refused || verdict;
   }
