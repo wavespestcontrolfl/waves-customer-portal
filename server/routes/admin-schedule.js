@@ -25130,8 +25130,8 @@ async function generateReportCopyWithFallback({
   requireSections = false,
   // (draft, rejection, { sameProvider }) => text added to the user message of
   // the next attempt, so a rejected draft is repaired and not written blind
-  // again. Null: the next attempt gets the same message (lawn, tree and shrub).
-  repairNote = null,
+  // again. Absent: the next attempt gets the same message (lawn, tree and shrub).
+  repairNote,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -25228,6 +25228,12 @@ async function generateReportCopyWithFallback({
     failures,
   };
 }
+
+// The repair note for the writer rules' drafts: what the draft broke, and the
+// draft itself only for the provider that wrote it.
+const writerRepairNote = (screenInputs) => (draft, rejection, { sameProvider }) => rejectedDraftRepairNote({
+  draft, rejection, detail: writerRulesRejectionDetail(draft, screenInputs), includeDraft: sameProvider,
+});
 
 function repairNoteFor(repairNote, rejected, providerName) {
   if (typeof repairNote !== 'function' || !rejected) return '';
@@ -26787,12 +26793,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       ? writerRulesRejection(text, writerScreenInputs)
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
     // Under the writer rules a rejected draft goes back with what it broke.
-    // The draft itself goes only to the provider that wrote it.
-    const repairNote = writerRulesOn
-      ? (draft, rejection, { sameProvider }) => rejectedDraftRepairNote({
-        draft, rejection, detail: writerRulesRejectionDetail(draft, writerScreenInputs), includeDraft: sameProvider,
-      })
-      : null;
+    const repairNote = writerRepairNote(writerScreenInputs);
     // A cached draft is served only if it still passes both screens as they
     // read now: a product, alias or active ingredient added since it was
     // cached must not ride out on the cache.
