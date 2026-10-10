@@ -16,7 +16,8 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
-const mockLock = jest.fn().mockResolvedValue(undefined);
+const callOrder = [];
+const mockLock = jest.fn(async () => { callOrder.push('call-lock'); });
 const mockSyncStatus = jest.fn().mockResolvedValue('open');
 jest.mock('../utils/triage-locks', () => ({
   lockTriageCall: (...a) => mockLock(...a),
@@ -39,12 +40,12 @@ const dictation = (over = {}, ...sources) => ({
 });
 
 // Minimal knex stand-in: customers.first, triage_items settled-lookup, and the insert upsert.
-function makeConn({ customer = null, settled = [], claimHeld = true, openCards = 0 } = {}) {
+function makeConn({ customer = null, settled = [], claimHeld = true, openCard = null } = {}) {
   const writes = [];
   const settledWheres = [];
   const conn = (table) => {
     if (table === 'customers') {
-      const read = async () => { conn.customerReads.push({ inTx: !!conn.locked, lockedRow: !!conn.rowLocked }); return customer; };
+      const read = async () => { callOrder.push('customer-row'); conn.customerReads.push({ inTx: !!conn.locked, lockedRow: !!conn.rowLocked }); return customer; };
       return { where: () => ({ first: read, forUpdate: () => { conn.rowLocked = true; return { first: read }; } }) };
     }
     if (table === 'call_log') {
@@ -63,7 +64,8 @@ function makeConn({ customer = null, settled = [], claimHeld = true, openCards =
           whereIn: () => ({ select: async () => settled }),
           whereIn2: null,
           count: () => ({ first: async () => ({ n: 1 }) }),
-          update: async (u) => { conn.retired.push({ where: w, update: u }); return openCards; },
+          forUpdate: () => ({ first: async () => openCard }),
+          update: async (u) => { conn.retired.push({ where: w, update: u }); return 1; },
         };
       },
       insert: (row) => ({
@@ -92,7 +94,7 @@ const file = (conn, over = {}) => fileNameSpellingCard(conn, {
 });
 
 describe('fileNameSpellingCard', () => {
-  beforeEach(() => { mockLock.mockClear(); mockSyncStatus.mockClear(); });
+  beforeEach(() => { callOrder.length = 0; mockLock.mockClear(); mockSyncStatus.mockClear(); });
 
   test('files ONE advisory name_review card with the spelling, saved name, caller turn and confidence', async () => {
     const conn = makeConn();
@@ -227,14 +229,35 @@ describe('fileNameSpellingCard', () => {
     expect(JSON.parse(conn.writes[0].row.payload).saved_value).toBe('Sirov');
   });
 
-  test('a live name that already matches files nothing and retires the open card', async () => {
-    const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Serov' }, openCards: 1 });
+  test('lock order: the customer row first, then the per-call lock, then the claim fence', async () => {
+    const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+    expect(await file(conn, { customerId: 'cust-1', procToken: 'tok-1' })).toBe(true);
+    expect(callOrder).toEqual(['customer-row', 'call-lock']);
+    expect(conn.fenced).toEqual({ id: 'call-1', processing_token: 'tok-1' });
+  });
+
+  test('a live name that now equals the open card\'s own spelling files nothing and retires that card', async () => {
+    const openCard = { id: 'card-1', payload: JSON.stringify({ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' }) };
+    const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Serov' }, openCard });
     expect(await file(conn, { customerId: 'cust-1' })).toBe(false);
     expect(conn.writes).toEqual([]);
     expect(conn.retired).toHaveLength(1);
-    expect(conn.retired[0].where).toEqual({ call_log_id: 'call-1', reason_code: 'name_spelling_differs', status: 'open' });
+    expect(conn.retired[0].where).toEqual({ id: 'card-1' });
     expect(conn.retired[0].update).toMatchObject({ status: 'resolved', resolution_source: 'auto' });
     expect(mockSyncStatus).toHaveBeenCalledWith(conn, 'call-1');
+  });
+
+  test('a reprocess with a conflicting pair and an unchanged stored name leaves the open card open', async () => {
+    const openCard = { id: 'card-1', payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } };
+    const src = 'Caller: my last name is S-E-R-O-V or maybe S-E-R-A-V';
+    const conflicting = dictationFor([
+      { raw_spoken: 'S-E-R-O-V', spelled_value: 'Serov', field: 'last_name', whose: 'caller', confidence: 0.92 },
+      { raw_spoken: 'S-E-R-A-V', spelled_value: 'Serav', field: 'last_name', whose: 'caller', confidence: 0.7 },
+    ], src);
+    const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard });
+    expect(await file(conn, { customerId: 'cust-1', dictation: conflicting })).toBe(false);
+    expect(conn.writes).toEqual([]);
+    expect(conn.retired).toEqual([]);
   });
 
   test('a linked customer\'s name is the saved name: the record is right, so no card; the record is wrong, a card', async () => {

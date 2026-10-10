@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingDifferences, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -4041,6 +4041,63 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
   });
 }
 
+const parseCardPayload = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
+
+// Calls whose spelling is never compared with the linked customer: a third-party caller (family
+// member, agent, tenant, buyer ...), or an applicant / vendor an inbound number prelinked to a
+// customer. An unlinked call still compares against the extracted caller name.
+function nameSpellingCallExcluded({ customerId, extraction, v2Result }) {
+  return !!customerId && (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property) || thirdPartyCallNatureFromV2(v2Result));
+}
+
+// An OPEN card is stale only when the live stored name now equals the spelling the card itself
+// recorded. Retired as an auto close; an operator's in_progress card is never touched.
+async function retireStaleNameSpellingCard(trx, callLogId, card) {
+  await trx('triage_items').where({ id: card.id }).update({
+    status: 'resolved',
+    resolution_source: 'auto',
+    resolution_note: 'Superseded — the customer name now matches the spelling.',
+    resolved_at: new Date(),
+    updated_at: new Date(),
+  });
+  await syncCallReviewStatus(trx, callLogId);
+}
+
+// The thin writer, inside the card transaction. Lock order is the customer row FIRST, then the
+// per-call triage lock, then the claim fence (a Customer 360 edit locks the row and then the
+// customer's call locks; the reverse order here would deadlock with it). The customer name is read
+// live under that lock, so the card never carries a name the record no longer has.
+async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, procToken }) {
+  const live = customerId ? await trx('customers').where({ id: customerId }).forUpdate().first('first_name', 'last_name') : null;
+  await lockTriageCall(trx, callLogId);
+  if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+  const openCard = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).forUpdate().first('id', 'payload');
+  const { saved, differences, retire } = nameSpellingCardDecision({
+    dictation, live, extracted, openCardPayload: openCard ? parseCardPayload(openCard.payload) : null,
+  });
+  if (retire) await retireStaleNameSpellingCard(trx, callLogId, openCard);
+  if (!differences.length) return false;
+  const filingCustomer = live && customerId ? String(customerId) : null;
+  const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
+    .whereIn('status', ['resolved', 'dismissed']).select('payload');
+  const [top, ...others] = unsettledNameDifferences(differences, settled.map((r) => parseCardPayload(r.payload)), filingCustomer);
+  if (!top) return false;
+  await trx('triage_items')
+    .insert(buildTriageItem({
+      callLogId,
+      flag: 'name_spelling_differs',
+      extraction,
+      severity: 'advisory',
+      extraPayload: nameSpellingCardPayload({ top, others, saved, filingCustomer }),
+    }))
+    .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .merge(['payload', 'summary', 'updated_at'])
+    .where('triage_items.status', 'open');
+  await syncCallReviewStatus(trx, callLogId);
+  return true;
+}
+
 // The name_spelling_differs card (advisory, card-only): the caller spelled their own name
 // and the spelling differs (letters, any case) from the name being saved for the caller
 // (the linked customer's name when linked, else the extracted name). ONE open card per call.
@@ -4057,65 +4114,10 @@ async function fileNameSpellingCard(conn, {
   try {
     if (isOutbound) return false;
     const extraction = v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } };
-    // A third party (family member, agent, tenant, buyer ...) is not the account holder: their
-    // spelling is never compared with the linked customer's record. An unlinked call still compares
-    // against the extracted caller name.
-    if (customerId && isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return false;
-    // An applicant or vendor can be prelinked to a customer by the inbound number: their spelling is
-    // never compared with that customer's record, whatever relationship_to_property says.
-    if (customerId && thirdPartyCallNatureFromV2(v2Result)) return false;
+    if (nameSpellingCallExcluded({ customerId, extraction, v2Result })) return false;
     // No caller spelling in this pass: nothing to compare and no evidence to refresh or retire.
     if (!(dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return false;
-    return await conn.transaction(async (trx) => {
-      await lockTriageCall(trx, callLogId);
-      if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
-      // The customer's name is read HERE, under the per-call lock and the claim fence, with the row
-      // locked: a staff correction made while this pass ran is seen, and the card never carries a
-      // name the record no longer has. A linked customer is compared on stored fields only (a blank
-      // stays blank); the extracted name is used only for an unlinked call.
-      const customer = customerId ? await trx('customers').where({ id: customerId }).forUpdate().first('first_name', 'last_name') : null;
-      const saved = Object.fromEntries(['first_name', 'last_name']
-        .map((f) => [f, customer ? (String(customer[f] || '').trim() || null) : (extracted[f] || null)]));
-      const differences = nameSpellingDifferences({ dictation, saved });
-      if (!differences.length) {
-        // The live name already matches (or has no stored value): an OPEN card from an earlier pass is
-        // stale. Retire it; an operator's in_progress card is never touched.
-        const retired = await trx('triage_items')
-          .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' })
-          .update({
-            status: 'resolved',
-            resolution_source: 'auto',
-            resolution_note: 'Superseded — the customer name now matches the spelling.',
-            resolved_at: new Date(),
-            updated_at: new Date(),
-          });
-        if (retired) await syncCallReviewStatus(trx, callLogId);
-        return false;
-      }
-      const filingCustomer = customer && customerId ? String(customerId) : null;
-      const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
-        .whereIn('status', ['resolved', 'dismissed']).select('payload');
-      const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
-      const [top, ...others] = unsettledNameDifferences(
-        differences,
-        settled.map((r) => asObject(r.payload)),
-        filingCustomer,
-      );
-      if (!top) return false;
-      await trx('triage_items')
-        .insert(buildTriageItem({
-          callLogId,
-          flag: 'name_spelling_differs',
-          extraction,
-          severity: 'advisory',
-          extraPayload: nameSpellingCardPayload({ top, others, saved, filingCustomer }),
-        }))
-        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-        .merge(['payload', 'summary', 'updated_at'])
-        .where('triage_items.status', 'open');
-      await syncCallReviewStatus(trx, callLogId);
-      return true;
-    });
+    return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, procToken }));
   } catch (err) {
     logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);
     return false;

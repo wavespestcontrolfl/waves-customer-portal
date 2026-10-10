@@ -400,6 +400,24 @@ function nameSpellingDifferences({ dictation = null, saved = {} } = {}) {
 }
 
 /**
+ * The pure decision for one filing pass. `saved` is the name compared against: a linked customer's
+ * STORED fields only (a blank stays blank), else the extracted caller name. `differences` are the
+ * spelling differences to file. `retire` is true only when there is nothing to file AND the open
+ * card's own recorded spelling (main entry or `also`) now equals the live stored value of its field;
+ * a pass that merely lost confidence or found a conflicting pair leaves that card alone. Pure.
+ */
+function nameSpellingCardDecision({ dictation = null, live = null, extracted = {}, openCardPayload = null } = {}) {
+  const saved = Object.fromEntries(NAME_FIELDS.map((f) => [f, live
+    ? (String(live[f] || '').trim() || null)
+    : (extracted?.[f] || null)]));
+  const differences = nameSpellingDifferences({ dictation, saved });
+  const recorded = openCardPayload ? [openCardPayload, ...(Array.isArray(openCardPayload.also) ? openCardPayload.also : [])] : [];
+  const retire = !differences.length && recorded.some((d) => d && NAME_FIELDS.includes(d.field)
+    && d.spelled_value && saved[d.field] && nameKey(saved[d.field]) === nameKey(d.spelled_value));
+  return { saved, differences, retire };
+}
+
+/**
  * The name_spelling_differs card payload: the main discrepancy, the card text, the other
  * differing entries, and WHAT it was compared against (the linked customer's record, whose id
  * the card carries so the office opens that record, or the name heard on the call). Pure.
@@ -491,6 +509,7 @@ module.exports = {
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   nameSpellingDifferences,
+  nameSpellingCardDecision,
   nameSpellingCardText,
   unsettledNameDifferences,
   nameSpellingCardPayload,
