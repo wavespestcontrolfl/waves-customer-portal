@@ -367,6 +367,37 @@ describe('gallons sprayed at completion', () => {
       expect(products[0].areaValue).toBe(1900);
     });
 
+    test('spot rows only: the validated visit area the sheet submitted caps it, ahead of the lawn size on file', async () => {
+      const readServiceArea = jest.fn(async () => 1900);
+      const propertyServiceArea = { propertyId: 'prop-1', version: 'v1', kind: 'lawn', treatedSqft: 1900 };
+      const products = [{ productId: P_CEL, sprayedGallons: 4 }];
+      expect(await run(products, { ...withLawn(null), propertyServiceArea, actor: { technicianId: 't-1' }, readServiceArea })).toBeNull();
+      expect(readServiceArea).toHaveBeenCalledWith(expect.objectContaining({ propertyServiceArea, actor: { technicianId: 't-1' } }));
+      expect(products[0].areaValue).toBe(1900);
+      expect(help.sprayedGallonsFreeze(products).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedAreaSqft: 4000, lawnAreaSqft: 1900 });
+      const other = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(other, { ...withLawn(1500), propertyServiceArea, readServiceArea });
+      expect(other[0].areaValue).toBe(1900);
+    });
+
+    test('a visit area that fails validation, is absent, or sits behind a whole-lawn row is not read as the cap', async () => {
+      const propertyServiceArea = { propertyId: 'prop-1', version: 'stale', kind: 'lawn', treatedSqft: 100 };
+      const failed = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(failed, { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => null });
+      expect(failed[0].areaValue).toBe(1900); // falls through to the lawn size on file
+      const unknown = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(unknown, { propertyServiceArea, readServiceArea: async () => null });
+      expect(unknown[0].areaValue).toBe(4000);
+      const readServiceArea = jest.fn(async () => 100);
+      const rows = [{ productId: P_CEL, sprayedGallons: 4 }, wholeLawn()];
+      await run(rows, { propertyServiceArea, readServiceArea });
+      expect(readServiceArea).not.toHaveBeenCalled();
+      expect(rows[0].areaValue).toBe(1900);
+      const absent = [{ productId: P_CEL, sprayedGallons: 4 }];
+      await run(absent, { readServiceArea });
+      expect(readServiceArea).not.toHaveBeenCalled();
+    });
+
     test('no whole-lawn row and no size on file: not capped (today\'s behaviour), mark unchanged', async () => {
       const products = [{ productId: P_CEL, sprayedGallons: 4 }];
       expect(await run(products)).toBeNull();

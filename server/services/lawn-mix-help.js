@@ -16,7 +16,7 @@
  * AND the other direction: GALLONS SPRAYED entered instead of an area. /complete converts them with the product's STAGED carrier (the
  * sheet's figure is a preview only) into the recorded spot area, which then flows to the per-place limits, the ledger and the customer
  * card's "about N sq ft" exactly as a typed area does; the row is marked on structured_notes.lawnSprayedGallons so the record says the
- * area was derived. A spot cannot be larger than the lawn: the derived area is capped at the visit's whole-lawn row (else the lawn size on
+ * area was derived. A spot cannot be larger than the lawn: the derived area is capped at the visit's whole-lawn row (else the validated visit area the sheet submitted, else the lawn size on
  * file; unknown = no cap), the mark then carries capped / uncappedAreaSqft / lawnAreaSqft, and a place-limit refusal on a capped row says why.
  *
  * No agronomy number is added here: the rate, the unit and the carrier are the staged row's. Unit constants are physical. Fail closed:
@@ -39,6 +39,18 @@ const MAX_FILLS = 10;
 const MAX_GALLONS = Math.max(...TANKS) * MAX_FILLS;
 
 const live = () => require('../config/feature-gates').lawnMixHelpLive();
+
+// The visit area the sheet submitted (propertyServiceArea), validated by the completion's own snapshot reader (gate, lawn visit, the visit's
+// property, the version of the areas the sheet read); the treated square feet, or null when it is absent or fails any check.
+async function serviceAreaSqft({ knex, svc, propertyServiceArea, actor }) {
+  try {
+    const snapshot = await require('./property-service-areas').snapshotVisitArea(propertyServiceArea, svc, actor, knex);
+    return snapshot && snapshot.kind === 'lawn' ? positive(snapshot.treatedSqft) : null;
+  } catch (err) {
+    logger.warn(`[lawn-mix-help] visit area unreadable for ${svc?.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+}
 
 // The Celsius WG label on file (EPA Reg. No. 432-1507, the EPA-stamped 2021-09-01 version), word for word, the stricter instruction first. Keyed by EPA registration
 // number so a rename of the catalog product changes nothing and no product is matched by its name.
@@ -217,7 +229,7 @@ function weedOrder(groupIds, catalog) {
 
 // The readers a call can swap (tests); everything else is the real thing.
 const DEPS = Object.freeze({
-  isLive: live, readStaged: stagedRows, readCatalog: catalogRowsFor, readSpotRows: (knex, rows) => require('./lawn-trouble-areas').spotRowsOf(knex, rows),
+  isLive: live, readStaged: stagedRows, readCatalog: catalogRowsFor, readSpotRows: (knex, rows) => require('./lawn-trouble-areas').spotRowsOf(knex, rows), readServiceArea: serviceAreaSqft,
 });
 
 // The rows of the block: each product's entry, spot work only (a whole-lawn product keeps the plan's own amount).
@@ -294,15 +306,18 @@ async function gallonsStaged({ knex, svc, wanted, loadPlan, readStaged }) {
   }
 }
 
-// The lawn area a gallons-derived spot area may not pass: the area of a whole-lawn (non-spot) row on the same completion when one states
-// it (the largest such row), else the lawn size on file. null = unknown, and the area is NOT capped (today's behaviour): a lawn with no
-// size on file and no whole-lawn row has nothing to compare with.
-function lawnAreaOf(rows, planLawnSqft) {
+// The lawn area a gallons-derived spot area may not pass, in this order: the area of a whole-lawn (non-spot) row on the same completion
+// (the largest such row); the area the sheet submitted for the visit as propertyServiceArea.treatedSqft, once the server has validated it
+// (readServiceArea: the same check the completion's own snapshot makes, so a secondary property or a technician-entered visit area counts);
+// the lawn size on file (the plan's). null = unknown, and the area is NOT capped (today's behaviour): nothing to compare with.
+function lawnAreaOf(rows, serviceSqft, planLawnSqft) {
   const whole = rows
     .filter((row) => !row[SPOT_ROW] && row.areaUnit === 'sqft' && Number(row.areaValue) > 0)
     .map((row) => Math.round(Number(row.areaValue)))
     .filter((area) => Number.isFinite(area) && area > 0);
-  return whole.length ? Math.max(...whole) : (planLawnSqft ? Math.round(planLawnSqft) : null);
+  if (whole.length) return Math.max(...whole);
+  const fallback = positive(serviceSqft) || planLawnSqft;
+  return fallback ? Math.round(fallback) : null;
 }
 
 // Each asked row gets its area from its own staged carrier and is marked, or the step refuses (400, enter the area instead). A spot cannot be
@@ -336,7 +351,7 @@ function convertGallons(wanted, staged, month, lawnArea) {
  * (`loadPlan(svc, knex)` is the sheet's plan reader) plus, for tests, `isLive` and `readStaged`.
  */
 async function applyGallons(input) {
-  const { knex, svc, products, loadPlan, isLive, readStaged, readSpotRows } = { ...DEPS, ...input };
+  const { knex, svc, products, loadPlan, isLive, readStaged, readSpotRows, readServiceArea, propertyServiceArea, actor } = { ...DEPS, ...input };
   const rows = (Array.isArray(products) ? products : []).filter((row) => row && typeof row === 'object');
   for (const row of rows) delete row[FROM_GALLONS];
   const wanted = rows.filter(asked);
@@ -357,7 +372,9 @@ async function applyGallons(input) {
   if (notSpot) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed cannot be used for this product. Enter the area instead.', { productId: notSpot.productId });
   for (const row of rows) if (spot.includes(row)) row[SPOT_ROW] = true;
   try {
-    return convertGallons(wanted, staged, monthOfVisit(svc), lawnAreaOf(rows, read.planLawnSqft));
+    const wholeLawn = lawnAreaOf(rows, null, null);
+    const serviceSqft = wholeLawn || !propertyServiceArea ? null : await readServiceArea({ knex, svc, propertyServiceArea, actor });
+    return convertGallons(wanted, staged, monthOfVisit(svc), lawnAreaOf(rows, serviceSqft, read.planLawnSqft));
   } finally {
     for (const row of rows) delete row[SPOT_ROW];
   }
