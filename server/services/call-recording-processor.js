@@ -1201,6 +1201,22 @@ function phoneNearMissOfAni(extracted, ani) {
   return diff > 0 && diff <= 2;
 }
 
+// The payload mark a no-text hold leaves on an OPEN callback_number_needed card an earlier pass filed.
+// Same expression as disclaimed-number-holds.NO_TEXT_MARK_SQL: a card that did not already carry
+// no_text_hold was filed as an ownership disclaimer, and keeps that meaning (ownership_disclaimed).
+const { NO_TEXT_MARK_SQL } = require('./disclaimed-number-holds');
+
+// True when `phone` is one of the numbers the call itself touched: the ANI, the dialed number, or
+// the lead's number a form-callback bridge recorded in the call's metadata. Anything else on a
+// no-text call is a dictated number and is never adopted (codex #6112 r8 P1).
+function phoneIsOneOfCallLegs(call = {}, phone) {
+  if (!phone) return false;
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const legs = [call.from_phone, call.to_phone, metadata?.type === 'lead_auto_bridge' ? metadata.leadPhone : null];
+  return legs.some((leg) => leg && samePhone(phone, leg));
+}
+
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
   const extracted = String(extractedPhone || '').trim();
   if (isOutboundCall(call)) {
@@ -11094,7 +11110,7 @@ const CallRecordingProcessor = {
       await trx('triage_items')
         .where({ call_log_id: call.id, reason_code: 'callback_number_needed' })
         .whereIn('status', ['open', 'in_progress'])
-        .update({ payload: trx.raw('COALESCE(payload, \'{}\'::jsonb) || \'{"no_text_hold": true}\'::jsonb') });
+        .update({ payload: trx.raw(NO_TEXT_MARK_SQL) });
       if (refresh) {
         // Refresh the OPEN card only: a card staff already resolved or dismissed stays settled.
         await trx('triage_items')
@@ -12597,14 +12613,16 @@ const CallRecordingProcessor = {
       }
     }
 
-    // ani_cannot_text (codex r7 P1): the V1 extractor has ONE phone field, so a number the caller
-    // dictated for texts can land in extracted.phone and from there key the customer match, the
-    // stored phone and every later outbound leg — the automatic phone write the owner's card-only
-    // ruling forbids. On an inbound no-text call a spoken number that is not the ANI is quarantined:
-    // automation never adopts it, and the text_number_differs card carries the dictated number for
-    // the office. The ANI stays the callback destination. Outbound legs resolve from the call's own
-    // bridge metadata and are not touched.
-    if (callAniCannotText && extracted.phone && !isOutboundCall(call) && !samePhone(extracted.phone, call.from_phone)) {
+    // ani_cannot_text (codex r7 P1, r8 P1): the V1 extractor has ONE phone field, so a number the
+    // caller dictated for texts can land in extracted.phone and from there key the customer match,
+    // the stored phone and every later leg — the automatic phone write the owner's card-only ruling
+    // forbids. On a no-text call, inbound or outbound, a spoken number that is not one of the call's
+    // own legs is quarantined: automation never adopts it, and the text_number_differs card carries
+    // the dictated number for the office. The ANI (or the dialed customer) stays the callable number.
+    // The call's own legs are the only numbers automation may keep: the ANI, the dialed number and,
+    // for a form-callback bridge, the lead's number in the bridge metadata (the outbound branch of
+    // resolveCallContactPhone would otherwise prefer the dictated number over the dialed customer).
+    if (callAniCannotText && extracted.phone && !phoneIsOneOfCallLegs(call, extracted.phone)) {
       logger.info(`[call-proc] no-text call: dictated number ${maskPhone(extracted.phone)} kept off the caller fields for ${maskSid(callSid)}`);
       extracted.phone = null;
     }

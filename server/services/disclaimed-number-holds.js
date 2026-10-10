@@ -23,6 +23,18 @@ const { toE164, isLikelyE164 } = require('../utils/phone');
 
 const TABLE = 'disclaimed_number_holds';
 
+// Marks a no-text hold leaves on an OPEN callback_number_needed card an earlier pass filed:
+// no_text_hold (its Resolve must not release this hold) and, when the card did not already carry
+// no_text_hold, ownership_disclaimed — that card was filed because the caller said the number is
+// not theirs, and "Line can get texts" (which proves only that the line takes SMS) must not clear
+// it (codex #6112 r8 P1). The routing-gates stamp writes the same two keys on a dual-signal card.
+const NO_TEXT_MARK_SQL = `COALESCE(payload, '{}'::jsonb) || jsonb_build_object(
+  'no_text_hold', true,
+  'ownership_disclaimed', COALESCE((payload->>'ownership_disclaimed')::boolean, COALESCE(payload->>'no_text_hold', '') <> 'true'))`;
+// An open callback_number_needed card that still stands for "that is not my number": filed without
+// the no-text mark, or marked while carrying the ownership disclaimer. Only its own Resolve clears it.
+const OWNERSHIP_DISCLAIMER_CARD_SQL = `(COALESCE(payload->>'no_text_hold', '') <> 'true' OR COALESCE(payload->>'ownership_disclaimed', '') = 'true')`;
+
 // Canonical key for a hold row / a send's `to`. null for anything that is
 // not a dialable number (the send can't reach a disclaimed number with it,
 // and a hold on it could never match a real send either).
@@ -104,13 +116,12 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * are only ever reached by one of the two at a time — no deadlock cycle.
  */
 async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, noTextHold = false, afterArm = null, conn = db }) {
-  if (!holdPhoneKey(phone) || !callLogId) {
-    // Nothing dialable to hold: no hold row, but a release card the caller asked for still gets written
-    // (its own transaction; there is no hold for it to be atomic with).
-    const recorded = await recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
-    if (afterArm) await conn.transaction(afterArm);
-    return recorded;
-  }
+  if (!callLogId || (!holdPhoneKey(phone) && !afterArm)) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
+  // No dialable number (anonymous, restricted or masked ANI) but a companion card write: no hold row,
+  // yet the card still goes through the same lock and claim fence below, so a worker that lost its
+  // claim during extraction cannot file a stale card after the replacement pass finalized the call
+  // (codex #6112 r8 P2).
+  const holdable = !!holdPhoneKey(phone);
   const { lockTriageCall } = require('../utils/triage-locks');
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
@@ -122,6 +133,10 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
       const owned = await claim.forUpdate().first('id');
       if (!owned) return { recorded: false, claimLost: true };
     }
+    if (!holdable) {
+      if (afterArm) await afterArm(trx);
+      return { recorded: false, reason: 'no_phone' };
+    }
     const recorded = await recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
     if (noTextHold) {
       // A hold armed because the VALID extraction said the line cannot get texts: mark any callback_number_needed
@@ -130,7 +145,7 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
       await trx('triage_items')
         .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
         .whereIn('status', ['open', 'in_progress'])
-        .update({ payload: trx.raw('COALESCE(payload, \'{}\'::jsonb) || \'{"no_text_hold": true}\'::jsonb') });
+        .update({ payload: trx.raw(NO_TEXT_MARK_SQL) });
       // Re-arming invalidates the version of every text_number_differs card this call already has: an
       // older (closed) card on screen can no longer release what this pass just armed.
       await trx('triage_items')
@@ -170,7 +185,7 @@ async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, cle
                      WHERE t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs')
         AND NOT EXISTS (SELECT 1 FROM triage_items d
                          WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
-                           AND COALESCE(d.payload->>'no_text_hold', '') <> 'true')
+                           AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})
       RETURNING h.source_call_log_id`,
     [clearedBy ? String(clearedBy).slice(0, 100) : null, reason ? String(reason).slice(0, 100) : null, key, exceptCallLogId, exceptCallLogId],
   );
@@ -365,6 +380,8 @@ module.exports = {
   ensureDisclaimedNumberHold,
   clearDisclaimedNumberHoldsForCall,
   clearNoTextHoldsForPhone,
+  NO_TEXT_MARK_SQL,
+  OWNERSHIP_DISCLAIMER_CARD_SQL,
   disclaimedNumberHeld,
   disclaimedNumberBlocksSend,
   disclaimedNumberHeldForVisit,

@@ -242,9 +242,11 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   });
 
   test('a no-text call never adopts a dictated number as the caller phone (the V1 single phone field is quarantined before the customer step)', () => {
-    const at = src.indexOf('if (callAniCannotText && extracted.phone && !isOutboundCall(call) && !samePhone(extracted.phone, call.from_phone)) {');
+    const at = src.indexOf('if (callAniCannotText && extracted.phone && !phoneIsOneOfCallLegs(call, extracted.phone)) {');
     expect(at).toBeGreaterThan(-1);
     expect(src.slice(at, at + 400)).toContain('extracted.phone = null;');
+    // inbound AND outbound: only the call's own legs (ANI, dialed number, bridge lead number) may stay
+    expect(src).toMatch(/function phoneIsOneOfCallLegs\(call = \{\}, phone\) \{[^]*?\[call\.from_phone, call\.to_phone, metadata\?\.type === 'lead_auto_bridge' \? metadata\.leadPhone : null\]/);
     expect(at).toBeLessThan(src.indexOf('const phone = resolveCallContactPhone(call, extracted.phone);'));
   });
 
@@ -265,9 +267,13 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t");
     expect(fn).toContain("t.reason_code = 'text_number_differs'");
     expect(fn).toContain("AND NOT EXISTS (SELECT 1 FROM triage_items d");
-    expect(fn).toContain("COALESCE(d.payload->>'no_text_hold', '') <> 'true'");
+    expect(fn).toContain("OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')");
+    // the dual-signal stamp and the disclaimer predicate
+    const gates = fs.readFileSync(require.resolve('../services/call-routing-gates'), 'utf8');
+    expect(gates).toContain("? { no_text_hold: true, ...(extraction?.caller?.caller_id_disclaimed === true ? { ownership_disclaimed: true } : {}) }");
     expect(fn).toContain('AND h.cleared_at IS NULL');
     const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    expect(triage).toContain('.whereRaw(OWNERSHIP_DISCLAIMER_CARD_SQL)');
     const rel = triage.slice(triage.indexOf('async function releaseNoTextHold('), triage.indexOf('async function releaseClosedNoTextHold('));
     expect(rel).toContain('if (release) {');
     expect(rel).toContain('Holds.clearNoTextHoldsForPhone({');
@@ -278,7 +284,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   test('arming the no-text hold also marks a callback_number_needed card an earlier pass left open (no stale unmarked card can release it)', () => {
     const at = src.indexOf('const writeTextNumberCard = async (trx, item');
     const section = src.slice(at, at + 3600);
-    expect(section).toMatch(/reason_code: 'callback_number_needed'[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)[^]*?no_text_hold/);
+    expect(section).toMatch(/reason_code: 'callback_number_needed'[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)[^]*?NO_TEXT_MARK_SQL/);
   });
 
   test('the hold arm stamps open callback cards in its own transaction, and Resolve reads the LIVE payload under the lock', () => {

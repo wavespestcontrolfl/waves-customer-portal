@@ -95,6 +95,11 @@ function makeFakeDb(seed = {}) {
           rawPredicates.push((row) => row.payload?.no_text_hold !== true);
           return api;
         }
+        // disclaimedCardOpen: a plain disclaimer card, or a dual-signal card marked ownership_disclaimed
+        if (sql === require('../services/disclaimed-number-holds').OWNERSHIP_DISCLAIMER_CARD_SQL) {
+          rawPredicates.push((row) => row.payload?.no_text_hold !== true || row.payload?.ownership_disclaimed === true);
+          return api;
+        }
         if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
         rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
         return api;
@@ -544,6 +549,16 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
   test('"Line can get texts" with a plain disclaimed callback card still open keeps the hold (that card\'s own Resolve decides)', async () => {
     const { tables } = await run([textCard(), cbCard({ payload: {} })], 'resolve', CARD_ID, { line_can_get_texts: true });
     expect(numberHold(tables).cleared_at).toBeNull();
+  });
+
+  test('"Line can get texts" keeps the hold while a DUAL-signal callback card (disclaimed AND cannot text) is open: it proves the line, not the owner', async () => {
+    const { tables } = await run([textCard(), cbCard({ payload: { no_text_hold: true, ownership_disclaimed: true } })], 'resolve', CARD_ID, { line_can_get_texts: true });
+    expect(numberHold(tables).cleared_at).toBeNull();
+  });
+
+  test('"Line can get texts" releases when the only other callback card is a pure no-text mark (no ownership disclaimer)', async () => {
+    const { tables } = await run([textCard(), cbCard({ payload: { no_text_hold: true } })], 'resolve', CARD_ID, { line_can_get_texts: true });
+    expect(numberHold(tables).cleared_at).not.toBeNull();
   });
 
   describe('closing callback_number_needed never clears a no-text hold (either order, any state of the text card)', () => {

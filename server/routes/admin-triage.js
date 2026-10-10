@@ -143,13 +143,16 @@ function cardCarriesNoTextHold(item) {
   return payload?.no_text_hold === true;
 }
 
-// A callback_number_needed card still OPEN on the call that is NOT a no-text card: the caller also
-// disclaimed the number, and only that card's own Resolve verifies it.
+// A callback_number_needed card still OPEN on the call that stands for "that is not my number": filed
+// without the no-text mark, or marked ownership_disclaimed because the caller BOTH disclaimed the number
+// and said the line cannot get texts (codex #6112 r8 P1). "Line can get texts" proves only that the line
+// takes SMS, never who owns it, so only that card's own Resolve verifies the number.
 async function disclaimedCardOpen(trx, callLogId) {
+  const { OWNERSHIP_DISCLAIMER_CARD_SQL } = require('../services/disclaimed-number-holds');
   const open = await trx('triage_items')
     .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
     .whereIn('status', OPEN_STATES)
-    .whereRaw("COALESCE(payload->>'no_text_hold', '') <> 'true'")
+    .whereRaw(OWNERSHIP_DISCLAIMER_CARD_SQL)
     .first('id');
   return !!open;
 }

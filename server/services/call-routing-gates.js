@@ -896,8 +896,12 @@ const FLAG_PAYLOAD_STAMPS = [
   { flags: new Set(['missing_unit_number']), stamp: ({ extraction, addressValidation }) => ({ unit_ask_building: unitAskBuilding(extraction, addressValidation) }) },
   // A hold armed because the VALID extraction said the line cannot get texts (ani_cannot_text) is marked on
   // both of its cards, so closing callback_number_needed can tell it must not release that hold.
+  // A caller who ALSO disclaimed the number keeps that meaning on the callback card
+  // (ownership_disclaimed): "Line can get texts" never clears it; its own Resolve does.
   { flags: new Set(['callback_number_needed', 'text_number_differs']),
-    stamp: ({ extraction }) => (extraction?.caller?.ani_cannot_text === true ? { no_text_hold: true } : {}) },
+    stamp: ({ extraction }) => (extraction?.caller?.ani_cannot_text === true
+      ? { no_text_hold: true, ...(extraction?.caller?.caller_id_disclaimed === true ? { ownership_disclaimed: true } : {}) }
+      : {}) },
 ];
 
 function buildTriageItem({
