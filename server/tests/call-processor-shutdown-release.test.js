@@ -134,6 +134,38 @@ maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () 
     expect(Number((await readRow()).processing_generation)).toBe(2);
   });
 
+  test('a stamped extraction_failed retry is swept and claimed inside the 10-minute backoff, once (Codex r1 P1)', async () => {
+    processor._test.resetShutdownForTests();
+    // A retry pass handed back at a deploy: status restored to
+    // extraction_failed, attempts under the cap, updated_at seconds old, stamped.
+    await db('call_log').where({ twilio_call_sid: SID }).update({
+      processing_status: 'extraction_failed',
+      extraction_attempts: 1,
+      processing_token: null,
+      // Not 'pending': only the extraction_failed sweep branch may admit it.
+      transcription_status: 'completed',
+      updated_at: new Date(),
+      metadata: JSON.stringify({ fixture: 'shutdown-release', shutdown_released_at: new Date().toISOString() }),
+    });
+    const generation = Number((await readRow()).processing_generation);
+    const before = fetchSpy.mock.calls.length;
+    await processor.processAllPending();
+    // Swept AND claimed (the claim's own backoff guard honours the stamp too):
+    // the 404 releases the row as not ready with the retry status restored.
+    expect(fetchSpy.mock.calls.length).toBe(before + 1);
+    const swept = await readRow();
+    expect(Number(swept.processing_generation)).toBe(generation + 1);
+    expect(swept.processing_status).toBe('extraction_failed');
+    expect(Number(swept.extraction_attempts)).toBe(1);
+    expect(swept.metadata.shutdown_released_at).toBeUndefined();
+    // Stamp cleared, updated_at fresh: the backoff holds again.
+    await processor.processAllPending();
+    expect(fetchSpy.mock.calls.length).toBe(before + 1);
+    await db('call_log').where({ twilio_call_sid: SID }).update({
+      processing_status: null, extraction_attempts: 0, transcription_status: 'pending', metadata: JSON.stringify({ fixture: 'shutdown-release' }),
+    });
+  });
+
   test('a pass that finishes inside the grace is counted finished and nothing is written', async () => {
     processor._test.resetShutdownForTests();
     // Instant 404: the pass claims and releases itself within the grace.
