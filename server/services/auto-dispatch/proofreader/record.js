@@ -35,6 +35,7 @@ const { resolveEmailCustomerLink, personSentFilter, extractEmailAddresses } = re
 const { emailPlainText, stripQuotedAndSignature, ownReplySubject } = require('../../email/email-strip');
 const { operatorReply, smsContactSelects } = require('../../staff-contact');
 const { etOffsetIso } = require('../../../utils/datetime-et');
+const { whereNotSandboxCall } = require('../../voice-agent/relay-protocol');
 const { RETAINED_HISTORY_STATUSES } = require('../../visit-context/statuses');
 
 // One entry's longest text. A longer one is split into parts, never cut
@@ -49,7 +50,7 @@ const MAX_RECORD_CHARS = 300000;
 
 // Interaction rows that only repeat a text or an email already read from its
 // source table, and the 'call' row the recording processor writes: its body
-// is a model's summary of a call whose own words are read from call_log, and
+// is a model's summary of a call whose own words come from the call log table, and
 // a paraphrase must never stand as a quote (Codex #6258 r4).
 // 'inbound_call' is the raw transcript copied again when staff tag a call
 // (admin-call-recordings.js), dated at the tagging (r8).
@@ -220,6 +221,8 @@ async function readCalls(conn, { customerId, asOf }, unread) {
   const rows = await conn('call_log')
     .where({ customer_id: customerId })
     .where('created_at', '<', asOf)
+    // A sandbox test call is nobody's words (relay-protocol.js).
+    .modify((qb) => whereNotSandboxCall(qb))
     .select('direction', 'transcription', 'recording_sid', 'created_at', 'updated_at', 'call_outcome', 'processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status');
   const ours = rows.filter((row) => !NOT_THIS_CUSTOMER_OUTCOMES.includes(row.call_outcome) && !contextAggregator.isExcludedCall(row));
   return ours.map((row) => {
@@ -285,7 +288,7 @@ async function readPortalRequests(conn, { customerId, asOf }, unread) {
     // source 'admin' is an operator's own record (admin-cancellation.js): staff
     // words in the same table, never the customer's (r8).
     // 'voice_agent' is the phone assistant's paraphrase of a call whose own
-    // words are read from call_log (r9).
+    // words come from the call log table (r9).
     .whereRaw("COALESCE(source, '') NOT IN ('admin', 'voice_agent')")
     .select('category', 'subject', 'description', 'created_at', 'updated_at');
   // updated_at moves on a status or assignment change too, so it does not

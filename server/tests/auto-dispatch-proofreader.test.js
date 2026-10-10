@@ -43,7 +43,7 @@ function fakeConn(tables, { fail = [] } = {}) {
           }
           if (prop === 'whereNull') filters.push((row) => row[args[0]] == null);
           // A where/orWhere callback builds a nested group: run it on the same chain.
-          if (typeof args[0] === 'function') args[0].call(chain);
+          if (typeof args[0] === 'function') args[0].call(chain, chain);
           return chain;
         };
       },
