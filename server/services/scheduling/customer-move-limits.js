@@ -84,10 +84,19 @@ function slotChanged(row) {
 // The same reading as rate-review's CADENCE_SQL, for the four ruled plans.
 const CATALOG_CADENCES = new Set(['monthly', 'every_6_weeks', 'bimonthly', 'quarterly']);
 
-function catalogCadence(svc) {
+// True for a legacy plan row: 'custom' or no pattern, and no interval. Its
+// cadence is not on the row.
+function isLegacyCadenceRow(svc) {
   const stored = svc.recurring_pattern || null;
-  if (stored && stored !== 'custom') return null;
-  if (Number.parseInt(svc.recurring_interval_days, 10) > 0) return null;
+  return (!stored || stored === 'custom') && !(Number.parseInt(svc.recurring_interval_days, 10) > 0);
+}
+
+// A legacy row's cadence from the catalog: one of the four ruled plans, or
+// null. Null covers a catalog cadence with no limit (semiannual, seasonal,
+// annual, weekly) and a missing one: neither gets an allowance. The stored
+// 'custom' is never read for such a row; with no interval it says nothing
+// (the scheduler's 91-day default is a spacing fallback, not a plan).
+function catalogCadence(svc) {
   const frequency = normalizeRecurringPattern(svc.catalog_frequency) || svc.catalog_frequency || null;
   return CATALOG_CADENCES.has(frequency) ? frequency : null;
 }
@@ -106,7 +115,10 @@ function allowanceDays(svc) {
   // Legacy rows store aliases ('bi-monthly'); the shared normalizer reads
   // them. A value it does not place (monthly_nth_weekday) is passed as stored.
   const stored = svc.recurring_pattern || null;
-  const pattern = catalogCadence(svc) || (stored && normalizeRecurringPattern(stored)) || stored;
+  const pattern = isLegacyCadenceRow(svc)
+    ? catalogCadence(svc)
+    : (normalizeRecurringPattern(stored) || stored);
+  if (!pattern) return null;
   const gap = intervalDaysForPattern(pattern, svc.recurring_interval_days);
   if (!gap) return null;
   return ALLOWANCE_BY_GAP_DAYS.find((band) => gap >= band.from && gap <= band.to)?.days || null;

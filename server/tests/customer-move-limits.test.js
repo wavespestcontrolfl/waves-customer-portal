@@ -96,6 +96,8 @@ describe('late-move limit', () => {
   test.each([
     ['custom', 'monthly', 7], [null, 'monthly', 7], [null, 'quarterly', 21], ['custom', 'bimonthly', 14],
     ['custom', 'every_6_weeks', 10], [null, 'seasonal_feb_oct', null], [null, 'one_time', null], [null, null, null],
+    ['custom', 'semiannual', null], ['custom', 'seasonal_feb_oct', null], ['custom', 'annual', null], ['custom', 'weekly', null],
+    ['custom', null, null],
   ])('legacy plan row (%s, no interval) reads the catalog cadence %s', (pattern, frequency, days) => {
     expect(allowanceDays({
       recurring_pattern: pattern, recurring_interval_days: null, is_recurring: true, catalog_frequency: frequency,
