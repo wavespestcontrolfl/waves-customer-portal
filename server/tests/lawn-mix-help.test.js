@@ -406,6 +406,15 @@ describe('gallons sprayed at completion', () => {
       expect(out).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now', error: expect.stringContaining('visit area could not be confirmed') } });
       expect(products[0]).toMatchObject({ areaValue: 10, rate: 0.085 });
       expect(help.sprayedGallonsFreeze(products)).toEqual({});
+      // A structured 4xx from the snapshot (stale version) reaches the sheet as it came, so the sheet can read the areas again.
+      const stale = Object.assign(new Error('Property areas changed. Reload and review the job coverage.'), { status: 409, statusCode: 409, code: 'property_service_area_changed' });
+      const staleOut = await run([{ productId: P_CEL, sprayedGallons: 4 }], { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw stale; } });
+      expect(staleOut).toEqual({ status: 409, payload: { error: 'Property areas changed. Reload and review the job coverage.', code: 'property_service_area_changed' } });
+      const missing = Object.assign(new Error('Service not found.'), { status: 404, statusCode: 404 });
+      expect(await run([{ productId: P_CEL, sprayedGallons: 4 }], { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw missing; } })).toEqual({ status: 404, payload: { error: 'Service not found.' } });
+      // A server-side failure is not passed through (a 5xx would lock the form): it is the correctable 400.
+      const down = Object.assign(new Error('db down'), { statusCode: 503 });
+      expect(await run([{ productId: P_CEL, sprayedGallons: 4 }], { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw down; } })).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now' } });
       // Nothing submitted: the plan's size still caps it.
       const absent = [{ productId: P_CEL, sprayedGallons: 4 }];
       expect(await run(absent, { ...withLawn(1900), readServiceArea: async () => { throw new Error('never called'); } })).toBeNull();

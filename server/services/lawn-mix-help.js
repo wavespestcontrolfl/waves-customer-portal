@@ -373,6 +373,11 @@ async function visitAreaRead({ knex, svc, propertyServiceArea, actor, readServic
     return { sqft: await readServiceArea({ knex, svc, propertyServiceArea, actor }) };
   } catch (err) {
     logger.warn(`[lawn-mix-help] visit area unreadable for ${svc?.id}: ${err?.code || err?.name || 'Error'}`);
+    // A structured 4xx the snapshot itself raises (the 409 property_service_area_changed of a stale version, a 404, a 400 review message) is
+    // the answer the sheet already knows how to act on (it reads the areas again on that code), so it is returned as it came. Only an
+    // unstructured failure (no status; a database error) or a 5xx, which would lock the form to the same body and key, becomes the 400.
+    const status = Number(err?.statusCode || err?.status);
+    if (status >= 400 && status < 500) return { refused: { status, payload: { error: err.message, ...(err.code ? { code: err.code } : {}) } } };
     return { refused: refusal(400, 'lawn_gallons_unavailable_now', 'The visit area could not be confirmed just now. Try again in a moment, or enter the area instead.') };
   }
 }
