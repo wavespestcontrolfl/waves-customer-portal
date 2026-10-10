@@ -8,6 +8,7 @@ const {
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   nameSpellingDifferences,
+  nameSpellingCardDecision,
   nameSpellingCardText,
   unsettledNameDifferences,
   nameSpellingCardPayload,
@@ -377,6 +378,38 @@ describe('spelled names — card-only', () => {
     test('an email context disqualifies the turn', () => {
       expect(names([entry()], 'Caller: my email is S-E-R-O-V at gmail dot com')[0].turn).toBeNull();
       expect(names([entry()], 'Caller: S-E-R-O-V, at example dot com')[0].turn).toBeNull();
+    });
+  });
+
+  describe('whole spelled runs and the evidence quote', () => {
+    const smith = (over = {}) => entry({ raw_spoken: 'S-M-I-T-H', spelled_value: 'Smith', ...over });
+    test('a decoder run that is only the front of a longer spelled run is not grounded', () => {
+      expect(names([smith()], 'Caller: my last name is S-M-I-T-H-E')).toEqual([]);
+    });
+    test('an exact run is grounded; so is a run that appears whole elsewhere in the same turn', () => {
+      expect(names([smith()], 'Caller: my last name is S-M-I-T-H')).toHaveLength(1);
+      const both = 'Caller: not S-M-I-T-H-E, I said S-M-I-T-H';
+      expect(names([smith()], both)).toHaveLength(1);
+      expect(names([smith()], both)[0].turn).toBe(both);
+    });
+    test('a long caller turn is quoted as a window that contains the spelling', () => {
+      const turn = `Caller: ${'blah '.repeat(90)}my last name is S-E-R-O-V and that is it`;
+      expect(turn.length).toBeGreaterThan(450);
+      const quote = names([entry()], turn)[0].turn;
+      expect(quote).toContain('S-E-R-O-V');
+      expect(quote.length).toBeLessThanOrEqual(302);
+      expect(quote.startsWith('…')).toBe(true);
+    });
+  });
+
+  describe('nameSpellingCardDecision retire rule', () => {
+    const dictation = { names: [] }; // a later pass with no usable spelling
+    const card = { field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell', also: [{ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' }] };
+    const decide = (live) => nameSpellingCardDecision({ dictation, live, openCardPayload: card });
+    test('one corrected field of two leaves the card open; both corrected retires it', () => {
+      expect(decide({ first_name: 'Kwentrell', last_name: 'Sirov' }).retire).toBe(false);
+      expect(decide({ first_name: 'Quentrell', last_name: 'Serov' }).retire).toBe(false);
+      expect(decide({ first_name: 'Kwentrell', last_name: 'SEROV' }).retire).toBe(true);
     });
   });
 

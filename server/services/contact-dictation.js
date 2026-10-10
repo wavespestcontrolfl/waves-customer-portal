@@ -308,40 +308,63 @@ function spelledLetterRuns(raw) {
   return runs;
 }
 
+const QUOTE_MAX = 300;
+const QUOTE_LEAD = 120;
+
+// The part of an over-long turn shown as evidence: a window around the spelling (so the quote always
+// contains it), with an ellipsis where the turn was cut. A turn that fits is returned as it is.
+function quoteWindow(turn, at, len) {
+  if (turn.length <= QUOTE_MAX) return turn;
+  const from = Math.max(0, Math.min(at - QUOTE_LEAD, turn.length - QUOTE_MAX));
+  const to = Math.min(turn.length, Math.max(from + QUOTE_MAX, at + len));
+  return `${from > 0 ? '…' : ''}${turn.slice(from, to)}${to < turn.length ? '…' : ''}`;
+}
+
+// Every turn (a line) of `text` that holds the spelling as a WHOLE spelled run, so S-M-I-T-H inside
+// S-M-I-T-H-E is not S-M-I-T-H. Each hit is { turn, quote }; `wanted` is the letter run to find.
+function turnsWithSpelling(text, lower, needle, wanted) {
+  const hits = [];
+  for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
+    const start = text.lastIndexOf('\n', at) + 1;
+    const endIdx = text.indexOf('\n', at + needle.length);
+    const rawTurn = text.slice(start, endIdx < 0 ? text.length : endIdx);
+    const turn = rawTurn.trim();
+    if (wanted.length && !wanted.every((r) => spelledLetterRuns(turn).includes(r))) continue;
+    const local = at - start - (rawTurn.length - rawTurn.trimStart().length);
+    hits.push({ turn, quote: quoteWindow(turn, local, needle.length) });
+  }
+  return hits;
+}
+
 // The caller turn that contains the spelling, or null. The simple qualifier:
 // when a transcript carries Agent:/Caller: labels the turn must be labeled
 // Caller:; an unlabeled transcript (the dictation pass) is taken as it is, EXCEPT
 // when a labeled transcript puts the same spelling in an Agent: turn and in no
 // Caller: turn (the spelling is the employee's, so the unlabeled copy is too);
-// a turn with email wording is an address, not a name.
-function callerTurnWithSpelling(raw, sources) {
+// a turn with email wording is an address, not a name. The spelling must be a whole
+// letter run in the turn (`run`: the run the decoder's value spells; default every run of `raw`).
+function callerTurnWithSpelling(raw, sources, run = null) {
   const flat = (v) => String(v || '').replace(/[ \t]+/g, ' ');
   const needle = flat(raw).trim().replace(/\s*\n\s*/g, ' ').toLowerCase();
   if (!needle) return null;
+  const wanted = run ? [run] : spelledLetterRuns(raw);
+  const noEmail = (h) => !EMAIL_WORDING_RE.test(h.turn.toLowerCase());
   const unlabeled = [];
   let agentSpoke = false;
   for (const src of sources) {
     const text = flat(src);
     const lower = text.toLowerCase();
     if (!/^\s*(?:agent|caller)\s*:/im.test(text)) { unlabeled.push({ text, lower }); continue; }
-    for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
-      const start = text.lastIndexOf('\n', at) + 1;
-      const endIdx = text.indexOf('\n', at + needle.length);
-      const turn = text.slice(start, endIdx < 0 ? text.length : endIdx).trim();
-      if (/^caller\s*:/i.test(turn)) {
-        if (!EMAIL_WORDING_RE.test(turn.toLowerCase())) return turn.slice(0, 300);
-      } else if (/^agent\s*:/i.test(turn)) agentSpoke = true;
-    }
+    const hits = turnsWithSpelling(text, lower, needle, wanted);
+    const caller = hits.find((h) => /^caller\s*:/i.test(h.turn) && noEmail(h));
+    if (caller) return caller.quote;
+    if (hits.some((h) => /^agent\s*:/i.test(h.turn))) agentSpoke = true;
   }
   // The diarized transcript binds the speaker: an Agent: spelling with no Caller: copy is never the caller's.
   if (agentSpoke) return null;
   for (const { text, lower } of unlabeled) {
-    for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
-      const start = text.lastIndexOf('\n', at) + 1;
-      const endIdx = text.indexOf('\n', at + needle.length);
-      const turn = text.slice(start, endIdx < 0 ? text.length : endIdx).trim();
-      if (!EMAIL_WORDING_RE.test(turn.toLowerCase())) return turn.slice(0, 300);
-    }
+    const hit = turnsWithSpelling(text, lower, needle, wanted).find(noEmail);
+    if (hit) return hit.quote;
   }
   return null;
 }
@@ -362,14 +385,17 @@ function sanitizeNameEntries(entries, sources = []) {
     if (!NAME_FIELDS.includes(n?.field) || !SPELLED_NAME_RE.test(spelled)) continue;
     const raw = squash(n?.raw_spoken);
     if (!raw || !haystacks.some((h) => h.includes(raw))) continue;
-    if (!spelledLetterRuns(n.raw_spoken).includes(nameKey(spelled))) continue;
+    const run = nameKey(spelled);
+    if (!spelledLetterRuns(n.raw_spoken).includes(run)) continue;
+    // Grounded only when a source holds that spelling as a WHOLE run, not as part of a longer one.
+    if (!srcs.some((src) => spelledLetterRuns(src).includes(run))) continue;
     out.push({
       raw_spoken: String(n.raw_spoken).slice(0, 300),
       spelled_value: properCase(spelled),
       field: n.field,
       whose: n?.whose === 'caller' ? 'caller' : 'other',
       confidence: Math.max(0, Math.min(1, Number(n?.confidence) || 0)),
-      turn: callerTurnWithSpelling(n.raw_spoken, srcs),
+      turn: callerTurnWithSpelling(n.raw_spoken, srcs, run),
     });
   }
   return out;
@@ -403,7 +429,7 @@ function nameSpellingDifferences({ dictation = null, saved = {} } = {}) {
  * The pure decision for one filing pass. `saved` is the name compared against: a linked customer's
  * STORED fields only (a blank stays blank), else the extracted caller name. `differences` are the
  * spelling differences to file. `retire` is true only when there is nothing to file AND the open
- * card's own recorded spelling (main entry or `also`) now equals the live stored value of its field;
+ * card's own recorded spellings (the main entry AND every `also` entry) ALL equal the live stored value of their field;
  * a pass that merely lost confidence or found a conflicting pair leaves that card alone. Pure.
  */
 function nameSpellingCardDecision({ dictation = null, live = null, extracted = {}, openCardPayload = null } = {}) {
@@ -412,7 +438,7 @@ function nameSpellingCardDecision({ dictation = null, live = null, extracted = {
     : (extracted?.[f] || null)]));
   const differences = nameSpellingDifferences({ dictation, saved });
   const recorded = openCardPayload ? [openCardPayload, ...(Array.isArray(openCardPayload.also) ? openCardPayload.also : [])] : [];
-  const retire = !differences.length && recorded.some((d) => d && NAME_FIELDS.includes(d.field)
+  const retire = !differences.length && recorded.length > 0 && recorded.every((d) => d && NAME_FIELDS.includes(d.field)
     && d.spelled_value && saved[d.field] && nameKey(saved[d.field]) === nameKey(d.spelled_value));
   return { saved, differences, retire };
 }
