@@ -3533,6 +3533,17 @@ const gates = {
   // unset.
   autoDispatchConflictMoves: gateEnvValue('GATE_AUTO_DISPATCH_CONFLICT_MOVES'),
 
+  // Auto-dispatch road check (owner 2026-10-09, "drive time yes"): the 04:10
+  // run scores slots on a straight-line drive model. On, an ordinary move's
+  // drive saving is measured again on Google's traffic-aware route matrix
+  // (the three legs around the visit, on the day it has and the day it would
+  // take) and a move that saves under the drive floor on real roads does not
+  // happen. It can only stop a move; a leg Google does not answer keeps the
+  // model's number. OFF in every environment; auto-dispatch/config.js reads
+  // it through gateEnvValue() at call time (config.roadCheckEnabled). Kill
+  // switch: unset.
+  autoDispatchRoadCheck: gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a

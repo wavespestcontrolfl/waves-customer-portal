@@ -45,6 +45,7 @@ const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
+const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
@@ -470,6 +471,7 @@ function scoreOnSharedModel(service, geo, cand, stops, siblings, placement) {
     stops_that_day: stops.length + 1,
     same_area_share: clusterShare(stops, geo),
     model: 'shared_v1',
+    [ROAD_LEGS]: roadLegsOf(cost, cand.date, hhmmToMin(cand.start_time)),
   };
 }
 
@@ -706,6 +708,7 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
     stops_that_day: stops.length + 1,
     same_area_share: clusterShare(stops, geo),
     model: 'shared_v1',
+    [ROAD_LEGS]: roadLegsOf(cost, dateStr, hhmmToMin(service.window_start) ?? DAY_OPEN),
   };
 }
 

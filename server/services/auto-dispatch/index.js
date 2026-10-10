@@ -32,6 +32,7 @@ const audit = require('./audit');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveRules = require('./move-rules');
+const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
 
@@ -162,6 +163,8 @@ function buildPlacementAudit({
     candidate_detour_minutes: candidate.detour_minutes,
     day_move: moveRules.isDayMove(current, candidate),
     drive_saving_minutes: moveRules.driveSavingMinutes(current, candidate),
+    // GATE_AUTO_DISPATCH_ROAD_CHECK: the same saving on real roads, when asked.
+    road: roadCheck.roadResultOf(candidate),
     candidate_total_drive_minutes: candidate.total_drive_minutes,
     stops_that_day: candidate.stops_that_day,
     current_score_breakdown: currentScore,
@@ -381,9 +384,11 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   // fallback list, Codex pre-push P1) passed the same drive floor and score
   // bar — a below-bar or worse-than-current placement never reaches apply.js.
   // Ties keep encounter order.
-  const ranked = moveRules.rankCandidates({
+  // road-check.js then asks real roads about the top slots (gate on, an
+  // ordinary move only): it can drop a slot, never add one.
+  const ranked = await roadCheck.confirmOnRoads(moveRules.rankCandidates({
     service, current, currentScore, scored, threshold, config,
-  });
+  }), { service, current, config, travel: ctx.roadTravel });
   const { best } = ranked;
 
   const {
@@ -494,6 +499,12 @@ function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
     return {
       reason_code: 'CONFLICT_NO_NEAR_SLOT',
       reason_description: `In conflict, but the nearest free slot adds ${-routeMetrics.drive_saving_minutes} drive minutes > ${config.conflictMaxAddedDriveMinutes} allowed; a person must place it`,
+    };
+  }
+  if (ranked.roadFailed) {
+    return {
+      reason_code: 'NO_ROAD_DRIVE_SAVING',
+      reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${config.minDayMoveDriveSavingMinutes} required`,
     };
   }
   if (ranked.floorFailed) {
@@ -1067,6 +1078,8 @@ async function evaluateServiceForRun(service, run) {
     topN: 60,
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
+    // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
+    roadTravel: run.roadTravel,
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -1361,6 +1374,9 @@ async function runAutoDispatch(opts = {}) {
     clearedIds: new Set(), // visits read placed and clear with the conflict read on (notice close)
     strandedIds: new Set(), // members a partial group move left behind (settleConflicts)
     loaded: [], // every visit the scan loaded (settleConflicts reads the ones with no clear read)
+    // One road-time reader for the whole run: it keeps every answer, so
+    // pass 2 asks Google nothing twice (road-check.js).
+    roadTravel: config.roadCheckEnabled === true ? roadCheck.createRunTravel(config) : null,
   };
 
   try {
@@ -1425,7 +1441,7 @@ async function runAutoDispatch(opts = {}) {
       await require('../tech-visit-notifications').pushAutoDispatchSummary({ runId });
     }
   }
-  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts}`);
+  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts} road_legs=${roadCheck.spendOf(run.roadTravel)}`);
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
