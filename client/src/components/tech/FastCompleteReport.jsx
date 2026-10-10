@@ -618,10 +618,6 @@ export function factsHold(facts) {
   if (unclear.length) {
     return `It isn’t clear whether you treated ${joinAnd(unclear.map((area) => area.toLowerCase()))}. Say plainly where you treated, then write it again.`;
   }
-  // A spray heard but not held up: never recorded as spot spraying.
-  if (facts.unclearSpray) {
-    return 'It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.';
-  }
   // A pest the note treats for that was not heard: never left off the
   // products' targets (Codex #5538).
   const unclearPests = facts.unclearPests || [];

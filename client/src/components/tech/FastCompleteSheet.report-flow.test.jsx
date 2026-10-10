@@ -413,12 +413,12 @@ describe('generate and read', () => {
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
 
-  test('a perimeter heard but not held up by the note holds the send, never a spot treatment (GitHub Codex P1)', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [], spray: null, unclearSpray: true } }));
+  test('a spray heard but not held up by the note shows as unclear and does not hold the send (owner 2026-10-10)', async () => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: ['ants'], spray: null, unclearSpray: true } }));
     await generate();
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · not clear: how you sprayed');
-    expect(screen.getByText('It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · not clear: how you sprayed · for ants');
+    expect(screen.queryByText(/It isn’t clear how you sprayed/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
   test('a note that says no spraying holds the send while a spray is still on the visit (GitHub Codex P1)', async () => {
