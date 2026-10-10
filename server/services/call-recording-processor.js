@@ -22902,43 +22902,60 @@ const CallRecordingProcessor = {
       const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
     });
-    // Claim writes blocked on a row lock when the flag flipped: wait for them
-    // inside the budget, so a claim that commits in time carries a visible
-    // token for the stamps below (and its own post-commit self-stamp has
-    // landed). A claim still blocked at the deadline is left to the legacy
-    // window; its post-commit self-stamp still lands if it commits before
-    // the pool closes.
+    const summary = { enabled, inFlight: 0, stamped: 0, failed: 0 };
+    const seen = new Set();
+    // One token-fenced stamp per entry, all concurrent, each racing the
+    // shared deadline. Returns the tokens whose stamp landed (1 row).
+    const stampEntries = async (entries) => {
+      const landed = new Set();
+      await Promise.all(entries.map(async ([procToken, entry]) => {
+        if (!seen.has(procToken)) { seen.add(procToken); summary.inFlight += 1; }
+        try {
+          const rows = await Promise.race([
+            db('call_log')
+              .where({ id: entry.callId })
+              .where('processing_token', procToken)
+              // Stamp AND beat in one statement: the pass is alive right now,
+              // and the 2-minute silence must start here, not at a beat that
+              // went stale behind a long provider call.
+              .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() }),
+            deadline,
+          ]);
+          if (rows === 'deadline') {
+            summary.failed += 1;
+            logger.warn(`[call-proc] shutdown: stamp for ${maskSid(entry.callSid)} did not land before the deadline`);
+          } else if (rows) {
+            landed.add(procToken);
+            summary.stamped += 1;
+            logger.info(`[call-proc] shutdown: stamped interrupted pass ${maskSid(entry.callSid)}`);
+          }
+          // 0 rows: the pass finished, a peer took the row, or the claim has
+          // not committed yet (the second pass below retries that one).
+        } catch (err) {
+          summary.failed += 1;
+          logger.warn(`[call-proc] shutdown: stamp failed for ${maskSid(entry.callSid)}: ${err.message}`);
+        }
+      }));
+      return landed;
+    };
+    // Pass 1: stamp the claims that exist now, CONCURRENTLY with the wait for
+    // claim writes blocked on a row lock when the flag flipped (Codex r11
+    // P1: that wait must not spend the budget before committed owners are
+    // stamped). A blocked claim that commits inside the budget then carries
+    // a visible token (and has self-stamped post-commit); pass 2 stamps it.
+    // One still blocked at the deadline is left to the legacy window.
+    const firstPass = stampEntries([...inFlightPasses.entries()]);
     if (pendingClaimWrites.size) {
       await Promise.race([Promise.allSettled([...pendingClaimWrites]), deadline]);
     }
-    const entries = [...inFlightPasses.entries()];
-    const summary = { enabled, inFlight: entries.length, stamped: 0, failed: 0 };
-    if (!entries.length) return summary;
-    await Promise.all(entries.map(async ([procToken, entry]) => {
-      try {
-        const rows = await Promise.race([
-          db('call_log')
-            .where({ id: entry.callId })
-            .where('processing_token', procToken)
-            // Stamp AND beat in one statement: the pass is alive right now,
-            // and the 2-minute silence must start here, not at a beat that
-            // went stale behind a long provider call.
-            .update({ metadata: shutdownStampSql(db), processing_heartbeat_at: new Date() }),
-          deadline,
-        ]);
-        if (rows === 'deadline') {
-          summary.failed += 1;
-          logger.warn(`[call-proc] shutdown: stamp for ${maskSid(entry.callSid)} did not land before the deadline`);
-        } else if (rows) {
-          summary.stamped += 1;
-          logger.info(`[call-proc] shutdown: stamped interrupted pass ${maskSid(entry.callSid)}`);
-        }
-        // 0 rows: the pass finished, or a peer already took the row.
-      } catch (err) {
-        summary.failed += 1;
-        logger.warn(`[call-proc] shutdown: stamp failed for ${maskSid(entry.callSid)}: ${err.message}`);
-      }
-    }));
+    const landed = await firstPass;
+    const secondPass = [...inFlightPasses.entries()].filter(([procToken]) => !landed.has(procToken));
+    if (secondPass.length) {
+      // Only when there is budget left: at the deadline the race above
+      // resolves at once and would count every retry as failed.
+      const budgetLeft = await Promise.race([deadline, Promise.resolve('open')]);
+      if (budgetLeft === 'open') await stampEntries(secondPass);
+    }
     return summary;
   },
 
