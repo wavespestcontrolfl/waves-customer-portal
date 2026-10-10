@@ -241,13 +241,16 @@ async function withCatalogCadence(locked, trx) {
   return { ...locked, catalog_frequency: service?.frequency || null };
 }
 
-// Confirm: true when a move limit refuses this move to `date` (a blocked
-// first visit, or a date past a late-move limit that applies).
-async function moveLimitRefuses(svc, elig, range, config, date) {
+// Confirm: refuses (409 MOVE_LIMIT, through the error handler) a move a limit
+// does not allow: a blocked first visit, or a date past a late-move limit
+// that applies. The page reloads on MOVE_LIMIT and shows what GET now offers.
+async function assertMoveLimitAllows(svc, elig, range, config, date) {
   const { limit, blocked } = await loadMoveLimit(svc, elig);
-  if (blocked) return true;
-  if (!limit?.lastDate || date <= limit.lastDate) return false;
-  return moveLimits.lateLimitApplies(limit, await fullRangeForLimit(svc, limit, range, config), range.rangeTo);
+  const late = !blocked && limit?.lastDate && date > limit.lastDate
+    && moveLimits.lateLimitApplies(limit, await fullRangeForLimit(svc, limit, range, config), range.rangeTo);
+  if (blocked || late) {
+    throw Object.assign(new Error(MOVE_LIMIT_MESSAGE), { statusCode: 409, isOperational: true, code: 'MOVE_LIMIT' });
+  }
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -954,9 +957,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // Customer move limits (GATE_RESCHEDULE_MOVE_LIMITS). After the replay
     // above: a retry of a move that already committed still replays. The
     // page reloads on MOVE_LIMIT and shows what GET now offers.
-    if (await moveLimitRefuses(svc, elig, range, config, date)) {
-      return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' });
-    }
+    await assertMoveLimitAllows(svc, elig, range, config, date);
 
     // Shared SLOT_TAKEN recovery response (Codex round 1 P2 on PR #5267,
     // PRRT_kwDOR3YQi86mzgqa): the anti-forgery miss below AND a capacity
@@ -1329,7 +1330,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 router._test = {
   nextVisitDisclosureMismatch,
   applyMoveLimit,
-  moveLimitRefuses,
+  assertMoveLimitAllows,
   fullRangeForLimit,
   visitChangedSince,
   cadenceChangedSince,

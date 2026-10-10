@@ -110,6 +110,9 @@ describe('late-move limit', () => {
   });
 
   test('a one-time visit that stores a cadence has no plan allowance', () => {
+    // A booster extra: is_recurring false with a parent and a catalog service.
+    expect(allowanceDays({ recurring_pattern: null, is_recurring: false, recurring_parent_id: 'p-1', catalog_frequency: 'monthly' })).toBeNull();
+    expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: false, recurring_parent_id: 'p-1' })).toBeNull();
     expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: false, recurring_parent_id: null })).toBeNull();
     expect(allowanceDays({ recurring_pattern: 'monthly' })).toBeNull();
     expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: null, recurring_parent_id: 'p-1' })).toBe(21);
@@ -455,15 +458,14 @@ describe('reschedule-public wiring', () => {
   test('Confirm checks the limits after the idempotent replay and refuses MOVE_LIMIT', () => {
     const commit = src.slice(src.indexOf("router.post('/:token', commitLimiter"));
     const replay = commit.indexOf('replayed: true');
-    const check = commit.indexOf('await moveLimitRefuses(svc, elig, range, config, date)');
+    const check = commit.indexOf('await assertMoveLimitAllows(svc, elig, range, config, date);');
     expect(replay).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(replay);
-    expect(commit.slice(check, check + 200)).toMatch(/code: 'MOVE_LIMIT'/);
-    const refuses = src.slice(src.indexOf('async function moveLimitRefuses('));
-    const body = refuses.slice(0, refuses.indexOf('\n}\n'));
-    expect(body).toMatch(/if \(blocked\) return true;/);
-    expect(body).toMatch(/date <= limit\.lastDate\) return false;/);
+    const asserts = src.slice(src.indexOf('async function assertMoveLimitAllows('));
+    const body = asserts.slice(0, asserts.indexOf('\n}\n'));
+    expect(body).toMatch(/!blocked && limit\?\.lastDate && date > limit\.lastDate/);
     expect(body).toMatch(/lateLimitApplies\(limit, await fullRangeForLimit\(svc, limit, range, config\), range\.rangeTo\)/);
+    expect(body).toMatch(/if \(blocked \|\| late\) \{\n\s+throw Object\.assign\(new Error\(MOVE_LIMIT_MESSAGE\), \{ statusCode: 409, isOperational: true, code: 'MOVE_LIMIT' \}\);/);
   });
 
   test('the search and the slot-taken refresh decide over the whole range and return the limit they applied', () => {

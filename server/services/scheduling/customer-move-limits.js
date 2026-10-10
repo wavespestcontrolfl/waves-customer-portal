@@ -91,10 +91,13 @@ function catalogCadence(svc) {
   return CATALOG_CADENCES.has(frequency) ? frequency : null;
 }
 
-// A plan visit: the recurring root or one of its occurrences. The admin
-// creator can store a cadence on a one-time visit; that visit has no plan.
+// A plan visit, by the repository's recurring-series rule (rate-review's
+// PLAN_ROW_SQL): the recurring root or an occurrence (is_recurring true, or a
+// legacy occurrence with no flag and a parent). A booster extra stores
+// is_recurring = false with a parent: a one-off visit, no plan allowance. The
+// admin creator can also store a cadence on a one-time visit.
 function isPlanVisit(svc) {
-  return svc.is_recurring === true || svc.recurring_parent_id != null;
+  return svc.is_recurring === true || (svc.is_recurring == null && svc.recurring_parent_id != null);
 }
 
 function allowanceDays(svc) {
