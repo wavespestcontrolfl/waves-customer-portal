@@ -87,9 +87,11 @@ function isCustomerRecurringDispatchEnabled() {
 
 // GATE_AUTO_DISPATCH_ROAD_CHECK: same call-time, fail-closed convention.
 function isRoadCheckEnabled() {
-  const { gateEnvValue } = require('../../config/feature-gates');
+  const { gateEnvValue, autoDispatchSharedModelLive } = require('../../config/feature-gates');
   try {
-    return gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK');
+    // The road legs are the shared model's own (candidate-slots.js builds
+    // them only on that path), so without that gate there is nothing to measure.
+    return gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK') && autoDispatchSharedModelLive();
   } catch (_) {
     return false;
   }
