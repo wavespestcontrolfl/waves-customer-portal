@@ -34,6 +34,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { intervalDaysForPattern, normalizeRecurringPattern } = require('../recurring-appointment-seeder');
 const { visitTimeElapsed } = require('../reschedule-eligibility');
+const { isPlanSeriesRow } = require('../recurring-series-cancel-reseed');
 
 // Allowance by the plan's nominal gap in days (intervalDaysForPattern, the
 // shared reading of a stored cadence): monthly and monthly_nth_weekday 30,
@@ -91,13 +92,13 @@ function catalogCadence(svc) {
   return CATALOG_CADENCES.has(frequency) ? frequency : null;
 }
 
-// A plan visit, by the repository's recurring-series rule (rate-review's
-// PLAN_ROW_SQL): the recurring root or an occurrence (is_recurring true, or a
-// legacy occurrence with no flag and a parent). A booster extra stores
-// is_recurring = false with a parent: a one-off visit, no plan allowance. The
-// admin creator can also store a cadence on a one-time visit.
+// A plan visit, by the repository's own rule (isPlanSeriesRow; rate-review's
+// PLAN_ROW_SQL mirrors it): the recurring root or an occurrence. Never a
+// booster extra (is_recurring false with a parent), a free re-service
+// callback or an included follow-up: those are one-off visits with no plan
+// allowance, as is a one-time visit that stores a cadence.
 function isPlanVisit(svc) {
-  return svc.is_recurring === true || (svc.is_recurring == null && svc.recurring_parent_id != null);
+  return isPlanSeriesRow(svc);
 }
 
 function allowanceDays(svc) {

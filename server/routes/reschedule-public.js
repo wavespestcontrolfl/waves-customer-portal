@@ -432,6 +432,9 @@ function selectSvc(column, value, database = db) {
       's.visit_id',
       's.recurring_pattern',
       's.recurring_interval_days',
+      // Callbacks and included follow-ups are not plan visits (move limits).
+      's.is_callback',
+      's.followup_included',
       // A legacy plan row's cadence (move limits: catalogCadence).
       'sv.frequency as catalog_frequency',
       's.recurring_parent_id',
@@ -1086,7 +1089,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       if (elig.missed) return;
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
         .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',
-          'service_id', 'is_recurring', 'recurring_parent_id');
+          'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
       if (visitInsideMoveNoticeWindow(locked)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',

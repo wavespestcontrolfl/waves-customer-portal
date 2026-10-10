@@ -110,6 +110,9 @@ describe('late-move limit', () => {
   });
 
   test('a one-time visit that stores a cadence has no plan allowance', () => {
+    // A free re-service callback or an included follow-up keeps is_recurring.
+    expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: true, is_callback: true })).toBeNull();
+    expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: true, followup_included: true })).toBeNull();
     // A booster extra: is_recurring false with a parent and a catalog service.
     expect(allowanceDays({ recurring_pattern: null, is_recurring: false, recurring_parent_id: 'p-1', catalog_frequency: 'monthly' })).toBeNull();
     expect(allowanceDays({ recurring_pattern: 'quarterly', is_recurring: false, recurring_parent_id: 'p-1' })).toBeNull();
@@ -379,7 +382,7 @@ describe('reschedule-public wiring', () => {
       if (prev === undefined) delete process.env.GATE_RESCHEDULE_MOVE_LIMITS; else process.env.GATE_RESCHEDULE_MOVE_LIMITS = prev;
     }
     // Both movers run the guard that holds the pin.
-    expect(src).toMatch(/'service_id', 'is_recurring', 'recurring_parent_id'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, await withCatalogCadence\(locked, trx\)\)\)/);
+    expect(src).toMatch(/'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included'\);\n[\s\S]{0,700}if \(cadenceChangedSince\(svc, await withCatalogCadence\(locked, trx\)\)\)/);
   });
 
   test('the search rechecks the visit after its availability build and before it applies the limit', () => {
