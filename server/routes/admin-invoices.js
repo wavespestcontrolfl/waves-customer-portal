@@ -1748,6 +1748,9 @@ async function invoiceSendHandler(req, res, next) {
         // never requeued for a later send outside the approval.
         ...(req.ibApprovedSend ? {
           expectedTotal: req.ibApprovedSend.expectedTotal, expectedRecipients: req.ibApprovedSend.recipients,
+          // The row version the card showed (edit time + amount due / lines digest): the
+          // claim refuses an edit or partial credit that landed after the card.
+          expectedVersion: req.ibApprovedSend.version || null,
           skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true,
         } : {}),
       });
@@ -1930,7 +1933,10 @@ async function invoiceChargeCardHandler(req, res, next) {
       // dispute hold is active, naming this admin.
       {
         expectedTotal,
-        operatorOverride: true,
+        // The Invoices page overrides a dispute hold and records it; the bar never does:
+        // with the override off, a held customer is refused inside the charge transaction
+        // before any override trail (recordHoldOverride) can be written.
+        operatorOverride: !req.ibChargeGuard,
         overrideTrail: {
           actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
           route: 'admin_invoice_charge_card', invoiceId: req.params.id,

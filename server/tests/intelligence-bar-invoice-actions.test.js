@@ -283,8 +283,11 @@ describe('send_invoice commit', () => {
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
     const result = await run();
     expect(Invoices.sendInvoiceFromBar).toHaveBeenCalledWith({
-      invoiceId: INV, body: { requestReview: false }, actor: { technicianId: 'staff-1' },
-      approvedSend: { expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' } },
+      invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
+      approvedSend: {
+        expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/) },
+      },
     });
     // The exact recipients ride only to the send, never into the result.
     expect(JSON.stringify(result)).not.toMatch(/9415550100|robin@example\.com/);
@@ -299,7 +302,7 @@ describe('send_invoice commit', () => {
     Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 400, json: { error: 'Invoice already paid' } });
     ({ run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version'));
     await expect(run()).resolves.toMatchObject({ error: 'The invoice was not sent: Invoice already paid', failed: true });
-    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 409, json: { error: 'Invoice total is $140.00, not the approved $129.00 — not sent', code: 'total_changed' } });
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 400, json: { error: 'Invoice total is $140.00, not the approved $129.00 — not sent', code: 'total_changed' } });
     ({ run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version'));
     await expect(run()).resolves.toMatchObject({ code: 'total_changed', preview_changed: true });
   });
@@ -307,6 +310,8 @@ describe('send_invoice commit', () => {
   test.each([
     ['the total', () => { state.invoices[0].total = '140.00'; }],
     ['the status', () => { state.invoices[0].status = 'viewed'; }],
+    ['the credit applied (amount due, same total)', () => { state.invoices[0].credit_applied = '25.00'; }],
+    ['the lines (same total)', () => { state.invoices[0].line_items = JSON.stringify([{ description: 'Quarterly Pest Control', amount: 129 }]); }],
     ['the row version', () => { state.invoices[0].updated_at = new Date('2099-01-03T00:00:00Z'); }],
     ['the email recipient', () => { Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ emailRecipient: { email: 'other@example.com' } })); }],
   ])('drift in %s refuses with preview_changed and sends nothing', async (_label, mutate) => {
@@ -314,6 +319,42 @@ describe('send_invoice commit', () => {
     mutate();
     await expect(run()).resolves.toMatchObject({ preview_changed: true });
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('the card pins the approved version, and a claim that finds it changed reports preview_changed with nothing sent', async () => {
+    const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    expect(card._version).toMatchObject({ invoice_version: new Date('2099-01-01T12:00:00Z').getTime(), version_digest: expect.stringMatching(/^[0-9a-f]{32}$/), first_delivery: true });
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 400, json: { ok: false, code: 'approved_version_changed', error: 'Invoice changed after it was approved — not sent' } });
+    await expect(run()).resolves.toMatchObject({ code: 'approved_version_changed', failed: true, preview_changed: true });
+  });
+
+  test('an invoice sent before is a resend: no first-delivery flag', async () => {
+    state.invoices[0].sent_at = new Date('2098-12-01T00:00:00Z');
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    await run();
+    expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].body).toEqual({ requestReview: false });
+  });
+
+  test.each([
+    ['a live claim 409 with the route code', { status: 409, json: { error: 'Invoice INV is already being delivered by another request — not sent again', code: 'delivery_in_progress' } }],
+    ['a live claim 409 with no code (a resend)', { status: 409, json: { error: 'Invoice send already in progress' } }],
+    ['a first delivery the route answered as in progress', { status: 200, json: { ok: true, in_progress: true, sms: { ok: false, code: 'delivery_in_progress' }, email: { ok: false, code: 'delivery_in_progress' } } }],
+  ])('another send owning the claim (%s) is uncertain and never invites a retry or a fresh card', async (_label, reply) => {
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce(reply);
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    const result = await run();
+    expect(result).toMatchObject({ outcome_unknown: true, code: 'delivery_in_progress', error: expect.stringMatching(/Another send of this invoice is in progress.*check the invoice page/) });
+    expect(result.preview_changed).toBeUndefined();
+    expect(result.failed).toBeUndefined();
+    expect(result.success).toBeUndefined();
+    expect(executionOutcome(result)).toBe('outcome_unknown');
+  });
+
+  test('a first delivery another request already completed is a no-op success', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 200, json: { ok: true, already_delivered: true, sms: { ok: false, code: 'already_delivered' }, email: { ok: false, code: 'already_delivered' } } });
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    await expect(run()).resolves.toMatchObject({ success: true, note: expect.stringMatching(/already delivered/) });
   });
 
   test('an uncertain delivery is reported as unknown, never as not sent', async () => {
@@ -361,6 +402,25 @@ describe('charge_invoice card', () => {
     ]));
   });
 
+  test.each(['cash', 'check', 'other', 'zelle', 'venmo', 'paypal', 'bank', 'bank_account', 'ach', null, ''])(
+    'a saved method of type %p is not a card: refused by id and by last 4, never quoted, and never auto-picked',
+    async (type) => {
+      state.payment_methods = [cardRow({ method_type: type })];
+      await expect(preview('charge_invoice', { invoice_id: INV, payment_method_id: CARD })).resolves.toMatchObject({ code: 'not_card_method' });
+      await expect(preview('charge_invoice', { invoice_id: INV, card_last4: '4242' })).resolves.toMatchObject({ code: 'not_card_method' });
+      // The only saved method is not a card, so there is no card to pick.
+      await expect(preview('charge_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'no_saved_card' });
+      expect(StripeService.quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
+    },
+  );
+
+  test('a card type (including a new Stripe wallet type the surcharge path treats as a card) still builds the card', async () => {
+    for (const type of ['card', 'apple_pay']) {
+      state.payment_methods = [cardRow({ method_type: type })];
+      await expect(preview('charge_invoice', { invoice_id: INV })).resolves.toMatchObject({ preview: true, payment_method_id: CARD });
+    }
+  });
+
   test('account credit applied first is named; a debit card shows no surcharge', async () => {
     StripeService.quoteInvoiceSavedCardCharge.mockResolvedValue(quote({ base: 104, surcharge: 0, total: 104, rateBps: 0, funding: 'debit', projectedCreditApplied: 25 }));
     const p = await preview('charge_invoice', { invoice_id: INV });
@@ -369,7 +429,9 @@ describe('charge_invoice card', () => {
 
   test('the tool does no surcharge math of its own (computeChargeAmount stays the one path)', () => {
     const src = fs.readFileSync(require.resolve('../services/intelligence-bar/invoice-action-tools'), 'utf8');
-    expect(src).not.toMatch(/computeChargeAmount\(|require\([^)]*stripe-pricing|rateBps\)?\s*\*/);
+    // The one stripe-pricing import is the card-type classifier (no math).
+    const withoutClassifier = src.replace("const { isCardMethodType } = require('../stripe-pricing');", '');
+    expect(withoutClassifier).not.toMatch(/computeChargeAmount\(|require\([^)]*stripe-pricing|rateBps\)?\s*\*/);
     expect(src).toContain('quoteInvoiceSavedCardCharge(invoice.id, card.id)');
   });
 
@@ -394,7 +456,7 @@ describe('charge_invoice card', () => {
     CollectionHold.customerHasActiveCollectionHoldChecked.mockResolvedValueOnce(true);
     await expect(preview('charge_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'collection_hold', error: expect.stringMatching(/^Collection is on hold for this customer \(billing dispute\)/) });
     state.payment_methods = [cardRow({ method_type: 'us_bank_account', last_four: '6789' })];
-    await expect(preview('charge_invoice', { invoice_id: INV, card_last4: '6789' })).resolves.toMatchObject({ code: 'bank_method' });
+    await expect(preview('charge_invoice', { invoice_id: INV, card_last4: '6789' })).resolves.toMatchObject({ code: 'not_card_method' });
     state.payment_methods = [cardRow({ customer_id: 'cust-2' })];
     await expect(preview('charge_invoice', { invoice_id: INV, payment_method_id: CARD })).resolves.toMatchObject({ error: 'Payment method does not belong to invoice customer' });
     state.payment_methods = [cardRow(), cardRow({ id: CARD2, last_four: '1881', is_default: false })];

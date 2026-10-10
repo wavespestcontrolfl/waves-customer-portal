@@ -3041,6 +3041,30 @@ function alreadyDeliveredForFirstSend(invoice) {
       || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
 }
 
+// The Intelligence Bar's approved invoice version (updated_at + a digest of the
+// total, credit, amount due and lines) no longer matches the row at the claim:
+// an edit or a partial credit landed after the card was shown. Nothing was claimed.
+function approvedVersionChangedError(invoice) {
+  return Object.assign(
+    new Error(`Invoice ${invoice?.invoice_number || invoice?.id || ""} changed after it was approved (amount due, lines or edit time) — not sent`),
+    { code: "approved_version_changed" },
+  );
+}
+
+// expectedVersion: { updatedAtMs, digest } or null. The claim's updated_at
+// predicate is checked in the claim's own locked UPDATE; the digest is checked
+// on the row that UPDATE returned (a claimed invoice is edit-locked).
+function approvedVersionMatchesTime(row, expectedVersion) {
+  if (expectedVersion.updatedAtMs === null || expectedVersion.updatedAtMs === undefined) return !row.updated_at;
+  const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
+  return at !== null && Math.floor(at) === Math.floor(expectedVersion.updatedAtMs);
+}
+
+// The send wrapper's refusal shape for approvedVersionChangedError (nothing was claimed or sent).
+function approvedVersionChangedResult(err) {
+  return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
+}
+
 function sendClaimLostError() {
   return Object.assign(
     new Error("Invoice send claim changed; delivery not attempted"),
@@ -4506,6 +4530,9 @@ async function claimInvoiceForSend(invoiceId, {
   firstDeliveryOnly = false,
   overridesReviewHold = false,
   adoptsQueuedInvoiceSend = false,
+  // Intelligence Bar send_invoice: { updatedAtMs, digest } the confirm card
+  // showed. Null = unchanged for every other caller.
+  expectedVersion = null,
   database = db,
 } = {}) {
   assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimInvoiceForSend");
@@ -4585,6 +4612,12 @@ async function claimInvoiceForSend(invoiceId, {
       [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
     );
   }
+  if (expectedVersion) {
+    // The approved edit time, in the claim's own locked UPDATE: an edit after
+    // the card was shown stamps updated_at, so it cannot be claimed.
+    if (expectedVersion.updatedAtMs === null || expectedVersion.updatedAtMs === undefined) claimFlip.whereNull("updated_at");
+    else claimFlip.where("updated_at", ">=", new Date(expectedVersion.updatedAtMs)).where("updated_at", "<", new Date(Number(expectedVersion.updatedAtMs) + 1));
+  }
   const [invoice] = await claimFlip
     .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
     .returning("*");
@@ -4601,9 +4634,22 @@ async function claimInvoiceForSend(invoiceId, {
     if (firstDeliveryOnly && latest?.status === "sending" && latest.send_claim_token) {
       throw firstDeliveryInProgressError(latest);
     }
+    // A row that is still claimable but no longer the approved version: report that,
+    // not "not sendable". A live claim (status 'sending') keeps the in-progress error
+    // below so a concurrent delivery is never read as a changed invoice.
+    if (expectedVersion && latest && latest.status === current.status && !approvedVersionMatchesTime(latest, expectedVersion)) {
+      throw approvedVersionChangedError(latest);
+    }
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;
+  if (expectedVersion && expectedVersion.digest
+    && require("./invoice-helpers").approvedInvoiceVersionDigest(invoice) !== expectedVersion.digest) {
+    // The row the claim just took is edit-locked from here; its amount due or
+    // lines are not what the card showed. Hand the claim back and send nothing.
+    await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+    throw approvedVersionChangedError(invoice);
+  }
   // A first send that waited for the visit summary's handoff (which holds this invoice through the
   // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
   // that release, so the summary's own record is read: a link text that started or was accepted
@@ -4646,6 +4692,8 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   // outright with queued_pay_link until the window, instead of adopting
   // (cancelling) that row the way the ordinary claim path already can.
   adoptsQueuedInvoiceSend = false,
+  // Intelligence Bar approved version (see claimInvoiceForSend); null = unchanged.
+  expectedVersion = null,
 } = {}) {
   // requireDue is the scheduled-send worker's claim: an automatic queue
   // send, never a first-delivery request, and never an operator override —
@@ -4686,7 +4734,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       const invoice = await claimDueScheduledInvoiceForSend(trx, invoiceId);
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx }) };
   });
 }
 
@@ -4807,11 +4855,11 @@ async function releaseRefusedRenewalSend(invoiceId, verdict, { allowClaimed = fa
   });
 }
 
-async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
+async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false, expectedVersion = null } = {}) {
   return db.transaction(async (trx) => {
     const payerId = await customerDefaultPayerLocked(customerId, trx);
     if (!payerId) {
-      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx }) };
     }
     if (allowClaimed && claimToken) {
       await trx("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
@@ -7850,12 +7898,16 @@ const InvoiceService = {
       // INVOICE_VISIT_TERMINAL_UNVOIDED, exactly as a safety-refused void), and a
       // hold refusal never requeues it for a later send outside the approval.
       refusalOnly = false,
+      // Intelligence Bar send_invoice: { updatedAtMs, digest } of the invoice row its card
+      // showed. The claim refuses (approved_version_changed, nothing sent) when an edit or
+      // a partial credit changed the amount due or the lines after the card. Null = unchanged.
+      expectedVersion = null,
     } = {},
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
-      expectedRecipients, refusalOnly,
+      expectedRecipients, refusalOnly, expectedVersion,
     });
 
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -7878,7 +7930,7 @@ const InvoiceService = {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
           emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
-          expectedRecipients, refusalOnly,
+          expectedRecipients, refusalOnly, expectedVersion,
         }));
       }
     }
@@ -7897,8 +7949,9 @@ const InvoiceService = {
     // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
     try {
-      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt });
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt, expectedVersion });
     } catch (err) {
+      if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
@@ -7948,8 +8001,9 @@ const InvoiceService = {
     // credit is drawn down — nothing to reverse.
     let claim;
     try {
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, expectedVersion });
     } catch (err) {
+      if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       throw err;

@@ -49,7 +49,8 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus } = require('../invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest } = require('../invoice-helpers');
+const { isCardMethodType } = require('../stripe-pricing');
 
 const PER_CHARGE_CAP_CENTS = 50000;
 const DAILY_CAP_CENTS = 150000;
@@ -212,6 +213,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   const legs = sendLegs(who, invoice, dueCents);
   if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
   const totalCents = toCents(invoice.total);
+  // Never delivered on any channel: the send is a FIRST delivery, so the route's own
+  // first-delivery semantics make a send that loses a race with another delivery a no-op.
+  const firstDelivery = !invoice.sent_at && !invoice.sms_sent_at && !invoice.email_sent_at;
   const recipients = { phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email };
   return {
     ...(forSend ? { sendRecipients: recipients } : {}),
@@ -238,7 +242,10 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       total_cents: totalCents,
       due_cents: dueCents,
       invoice_version: msOf(invoice.updated_at),
+      // Amount due, credit and lines: the claim refuses a row that no longer matches.
+      version_digest: approvedInvoiceVersionDigest(invoice),
       sent: msOf(invoice.sent_at),
+      first_delivery: firstDelivery,
       payer_id: invoice.payer_id || null,
       recipients: digest(recipients),
     },
@@ -270,13 +277,26 @@ async function verifiedPlan(input, pinned, build, { what, changed }) {
   return { plan };
 }
 
+// 409s from the Send handler that happen before any claim (nothing in flight anywhere).
+const DEFINITIVE_SEND_CONFLICT_CODES = new Set(['deposit_settlement_pending', 'balance_changed_retry', 'INVOICE_VISIT_TERMINAL_UNVOIDED']);
+const IN_PROGRESS_SEND_MESSAGE = 'Another send of this invoice is in progress, so this one sent nothing. It may or may not have gone out yet: check the invoice page before sending again.';
+
 // A send reply the route answered without delivering anything new (status 200).
-const NOOP_SEND_KEYS = ['already_delivered', 'queued_delivery', 'in_progress', 'covered_by_credit', 'settled_zero_due'];
+const NOOP_SEND_KEYS = ['already_delivered', 'queued_delivery', 'covered_by_credit', 'settled_zero_due'];
 
 // The Send handler's reply, in the tool's words.
 function sendOutcome(plan, status, json = {}) {
   const base = { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number };
-  if (status === 409) return { ...base, error: `Nothing was sent: ${json.error || 'the invoice is busy'}`, code: json.code || 'send_conflict', preview_changed: true };
+  if (status === 409) {
+    // The route's own pre-delivery refusals (nothing claimed, nothing sent): a fresh card is fine.
+    if (DEFINITIVE_SEND_CONFLICT_CODES.has(json.code)) {
+      return { ...base, error: `Nothing was sent: ${json.error || 'the invoice is busy'}`, code: json.code, preview_changed: true };
+    }
+    // Any other conflict means another request owns the live send claim: that delivery may
+    // still finish. Uncertain and not retryable, no fresh card (a retry could send it twice).
+    return { ...base, outcome_unknown: true, code: json.code || 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE };
+  }
+  if (json.in_progress) return { ...base, outcome_unknown: true, code: 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE };
   const text = channelResult(json.sms);
   const email = channelResult(json.email);
   const unknown = UNCERTAIN_SEND_CODES.has(json.code) || [text, email].some((leg) => leg.status === 'unknown');
@@ -286,7 +306,9 @@ function sendOutcome(plan, status, json = {}) {
   }
   // Both channels failed (or the route refused before sending).
   if (status !== 200) {
-    return { ...base, error: `The invoice was not sent: ${json.error || 'send failed'}`, code: json.code || 'send_failed', failed: true, text, email };
+    // The invoice changed after the card was shown (nothing claimed or sent): a fresh card is right.
+    const changed = json.code === 'approved_version_changed' || json.code === 'total_changed';
+    return { ...base, error: `The invoice was not sent: ${json.error || 'send failed'}`, code: json.code || 'send_failed', failed: true, ...(changed ? { preview_changed: true } : {}), text, email };
   }
   if (NOOP_SEND_KEYS.some((key) => json[key])) {
     const note = json.covered_by_credit ? 'Nothing was sent: account credit now covers this invoice.' : 'Nothing new was sent: the invoice was already delivered or is being delivered.';
@@ -308,11 +330,18 @@ async function commitSend(input, actionContext) {
     invoiceId: plan.invoice_id,
     // The Invoices page Send with no review decision taken for it: an ordinary
     // send (neither firstDelivery nor resend) and no review request.
-    body: { requestReview: false },
+    // A never-delivered invoice is also flagged a first delivery, exactly as the Invoices
+    // page does: if another delivery wins the claim first, the route reports a no-op, not a resend.
+    body: { requestReview: false, ...(pinned.first_delivery ? { firstDelivery: true } : {}) },
     actor: { technicianId: actionContext?.technicianId || null },
     // The total and the recipients the card showed: the send refuses a different
-    // total on its claimed row, and each leg refuses a different recipient.
-    approvedSend: { expectedTotal: pinned.total_cents / 100, recipients: plan.sendRecipients },
+    // total on its claimed row, and each leg refuses a different recipient. The version
+    // (edit time + amount due / lines digest) is enforced by the send claim itself.
+    approvedSend: {
+      expectedTotal: pinned.total_cents / 100,
+      recipients: plan.sendRecipients,
+      version: { updatedAtMs: pinned.invoice_version, digest: pinned.version_digest },
+    },
   });
   const result = sendOutcome(plan, status, json || {});
   logger.info(`[intelligence-bar:invoice-actions] send ${plan.invoice_id}: ${result.text?.status || 'n/a'} / ${result.email?.status || 'n/a'}`);
@@ -361,7 +390,8 @@ function chargeLockGuard({ invoiceId, customerId }) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
     const message = capRefusal(totalCents, await chargedTodayCents(trx, { excludeInvoiceId: invoiceId }));
     if (message) throw Object.assign(new Error(message), { code: 'IB_CHARGE_CAP' });
-    // The route overrides a dispute hold (operatorOverride); the bar never does.
+    // The route runs this charge with operatorOverride off (the bar never overrides a
+    // dispute hold), so a held customer is already refused before this; the check stays as a backstop.
     await require('../collections/collection-hold').assertNoCollectionHold(customerId, trx);
   };
 }
@@ -372,7 +402,6 @@ const cardLabel = (pm) => `${pm.card_brand || 'Card'} •••• ${pm.last_fou
 async function resolveCard(invoice, input) {
   const methods = await db('payment_methods').where({ customer_id: invoice.customer_id })
     .orderBy('is_default', 'desc').orderBy('created_at', 'desc');
-  const { isBankMethodType } = require('../autopay-eligibility');
   const requestedId = String(input?.payment_method_id || '').trim();
   const last4 = String(input?.card_last4 || '').replace(/\D/g, '');
   if (requestedId && last4) return refusal('Give payment_method_id or card_last4, not both', 'invalid_target');
@@ -392,7 +421,7 @@ async function resolveCard(invoice, input) {
     }
     [picked] = matches;
   } else {
-    const cards = methods.filter((m) => !isBankMethodType(m.method_type));
+    const cards = methods.filter((m) => isCardMethodType(m.method_type));
     if (!cards.length) return refusal('This customer has no saved card.', 'no_saved_card');
     if (cards.length > 1) {
       return refusal(`This customer has ${cards.length} saved cards: ${cards.map(cardLabel).join('; ')}. Say which card to charge.`, 'card_ambiguous',
@@ -400,8 +429,10 @@ async function resolveCard(invoice, input) {
     }
     [picked] = cards;
   }
-  if (isBankMethodType(picked.method_type)) {
-    return refusal('The bar charges cards only. Charge a bank account from the Invoices page.', 'bank_method');
+  // A positive card match, from the surcharge path's own classifier (stripe-pricing
+  // isCardMethodType): a bank, cash, check, other or empty type is not a card.
+  if (!isCardMethodType(picked.method_type)) {
+    return refusal('The bar charges saved cards only. Charge a bank account or another payment method from the Invoices page.', 'not_card_method');
   }
   if (!picked.stripe_payment_method_id) return refusal('Payment method has no Stripe id', 'card_unusable');
   return { card: picked };

@@ -1,4 +1,5 @@
 // Shared by claim, finalization, and provider-boundary checks.
+const crypto = require('crypto');
 const SEND_CLAIMABLE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
 
@@ -414,6 +415,24 @@ function isCollectionPendingFenceError(err) {
   return COLLECTION_PENDING_FENCE_CODES.includes(err.code) || err.reconciliationRequired === true;
 }
 
+// A digest of what a send would put in front of the customer: the gross total,
+// the credit applied, the amount due and the line items. The Intelligence Bar pins
+// it on its confirm card (with the row's updated_at) and claimInvoiceForSend
+// refuses a claim whose row no longer matches, so an edit or a partial credit
+// between the card and the claim cannot change the pay-link balance or the lines
+// while the gross total stays equal.
+function approvedInvoiceVersionDigest(invoice) {
+  let lines = invoice && invoice.line_items;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { /* keep raw */ } }
+  const payload = {
+    total_cents: Math.round((Number(invoice && invoice.total) || 0) * 100),
+    credit_cents: Math.round((Number(invoice && invoice.credit_applied) || 0) * 100),
+    due_cents: Math.round(invoiceAmountDue(invoice) * 100),
+    lines: lines === undefined ? null : lines,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 32);
+}
+
 module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -445,6 +464,7 @@ module.exports = {
   isCollectibleOwnInvoice,
   hasCollectibleAmountDue,
   invoiceAmountDue,
+  approvedInvoiceVersionDigest,
   invoiceDepositCreditCents,
   invoicePrincipalCents,
   formatCardLine,

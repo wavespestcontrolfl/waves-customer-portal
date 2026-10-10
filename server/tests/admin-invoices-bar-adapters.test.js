@@ -48,8 +48,9 @@ describe('sendInvoiceFromBar', () => {
     const page = await post('/inv-1/send', { requestReview: false });
     const pageCall = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
     const recipients = { phone: '9415550100', email: 'robin@example.com' };
+    const version = { updatedAtMs: 4070908800000, digest: 'abc123' };
     const bar = await router.sendInvoiceFromBar({
-      invoiceId: 'inv-1', body: { requestReview: false }, actor: { technicianId: 'staff-1' }, approvedSend: { expectedTotal: 129, recipients },
+      invoiceId: 'inv-1', body: { requestReview: false }, actor: { technicianId: 'staff-1' }, approvedSend: { expectedTotal: 129, recipients, version },
     });
     const barCall = InvoiceService.sendViaSMSAndEmail.mock.calls[1];
     expect(page).toEqual({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
@@ -57,10 +58,11 @@ describe('sendInvoiceFromBar', () => {
     expect(barCall[0]).toBe('inv-1');
     // Same call as the page, except the bar never draws credit and never takes the
     // page's operator dispute-hold exemption, and it carries the approved total + recipients.
-    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true });
+    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, expectedVersion: version, skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true });
     expect(pageCall[1].holdExempt).toBe('operator');
     expect(pageCall[1].refusalOnly).toBeUndefined();
     expect(pageCall[1].expectedTotal).toBeUndefined();
+    expect(pageCall[1].expectedVersion).toBeUndefined();
     expect(pageCall[1].skipAccountCreditAutoApply).toBeUndefined();
     expect(pageCall[1]).toMatchObject({ requestReview: false, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: 'staff-1', firstDeliveryOnly: false, overridesReviewHold: false });
   });
@@ -78,6 +80,31 @@ describe('sendInvoiceFromBar', () => {
   });
 });
 
+describe('a send that loses the race to another delivery (PR #6117 round-1 P1)', () => {
+  const inProgress = () => Object.assign(new Error('Invoice INV-1 is already being delivered by another request — not sent again'), { code: 'delivery_in_progress' });
+
+  test('a never-sent invoice sent as a first delivery is a no-op success when another delivery owns the claim', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockRejectedValueOnce(inProgress());
+    const result = await router.sendInvoiceFromBar({
+      invoiceId: 'inv-1', body: { requestReview: false, firstDelivery: true }, actor: {}, approvedSend: { expectedTotal: 1 },
+    });
+    expect(InvoiceService.sendViaSMSAndEmail.mock.calls[0][1].firstDeliveryOnly).toBe(true);
+    expect(result).toMatchObject({ status: 200, json: { ok: true, in_progress: true } });
+  });
+
+  test('a resend that finds a live claim is the route\'s 409, which the tool reports as uncertain', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockRejectedValueOnce(inProgress());
+    await expect(router.sendInvoiceFromBar({ invoiceId: 'inv-1', body: { requestReview: false }, actor: {}, approvedSend: { expectedTotal: 1 } }))
+      .resolves.toMatchObject({ status: 409, json: { code: 'delivery_in_progress' } });
+  });
+
+  test('a changed approved version comes back as the wrapper\'s refusal (400), not a delivery', async () => {
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({ ok: false, code: 'approved_version_changed', error: 'changed', sms: { ok: false }, email: { ok: false } });
+    await expect(router.sendInvoiceFromBar({ invoiceId: 'inv-1', body: {}, actor: {}, approvedSend: { expectedTotal: 1, version: { updatedAtMs: 1, digest: 'x' } } }))
+      .resolves.toMatchObject({ status: 400, json: { code: 'approved_version_changed', error: 'changed' } });
+  });
+});
+
 describe('the approved recipients reach each send leg (source contract)', () => {
   test('sendViaSMSAndEmail hands the phone to the text leg and the email to the email leg', () => {
     const src = require('fs').readFileSync(require.resolve('../services/invoice.js'), 'utf8');
@@ -85,7 +112,7 @@ describe('the approved recipients reach each send leg (source contract)', () => 
     expect(fn).toContain('...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),');
     expect(fn).toContain('...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),');
     // Both re-entries (the zero-due retry and the renewal gate) keep the pins.
-    expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients, refusalOnly,$/gm)).toHaveLength(2);
+    expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients, refusalOnly, expectedVersion,$/gm)).toHaveLength(2);
   });
 
   test('refusalOnly: a held text is never queued for later and a hold refusal is never requeued as a scheduled send', () => {
@@ -131,10 +158,12 @@ describe('chargeInvoiceFromBar', () => {
     expect(initiatedVia).toBe('intelligence_bar');
     // Same options as the page (the trail's ip / user agent are request facts the bar has none of).
     expect({ ...barOptions, overrideTrail: { ...barOptions.overrideTrail, ip: 'x', userAgent: 'x' } })
-      .toEqual({ ...pageCall[2], overrideTrail: { ...pageCall[2].overrideTrail, ip: 'x', userAgent: 'x' } });
-    expect(barOptions).toMatchObject({ expectedTotal: 132.87, operatorOverride: true, overrideTrail: { actorId: 'staff-1', route: 'admin_invoice_charge_card', invoiceId: 'inv-1' } });
+      .toEqual({ ...pageCall[2], operatorOverride: false, overrideTrail: { ...pageCall[2].overrideTrail, ip: 'x', userAgent: 'x' } });
+    expect(barOptions).toMatchObject({ expectedTotal: 132.87, operatorOverride: false, overrideTrail: { actorId: 'staff-1', route: 'admin_invoice_charge_card', invoiceId: 'inv-1' } });
     expect(pageCall[2].assertUnderChargeLock).toBeUndefined();
     expect(pageCall[2].initiatedVia).toBeUndefined();
+    // The page overrides a dispute hold; the bar never does (no override trail can be written for it).
+    expect(pageCall[2].operatorOverride).toBe(true);
   });
 
   test('a body field cannot set the bar-only options on the HTTP route', async () => {
