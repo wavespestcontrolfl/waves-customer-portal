@@ -14,7 +14,8 @@
  *      model sees only words that existed before the move. Undated notes on
  *      file are read as they are today.
  *
- * The console shows ids and counts, never a customer name. It reads the
+ * The console shows ids, verdicts and counts: never a customer name, a quote
+ * or the model's own sentence (those are in the output file). It reads the
  * database and writes two files in --out. It changes no visit,
  * sends nothing, and raises no notification. The model calls are recorded
  * in the call ledger like any other call.
@@ -100,7 +101,7 @@ async function runHardCases(arms, proofreader) {
     console.log(`  ${arm.label}: ${JSON.stringify(tally(got, (r) => r.score))}`);
     rows.filter((row) => row.arms[arm.label].score !== 'right').forEach((row) => {
       const r = row.arms[arm.label];
-      console.log(`    ${r.score}: "${row.name}" expected ${row.expect}, got ${r.verdict} (${r.why}) ${r.reason || ''}`);
+      console.log(`    ${r.score}: "${row.name}" expected ${row.expect}, got ${r.verdict} (${r.why})`);
     });
   }
   return rows;
@@ -108,16 +109,19 @@ async function runHardCases(arms, proofreader) {
 
 async function loadMoves(db) {
   const since = new Date(Date.now() - DAYS * 86400000);
+  // The customer is the one frozen on the audit row at move time, never the
+  // visit's owner today; a visit deleted since still replays (Codex #6258 r2).
   let query = db('auto_dispatch_audit_logs as l')
-    .join('scheduled_services as s', 's.id', 'l.scheduled_service_id')
-    .leftJoin('customers as c', 'c.id', 's.customer_id')
+    .leftJoin('scheduled_services as s', 's.id', 'l.scheduled_service_id')
+    .leftJoin('customers as c', 'c.id', 'l.customer_id')
     .leftJoin('technicians as t0', 't0.id', 'l.old_technician_id')
     .leftJoin('technicians as t1', 't1.id', 'l.new_technician_id')
     .where('l.action', 'changed')
+    .whereNotNull('l.customer_id')
     .where('l.created_at', '>=', since)
     .orderBy('l.created_at', 'desc')
     .select(
-      'l.id as audit_id', 'l.scheduled_service_id', 's.customer_id', 's.service_type', 'l.created_at', 'l.reason_code',
+      'l.id as audit_id', 'l.scheduled_service_id', 'l.customer_id', 's.service_type', 'l.created_at', 'l.reason_code',
       'l.old_scheduled_date', 'l.old_window_start', 'l.old_window_end', 'l.new_scheduled_date', 'l.new_window_start', 'l.new_window_end',
       't0.name as old_tech', 't1.name as new_tech', 'c.first_name', 'c.last_name',
     );
@@ -127,7 +131,7 @@ async function loadMoves(db) {
 
 async function replayMove(row, arms, { db, proofreader, toDateStr }) {
   const move = proofreader.moveFacts({
-    serviceType: row.service_type,
+    serviceType: row.service_type || 'Service visit',
     from: { date: toDateStr(row.old_scheduled_date), windowStart: row.old_window_start, windowEnd: row.old_window_end, technician: firstName(row.old_tech) },
     to: { date: toDateStr(row.new_scheduled_date), windowStart: row.new_window_start, windowEnd: row.new_window_end, technician: firstName(row.new_tech) },
   });
@@ -173,7 +177,8 @@ function printMoves(rows, arms) {
     console.log(`\n  move ${row.audit_id} · ${row.move.service} · ${row.move.from.weekday} ${row.move.from.date} ${row.move.from.arrival_window} -> ${row.move.to.weekday} ${row.move.to.date} ${row.move.to.arrival_window}`);
     arms.forEach((arm) => {
       const r = row.arms[arm.label];
-      console.log(`    ${arm.label}: ${r.verdict} (${r.why})${r.quote ? ` "${r.quote}"` : ''}${r.reason ? ` — ${r.reason}` : ''}`);
+      // Never the quote or the model's sentence: both can hold customer words.
+      console.log(`    ${arm.label}: ${r.verdict} (${r.why})${r.entry_id ? ` entry ${r.entry_id}` : ''}`);
     });
   });
 }

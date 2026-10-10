@@ -29,7 +29,8 @@
 const logger = require('../../logger');
 const { redactAccessCodes } = require('../../context-aggregator');
 const { excludeUnresolvedSendReservations } = require('../../messaging/review-ask-reservation');
-const { resolveEmailCustomerLink } = require('../../email/email-customer-link');
+const { resolveEmailCustomerLink, personSentFilter } = require('../../email/email-customer-link');
+const { emailPlainText } = require('../../email/email-strip');
 const { etOffsetIso } = require('../../../utils/datetime-et');
 
 // One entry's longest text. A longer one is split into parts, never cut
@@ -93,28 +94,33 @@ async function readTexts(conn, { customerId, asOf }) {
 
 // Mail the sync linked to the customer, plus our own replies. A sent mail is
 // stored with no customer (measured 2026-10-09: 3,062 sent mails, none
-// linked), so each unlinked mail of the customer's threads, or one that names
-// the customer's address, is put to the ONE linkage rule the mail lanes share
-// (email-customer-link.js: To, Cc and Bcc parsed as addresses; a mixed
-// thread or a second customer among the recipients links to nobody). Only a
-// mail that rule gives to this customer is read (Codex #6258 r1).
+// linked), so each unlinked SENT mail (personSentFilter: never a draft) of
+// the customer's threads, or one that names the customer's address, is put
+// to the ONE linkage rule the mail lanes share (email-customer-link.js: To,
+// Cc and Bcc parsed as addresses; a mixed thread or a second customer among
+// the recipients links to nobody). Only a mail that rule gives to this
+// customer is read (Codex #6258 r1).
 //
-// A mail synced before Cc/Bcc were captured (196 of the 211 unlinked mails in
-// customer threads, 2026-10-09) is asked with an empty Cc/Bcc: the thread
-// and To rules still apply in full. Without that, nearly every staff reply
-// on file would be left out of the record.
-async function readEmails(conn, { customerId, asOf, customerEmail }) {
-  const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'snippet', 'received_at'];
+// A mail synced before Cc/Bcc were captured cannot be linked by that rule
+// (who else it reached is unknown), and it is not guessed here (r2). When
+// such a mail sits in one of the customer's own threads it is very likely
+// our reply (196 of the 211 unlinked mails in customer threads, 2026-10-09),
+// so the record says it could not read it: the verdict is then never allow.
+//
+// The body is the shared reader's (email-strip.js emailPlainText): an
+// HTML-only mail is converted, never replaced by Gmail's short snippet.
+async function readEmails(conn, { customerId, asOf, customerEmail }, unread) {
+  const columns = ['id', 'gmail_thread_id', 'customer_id', 'from_address', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'received_at'];
   const live = (query) => query.where('received_at', '<', asOf).whereNull('quarantined_at')
     .whereRaw("COALESCE(classification, '') <> 'spam'");
   const linked = await live(conn('emails').where({ customer_id: customerId })).select(columns);
-  const threads = [...new Set(linked.map((row) => row.gmail_thread_id).filter(Boolean))];
+  const threads = new Set(linked.map((row) => row.gmail_thread_id).filter(Boolean));
   const address = clean(customerEmail).toLowerCase();
   let candidates = [];
-  if (threads.length || address) {
-    candidates = await live(conn('emails').whereNull('customer_id'))
+  if (threads.size || address) {
+    candidates = await live(conn('emails').whereNull('customer_id')).whereRaw(personSentFilter('emails'))
       .where(function ours() {
-        if (threads.length) this.whereIn('gmail_thread_id', threads);
+        if (threads.size) this.whereIn('gmail_thread_id', [...threads]);
         // A coarse pre-filter only; resolveEmailCustomerLink decides.
         if (address) this.orWhereRaw("position(? in lower(concat_ws(' ', to_address, cc_address, bcc_address))) > 0", [address]);
       })
@@ -122,11 +128,15 @@ async function readEmails(conn, { customerId, asOf, customerEmail }) {
   }
   const replies = [];
   for (const row of candidates) {
-    const owner = await resolveEmailCustomerLink(conn, { ...row, cc_address: row.cc_address ?? '', bcc_address: row.bcc_address ?? '' });
+    if (row.cc_address == null || row.bcc_address == null) {
+      if (threads.has(row.gmail_thread_id)) unread.push({ channel: 'email', at: eastern(row.received_at), reason: 'recipients_not_captured' });
+      continue;
+    }
+    const owner = await resolveEmailCustomerLink(conn, row);
     if (owner != null && String(owner) === String(customerId)) replies.push(row);
   }
   const mail = (row, from) => {
-    const body = clean(row.body_text) || clean(row.snippet);
+    const body = clean(emailPlainText(row));
     return entry('email', from, row.received_at, body ? `${clean(row.subject)}: ${body}` : '');
   };
   return [...linked.map((row) => mail(row, 'customer')), ...replies.map((row) => mail(row, 'staff'))];
@@ -184,14 +194,38 @@ async function readRescheduleReplies(conn, { customerId, asOf }) {
 }
 
 // What the customer wrote in the portal's request form ("schedule_change"
-// is one of its categories). These rows are not copied anywhere else.
-async function readPortalRequests(conn, { customerId, asOf }) {
+// is one of its categories). These rows are not copied anywhere else. An
+// open request can be revised in place (routes/schedule.js appends to it and
+// stamps updated_at), so a request changed at or after `asOf` is not the text
+// that existed then: it is unread, not read (Codex #6258 r2). The nightly
+// run passes its own time, so nothing is ever "later" there.
+async function readPortalRequests(conn, { customerId, asOf }, unread) {
   const rows = await conn('service_requests').where({ customer_id: customerId }).where('created_at', '<', asOf)
-    .select('category', 'subject', 'description', 'created_at');
-  return rows.map((row) => entry(
-    'portal_request', 'customer', row.created_at,
-    [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
-  ));
+    .select('category', 'subject', 'description', 'created_at', 'updated_at');
+  return rows.map((row) => {
+    if (row.updated_at && new Date(row.updated_at).getTime() >= new Date(asOf).getTime()) {
+      unread.push({ channel: 'portal_request', at: eastern(row.created_at), reason: 'revised_later' });
+      return [];
+    }
+    return entry(
+      'portal_request', 'customer', row.created_at,
+      [clean(row.category), clean(row.subject), clean(row.description)].filter(Boolean).join(': '),
+    );
+  });
+}
+
+// What the customer told the portal assistant, and what it answered. A
+// signed-in chat is stored only here (agent_messages under the customer's
+// agent_sessions); the text channel's turns are in sms_log already.
+async function readAssistantChat(conn, { customerId, asOf }) {
+  const rows = await conn('agent_messages')
+    .join('agent_sessions', 'agent_sessions.id', 'agent_messages.conversation_id')
+    .where('agent_sessions.customer_id', customerId)
+    .where('agent_messages.created_at', '<', asOf)
+    .whereIn('agent_messages.role', ['user', 'assistant'])
+    .whereRaw("COALESCE(agent_sessions.channel, '') <> 'sms'")
+    .select('agent_messages.role', 'agent_messages.content', 'agent_messages.created_at');
+  return rows.map((row) => entry('portal_chat', row.role === 'user' ? 'customer' : 'system', row.created_at, row.content));
 }
 
 // The customer's file notes and the notes on the visit and its series.
@@ -217,7 +251,7 @@ async function readUndatedNotes(conn, { customer, serviceId }) {
 const SOURCES = [
   ['text', readTexts], ['email', readEmails], ['call', readCalls], ['note', readInteractions],
   ['note', readStaffNotes], ['technician_note', readTechNotes], ['reschedule_reply', readRescheduleReplies],
-  ['portal_request', readPortalRequests], ['customer_file_note', readUndatedNotes],
+  ['portal_request', readPortalRequests], ['portal_chat', readAssistantChat], ['customer_file_note', readUndatedNotes],
 ];
 
 /**

@@ -7,6 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 // it answers from the row: `links_to` names the customer a send belongs to.
 jest.mock('../services/email/email-customer-link', () => ({
   resolveEmailCustomerLink: jest.fn(async (_conn, row) => row.links_to || null),
+  personSentFilter: (alias) => `SENT_ONLY(${alias})`,
 }));
 
 const {
@@ -62,9 +63,8 @@ const TABLES = {
   ],
   emails: [
     { id: 'm1', gmail_thread_id: 'th1', customer_id: 'c1', from_address: 'Pat <pat@example.test>', subject: 'Schedule', body_text: `${'x'.repeat(MAX_ENTRY_CHARS)} never before noon`, snippet: null, received_at: '2026-05-01T10:00:00.000Z' },
-    // Sent mail is stored with no customer. m2 is ours to this customer (synced
-    // before Cc/Bcc were captured); m3 belongs to another customer; m4 to nobody.
-    { id: 'm2', gmail_thread_id: 'th1', customer_id: null, from_address: 'office@example.test', to_address: 'pat@example.test', cc_address: null, bcc_address: null, subject: 'Re: Schedule', body_text: 'We will keep you on Wednesdays.', snippet: null, received_at: '2026-05-01T11:00:00.000Z', links_to: 'c1' },
+    // Sent mail is stored with no customer. m2 is ours to this customer (HTML only); m3 belongs to another customer; m4 to nobody.
+    { id: 'm2', gmail_thread_id: 'th1', customer_id: null, from_address: 'office@example.test', to_address: 'pat@example.test', cc_address: '', bcc_address: '', subject: 'Re: Schedule', body_text: '', body_html: '<p>We will keep you on Wednesdays.</p>', snippet: 'We will keep', received_at: '2026-05-01T11:00:00.000Z', links_to: 'c1' },
     { id: 'm3', gmail_thread_id: 'th9', customer_id: null, from_address: 'office@example.test', to_address: 'joann.pat@example.test', cc_address: '', bcc_address: '', subject: 'Other', body_text: 'Fridays only for you.', snippet: null, received_at: '2026-05-02T11:00:00.000Z', links_to: 'c2' },
     { id: 'm4', gmail_thread_id: 'th1', customer_id: null, from_address: 'office@example.test', to_address: 'tech@example.test', cc_address: '', bcc_address: '', subject: 'Fwd: Schedule', body_text: 'Internal forward.', snippet: null, received_at: '2026-05-03T11:00:00.000Z', links_to: null },
   ],
@@ -171,10 +171,39 @@ describe('the customer record', () => {
     const staffMail = record.entries.filter((e) => e.channel === 'email' && e.from === 'staff').map((e) => e.text);
     // Ours to this customer is read; a send the rule gives to another
     // customer, or to nobody (a mixed thread, an internal forward), is not.
+    // m2 is HTML only: the whole body is read, not Gmail's short snippet.
     expect(staffMail).toEqual(['Re: Schedule: We will keep you on Wednesdays.']);
-    // A mail synced before Cc/Bcc were captured is asked with an empty Cc/Bcc.
-    const asked = resolveEmailCustomerLink.mock.calls.map(([, row]) => row).find((row) => row.id === 'm2');
-    expect([asked.cc_address, asked.bcc_address]).toEqual(['', '']);
+    // Only sent mail is a candidate: never a draft.
+    expect(emailCalls.some(([, method, sql]) => method === 'whereRaw' && sql === 'SENT_ONLY(emails)')).toBe(true);
+    expect(record.unread.filter((u) => u.channel === 'email')).toEqual([]);
+  });
+
+  test('a sent mail with no Cc/Bcc on file is never guessed: in the customer\'s thread it makes the record incomplete', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    resolveEmailCustomerLink.mockClear();
+    const old = (id, thread) => ({ id, gmail_thread_id: thread, customer_id: null, to_address: 'pat@example.test', cc_address: null, bcc_address: null, subject: 'Re', body_text: 'Old reply.', received_at: '2026-04-01T11:00:00.000Z', links_to: 'c1' });
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, emails: [TABLES.emails[0], old('o1', 'th1'), old('o2', 'th-other')] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(resolveEmailCustomerLink).not.toHaveBeenCalled();
+    expect(record.entries.some((e) => e.text.includes('Old reply.'))).toBe(false);
+    expect(record.unread.filter((u) => u.channel === 'email')).toEqual([{ channel: 'email', at: '2026-04-01T07:00:00-04:00', reason: 'recipients_not_captured' }]);
+  });
+
+  test('a portal request revised after the as-of time is unread, not read as it is now', async () => {
+    const request = (description, updated_at) => ({ category: 'schedule_change', subject: 'Day', description, created_at: '2026-08-10T10:00:00.000Z', updated_at });
+    const record = await buildCustomerRecord(fakeConn({ ...TABLES, service_requests: [request('Old words.', '2026-08-11T10:00:00.000Z'), request('Words added later.', '2026-10-06T10:00:00.000Z')] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'portal_request').map((e) => e.text)).toEqual(['schedule_change: Day: Old words.']);
+    expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'portal_request', at: '2026-08-10T06:00:00-04:00', reason: 'revised_later' }]));
+  });
+
+  test('what the customer told the portal assistant is in the record', async () => {
+    const conn = fakeConn({ ...TABLES, agent_messages: [
+      { role: 'user', content: 'Never schedule me on Tuesdays.', created_at: '2026-09-01T15:00:00.000Z' },
+      { role: 'assistant', content: 'Noted.', created_at: '2026-09-01T15:00:05.000Z' },
+    ] });
+    const record = await buildCustomerRecord(conn, { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
+    expect(record.entries.filter((e) => e.channel === 'portal_chat').map((e) => [e.from, e.text])).toEqual([['customer', 'Never schedule me on Tuesdays.'], ['system', 'Noted.']]);
+    expect(conn.calls.some(([t, method, col, op, value]) => t === 'agent_messages' && method === 'where' && col === 'agent_messages.created_at' && op === '<' && value === AS_OF)).toBe(true);
+    expect(conn.calls.some(([t, method, col, value]) => t === 'agent_messages' && method === 'where' && col === 'agent_sessions.customer_id' && value === 'c1')).toBe(true);
   });
 
   test('a source that cannot be read is listed as unread and the rest is still built', async () => {
