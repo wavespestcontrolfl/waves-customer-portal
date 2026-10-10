@@ -43,15 +43,12 @@ const MAX_GALLONS = Math.max(...TANKS) * MAX_FILLS;
 const live = () => require('../config/feature-gates').lawnMixHelpLive();
 
 // The visit area the sheet submitted (propertyServiceArea), validated by the completion's own snapshot reader (gate, lawn visit, the visit's
-// property, the version of the areas the sheet read); the treated square feet, or null when it is absent or fails any check.
+// property, the version of the areas the sheet read); the treated square feet, or null when the completion would not freeze one either
+// (the property-areas gate is off, not a lawn area). A read that FAILS (the snapshot throws: stale version, another property, a database
+// error) throws here too, so the caller can tell "no visit area" from "the visit area could not be confirmed".
 async function serviceAreaSqft({ knex, svc, propertyServiceArea, actor }) {
-  try {
-    const snapshot = await require('./property-service-areas').snapshotVisitArea(propertyServiceArea, svc, actor, knex);
-    return snapshot && snapshot.kind === 'lawn' ? positive(snapshot.treatedSqft) : null;
-  } catch (err) {
-    logger.warn(`[lawn-mix-help] visit area unreadable for ${svc?.id}: ${err?.code || err?.name || 'Error'}`);
-    return null;
-  }
+  const snapshot = await require('./property-service-areas').snapshotVisitArea(propertyServiceArea, svc, actor, knex);
+  return snapshot && snapshot.kind === 'lawn' ? positive(snapshot.treatedSqft) : null;
 }
 
 // The Celsius WG label on file (EPA Reg. No. 432-1507, the EPA-stamped 2021-09-01 version), word for word, the stricter instruction first. Keyed by EPA registration
@@ -335,7 +332,10 @@ function cappedRate(row, areaSqft) {
   const rateUnit = String(row.rateUnit || '').trim().replace(PER_BASIS, '');
   const amountUnit = String(row.amountUnit || row.rateUnit || '').trim().replace(PER_BASIS, '');
   const converted = rateUnit && amountUnit && !rateUnit.includes('/') && !amountUnit.includes('/') ? convertInventoryQuantity(amount, amountUnit, rateUnit) : null;
-  return converted ? Math.round((converted / (areaSqft / 1000)) * 10000) / 10000 : null;
+  // service_products.application_rate is decimal(8,3): round to what the column keeps, so the limit check and the insert judge the same
+  // dose. A rate that rounds to zero is cleared (the amount-over-area path runs).
+  const rate = converted ? Math.round((converted / (areaSqft / 1000)) * 1000) / 1000 : 0;
+  return rate > 0 ? rate : null;
 }
 
 // Each asked row gets its area from its own staged carrier and is marked, or the step refuses (400, enter the area instead). A spot cannot be
@@ -363,6 +363,18 @@ function convertGallons(wanted, staged, month, lawn) {
     row[FROM_GALLONS] = mark;
   }
   return null;
+}
+
+// Absent (nothing submitted) falls back to the plan's size or the rows; a submitted area that cannot be read is not guessed around: the
+// completion's own snapshot may succeed on a retry and persist an area this step never judged. `{ sqft }` or `{ refused }`.
+async function visitAreaRead({ knex, svc, propertyServiceArea, actor, readServiceArea }) {
+  if (!propertyServiceArea) return { sqft: null };
+  try {
+    return { sqft: await readServiceArea({ knex, svc, propertyServiceArea, actor }) };
+  } catch (err) {
+    logger.warn(`[lawn-mix-help] visit area unreadable for ${svc?.id}: ${err?.code || err?.name || 'Error'}`);
+    return { refused: refusal(400, 'lawn_gallons_unavailable_now', 'The visit area could not be confirmed just now. Try again in a moment, or enter the area instead.') };
+  }
 }
 
 /**
@@ -400,8 +412,9 @@ async function applyGallons(input) {
   if (notSpot) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed cannot be used for this product. Enter the area instead.', { productId: notSpot.productId });
   for (const row of rows) if (spot.includes(row)) row[SPOT_ROW] = true;
   try {
-    const serviceSqft = propertyServiceArea ? await readServiceArea({ knex, svc, propertyServiceArea, actor }) : null;
-    return convertGallons(wanted, staged, monthOfVisit(svc), lawnAreaOf(rows, serviceSqft, read.planLawnSqft));
+    const visit = await visitAreaRead({ knex, svc, propertyServiceArea, actor, readServiceArea });
+    if (visit.refused) return visit.refused;
+    return convertGallons(wanted, staged, monthOfVisit(svc), lawnAreaOf(rows, visit.sqft, read.planLawnSqft));
   } finally {
     for (const row of rows) delete row[SPOT_ROW];
   }

@@ -399,6 +399,19 @@ describe('gallons sprayed at completion', () => {
       expect(readServiceArea).not.toHaveBeenCalled();
     });
 
+    test('a submitted visit area whose read FAILS refuses the step (correctable 400, nothing converted); absent keeps the fallback', async () => {
+      const propertyServiceArea = { propertyId: 'prop-1', version: 'v1', kind: 'lawn', treatedSqft: 1900 };
+      const products = [{ productId: P_CEL, sprayedGallons: 4, areaValue: 10, areaUnit: 'sqft', rate: 0.085, rateUnit: 'oz', totalAmount: 0.4, amountUnit: 'oz' }];
+      const out = await run(products, { ...withLawn(1900), propertyServiceArea, readServiceArea: async () => { throw new Error('Property areas changed.'); } });
+      expect(out).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now', error: expect.stringContaining('visit area could not be confirmed') } });
+      expect(products[0]).toMatchObject({ areaValue: 10, rate: 0.085 });
+      expect(help.sprayedGallonsFreeze(products)).toEqual({});
+      // Nothing submitted: the plan's size still caps it.
+      const absent = [{ productId: P_CEL, sprayedGallons: 4 }];
+      expect(await run(absent, { ...withLawn(1900), readServiceArea: async () => { throw new Error('never called'); } })).toBeNull();
+      expect(absent[0].areaValue).toBe(1900);
+    });
+
     test('no whole-lawn row and no size on file: not capped (today\'s behaviour), mark unchanged', async () => {
       const products = [{ productId: P_CEL, sprayedGallons: 4 }];
       expect(await run(products)).toBeNull();
@@ -427,13 +440,13 @@ describe('gallons sprayed at completion', () => {
       const row = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz', totalAmount: 0.4, amountUnit: 'oz' };
       expect(await run([row], withLawn(1900))).toBeNull();
       expect(row.areaValue).toBe(1900);
-      expect(row.rate).toBe(0.2105);
-      expect(proposedRow(row)).toMatchObject({ application_rate: 0.2105, rate_unit: 'oz', area_treated_sqft: 1900 });
+      expect(row.rate).toBe(0.211);
+      expect(proposedRow(row)).toMatchObject({ application_rate: 0.211, rate_unit: 'oz', area_treated_sqft: 1900 });
       expect(help.sprayedGallonsFreeze([row]).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedRate: 0.085 });
       // The amount's unit converts to the rate's (0.025 lb = 0.4 oz); a /1000sf suffix on the rate unit is kept as submitted.
       const lb = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz/1000sf', totalAmount: 0.025, amountUnit: 'lb' };
       await run([lb], withLawn(1900));
-      expect(lb).toMatchObject({ rate: 0.2105, rateUnit: 'oz/1000sf' });
+      expect(lb).toMatchObject({ rate: 0.211, rateUnit: 'oz/1000sf' });
     });
 
     test('a capped row whose amount unit cannot be reconciled with the rate unit has the rate cleared (amount over area runs); no amount or no rate leaves it alone', async () => {
@@ -443,6 +456,11 @@ describe('gallons sprayed at completion', () => {
       expect(odd.rate).toBe('');
       expect(proposedRow(odd).application_rate).toBeNull();
       expect(help.sprayedGallonsFreeze([odd]).lawnSprayedGallons.rows[0]).toMatchObject({ capped: true, uncappedRate: 0.085 });
+      // The column keeps 3 decimals: 0.4 oz over 1,900 is 0.211 in the limit check and the insert alike; a tiny amount rounds to zero and is cleared.
+      const tiny = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz', totalAmount: 0.0001, amountUnit: 'oz' };
+      await run([tiny], withLawn(1900));
+      expect(tiny.rate).toBe('');
+      expect(proposedRow(tiny).application_rate).toBeNull();
       const noAmount = { productId: P_CEL, sprayedGallons: 4, rate: 0.085, rateUnit: 'oz' };
       await run([noAmount], withLawn(1900));
       expect(noAmount.rate).toBe(0.085);
