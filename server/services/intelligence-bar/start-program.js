@@ -405,27 +405,33 @@ async function predictPlanSync(customer, catalogRow, firstDate, cadence) {
   return { updates };
 }
 
-// Visits that already overlap the first visit's window (create_appointment's
+// Visits that already overlap one booked visit's window (create_appointment's
 // probe and fact shape, #6047): shown on the card and pinned, so an overlap
-// that appears after the card refuses as preview_changed.
+// that appears after the card refuses as preview_changed. Every date the
+// handler will preseed is probed (the dates come from plannedVisitDates, the
+// handler's own planning functions), each with the facts carrying its date.
 //
 // An overlapping visit of this same customer or property is refused: with
 // GATE_VISIT_GROUPS on, the handler's maybeGroupRow would group it with the
 // new visit (stamping it, possibly reassigning its technician), which this
 // card does not show. Returns the facts, or { error, code }.
-async function firstVisitOverlap(firstDate, window, customerId, propertyId) {
+async function seriesOverlap(visitDates, window, customerId, propertyId) {
   const { probeSlotOverlap } = require('../scheduling/window-rules');
-  const rows = await db.transaction((trx) => probeSlotOverlap({
-    trx, date: firstDate, windowStart: window.windowStart, windowEnd: window.windowEnd,
-  }));
-  if (!rows || !rows.length) return [];
-  const owners = await db('scheduled_services').whereIn('id', rows.map((r) => r.id)).select('id', 'customer_id', 'property_id');
-  const ours = (owners || []).some((o) => String(o.customer_id || '') === String(customerId)
-    || (propertyId && String(o.property_id || '') === String(propertyId)));
-  if (ours) {
-    return refusal('This customer already has a visit at that time. Pick another time, or book it from the Schedule screen. Nothing was proposed.', 'program_same_customer_overlap');
+  const facts = [];
+  for (const date of visitDates) {
+    const rows = await db.transaction((trx) => probeSlotOverlap({
+      trx, date, windowStart: window.windowStart, windowEnd: window.windowEnd,
+    }));
+    if (!rows || !rows.length) continue;
+    const owners = await db('scheduled_services').whereIn('id', rows.map((r) => r.id)).select('id', 'customer_id', 'property_id');
+    const ours = (owners || []).some((o) => String(o.customer_id || '') === String(customerId)
+      || (propertyId && String(o.property_id || '') === String(propertyId)));
+    if (ours) {
+      return refusal(`This customer already has a visit at that time on ${dateLabel(date)}. Pick another time, or book it from the Schedule screen. Nothing was proposed.`, 'program_same_customer_overlap');
+    }
+    const dateFacts = await require('./tools').bookingOverlapFacts(db, rows, date);
+    facts.push(...dateFacts.map((f) => ({ ...f, date })));
   }
-  const facts = await require('./tools').bookingOverlapFacts(db, rows, firstDate);
   return facts.sort((a, b) => (a.fact < b.fact ? -1 : a.fact > b.fact ? 1 : 0));
 }
 
@@ -518,12 +524,12 @@ async function buildProgramPlan(input, actionContext) {
   if (tech.error) return { ...tech };
   const window = firstVisitWindow(args.firstDate, args.start, catalogRow);
   if (window.error) return window;
-  const overlap = await firstVisitOverlap(args.firstDate, window, args.customerId, propertyId)
-    .catch(() => refusal('Could not check the schedule for visits that overlap the first visit. Try again in a moment. Nothing was proposed.'));
+  const visitDates = await plannedVisitDates(args.customerId, args.firstDate, args.cadence);
+  const overlap = await seriesOverlap(visitDates, window, args.customerId, propertyId)
+    .catch(() => refusal('Could not check the schedule for visits that overlap the booked visits. Try again in a moment. Nothing was proposed.'));
   if (overlap.error) return overlap;
   const planSync = await predictPlanSync(customer, catalogRow, args.firstDate, args.cadence);
   if (planSync.error) return planSync;
-  const visitDates = await plannedVisitDates(args.customerId, args.firstDate, args.cadence);
 
   const welcome = await welcomeVerdict(args);
   if (welcome.error) return welcome;
@@ -549,7 +555,7 @@ async function buildProgramPlan(input, actionContext) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, sendPropertyId: editApptAddressLive(), techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
+      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -557,7 +563,7 @@ async function buildProgramPlan(input, actionContext) {
       version: crypto.createHash('sha256').update(JSON.stringify([
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.firstDate,
-        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, editApptAddressLive(), techNoticeFor(techPin, actionContext),
+        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
         overlap.map((o) => o.fact), planSync.updates,
       ])).digest('hex'),
     },
@@ -578,12 +584,12 @@ function cardLines(plan) {
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
   add('operational', 'Leads: no lead status changes (this booking marks no lead won)');
   add('operational', plan.overlap.length
-    ? `No other visits at visits 2-${ONGOING_PRESEED} times (if one appears, nothing is booked)`
+    ? `No other visits at the ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times beyond the overlaps listed here (if a new one appears, nothing is booked)`
     : `No other visits at the first ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times (if one appears, nothing is booked)`);
   add('operational', `After booking: ask the bar to optimize ${plan.tech.name}'s route on ${dateLabel(plan.firstDate)} (a second card)`);
   if (plan.overlap.length) {
-    const who = plan.overlap.map((o) => [o.customer, o.service, o.window].filter(Boolean).join(', ')).join('; ');
-    add('operational', `Overlap: the first visit overlaps a visit already on the schedule (${who}). The booking goes ahead, as on the Schedule screen`);
+    const who = plan.overlap.map((o) => `${dateLabel(o.date)}: ${[o.customer, o.service, o.window].filter(Boolean).join(', ')}`).join('; ');
+    add('operational', `Overlap: ${plan.overlap.length === 1 ? 'a booked visit overlaps a visit' : 'booked visits overlap visits'} already on the schedule (${who}). The booking goes ahead, as on the Schedule screen`);
   }
 
   const total = plan.bill.lines.length + 1;
@@ -681,11 +687,12 @@ function scheduleBody(plan) {
     skipWeekends: false,
     sendConfirmationSms: plan.sendTexts,
     sendConfirmation: plan.sendTexts,
-    // The pinned property, so the handler's bookingProperty, zone and
-    // per-property series scope use it from the start. The handler accepts
-    // an explicit property only while GATE_EDIT_APPT_ADDRESS is on (pinned);
-    // off, its sole-property anchor resolves the same single property.
-    ...(plan.sendPropertyId ? { propertyId: plan.propertyId } : {}),
+    // The pinned property, always: the handler's bookingProperty, zone and
+    // per-property series scope derive from the property the card showed,
+    // not from the customer row. createScheduleBooking callers are exempt
+    // from GATE_EDIT_APPT_ADDRESS (that gate is about the screen's address
+    // picker, not about which property a programmatic booking targets).
+    ...(plan.propertyId ? { propertyId: plan.propertyId } : {}),
   };
 }
 
@@ -956,10 +963,6 @@ Ongoing programs only (no visit count). Refuses: a customer who is not on a mont
     additionalProperties: false,
   },
 };
-
-function editApptAddressLive() {
-  return require('../../config/feature-gates').isEnabled('editApptAddress') === true;
-}
 
 module.exports = {
   START_PROGRAM_TOOL,

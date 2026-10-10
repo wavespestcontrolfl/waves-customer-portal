@@ -359,6 +359,8 @@ async function maybePreDraftForBooking(scheduledServiceId, { ownerProcToken = nu
         };
       }
 
+      // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+      await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, customer.id);
       const [estimate] = await trx('estimates').insert({
         customer_id: customer.id,
         customer_name: customerName,

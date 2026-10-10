@@ -61,6 +61,8 @@ function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
     };
     return q;
   };
+  // The per-customer estimate lock (utils/customer-estimate-lock.js) is a raw advisory call.
+  trx.raw = jest.fn(async () => ({ rows: [] }));
   return { trx, ops };
 }
 

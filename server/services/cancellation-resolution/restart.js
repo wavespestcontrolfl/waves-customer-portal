@@ -830,6 +830,8 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       .update({ archived_at: nowDate, updated_at: nowDate });
 
     const token = randomBytes(16).toString('hex');
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+    await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, fresh.id);
     const [created] = await trx('estimates').insert({
       estimate_data: JSON.stringify(estimateData),
       address: pricingAi.addressForCustomer(fresh) || null,

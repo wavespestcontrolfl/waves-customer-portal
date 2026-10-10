@@ -8030,7 +8030,9 @@ async function scheduleCreateHandler(req, res, next) {
     let bookingProperty = null;
     let bookingSeriesScope = null;
     if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
+      // A createScheduleBooking caller (programmaticBooking) names the property
+      // its own card showed, so the screen's address-picker gate does not apply.
+      if (!isEnabled('editApptAddress') && !req.programmaticBooking) throw httpError(409, 'Appointment address changes are not enabled.');
       bookingProperty = await require('../services/customer-properties').bookingPropertyStamp({ customerId, propertyId });
       // Per-property duplicate-series scope (codex #3998 r2 P1): the same
       // shape the estimate converter hands the guards, so an active pest
@@ -8869,9 +8871,13 @@ async function scheduleCreateHandler(req, res, next) {
         }
       }
       // start_program (approvedNoOpenEstimateFamily): the card's open-estimate
-      // check re-run inside this transaction. Estimate creation takes no
-      // shared per-customer lock, so only its own insert can still race this.
+      // check re-run inside this transaction. Every estimate insert for a
+      // known customer takes the per-customer estimate lock
+      // (utils/customer-estimate-lock.js) before its INSERT, so taking it here
+      // makes this read wait for an in-flight creator and see its row (or
+      // makes the creator wait for this booking to commit).
       if (req.approvedNoOpenEstimateFamily) {
+        await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customerId);
         const openEstimate = await require('../services/intelligence-bar/start-program')
           .openEstimateForFamily(customerId, req.approvedNoOpenEstimateFamily, trx);
         if (openEstimate) {
@@ -9353,11 +9359,16 @@ async function scheduleCreateHandler(req, res, next) {
           });
           if (childClash.length) {
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
-            // Intelligence Bar start_program: its card promised no other
-            // visit at these times, so a child overlap refuses (pre-commit,
-            // same transaction). The Schedule screen keeps the warning.
+            // Intelligence Bar start_program: its card showed every overlap
+            // on every series date, so a child overlap the card did not show
+            // refuses (pre-commit, same transaction). The Schedule screen
+            // keeps the warning.
             if (Array.isArray(req.approvedOverlapFacts)) {
-              throw Object.assign(httpError(409, `Another visit overlaps the ${nextDateStr} visit. Nothing was booked.`), { code: 'OVERLAP_CHANGED' });
+              const approvedFacts = new Set(req.approvedOverlapFacts);
+              const liveFacts = await require('../services/intelligence-bar/tools').bookingOverlapFacts(trx, childClash, nextDateStr);
+              if (liveFacts.some((f) => !approvedFacts.has(f.fact))) {
+                throw Object.assign(httpError(409, `Another visit overlaps the ${nextDateStr} visit. Nothing was booked.`), { code: 'OVERLAP_CHANGED' });
+              }
             }
           }
         }
@@ -10203,6 +10214,7 @@ async function createScheduleBooking({
   const req = {
     body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true,
     skipLeadConversion: skipLeadConversion === true,
+    programmaticBooking: true,
     ...(approvedServiceAnchor ? { approvedServiceAnchor } : {}),
     ...(approvedBilling ? { approvedBilling } : {}),
     ...(Array.isArray(approvedVisitDates) ? { approvedVisitDates } : {}),

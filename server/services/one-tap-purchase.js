@@ -368,6 +368,8 @@ async function initPurchase({ customerId, clicked }) {
 
     // The draft rides the customer's on-file address so resolveEstimateCoords
     // adopts the customer coords (ride-along slot ranking needs them).
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+    await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customerId);
     const [estimateRow] = await trx('estimates').insert({
       customer_id: customerId,
       status: 'draft',

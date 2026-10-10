@@ -8,9 +8,10 @@
  * Harness from admin-schedule-create-tech-absence.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
-// Read into the gate map at load: an explicit propertyId (start_program's
-// pinned property) is accepted only while it is on.
-process.env.GATE_EDIT_APPT_ADDRESS = 'true';
+// GATE_EDIT_APPT_ADDRESS is deliberately left unset (off, the default): a
+// createScheduleBooking caller's explicit propertyId (start_program's pinned
+// property) is honoured whatever that screen gate says.
+delete process.env.GATE_EDIT_APPT_ADDRESS;
 jest.setTimeout(30000);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -243,7 +244,22 @@ describe('createScheduleBooking runs the POST / handler', () => {
       spy.mockRestore();
     });
 
-    test('an explicit propertyId (GATE_EDIT_APPT_ADDRESS on) stamps that property on the visit', async () => {
+    test('the open-estimate check takes the per-customer estimate lock first, so an in-flight estimate insert is waited for', async () => {
+      const StartProgram = require('../services/intelligence-bar/start-program');
+      const EstimateLock = require('../utils/customer-estimate-lock');
+      const lockSpy = jest.spyOn(EstimateLock, 'lockCustomerEstimates').mockResolvedValue(undefined);
+      const readSpy = jest.spyOn(StartProgram, 'openEstimateForFamily').mockResolvedValue(null);
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimateFamily: 'lawn_care' })).status).toBe(201);
+      expect(lockSpy).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+      expect(lockSpy.mock.invocationCallOrder[0]).toBeLessThan(readSpy.mock.invocationCallOrder[0]);
+      lockSpy.mockClear();
+      expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
+      expect(lockSpy).not.toHaveBeenCalled();
+      lockSpy.mockRestore();
+      readSpy.mockRestore();
+    });
+
+    test('an explicit propertyId stamps that property on the visit with GATE_EDIT_APPT_ADDRESS off (a programmatic booking is exempt)', async () => {
       const PROP = '00000000-0000-4000-8000-00000000a001';
       const propertyRow = { id: PROP, customer_id: 'cust-1', active: true, address_line1: '1 Example St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' };
       const baseDb = db.getMockImplementation();
@@ -280,6 +296,23 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(result.status).toBe(409);
       expect(result.json.code).toBe('OVERLAP_CHANGED');
       expect(inserts).toHaveLength(1); // the parent only; the transaction rolls it back
+      findConflictingVisits.mockResolvedValue([]);
+    });
+
+    test('a child overlap the card showed (its fact is approved) books; a different one refuses', async () => {
+      findConflictingVisits.mockResolvedValue([]);
+      const plain = await createScheduleBooking({ body: recurring, actor });
+      const childDates = plain.json.appointments.map((a) => a.date).slice(1);
+      inserts.length = 0;
+      const factFor = (id) => (date) => `${id}||Lawn Care|${date}|10:00 AM-11:00 AM`;
+      findConflictingVisits.mockResolvedValueOnce([]).mockResolvedValue(childClash);
+      const shown = await createScheduleBooking({ body: recurring, actor, approvedOverlapFacts: childDates.map(factFor('visit-7')) });
+      expect(shown.status).toBe(201);
+      inserts.length = 0;
+      findConflictingVisits.mockResolvedValueOnce([]).mockResolvedValue(childClash);
+      const other = await createScheduleBooking({ body: recurring, actor, approvedOverlapFacts: childDates.map(factFor('visit-8')) });
+      expect(other.status).toBe(409);
+      expect(other.json.code).toBe('OVERLAP_CHANGED');
       findConflictingVisits.mockResolvedValue([]);
     });
 

@@ -3411,6 +3411,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             const newerForInsert = recInsert.newerFlag || null;
             if (newerForInsert) { draftAddressBlockCarried = true; carriedAddressFlag = newerForInsert; }
             if (recInsert.newerClean) { addressUnverified = null; cleanEvidenceAt = recInsert.newerClean; }
+            // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+            await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customerId);
             const [inserted] = await trx('estimates').insert({
               ...estFields,
               ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert, addressUnverifiedClearedBy: null } } : {}),

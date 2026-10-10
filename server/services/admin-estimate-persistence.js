@@ -2507,6 +2507,8 @@ async function createOrReuseAdminEstimate({
     }
 
     const token = randomBytes(16).toString('hex');
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+    await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, writeFields.customer_id);
     const [created] = await trx('estimates').insert({
       ...writeFields,
       ...(clientDraftId ? { id: clientDraftId } : {}),

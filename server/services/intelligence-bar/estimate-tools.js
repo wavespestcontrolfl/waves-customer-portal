@@ -2067,6 +2067,8 @@ async function createPendingEstimate(input) {
     const duplicateBlock = await blockIfAutomatedEstimateDuplicate(insertContact.customerPhone, { database: trx });
     if (duplicateBlock) return { duplicateBlock };
 
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+    await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, recognizedCustomerId);
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify(estimateData),
       address,
@@ -3221,6 +3223,8 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     const payload = agentEstimatePayload(lockedInput, preview, {}, accountPricing);
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+    await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, accountPricing.customerId || null);
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify(payload.data),
       ...payload.fields,

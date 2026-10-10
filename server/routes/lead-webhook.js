@@ -940,6 +940,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           const draftAutomationNote = draftAutomation
             ? ` Draft automation: ${draftAutomation.status}${draftAutomation.unsupportedReason ? ` (${draftAutomation.unsupportedReason})` : ''}.`
             : '';
+          // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+          await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customer.id);
           const [estimateRow] = await trx('estimates').insert({
             customer_id: customer.id,
             customer_name: `${firstName} ${lastName}`,

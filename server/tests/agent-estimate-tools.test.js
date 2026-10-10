@@ -193,6 +193,8 @@ function makeDatabase({
     return builder;
   };
   database.fn = mockDb.fn;
+  // The per-customer estimate lock (utils/customer-estimate-lock.js) is a raw advisory call.
+  database.raw = jest.fn(async () => ({ rows: [] }));
   return { database, writes };
 }
 

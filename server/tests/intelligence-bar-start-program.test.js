@@ -219,11 +219,11 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     Schedule.loadSeriesBlackoutDates.mockResolvedValue(null);
   });
 
-  test('GATE_EDIT_APPT_ADDRESS off: no explicit propertyId (the handler would refuse it); the anchor check still applies', async () => {
-    FeatureGates.isEnabled.mockImplementation((g) => (g === 'editApptAddress' ? false : false));
+  test('GATE_EDIT_APPT_ADDRESS off: the pinned propertyId is still passed (a programmatic booking targets the property the card showed)', async () => {
+    FeatureGates.isEnabled.mockImplementation(() => false);
     const { scheduleBody, buildProgramPlan } = require('../services/intelligence-bar/start-program')._test;
     const built = await buildProgramPlan(BASE_INPUT);
-    expect(scheduleBody(built.plan).propertyId).toBeUndefined();
+    expect(scheduleBody(built.plan).propertyId).toBe('prop-1');
   });
 
   test('the card says no lead status changes', async () => {
@@ -555,10 +555,31 @@ describe('commit', () => {
     tables.scheduled_services = [{ id: 'visit-9', customer_id: 'other-customer', property_id: 'prop-other', first_name: 'Pat', last_name: 'Sample' }];
     const existing = { id: 'visit-9', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control' };
     WindowRules.probeSlotOverlap.mockResolvedValue([existing]);
-    const preview = await run(BASE_INPUT);
-    expect(lines(preview, 'operational')).toContain('Overlap: the first visit overlaps a visit already on the schedule (Pat Sample, Pest Control, 9:00 AM-10:00 AM). The booking goes ahead, as on the Schedule screen');
-    expect(preview.slot_overlap.with).toEqual([{ customer: 'Pat Sample', service: 'Pest Control', window: '9:00 AM-10:00 AM' }]);
+    const preview = await run({ ...BASE_INPUT });
+    // Every one of the four series dates is probed, and each overlap is listed with its date.
+    expect(WindowRules.probeSlotOverlap.mock.calls.map(([a]) => a.date)).toEqual(['2099-03-03', '2099-04-07', '2099-05-05', '2099-06-02']);
+    expect(lines(preview, 'operational')).toContain('Overlap: booked visits overlap visits already on the schedule (Tue, Mar 3, 2099: Pat Sample, Pest Control, 9:00 AM-10:00 AM; Tue, Apr 7, 2099: Pat Sample, Pest Control, 9:00 AM-10:00 AM; Tue, May 5, 2099: Pat Sample, Pest Control, 9:00 AM-10:00 AM; Tue, Jun 2, 2099: Pat Sample, Pest Control, 9:00 AM-10:00 AM). The booking goes ahead, as on the Schedule screen');
+    expect(preview.slot_overlap.with).toHaveLength(4);
     WindowRules.probeSlotOverlap.mockResolvedValue([existing, { id: 'visit-10', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Lawn Care' }]);
+    const result = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('an overlap on a LATER series date alone is shown on the card, pinned, and refuses as preview_changed when a new one appears there', async () => {
+    tables.scheduled_services = [{ id: 'visit-9', customer_id: 'other-customer', property_id: 'prop-other', first_name: 'Pat', last_name: 'Sample' }];
+    const existing = { id: 'visit-9', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control' };
+    const onlyOn = (date, rows) => WindowRules.probeSlotOverlap.mockImplementation(async (a) => (a.date === date ? rows : []));
+    onlyOn('2099-05-05', [existing]);
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'operational').find((l) => l.startsWith('Overlap:'))).toBe('Overlap: a booked visit overlaps a visit already on the schedule (Tue, May 5, 2099: Pat Sample, Pest Control, 9:00 AM-10:00 AM). The booking goes ahead, as on the Schedule screen');
+    // Same overlap at confirm: books, with that overlap pinned for the handler.
+    bookWithPlanSync({ status: 201, json: { id: 'v1', recurringCreated: 4 } });
+    await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+    expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([expect.stringContaining('2099-05-05')]);
+    // A new overlap on a later date refuses before booking.
+    createScheduleBooking.mockClear();
+    onlyOn('2099-06-02', [{ id: 'visit-11', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Lawn Care' }]);
     const result = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
