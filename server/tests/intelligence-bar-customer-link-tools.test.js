@@ -408,6 +408,8 @@ describe('send_email_reply carries the same guard', () => {
     expect(renderedTextForLinkCheck(nested)).toContain('https://portal.wavespestcontrol.com/pay/AbCdEfGhIjKlMnOpQrSt');
     const markup = 'Click <a href="https://portal.wavespestcontrol.com/appointment/AbCdEfGhIjKlMnOpQrSt">here</a>';
     expect(renderedTextForLinkCheck(markup).split(/\s+/)).toContain('portal.wavespestcontrol.com/appointment/AbCdEfGhIjKlMnOpQrSt');
+    const named = 'Click <a href="https://portal.wavespestcontrol.com/&Tab;receipt/AbCdEfGhIjKlMnOpQrSt&NewLine;">here</a>';
+    expect(renderedTextForLinkCheck(named).split(/\s+/)).toContain('portal.wavespestcontrol.com/receipt/AbCdEfGhIjKlMnOpQrSt');
     const tabbed = 'Click <a href="https://portal.wavespestcontrol.com/\treceipt/AbCdEfGhIjKlMnOpQrSt">here</a>';
     expect(renderedTextForLinkCheck(tabbed).split(/\s+/)).toContain('portal.wavespestcontrol.com/receipt/AbCdEfGhIjKlMnOpQrSt');
     expect(renderedTextForLinkCheck('Thanks, see you Tuesday.')).toBe('Thanks, see you Tuesday.');

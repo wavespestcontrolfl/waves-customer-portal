@@ -465,21 +465,17 @@ Return ONLY the email body text, no subject line, no metadata.`
 }
 
 // What an HTML-sent reply body reads as once a mail client renders it: HTML
-// entities (named, decimal, hex) decoded, then every host-shaped token —
-// including one sitting inside a tag attribute — appended as its own
-// whitespace-separated run so the link check sees it as a link.
-const HTML_NAMED_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", sol: '/', colon: ':', period: '.', nbsp: ' ' };
-function decodeHtmlEntities(text) {
-  return String(text || '')
-    .replace(/&#x([0-9a-f]+);?/gi, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);?/g, (_m, dec) => String.fromCodePoint(Number(dec)))
-    .replace(/&([a-z]+);/gi, (m, name) => HTML_NAMED_ENTITIES[name.toLowerCase()] ?? m);
-}
+// entities decoded with the repo's own `entities` (every named, decimal and
+// hex form a client knows — &Tab; and &NewLine; included, Codex r6 on
+// #6266), then every host-shaped token — including one sitting inside a tag
+// attribute — appended as its own whitespace-separated run so the link check
+// sees it as a link.
 function renderedTextForLinkCheck(body) {
+  const { decodeHTML } = require('entities');
   let decoded = String(body || '');
   // Nested encodings (&amp;#58;) unwrap in a couple of passes; bounded.
   for (let i = 0; i < 3; i += 1) {
-    const next = decodeHtmlEntities(decoded);
+    const next = decodeHTML(decoded);
     if (next === decoded) break;
     decoded = next;
   }
