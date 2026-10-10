@@ -3808,6 +3808,13 @@ const shutdownInterruptedClaim = "("
   + `metadata ->> '${SHUTDOWN_STAMP_KEY}' IS NOT NULL`
   + ` AND COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${SHUTDOWN_RECLAIM_QUIET_MINUTES} minutes'`
   + ")";
+// The quarantine backstop's OUTER age gate (updated_at 10 min old) lets the
+// webhook's immediate path win; the claim itself refreshes updated_at, so a
+// deploy-stamped quarantined claim would wait the full window behind it
+// (Codex r6 P2). This alternative opens that gate for a stamped dead claim.
+const stampedDeadClaimOrFalse = () => (isEnabled('callProcShutdownRelease')
+  ? `(processing_status = 'processing' AND ${shutdownInterruptedClaim})`
+  : 'FALSE');
 const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
@@ -9346,6 +9353,18 @@ const CallRecordingProcessor = {
     // in flight either commits before the lock (pre-claim, correctly the
     // baseline) or waits and lands post-claim, where the CAS stales it.
     let contactCasBaselineAtClaim = null;
+    // On the registry BEFORE the claim can commit: a SIGTERM that lands while
+    // the claim transaction is committing must still see this pass, or the
+    // stamp UPDATE snapshots an empty registry and the fresh claim dies
+    // unstamped (Codex r6 P2). The stamp UPDATE is token-fenced, so against
+    // an uncommitted claim it waits on the row lock and then stamps the
+    // committed row; against a claim that never commits it matches 0 rows.
+    // A refused or thrown claim leaves the registry below.
+    inFlightPasses.set(call.id, { callSid, procToken });
+    const unregisterClaim = () => {
+      if (inFlightPasses.get(call.id)?.procToken === procToken) inFlightPasses.delete(call.id);
+    };
+    try {
     await db.transaction(async (trx) => {
       if (call.customer_id) {
         contactCasBaselineAtClaim = await trx('customers')
@@ -9500,6 +9519,11 @@ const CallRecordingProcessor = {
           ? Number(claimedRows[0].processing_generation) : null;
       }
     });
+    } catch (claimErr) {
+      unregisterClaim();
+      throw claimErr;
+    }
+    if (claimBlocked) unregisterClaim();
     // A blocked claim did NO work — success: false so no caller can mistake
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
@@ -9534,8 +9558,8 @@ const CallRecordingProcessor = {
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
-    // The claim is ours from here: on the registry so a SIGTERM can stamp it
-    // (markInFlightForShutdown). Beat while we work: transcription of a
+    // The claim is ours from here (registered for markInFlightForShutdown
+    // before the transaction above). Beat while we work: transcription of a
     // long recording is one multi-minute await with no natural checkpoints,
     // and without a beat the reclaim predicates cannot tell that pass from a
     // wedged one. unref() so a draining process never lingers for the timer.
@@ -9557,7 +9581,6 @@ const CallRecordingProcessor = {
         .catch((e) => logger.warn(`[call-proc] heartbeat skipped for ${maskSid(callSid)}: ${e.message}`));
     }, 60 * 1000);
     if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
-    inFlightPasses.set(call.id, { callSid, procToken });
 
     // Outer guard: any unhandled throw between the claim above and the
     // terminal-status writes below would otherwise wedge the row in
@@ -22890,7 +22913,24 @@ const CallRecordingProcessor = {
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
-    const pending = await db('call_log')
+    const pending = await this.pendingCandidatesQuery();
+
+    const results = [];
+    for (const call of pending) {
+      try {
+        const result = await this.processRecording(call.twilio_call_sid);
+        results.push({ callSid: call.twilio_call_sid, ...result });
+      } catch (err) {
+        results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
+      }
+    }
+    return { ...summarizeBatch(results), results };
+  },
+
+  // The processAllPending candidate query, unexecuted (the predicates are raw
+  // SQL a mocked builder cannot evaluate; the live-PG suites run it as is).
+  pendingCandidatesQuery() {
+    return db('call_log')
       .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call is not a recording candidate
       .where(function () {
         this.where(function () {
@@ -22924,7 +22964,10 @@ const CallRecordingProcessor = {
                     .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
                 });
             })
-            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            .andWhere(function quarantineBackstopAge() {
+              this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+                .orWhereRaw(stampedDeadClaimOrFalse());
+            });
         });
       })
       .where(function () {
@@ -22963,17 +23006,6 @@ const CallRecordingProcessor = {
       })
       .orderBy('created_at', 'desc')
       .limit(20);
-
-    const results = [];
-    for (const call of pending) {
-      try {
-        const result = await this.processRecording(call.twilio_call_sid);
-        results.push({ callSid: call.twilio_call_sid, ...result });
-      } catch (err) {
-        results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
-      }
-    }
-    return { ...summarizeBatch(results), results };
   },
 
   /**

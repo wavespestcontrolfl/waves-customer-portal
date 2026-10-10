@@ -29,9 +29,11 @@ const SID_DEAD = sid('d2');
 const SID_BEATING = sid('d3');
 const SID_UNSTAMPED = sid('d4');
 const SID_LATE = sid('d5');
+const SID_QUAR_STAMPED = sid('d6');
+const SID_QUAR_UNSTAMPED = sid('d7');
 const REC = 'RE' + '8'.repeat(32);
 const RECORDING_URL = `https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/${REC}.mp3`;
-const ALL_SIDS = [SID, SID_DEAD, SID_BEATING, SID_UNSTAMPED, SID_LATE];
+const ALL_SIDS = [SID, SID_DEAD, SID_BEATING, SID_UNSTAMPED, SID_LATE, SID_QUAR_STAMPED, SID_QUAR_UNSTAMPED];
 
 describe('markInFlightForShutdown with the gate off (unit)', () => {
   test('is a no-op that reports counts only', async () => {
@@ -161,6 +163,12 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
       expect(Number(row.processing_generation)).toBe(3);
     }
     expect((await readRow(SID_BEATING)).metadata.shutdown_interrupted_at).toEqual(expect.any(String));
+
+    // A refused claim (blocked behind the beating one) registers itself
+    // before its transaction and leaves the registry when refused, so a
+    // SIGTERM in that window stamps nothing it does not own.
+    expect((await processor.processRecording(SID_BEATING)).reason).toBe('already_processing');
+    expect(processor.inFlightPassCount()).toBe(0);
   });
 
   test('a claim taken while the process is already draining stamps itself', async () => {
@@ -179,5 +187,33 @@ maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)',
     processor._test.resetShutdownForTests();
     await processor.processAllPending();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stamped dead claim on a PAN-quarantined row re-enters the backstop before its 10-minute outer age', async () => {
+    processor._test.resetShutdownForTests();
+    const quarantined = (metadata) => ({
+      recording_url: null,
+      recording_sid: null,
+      transcription: 'masked fixture transcript',
+      transcription_status: 'completed',
+      transcription_metadata: JSON.stringify({ pan_detected: 'true' }),
+      processing_status: 'processing',
+      processing_token: 'deadbeef'.repeat(4),
+      processing_generation: 3,
+      processing_started_at: minutesAgo(4),
+      processing_heartbeat_at: minutesAgo(3),
+      // The claim refreshed updated_at: the outer 10-minute gate alone
+      // would hold both rows until minute ten.
+      updated_at: minutesAgo(1),
+      metadata: JSON.stringify(metadata),
+    });
+    await insertCall(SID_QUAR_STAMPED, quarantined({ fixture: 'shutdown-release', shutdown_interrupted_at: minutesAgo(3).toISOString() }));
+    await insertCall(SID_QUAR_UNSTAMPED, quarantined({ fixture: 'shutdown-release' }));
+
+    const sids = (await processor.pendingCandidatesQuery().select('twilio_call_sid')).map((r) => r.twilio_call_sid);
+    expect(sids).toContain(SID_QUAR_STAMPED);
+    expect(sids).not.toContain(SID_QUAR_UNSTAMPED);
+    // Candidate rows only: never run extraction on a fixture transcript.
+    await db('call_log').whereIn('twilio_call_sid', [SID_QUAR_STAMPED, SID_QUAR_UNSTAMPED]).del();
   });
 });
