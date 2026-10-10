@@ -883,10 +883,20 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       ? [
         jest.spyOn(require('../services/customer-dedupe'), 'loserAutoBlockers').mockResolvedValue([]),
         jest.spyOn(require('../services/customer-dedupe'), 'previewMergeEffects').mockResolvedValue({ moving: { total_rows: 0 } }),
-        jest.spyOn(require('../services/customer-dedupe'), 'duplicatePairEligibility').mockResolvedValue({ eligible: true, code: 'eligible', reason: null, candidate: {} }),
-        jest.spyOn(require('../services/customer-dedupe'), 'rowLevelMergeConflict').mockReturnValue(null),
-        jest.spyOn(require('../services/customer-dedupe'), 'dbLevelMergeConflict').mockResolvedValue(null),
+        jest.spyOn(require('../services/customer-dedupe'), 'nonFkMergeRewrites').mockResolvedValue({}),
+        jest.spyOn(require('../services/customer-dedupe'), 'duplicateWinnerFor').mockResolvedValue({ winnerId: '00000000-0000-0000-0000-00000000e002', eligible: true, code: 'eligible', reason: null, candidate: {} }),
       ] : [];
+    if (toolName === 'delete_duplicate_customer') {
+      // The field check reads the customers columns and the self-reference
+      // scan reads the constraint list from information_schema.
+      require('../services/customer-empty-loser')._resetCaches();
+      const recordingRaw = dbMock.raw.getMockImplementation();
+      dbMock.raw.mockImplementation((sql, ...rest) => {
+        if (String(sql).includes('is_generated')) return Promise.resolve({ rows: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at'].map((column_name) => ({ column_name, column_default: null, is_generated: 'NEVER' })) });
+        if (String(sql).includes('constraint_type')) return Promise.resolve({ rows: [] });
+        return recordingRaw(sql, ...rest);
+      });
+    }
     const outsideFixture = OUTSIDE_WRITE_FIXTURES[toolName];
     const savedEnv = {};
     const savedFetch = global.fetch;

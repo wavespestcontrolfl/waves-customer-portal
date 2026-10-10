@@ -2886,7 +2886,7 @@ async function lockSameNameGroupRows(trx, winnerId, loserId) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false, pairKind = 'phone', requireEmptyLoser = false }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false, pairKind = 'phone' }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -2899,13 +2899,6 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   // Same for a same-name pair (no shared phone, usually no shared address).
   if (pairKind === SAME_NAME_KIND && (mode === 'auto' || !requireQueueEligibility)) {
     throw new Error('executeMerge: a same-name pair is review-only — it needs a manual merge with the queue re-check');
-  }
-  // requireEmptyLoser (the IB delete_duplicate_customer preset): the loser
-  // must hold nothing at all, decided UNDER this transaction's locks (after
-  // the row locks and the pair adjudication lock, before the first write).
-  // It only makes sense with the locked queue re-check, so it needs one.
-  if (requireEmptyLoser && (!requireQueueEligibility || mode === 'auto')) {
-    throw new Error('executeMerge: requireEmptyLoser needs a manual merge with the queue re-check');
   }
   // Locked winner snapshot + lock-held timestamp, hoisted for the
   // post-commit contact audit event.
@@ -3132,21 +3125,6 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       const err = new Error(`executeMerge: ${dbConflict.message}`);
       err.mergeConflictCode = dbConflict.code;
       throw err;
-    }
-    // The empty-loser precondition (delete_duplicate_customer only): read on
-    // THIS transaction, under the row locks taken above and the pair lock,
-    // before any write. The scan lives in customer-empty-loser.js (the card's
-    // check list); a throw rolls the whole merge back.
-    if (requireEmptyLoser) {
-      const { emptyLoserRefusal } = require('./customer-empty-loser');
-      const notEmpty = await emptyLoserRefusal(trx, winner, loser);
-      if (notEmpty) {
-        const err = new Error(`executeMerge: ${notEmpty.error}`);
-        err.previewChanged = true;
-        err.mergeConflictCode = 'loser_not_empty';
-        err.emptyLoserRefusal = notEmpty;
-        throw err;
-      }
     }
     // Same-account primary handoff (shared notification/channel prefs
     // resolve via (account_id, is_primary_profile=true)) is decided by
@@ -7224,7 +7202,7 @@ module.exports = {
   duplicateWinnerFor,
   // The "not a shell" blocker list and the tables previewMergeEffects never
   // counts — customer-empty-loser.js (the delete_duplicate_customer
-  // emptiness scan, run under executeMerge's locks) reads the same lists.
+  // emptiness scan) reads the same lists.
   loserAutoBlockers,
   REPOINT_EXCLUDED_TABLES,
   executeMerge,

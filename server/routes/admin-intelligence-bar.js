@@ -4344,6 +4344,8 @@ async function commitPendingAction(req, { id, contractHash }) {
     // winner_version/loser_version are inside that fingerprint).
     delete execParams._approved_versions;
     delete execParams._approved_effects;
+    delete execParams._approved_version;
+    delete execParams._approved_keeper;
     if (execParams._ib_task_context) {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
@@ -4513,7 +4515,14 @@ async function commitPendingAction(req, { id, contractHash }) {
         // customer versions + the disclosed effects fingerprint) ride to
         // the executor so it validates the APPROVED snapshot under its own
         // locks — never a freshly sampled one.
-        if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) execParams._approved_version = String(livePreview._version);
+        if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) {
+          execParams._approved_version = String(livePreview._version);
+          // The other record on the card: id and version, asserted under the
+          // pair lock inside the archive transaction.
+          if (livePreview.duplicate_of?.customer_id && livePreview.duplicate_of?.version) {
+            execParams._approved_keeper = { id: String(livePreview.duplicate_of.customer_id), version: String(livePreview.duplicate_of.version) };
+          }
+        }
         if (action.tool_name === 'merge_customers' && livePreview?.winner_version && livePreview?.loser_version) {
           execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };
           if (typeof livePreview.effects_fingerprint === 'string') execParams._approved_effects = livePreview.effects_fingerprint;

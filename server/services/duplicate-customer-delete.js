@@ -5,41 +5,40 @@
  * server/services/duplicate-customer-delete.js
  *
  * Owner ruling 2026-10-07 (Q3): "soft-delete for empty stubs only (no visits,
- * invoices, payments), carded, restorable." The bar may remove ONE customer
- * record that holds nothing — typically an "Unknown" stub that shares a real
- * customer's phone. A record with ANY history is refused and pointed at
- * merge_customers, which moves that history onto the real record.
+ * invoices, payments), carded, restorable." The bar may archive ONE customer
+ * record that is only an unknown-contact stub of a real customer sharing its
+ * phone. A record with ANY history, or any field the stub creator does not
+ * write, is refused and pointed at merge_customers, which moves history onto
+ * the real record.
  *
- * This is a thin PRESET of the merge engine, not a second delete path. The
- * commit is customer-dedupe.js executeMerge with the stub as the loser and
- * the record the duplicate queue keeps as the winner, exactly as
- * merge_customers calls it, plus one extra precondition the engine checks
- * itself (requireEmptyLoser):
- *   - the pair's final queue verdict runs under the engine's row locks and
- *     the pair adjudication lock (the lock the "not a duplicate" dismissal
- *     takes), so a dismissal cannot commit alongside the delete;
- *   - the loser must hold nothing, read under those same locks, before the
- *     first write (customer-empty-loser.js: the engine's own blocker and
- *     effect readers plus the history a merge rewrites with no customer_id
- *     column);
- *   - the loser is archived the way every merge archives it (deleted_at, its
- *     phone and email retired) and journaled, so the duplicate queue's undo
- *     reverses it.
- * Nothing moves, because the record holds nothing. The same fence as every
- * merge applies: a row that commits after the merge was blocked on the
- * customer lock lands on the archived record, which the undo then refuses to
- * revert as untouched (the engine's own activity gate).
+ * ARCHIVE ONLY. The commit is the customer page's own delete handler
+ * (routes/admin-customers.js archiveCustomerAsAdmin: billing wind-down guard,
+ * deletion gate, newsletter relink, customer.archive audit row). Nothing is
+ * merged and nothing is moved: the other record (the "keeper") is only read,
+ * never written, so no backfill, dunning release or payment-session change can
+ * touch it. The undo is the page's restore route, PATCH
+ * /api/admin/customers/:id/restore (clears deleted_at).
  *
- * The retained record comes from ONE queue build (duplicateWinnerFor): the
- * group that lists the stub as a candidate names its winner. The queue is
- * phone-based and no email pair check exists, so a record linked only by a
- * shared email is refused.
+ * Inside the archive transaction, in this order (the handler's `precheck`):
+ *   1. the customer row lock (FOR UPDATE, the handler's own);
+ *   2. acquirePairAdjudicationLock(keeper, stub) - the lock the "not a
+ *      duplicate" dismissal takes - so a dismissal cannot commit alongside;
+ *   3. the duplicate queue's verdict again (duplicateWinnerFor): the pair must
+ *      still be eligible and the keeper must be the one on the card;
+ *   4. BOTH pinned versions (stub and keeper updated_at, as merge_customers
+ *      pins) must match;
+ *   5. the emptiness scan again on the locked row (customer-empty-loser.js).
+ * Then the archive writes.
  *
- * Two-step (WRITE_TWO_STEP_TOOL_NAMES): an unconfirmed call is
- * mutation-free and returns the card. The preview carries the stub's
- * version (`_version`), so the route's fingerprint pin refuses Confirm when
- * the card, the retained record or any check changed, and the engine
- * re-asserts the approved version under its locks.
+ * The retained record comes from ONE queue build (duplicateWinnerFor). The
+ * queue is phone-based and no email pair check exists, so a record linked only
+ * by a shared email is refused.
+ *
+ * Remaining window, the same one the customer page delete and the merge engine
+ * have: no lock is shared by every history writer, so a foreign-key child
+ * insert waiting on the row lock, or a write to a pointer with no foreign key,
+ * can commit just after the archive and attach to the archived row. The record
+ * stays restorable. This tool adds no post-commit snapshot.
  */
 
 const db = require('../models/db');
@@ -104,13 +103,11 @@ async function findLinkedLiveRecords(stub, conn = db) {
     .limit(25);
 }
 
-// The retained record for `stub`, from ONE queue build, plus the merge
-// executor's other deterministic refusals (rowLevelMergeConflict and
-// dbLevelMergeConflict — billing, payer, a different multi-property account
-// with other live members). Refusals never name a person (the route runs the
-// preview before validating the target). Returns { winner } or a refusal.
+// The retained record for `stub`, from ONE queue build. Refusals never name a
+// person (the route runs the preview before validating the target). Returns
+// { winner } or a refusal.
 async function retainedRecordFor(stub, conn = db) {
-  const { duplicateWinnerFor, rowLevelMergeConflict, dbLevelMergeConflict } = require('./customer-dedupe');
+  const { duplicateWinnerFor } = require('./customer-dedupe');
   const verdict = await duplicateWinnerFor(stub.id, conn);
   if (!verdict.winnerId) {
     const linked = await findLinkedLiveRecords(stub, conn);
@@ -141,14 +138,11 @@ async function retainedRecordFor(stub, conn = db) {
   if (!winner || winner.deleted_at) {
     return { error: 'The record the duplicate queue keeps is no longer available — ask again for a fresh card.', code: 'record_unavailable' };
   }
-  const conflict = rowLevelMergeConflict(winner, stub) || await dbLevelMergeConflict(conn, winner, stub);
-  if (conflict) {
-    return { error: `The merge path would refuse this duplicate (${conflict.code}: ${conflict.message}). Use merge_customers after resolving it.`, code: 'merge_conflict', merge_code: conflict.code };
-  }
   return { winner };
 }
 
-const UNDO_LINE = "Reversible: the delete is archived through the merge engine and journaled, so the duplicate queue's undo brings it back.";
+const RESTORE_LINE = 'Restorable: an admin can restore it from the customer record (restore route); nothing is moved or merged.';
+const WINDOW_LINE = 'Same window as the customer page delete: a visit, message or lead written at the very instant of the delete can attach to the archived record. It stays restorable.';
 const NO_MESSAGE_LINE = 'No customer message is sent';
 
 async function previewDeleteDuplicateCustomer(customerId) {
@@ -164,14 +158,12 @@ async function previewDeleteDuplicateCustomer(customerId) {
   if (refusal) return refusal;
 
   const checks = Object.fromEntries(CHECKS.map((c) => [c.label, 'none']));
-  const stubLine = identityLine(stub);
-  const winnerLine = identityLine(winner);
-  const how = 'It is archived into the record above through the merge engine; nothing moves because the record holds nothing.';
+  const how = 'It is archived only (nothing is moved or merged); the record above is not touched.';
   return {
     preview: true,
     customer_id: stub.id,
     stub: { name: customerName(stub), phone_masked: maskPhone(stub.phone), email_masked: maskEmail(stub.email), created_on: stub.created_on || null },
-    archived_into: {
+    duplicate_of: {
       customer_id: winner.id,
       name: customerName(winner),
       phone_masked: maskPhone(winner.phone),
@@ -180,81 +172,100 @@ async function previewDeleteDuplicateCustomer(customerId) {
       version: winner.version,
     },
     checks,
-    undo: UNDO_LINE,
+    restore: RESTORE_LINE,
+    window: WINDOW_LINE,
     customer_message: NO_MESSAGE_LINE,
     _version: stub.version,
     // Curated card lines (routes/admin-intelligence-bar.js PINNED_DISPLAY_BUILDERS).
     card: {
-      delete: `Delete the empty duplicate record ${stubLine}`,
-      archived_into: `${winnerLine}; stays as is`,
+      delete: `Delete the empty duplicate record ${identityLine(stub)}`,
+      duplicate_of: `${identityLine(winner)}; stays as is`,
       how,
       checks,
-      undo: UNDO_LINE,
+      restore: RESTORE_LINE,
+      window: WINDOW_LINE,
       customer_message: NO_MESSAGE_LINE,
     },
-    note_to_operator: `${customerName(stub)} holds nothing (every check above is none). ${how} Nothing was changed yet.`,
+    note_to_operator: `${customerName(stub)} holds nothing beyond an unknown-contact stub (every check above is none). ${how} Nothing was changed yet.`,
   };
 }
 
-// The commit IS executeMerge, the same call merge_customers makes, with the
-// stub as the loser, the queue's retained record as the winner and
-// requireEmptyLoser. Everything decisive runs inside the engine's locked
-// section: the stub's approved version, the pair's queue verdict under the
-// pair adjudication lock, the engine's other refusals, and "still empty".
-async function commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion = null) {
+// The archive-only commit: the customer page's delete handler, with the
+// decisive checks in its `precheck` (inside the archive transaction, after
+// the customer row lock, before any write). `approvedVersion` and
+// `approvedKeeper` ({ id, version }) are the card's pins (route-owned).
+async function commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion = null, approvedKeeper = null) {
   const stub = await loadCustomer(customerId);
   if (!stub || stub.deleted_at) {
     return { error: 'This customer is already deleted or no longer exists.', code: 'record_unavailable', preview_changed: true };
   }
-  // One queue build picks the retained record (the engine re-checks the pair
-  // under its locks; this read only names the winner).
-  const retained = await retainedRecordFor(stub);
-  if (retained.error) return { error: retained.error, code: retained.code, preview_changed: true };
-  const { winner } = retained;
-
-  const { executeMerge } = require('./customer-dedupe');
-  try {
-    const result = await executeMerge({
-      winnerId: winner.id,
-      loserId: stub.id,
-      performedBy: `ib:${actionContext.technicianId || 'unknown'}`,
-      performedById: actionContext.technicianId || null,
-      mode: 'intelligence_bar',
-      evidence: { via: 'intelligence_bar', preset: 'delete_duplicate_customer' },
-      // The APPROVED card's stub version (route pin), else the one just read;
-      // validated by the engine under its row locks.
-      expectedVersions: { loser: approvedVersion || stub.version },
-      requireQueueEligibility: true,
-      requireEmptyLoser: true,
-    });
-    logger.info(`[intelligence-bar] delete_duplicate_customer archived ${customerId} into ${winner.id} (journal ${result.journalId})`);
-    return {
-      success: true,
-      customer_id: customerId,
-      deleted: true,
-      archived_into: winner.id,
-      journal_id: result.journalId,
-      undo: UNDO_LINE,
-      customer_message: NO_MESSAGE_LINE,
-    };
-  } catch (err) {
-    if (err && err.emptyLoserRefusal) {
-      const { error, code, found } = err.emptyLoserRefusal;
-      return { error, code, found, preview_changed: true };
-    }
-    // The engine's own refusals (version moved, pair no longer mergeable, a
-    // billing conflict, a live collection call) are plain domain errors:
-    // relay the message; nothing committed (one transaction).
-    const drifted = err && (err.previewChanged === true || /deleted|not found/i.test(err.message || ''));
-    if (!err || !err.message) throw err;
-    return { error: err.message, ...(err.mergeConflictCode ? { code: err.mergeConflictCode } : {}), ...(drifted ? { preview_changed: true } : {}) };
+  // A call with no card (direct) pins what is read now; with a card the
+  // approved pins are what the locked section asserts.
+  let keeper = approvedKeeper;
+  if (!keeper) {
+    const retained = await retainedRecordFor(stub);
+    if (retained.error) return { error: retained.error, code: retained.code, preview_changed: true };
+    keeper = { id: retained.winner.id, version: retained.winner.version };
   }
+  const stubVersion = approvedVersion || stub.version;
+
+  const changed = (error, code, extra = {}) => Object.assign(new Error(error), { previewChanged: true, code, ...extra });
+  const { acquirePairAdjudicationLock, duplicateWinnerFor } = require('./customer-dedupe');
+  const precheck = async (trx) => {
+    // 1. The customer row is locked by the handler. Re-read it.
+    const row = await loadCustomer(customerId, trx);
+    if (!row || row.deleted_at) throw changed('This customer is already deleted or no longer exists.', 'record_unavailable');
+    // 2. The pair adjudication lock, so a "not a duplicate" dismissal cannot
+    //    commit alongside the archive.
+    await acquirePairAdjudicationLock(trx, keeper.id, customerId);
+    // 3. The queue verdict again, under that lock.
+    const verdict = await duplicateWinnerFor(customerId, trx);
+    if (!verdict.eligible) {
+      throw changed(`The duplicate queue no longer lists this record as a mergeable duplicate (${verdict.code}). Ask again for a fresh card, or use merge_customers.`, 'not_a_mergeable_duplicate');
+    }
+    if (String(verdict.winnerId) !== String(keeper.id)) {
+      throw changed('The record the duplicate queue keeps changed after the card was shown. Ask again for a fresh card.', 'keeper_changed');
+    }
+    // 4. Both pinned versions.
+    if (String(row.version) !== String(stubVersion)) {
+      throw changed('This customer record changed after the card was shown. Ask again for a fresh card.', 'version_changed');
+    }
+    const keeperRow = await loadCustomer(keeper.id, trx);
+    if (!keeperRow || keeperRow.deleted_at) throw changed('The record this duplicate belongs to is no longer available. Ask again for a fresh card.', 'record_unavailable');
+    if (String(keeperRow.version) !== String(keeper.version)) {
+      throw changed('The record this duplicate belongs to changed after the card was shown. Ask again for a fresh card.', 'keeper_version_changed');
+    }
+    // 5. The emptiness scan again, on the locked row.
+    const refusal = notEmptyRefusal(await readEmptiness(row, trx, keeperRow));
+    if (refusal) throw changed(refusal.error, refusal.code, { found: refusal.found });
+  };
+
+  const { archiveCustomerAsAdmin } = require('../routes/admin-customers');
+  let reply;
+  try {
+    reply = await archiveCustomerAsAdmin({
+      customerId,
+      actor: { technicianId: actionContext.technicianId || null, userAgent: 'intelligence-bar:delete_duplicate_customer' },
+      precheck,
+    });
+  } catch (err) {
+    if (err && err.previewChanged) return { error: err.message, code: err.code, ...(err.found ? { found: err.found } : {}), preview_changed: true };
+    throw err;
+  }
+  const { status, json } = reply;
+  if (status === 200 && json?.success) {
+    logger.info(`[intelligence-bar] delete_duplicate_customer archived customer ${customerId} (duplicate of ${keeper.id}; nothing moved)`);
+    return { success: true, customer_id: customerId, deleted: true, restore: RESTORE_LINE, customer_message: NO_MESSAGE_LINE };
+  }
+  const message = json?.message || json?.error || `Delete failed (HTTP ${status})`;
+  return { error: message, ...(status === 404 ? { preview_changed: true } : {}) };
 }
 
 module.exports = {
   previewDeleteDuplicateCustomer,
   commitDeleteDuplicateCustomer,
-  UNDO_LINE,
+  RESTORE_LINE,
+  WINDOW_LINE,
   NO_MESSAGE_LINE,
   _test: { createdOnET, maskEmail, maskPhone },
 };

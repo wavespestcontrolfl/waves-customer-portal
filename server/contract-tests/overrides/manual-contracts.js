@@ -46,12 +46,13 @@ module.exports = {
   // services/duplicate-customer-delete.js and customer-empty-loser.js, not the
   // registered customer-lifecycle-tools.js source; the readers they call are
   // customer-dedupe.js's (duplicateWinnerFor, loserAutoBlockers,
-  // previewMergeEffects, nonFkMergeRewrites). Smoke runs only the unconfirmed
-  // preview (two-step), which writes nothing.
+  // previewMergeEffects, nonFkMergeRewrites). Archive only: the commit is the
+  // customer page's delete handler. Smoke runs only the unconfirmed preview
+  // (two-step), which writes nothing.
   delete_duplicate_customer: {
     tables: ['customers', 'customer_properties', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews', 'customer_merge_journal', 'customer_duplicate_dismissals'],
     columns: {
-      customers: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at', 'created_at', 'updated_at', 'waveguard_tier', 'account_credits', 'account_id', 'is_primary_profile'],
+      customers: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at', 'created_at', 'updated_at', 'account_id', 'is_primary_profile', 'referred_by_customer_id'],
       customer_properties: ['customer_id', 'is_primary'],
       customer_plan_rates: ['customer_id'],
       field_credit_allocations: ['customer_id'],

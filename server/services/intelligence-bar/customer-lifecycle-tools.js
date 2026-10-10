@@ -22,11 +22,11 @@
  * /api/admin/customers/:id route and cancellation-eligibility as a blocker.
  *
  * delete_duplicate_customer (owner ruling 2026-10-07): the narrow case —
- * remove ONE record that holds nothing, as a thin preset of executeMerge
- * (the stub is the loser, the record the duplicate queue keeps is the
- * winner, requireEmptyLoser makes the engine check "holds nothing" under its
- * own locks). The card and the commit live in
- * services/duplicate-customer-delete.js; the tool, its gate and dispatch here.
+ * archive ONE record that is only an unknown-contact stub of a real customer,
+ * through the customer page's own DELETE handler (archive only: nothing is
+ * merged or moved, the other record is never written). The pair checks, the
+ * emptiness scan and the commit live in services/duplicate-customer-delete.js
+ * and customer-empty-loser.js; the tool, its gate and dispatch here.
  */
 
 const db = require('../../models/db');
@@ -399,10 +399,14 @@ async function deleteDuplicateCustomer(input, actionContext = {}) {
   const { previewDeleteDuplicateCustomer, commitDeleteDuplicateCustomer } = require('../duplicate-customer-delete');
   // Only the server-derived context confirms (never a model-supplied field).
   if (actionContext.confirmed !== true) return previewDeleteDuplicateCustomer(customerId);
-  // The approved card's record version (route pin from the fingerprint-
-  // verified preview), re-asserted by executeMerge under its row locks.
+  // The approved card's pins (route-owned, from the fingerprint-verified
+  // preview): this record's version and the other record's id and version,
+  // re-asserted inside the archive transaction under the row and pair locks.
   const approvedVersion = typeof input._approved_version === 'string' && input._approved_version ? input._approved_version : null;
-  return commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion);
+  const k = input._approved_keeper;
+  const approvedKeeper = k && typeof k.id === 'string' && k.id && typeof k.version === 'string' && k.version
+    ? { id: k.id.toLowerCase(), version: k.version } : null;
+  return commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion, approvedKeeper);
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────
@@ -427,9 +431,9 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
   },
   {
     name: 'delete_duplicate_customer',
-    description: `Delete ONE empty duplicate customer record, such as an "Unknown" stub that shares a real customer's phone. Only for a record that holds nothing: no visits, service records, invoices, payments, saved cards or Stripe profile, estimates, leads, calls, texts or emails, plan rates, monthly rate or plan, portal login, referral or credit balance, and no saved property beyond one auto-created primary.
-Prefer merge_customers whenever the duplicate has ANY history — this tool refuses such a record and names what it found. It also refuses a record the duplicate queue does not list as a mergeable duplicate, and a record linked to the real customer only by a shared email.
-The record is archived into the real customer through the merge engine (nothing moves, because the record holds nothing) and the duplicate queue's undo reverses it. The first call returns a PREVIEW card naming the record, the real customer it is archived into (unchanged), and each check. Nothing changes until the operator confirms. No customer message is sent.`,
+    description: `Delete ONE empty duplicate customer record: a stub, such as an "Unknown" record created from a call, that shares a real customer's phone. Only for a record that holds nothing: no visits, service records, invoices, payments, saved cards or Stripe profile, estimates, leads, calls, texts or emails, plan rates, monthly rate or plan, portal login, referral or credit balance, no notes, gate code or other field the stub creator does not write, and no saved property beyond one auto-created primary.
+Prefer merge_customers whenever the duplicate has ANY history or data — this tool refuses such a record and names what it found. It also refuses a record the duplicate queue does not list as a mergeable duplicate, and a record linked to the real customer only by a shared email.
+The record is ARCHIVED ONLY (the customer page's delete): nothing is merged or moved and the real customer is not touched. An admin can restore it afterward from the customer record (restore route). The first call returns a PREVIEW card naming the record, the real customer it duplicates (unchanged), and each check. Nothing changes until the operator confirms. No customer message is sent.`,
     input_schema: {
       type: 'object',
       properties: {

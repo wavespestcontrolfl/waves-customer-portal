@@ -1,32 +1,32 @@
 /**
- * The "this record holds nothing" scan for delete_duplicate_customer.
+ * The "this record is only an unknown-contact stub" scan for
+ * delete_duplicate_customer.
  * server/services/customer-empty-loser.js
  *
- * One scan, two readers: executeMerge (customer-dedupe.js) runs
- * emptyLoserRefusal UNDER its row locks and the pair adjudication lock when
- * a caller passes requireEmptyLoser (the Intelligence Bar delete preset),
- * and the tool's card reads the same findings unlocked to show its checks.
  * Owner ruling 2026-10-07 (Q3): empty stubs only; a record with any history
- * goes through merge_customers.
+ * goes through merge_customers. "Empty" is FAIL-CLOSED and bounded, in three
+ * parts, and every part refuses when it cannot read what it needs.
  *
- * "Empty" is read from the merge engine's own readers (customer-dedupe.js),
- * never a hand-kept table list:
- *   - loserAutoBlockers: the auto-merge's "not a shell" list (Stripe
- *     profile, portal login, payer, billing mode, monthly rate, live stage,
- *     and the payment / invoice / visit / contract / credit tables);
- *   - previewMergeEffects: every row in every table that points at the
- *     customer (declared FKs, every *customer_id column, and the polymorphic
- *     notification / email pointers) - the same set a merge would move;
- *   - nonFkMergeRewrites: the history a merge rewrites that no customer_id
- *     column names (a call_log link override, an irrigation weekly email
- *     identity, a visit address stamp);
- *   - every table that sweep deliberately skips (REPOINT_EXCLUDED_TABLES)
- *     is counted directly from the engine's own list.
- * Two pointer kinds are not history and are allowed: ONE untouched primary
- * saved property (created automatically from the customer's address) and the
- * nightly derived health score. A primary profile with other live members in
- * its account is refused (a merge hands primary to the winner; a delete of a
- * record that holds nothing must not move account ownership).
+ *  A. Fields. The record must look like what the unknown-caller creator makes
+ *     (call-recording-processor.js, the customers insert for a new inbound
+ *     call). Every customer column outside STUB_CREATOR_COLUMNS must be NULL or
+ *     the column's schema default, read from information_schema and compared at
+ *     runtime, so a column added later refuses by default. The refusal names the
+ *     column, never the value.
+ *  B. Linked rows. The merge engine's own readers: loserAutoBlockers (the
+ *     auto-merge "not a shell" list), previewMergeEffects (every table that
+ *     points at the customer: declared FKs, every *customer_id column, the
+ *     polymorphic pointers), nonFkMergeRewrites (history no customer_id column
+ *     names), every merge-excluded table, and the customers table's own
+ *     pointer columns (referred_by_customer_id and any other customers column
+ *     that references a customer). A count that cannot be read refuses.
+ *     Allowed: ONE untouched automatic primary saved property and the derived
+ *     health score.
+ *  C. Account ownership. A primary profile with other live members in its
+ *     account refuses.
+ *
+ * readEmptiness runs unlocked for the preview card and again on the archive
+ * transaction after the row lock and the pair lock (duplicate-customer-delete).
  */
 
 const db = require('../models/db');
@@ -56,7 +56,7 @@ const CHECKS = [
     match: (table) => /(call|sms|email|message|conversation|notification|voicemail|outbox)/.test(table),
   },
   { key: 'properties', label: 'Saved properties (one untouched auto-created primary allowed)', tables: ['customer_properties'] },
-  { key: 'customer_text', label: 'Notes and service contacts' },
+  { key: 'fields', label: 'Record fields (only what the unknown-caller stub creator writes may be set)' },
   { key: 'plan_rates', label: 'Plan-rate ledger', tables: ['customer_plan_rates'] },
   {
     key: 'billing',
@@ -71,6 +71,7 @@ const CHECKS = [
     tables: ['referral_promoters', 'customer_credit_ledger', 'field_credit_allocations'],
   },
   { key: 'account', label: 'Other live members of its account' },
+  { key: 'customer_links', label: 'Other customer records pointing at it (referrals)' },
   { key: 'other', label: 'Other linked records' },
 ];
 
@@ -162,17 +163,118 @@ function primaryPropertyEdits(property, customer) {
   return edits;
 }
 
-// Customer-owned text the merge carries onto the survivor: the notes it
-// appends (customer-dedupe predictNoteAppends — its own column list) and the
-// service-contact slots. Deleting would strand it on the archived row.
-function customerOwnedText(stub, predictNoteAppends) {
-  const notes = Object.keys(predictNoteAppends({}, stub));
-  const contacts = Object.entries(stub)
-    .filter(([column, value]) => /^service_contact\d?_(name|phone|email)$/.test(column) && !isBlank(value))
-    .map(([column]) => column);
-  return [...notes, ...contacts];
+// The customers columns the unknown-caller creator writes - exactly the keys of
+// the insert in call-recording-processor.js (the new-customer-from-a-call
+// path), plus row bookkeeping. Nothing else may hold a value.
+const STUB_CREATOR_COLUMNS = new Set([
+  'id', 'account_id', 'is_primary_profile', 'profile_label',
+  'first_name', 'last_name', 'phone', 'email',
+  'address_line1', 'address_line2', 'city', 'state', 'zip',
+  'referral_code', 'lead_source', 'lead_source_detail',
+  'pipeline_stage', 'pipeline_stage_changed_at', 'nearest_location_id',
+  'active', 'created_at', 'updated_at', 'deleted_at',
+]);
+// Keys the callers add to the row they pass in (not columns).
+const ROW_ALIASES = new Set(['version', 'created_on']);
+
+// A default the database fills in by itself on every new row (a timestamp,
+// a generated id or token). Not operator data, so any value passes.
+const GENERATED_DEFAULT = /(now\(\)|current_timestamp|clock_timestamp\(|gen_random_uuid\(|uuid_generate_v|gen_random_bytes\(|nextval\()/i;
+
+function stripCasts(expr) {
+  let out = String(expr).trim();
+  for (;;) {
+    const next = out.replace(/::[a-zA-Z_][\w\s]*(\[\])?$/, '').trim();
+    if (next === out) return out;
+    out = next;
+  }
 }
 
+// -> { kind: 'none' | 'generated' | 'literal' | 'unknown', value? }
+function parseColumnDefault(expr) {
+  if (expr === null || expr === undefined) return { kind: 'none' };
+  const raw = String(expr);
+  if (GENERATED_DEFAULT.test(raw)) return { kind: 'generated' };
+  const body = stripCasts(raw);
+  if (/^null$/i.test(body)) return { kind: 'none' };
+  if (/^(true|false)$/i.test(body)) return { kind: 'literal', value: body.toLowerCase() === 'true' };
+  if (/^-?\d+(\.\d+)?$/.test(body)) return { kind: 'literal', value: Number(body) };
+  const quoted = body.match(/^'((?:[^']|'')*)'$/);
+  if (quoted) return { kind: 'literal', value: quoted[1].replace(/''/g, "'") };
+  return { kind: 'unknown' };
+}
+
+function valueMatchesDefault(value, def) {
+  if (def.kind === 'generated') return true;
+  if (def.kind !== 'literal') return false; // no default, or one that cannot be read: any value is data
+  const d = def.value;
+  if (typeof value === 'boolean') return typeof d === 'boolean' && value === d;
+  if (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value) && typeof d === 'number')) {
+    return typeof d === 'number' && Number(value) === d;
+  }
+  if (Array.isArray(value)) return typeof d === 'string' && d.trim() === '{}' && value.length === 0;
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    if (typeof d !== 'string') return false;
+    try { return JSON.stringify(JSON.parse(d)) === JSON.stringify(value); } catch { return false; }
+  }
+  if (typeof value === 'string') return typeof d === 'string' && value === d;
+  return false;
+}
+
+let columnMetaCache = null;
+async function customerColumnMeta(conn) {
+  if (columnMetaCache) return columnMetaCache;
+  const result = await conn.raw(`
+    SELECT column_name, column_default, is_generated
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'customers'`);
+  const meta = new Map((result.rows || []).map((r) => [r.column_name, { def: parseColumnDefault(r.column_default), generated: r.is_generated === 'ALWAYS' }]));
+  if (!meta.size) throw new Error('customers columns unreadable');
+  columnMetaCache = meta;
+  return meta;
+}
+
+// Customer columns holding a value the stub creator would not have written.
+async function readFieldFindings(row, conn) {
+  const meta = await customerColumnMeta(conn);
+  const findings = [];
+  for (const [column, value] of Object.entries(row)) {
+    if (value === null || value === undefined) continue;
+    if (STUB_CREATOR_COLUMNS.has(column)) continue;
+    const info = meta.get(column);
+    if (!info) {
+      if (!ROW_ALIASES.has(column)) findings.push(column);
+      continue;
+    }
+    if (info.generated || valueMatchesDefault(value, info.def)) continue;
+    findings.push(column);
+  }
+  return findings;
+}
+
+const holdsText = (column) => `holds ${column.replace(/_/g, ' ')} (${column})`;
+
+// The customers table's own pointer columns: declared FKs to customers(id)
+// and every *customer_id column (customers.referred_by_customer_id). The
+// generic FK scan skips the customers table itself.
+let selfRefCache = null;
+async function customerSelfReferenceColumns(conn) {
+  if (selfRefCache) return selfRefCache;
+  const result = await conn.raw(`
+    SELECT DISTINCT column_name FROM (
+      SELECT kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+      JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+      WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
+        AND tc.table_name = 'customers' AND ccu.table_name = 'customers' AND ccu.column_name = 'id'
+      UNION
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'customers' AND column_name ~ '(^|_)customer_id$'
+    ) refs ORDER BY column_name`);
+  selfRefCache = (result.rows || []).map((r) => r.column_name);
+  return selfRefCache;
+}
 
 // nonFkMergeRewrites keys that are a premise about the two ADDRESSES, not a
 // row the loser holds (the sprinkler "home changed" stamp lands on the
@@ -204,8 +306,7 @@ async function countTable(table, customerId, conn = db, columns = ['customer_id'
 // checked" — it blocks, like a found row (fail closed). `conn` is the
 // archive transaction on the commit's locked re-check.
 async function readEmptiness(stub, conn = db, winner = null) {
-  const { loserAutoBlockers, previewMergeEffects, nonFkMergeRewrites, REPOINT_EXCLUDED_TABLES, predictNoteAppends } = require('./customer-dedupe');
-  const { hasMembership } = require('./membership-state');
+  const { loserAutoBlockers, previewMergeEffects, nonFkMergeRewrites, REPOINT_EXCLUDED_TABLES } = require('./customer-dedupe');
   const found = Object.fromEntries(CHECKS.map((c) => [c.key, []]));
   const add = (key, text) => { if (!found[key].includes(text)) found[key].push(text); };
   const countText = (table, n) => (n === 'unknown' ? `${table} (could not be checked)` : `${n} ${table}`);
@@ -261,10 +362,25 @@ async function readEmptiness(stub, conn = db, winner = null) {
   }
   for (const text of await readAccountMembers(stub, conn)) add('account', text);
 
-  for (const column of customerOwnedText(stub, predictNoteAppends)) add('customer_text', column);
+  // A. Fields: every column outside the stub creator's list is NULL or its
+  // schema default. Unreadable schema refuses.
+  try {
+    for (const column of await readFieldFindings(stub, conn)) add('fields', holdsText(column));
+  } catch (err) {
+    logger.warn(`[intelligence-bar] delete_duplicate_customer: field check failed: ${err.message}`);
+    add('fields', 'the record fields could not be checked');
+  }
 
-  if (hasMembership({ waveguard_tier: stub.waveguard_tier, monthly_rate: 0 })) add('billing', `a ${stub.waveguard_tier} plan tier`);
-  if (Number(stub.account_credits || 0) > 0) add('referral_credit', `$${Number(stub.account_credits).toFixed(2)} account credit`);
+  // B (self references). Other customer rows pointing at this one.
+  try {
+    for (const column of await customerSelfReferenceColumns(conn)) {
+      const n = await countTable('customers', stub.id, conn, [column]);
+      if (n !== 0) add('customer_links', n === 'unknown' ? `customers.${column} (could not be checked)` : `${n} customers.${column}`);
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar] delete_duplicate_customer: customer self-reference check failed: ${err.message}`);
+    add('customer_links', 'the customer pointer columns could not be checked');
+  }
 
   return found;
 }
@@ -281,17 +397,15 @@ function notEmptyRefusal(found) {
 }
 
 
-// The whole refusal for the engine's locked section: null when the loser is
-// empty, else { error, code: 'not_empty', found }. `winner` is the kept row.
-async function emptyLoserRefusal(conn, winner, loser) {
-  return notEmptyRefusal(await readEmptiness(loser, conn, winner));
-}
-
 module.exports = {
   CHECKS,
   categoryFor,
   readEmptiness,
   notEmptyRefusal,
-  emptyLoserRefusal,
+  STUB_CREATOR_COLUMNS,
+  parseColumnDefault,
+  valueMatchesDefault,
+  readFieldFindings,
+  _resetCaches: () => { columnMetaCache = null; selfRefCache = null; },
   primaryPropertyEdits,
 };
