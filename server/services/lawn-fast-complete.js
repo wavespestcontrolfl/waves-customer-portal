@@ -1151,7 +1151,7 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, packetContext } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes, packetContext, propertyServiceArea = null, actor = null } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
   if (!featureGates.lawnFastCompleteLive()) {
@@ -1259,7 +1259,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   // GATE_LAWN_MIX_HELP: gallons sprayed become the recorded spot area first (lawn-mix-help.js), so the places are judged on it.
   return require('./lawn-sod-sheet').checkNoProductNote({
     knex, svc, products, technicianNotes,
-    next: () => require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products })),
+    next: () => require('./lawn-mix-help').withSprayedGallons({ knex, svc, products, loadPlan, propertyServiceArea, actor }, () => require('./lawn-trouble-areas').preflightPlaces({ knex, svc, products })),
   });
 }
 

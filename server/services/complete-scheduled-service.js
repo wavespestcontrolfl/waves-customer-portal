@@ -4802,6 +4802,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           products,
           packetContext,
           technicianNotes,
+          propertyServiceArea,
+          actor: completionInput.actor,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(
