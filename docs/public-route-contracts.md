@@ -833,6 +833,41 @@ offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
 (`checkArrivalPlacement`) stays append-only too.
 
+Reschedule move limits (owner 2026-10-09; `GATE_RESCHEDULE_MOVE_LIMITS`, dark,
+read at call time in `services/scheduling/customer-move-limits.js`; rules in
+`docs/gates-and-env.md`). While set: `GET /api/public/reschedule/:token` may
+answer `state: 'not_reschedulable'`, `reason: 'move_limit'` (a never-serviced
+customer's visit after 2 online moves), and for a movable visit carries
+`moveLimit: { laterByOffice, noTimeSoon }`. `laterByOffice` is true when the
+late-move limit is applied: `availability` then holds no day after the
+visit's limit date, `find-slots` drops the same days, and the page says later
+dates go through the office. No date is sent, because the limit date need not
+have an open time. It is false when the visit has no plan allowance, when the
+limit is at or past the end of the booking range (it drops no day), or when
+fewer than 3 times would remain inside it (the limit is then not applied).
+`noTimeSoon` is true when no time is open in
+the next 7 days. `POST .../find-slots` and the commit route's `SLOT_TAKEN`
+refresh carry the same key for the list they return, and the client replaces
+what it holds with that answer (no key = no line). The key is OMITTED when the
+gate is off, the visit is a missed visit, or the move history cannot be read. `POST /api/public/reschedule/:token`
+answers `409 { code: 'MOVE_LIMIT' }` for a date past an applied limit or a
+blocked first visit, after its idempotent replay; the client reloads.
+`find-slots` answers `409 { code: 'MOVE_LIMIT', reason: 'move_limit' }` for a
+blocked first visit, and the client reloads there too. The commit route's
+`SLOT_TAKEN` refresh reads the visit again first: when its date, start,
+status or plan cadence changed since the request loaded it (another tab moved, rebooked or
+closed it), the answer is `409 SCOPE_CHANGED` and the page reloads (only
+while this gate is set). When the whole-range list that decides the
+limit cannot be built and the limit's date is inside the range (not before its first day), `find-slots`
+and Confirm answer `503 { code: 'LIMIT_UNAVAILABLE' }` (retry); they never
+show or commit a date the limit may hold back. When no limit date is inside the range, `find-slots` builds no whole-range
+list and sends `moveLimit: { laterByOffice: false }` with no `noTimeSoon`
+(the client keeps the `noTimeSoon` the first load set). `find-slots` makes the same check after its
+availability build and answers `409 SCOPE_CHANGED` (the client reloads).
+Confirm also answers `409 SCOPE_CHANGED` when the
+locked visit's plan cadence (`recurring_pattern`, `recurring_interval_days`) is
+not the one the request loaded: the allowance comes from it.
+
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
 dark, read at call time in `routes/reschedule-public.js`): `GET
 /api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.

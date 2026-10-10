@@ -364,6 +364,9 @@ const gates = {
   // Customer-facing pickers stop at a 16:00 start (dark). Registered for logGateStatus only;
   // scheduling/customer-windows.js reads the env at call time.
   customerLastStart16: gateEnvValue('GATE_CUSTOMER_LAST_START_16'),
+  // Customer reschedule page move limits: late-move limit by plan + 2 online moves of a first visit (dark).
+  // Registered for logGateStatus only; scheduling/customer-move-limits.js reads the env at call time.
+  rescheduleMoveLimits: gateEnvValue('GATE_RESCHEDULE_MOVE_LIMITS'),
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
   customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).

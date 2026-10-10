@@ -755,6 +755,115 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument();
   });
 
+  it('move limits: says later dates go through the office, and names no date (GATE_RESCHEDULE_MOVE_LIMITS)', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { laterByOffice: true, noTimeSoon: false } })) });
+    renderPage();
+    const note = await screen.findByTestId('move-limit-note');
+    expect(note).toHaveTextContent('Need a later date than the ones shown? Text or call us and we\'ll find a time.');
+    expect(note).not.toHaveTextContent('next 7 days');
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on/ })).toBeInTheDocument();
+  });
+
+  it('move limits: says when nothing is open in the next 7 days; no note when the server sends neither', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { laterByOffice: false, noTimeSoon: true } })) });
+    const { unmount } = renderPage();
+    expect(await screen.findByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
+    unmount();
+
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { laterByOffice: false, noTimeSoon: false } })) });
+    renderPage();
+    await screen.findByRole('button', { name: /Choose 1:00 PM on/ });
+    expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument();
+  });
+
+  it('move limits: a slot-taken refresh that carries no limit clears the line', async () => {
+    const payload = reschedulablePayload({ moveLimit: { laterByOffice: true, noTimeSoon: false } });
+    stubFetch({
+      get: jsonResponse(payload),
+      post: jsonResponse({
+        error: 'That time is no longer open. Here are the latest available times.',
+        code: 'SLOT_TAKEN',
+        availability: payload.availability,
+      }, 409),
+    });
+    renderPage();
+    expect(await screen.findByTestId('move-limit-note')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument());
+  });
+
+  it('move limits: a search that sends no noTimeSoon keeps the value the first load set', async () => {
+    const payload = reschedulablePayload({ moveLimit: { laterByOffice: false, noTimeSoon: true } });
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        return Promise.resolve(jsonResponse({ availability: payload.availability, summary: 'next friday', moveLimit: { laterByOffice: false } }));
+      }
+      if (!opts.method || opts.method === 'GET') return Promise.resolve(jsonResponse(payload));
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    expect(await screen.findByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
+    fireEvent.change(await screen.findByLabelText('Search for a service date or time'), { target: { value: 'next friday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([u]) => String(u).includes('/find-slots'))).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
+  });
+
+  it('move limits: a search that meets MOVE_LIMIT reloads the page into the text-us card', async () => {
+    let getCalls = 0;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ error: 'Text or call us.', reason: 'move_limit', code: 'MOVE_LIMIT' }, 409));
+      if (!opts.method || opts.method === 'GET') {
+        getCalls += 1;
+        return Promise.resolve(jsonResponse(getCalls === 1
+          ? reschedulablePayload()
+          : { ...reschedulablePayload(), state: 'not_reschedulable', reason: 'move_limit', availability: null }));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    const input = await screen.findByLabelText('Search for a service date or time');
+    fireEvent.change(input, { target: { value: 'next friday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByTestId('move-limit-card')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Choose 1:00 PM on/ })).not.toBeInTheDocument();
+  });
+
+  it('move limits: a search that meets SCOPE_CHANGED reloads the page and shows no error', async () => {
+    let getCalls = 0;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) return Promise.resolve(jsonResponse({ error: 'plan just updated', code: 'SCOPE_CHANGED' }, 409));
+      if (!opts.method || opts.method === 'GET') {
+        getCalls += 1;
+        return Promise.resolve(jsonResponse(reschedulablePayload()));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+    }));
+    renderPage();
+    const input = await screen.findByLabelText('Search for a service date or time');
+    fireEvent.change(input, { target: { value: 'next friday' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(getCalls).toBe(2));
+    expect(screen.queryByText('plan just updated')).not.toBeInTheDocument();
+  });
+
+  it('move limits: a first visit past its online moves shows the text-us card, not an error', async () => {
+    stubFetch({ get: jsonResponse({ ...reschedulablePayload(), state: 'not_reschedulable', reason: 'move_limit', availability: null }) });
+    renderPage();
+    expect(await screen.findByText(/let's find a time that works/)).toBeInTheDocument();
+    expect(screen.getByTestId('move-limit-card')).toHaveTextContent('our team will set the next time with you');
+    expect(screen.getByRole('link', { name: 'Text Waves' })).toBeInTheDocument();
+    expect(screen.queryByText(/we can't move this one online/)).not.toBeInTheDocument();
+  });
+
   it('the commit POST discloses the collective scope the page rendered under (codex P1)', async () => {
     const fetchMock = stubFetch({
       get: jsonResponse(reschedulablePayload({ isRecurring: true, collectiveAnchor: true })),
