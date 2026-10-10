@@ -134,7 +134,10 @@ async function closeResolved(bucket, { nowDate, clearedIds }) {
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
-        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed']);
+        // No arrival time any more: nothing to overlap, and that visit is the
+        // recurring-placement alert's (Codex #6253 r6).
+        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed'])
+          .whereRaw('s.window_start IS NOT NULL');
         if (cleared.length) q.whereNotIn('s.id', cleared);
       },
       resolvedTitle: RESOLVED_TITLE,
@@ -170,8 +173,14 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
     const { raiseAdminAlert } = require('../admin-alert-compose');
     const { shortDateET } = require('../admin-alert-names');
     const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
+    // The allowance counts a key once (audit.recentBudgetKeys), so a key may
+    // ring once in 24 hours: one that already rang is not written again,
+    // closed-and-reopened or with new wording (Codex #6253 r6). Its notice,
+    // when open, stays as it is.
+    const rung = await audit.recentBudgetKeys();
     let left = await audit.ringsLeft();
-    for (const item of audit.withinRingBudget([...bucket.values()], standing, Infinity, (row) => row.key)) {
+    const due = [...bucket.values()].filter((item) => !rung.has(item.key));
+    for (const item of audit.withinRingBudget(due, standing, Infinity, (row) => row.key)) {
       // Allowance spent: nothing more is written, a standing notice included.
       // Its refresh is free only when it does not ring, and a refresh whose
       // text changed can ring (audit.noticeRang: deduped and rung), which

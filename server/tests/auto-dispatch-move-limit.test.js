@@ -16,6 +16,7 @@ jest.mock('../services/auto-dispatch/audit', () => {
     noticeRang: actual.noticeRang,
     ringsLeft: jest.fn(async () => 10),
     standingNoticeKeys: jest.fn(async () => new Set()),
+    recentBudgetKeys: jest.fn(async () => new Set()),
     retireResolvedNotices: jest.fn(async () => {}),
     namedVisitAction: jest.fn(async (_id, _templates, generic) => generic),
   };
@@ -156,6 +157,17 @@ describe('needs-a-person notice', () => {
     expect(clearedOf().cleared).toEqual([]);
     // The visit's own row decides the rest: its date and its status.
     expect(clearedOf().sql).toMatch(/scheduled_date::text = notifications\.metadata->>'scheduledDate'/);
+    // A visit whose arrival time was removed has nothing to overlap.
+    expect(clearedOf().sql).toMatch(/s\.window_start IS NOT NULL/);
+  });
+
+  test('a key that already rang in the last 24 hours is not written again', async () => {
+    const bucket = new Map();
+    notice.collect(bucket, visit('rang', '2026-11-01'), 'no_slot', { kind: 'overlap' });
+    notice.collect(bucket, visit('fresh', '2026-11-02'), 'no_slot', { kind: 'overlap' });
+    audit.recentBudgetKeys.mockResolvedValueOnce(new Set(['auto-dispatch-needs-person:rang:2026-11-01']));
+    expect(await notice.raiseNotices(bucket)).toBe(1);
+    expect(raiseAdminAlert.mock.calls.map(([, spec]) => spec.subject.id)).toEqual(['fresh']);
   });
 
   test('an empty run still closes what its proof allows, and raises nothing', async () => {

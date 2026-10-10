@@ -297,8 +297,7 @@ async function standingConflict(seen, id) {
 }
 
 // Every visit whose conflict the run must read at its end: the ledger (each
-// visit the run evaluated in conflict), every other loaded visit the run has
-// no clear read for (a freeze, an inactive plan, a person-placed visit or a
+// visit the run evaluated in conflict), every other loaded visit (a freeze, an inactive plan, a person-placed visit or a
 // missing preference skips it before any conflict read, and an evaluation
 // can fail: Codex #6253 r5 P1), the members a partial group move
 // left behind (a one-time add-on is never loaded by the scan, so it has no
@@ -312,11 +311,11 @@ async function conflictsToSettle(run) {
   const unseen = (extra) => ({ service: null, conflict: null, ctx: { db, conflictMoves: true }, ...extra });
   for (const service of run.loaded) {
     const id = String(service.id);
-    if (!pending.has(id) && !run.clearedIds.has(id)) pending.set(id, unseen({ service, reason: 'SKIPPED' }));
+    if (!pending.has(id)) pending.set(id, unseen({ service, reason: 'SKIPPED' }));
   }
   for (const id of run.strandedIds) if (!pending.has(id)) pending.set(id, unseen({ reason: 'ERROR' }));
   for (const id of await needsPerson.standingVisitIds()) {
-    if (!pending.has(id) && !run.clearedIds.has(id)) pending.set(id, unseen({ noticeOnly: true }));
+    if (!pending.has(id)) pending.set(id, unseen({ noticeOnly: true }));
   }
   return pending;
 }
@@ -329,7 +328,12 @@ async function conflictsToSettle(run) {
 // nothing and closes its standing notice. A re-read that fails keeps what
 // the run saw (nothing, for a visit it never evaluated). Never throws.
 async function settleConflicts(run) {
-  for (const [id, seen] of await conflictsToSettle(run)) {
+  const pending = await conflictsToSettle(run);
+  // A clear read from earlier in the run is not proof at its end: a person
+  // can create an overlap while the run works (Codex #6253 r6). Only this
+  // final read fills clearedIds.
+  run.clearedIds.clear();
+  for (const [id, seen] of pending) {
     let now = seen.conflict ? seen : null;
     try {
       now = await standingConflict(seen, id);

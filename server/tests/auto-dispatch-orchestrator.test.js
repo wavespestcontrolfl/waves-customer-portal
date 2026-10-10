@@ -38,6 +38,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   standingMissingGeoKeys: jest.fn(async () => new Set()),
   ringsLeft: jest.fn(async () => 10),
   standingNoticeKeys: jest.fn(async () => new Set()),
+  recentBudgetKeys: jest.fn(async () => new Set()),
   retireResolvedNotices: jest.fn(async () => {}),
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
@@ -1376,6 +1377,7 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/overlaps another stop, and auto-dispatch did not move it/);
     // The same refusal on a visit that is not in conflict tells nobody.
     raiseAdminAlert.mockClear();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
     apply.previewGroupMove.mockResolvedValueOnce({ code: 'GROUP_MEMBER_GUARD', description: 'a sibling reached the move limit' });
     await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
@@ -1513,7 +1515,8 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       return q.whereNotIn.mock.calls.flatMap(([, ids]) => ids);
     };
 
-    test('a visit evaluated with the conflict read on and found clear is proof', async () => {
+    test('a visit read clear at the end of the run is proof', async () => {
+      rowReads();
       candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
       await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
       expect(provenClear()).toEqual(['s1']);
@@ -1572,9 +1575,19 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     expect(raiseAdminAlert.mock.calls[0][1]).toMatchObject({ why: expect.stringMatching(/closed day.*no open slot/) });
 
     raiseAdminAlert.mockClear();
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(null);
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
     await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  // Codex #6253 r6: a clear read from earlier in the run is not final.
+  test('a visit read clear in pass 1 that a person put into an overlap during the run raises the notice', async () => {
+    rowReads();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [] });
+    candidateSlots._internals.readCurrentConflict.mockResolvedValue(OVERLAP);
+    await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(noticedIds()).toEqual(['s1']);
   });
 
   // Codex #6253 r3: nothing moved in the run, but a person cancelled the
