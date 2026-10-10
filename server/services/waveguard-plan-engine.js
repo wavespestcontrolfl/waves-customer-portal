@@ -745,7 +745,7 @@ async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}
   const areas = require('./lawn-trouble-areas');
   try {
     const found = await savepointRead(knex, async (k) => {
-      const propertyId = await areas.propertyOf(k, service);
+      const propertyId = await areas.propertyOf(k, service, { strict });
       return propertyId ? areas.loadActive(k, propertyId) : [];
     });
     return found.some((area) => area.type === type);
@@ -1892,7 +1892,9 @@ async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
 async function loadVisitForPlan(knex, id, scope = (q) => q) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) return null;
   return (await scope(knex('scheduled_services').where({ 'scheduled_services.id': id }))
-    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'lawn_protocol_version', 'lawn_protocol_key', 'lawn_protocol_window_key')) || null;
+    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'lawn_protocol_version', 'lawn_protocol_key', 'lawn_protocol_window_key',
+      // The stamped address: the property resolver's evidence for a visit with no property_id (the November nitrogen rule).
+      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')) || null;
 }
 
 // The city a booked visit is judged under, resolved the way the plan resolves it (the stamped visit

@@ -243,6 +243,22 @@ describe('the property read and the trouble-area read share one savepoint (codex
     expect(log).toEqual(['SAVEPOINT SP', 'propertyOf', 'ROLLBACK TO SAVEPOINT SP', 'RELEASE SAVEPOINT SP']);
   });
 
+  // Codex #6256 r6: the resolver is told the reader is strict, and the tank sheet's visit carries the resolver's address evidence.
+  test('the property read is asked strict only for a strict reader', async () => {
+    areas.propertyOf.mockClear();
+    await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: true });
+    expect(areas.propertyOf.mock.calls[0][2]).toEqual({ strict: true });
+    await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true });
+    expect(areas.propertyOf.mock.calls[1][2]).toEqual({ strict: false });
+  });
+
+  test('loadVisitForPlan reads the stamped address the property resolver uses', async () => {
+    let columns = null;
+    const query = { where: () => query, first: async (...cols) => { columns = cols; return { id: 'v' }; } };
+    await engine.loadVisitForPlan(() => query, '00000000-0000-4000-8000-000000000001');
+    expect(columns).toEqual(expect.arrayContaining(['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip']));
+  });
+
   test('strict with a good read: the same cut; strict with the gate off: no read at all', async () => {
     expect(await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: true })).toBe(0.5);
     delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
