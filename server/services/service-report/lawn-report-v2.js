@@ -535,6 +535,26 @@ function buildAftercare(applications, opts = {}) {
       waterInBy: instruction.waterInBy || null,
     });
   }
+  // GATE_LAWN_WATER_IN_RAIN: rain since the visit has watered the treatment in (read-time state, never frozen). The
+  // sentences are the instruction's own; no water-in is owed, so nothing is credited to the weekly plan. A hold line the
+  // visit had is still a hold, so the hold verdict and its task stay.
+  if (instruction && instruction.state === 'water_in_by_rain' && Array.isArray(instruction.lines) && instruction.lines.length >= 2) {
+    const holdKept = instruction.lines.length > 2;
+    return normalizeLawnAftercare({
+      watering: instruction.lines.join(' '),
+      reentry,
+      waterInRequired: false,
+      wateringHold: holdKept,
+      creditableWaterIn: false,
+      needsReview: false,
+      neutral: false,
+      evidenceSource: 'product_instruction',
+      ruleSource: instruction.ruleSource || null,
+      ...(holdKept ? { holdTask: instruction.lines[0] } : {}),
+      holdUntil: instruction.holdUntil || null,
+      waterInBy: instruction.waterInBy || null,
+    });
+  }
   if (instruction && instruction.state === 'none') {
     return {
       watering: NEUTRAL_AFTERCARE, reentry, waterInRequired: false, neutral: true, ruleSource: instruction.ruleSource || null,

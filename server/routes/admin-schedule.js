@@ -135,6 +135,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
   activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
@@ -25312,6 +25313,10 @@ async function generateReportCopyWithFallback({
   // Under the writer rules only the four-section report is accepted; the
   // deterministic fallback keeps the two-section shape.
   requireSections = false,
+  // (draft, rejection, { sameProvider }) => text added to the user message of
+  // the next attempt, so a rejected draft is repaired and not written blind
+  // again. Absent: the next attempt gets the same message (lawn, tree and shrub).
+  repairNote,
   providers = [
     {
       name: MODELS.TEXT_POLICIES.report.primary.provider,
@@ -25327,6 +25332,8 @@ async function generateReportCopyWithFallback({
 } = {}) {
   const failures = [];
   let lastRejection = null;
+  // The last rejected draft and who wrote it, for `repairNote`.
+  let rejected = null;
   // Shared wall-clock budget for the whole chain (2 providers × ≤2 attempts).
   // These direct adapter calls previously carried NO timeout, so a stalled
   // primary sat on callOpenAI's 10-minute default and the admin request died
@@ -25353,7 +25360,7 @@ async function generateReportCopyWithFallback({
           laneId: 'report_copy',
           model: provider.model,
           system: systemPrompt,
-          text: userMessage,
+          text: userMessage + repairNoteFor(repairNote, rejected, provider.name),
           jsonMode: false,
           maxTokens,
           timeoutMs: Math.min(remainingMs, REPORT_CALL_TIMEOUT_MS),
@@ -25390,6 +25397,7 @@ async function generateReportCopyWithFallback({
       }
 
       lastRejection = rejection;
+      rejected = { draft: report, rejection: repairReasonFor(rejection, parsed), provider: provider.name };
       logger.warn(
         `[generate-report] ${provider.name} attempt ${attempt} rejected (${rejection})${attempt < 2 ? '; retrying' : '; trying backup'}`,
       );
@@ -25404,6 +25412,26 @@ async function generateReportCopyWithFallback({
     rejection: lastRejection,
     failures,
   };
+}
+
+// The repair note for the writer rules' drafts: what the draft broke, and the
+// draft itself only for the provider that wrote it.
+const writerRepairNote = (screenInputs) => (draft, rejection, { sameProvider }) => rejectedDraftRepairNote({
+  draft, rejection, detail: writerRulesRejectionDetail(draft, screenInputs), includeDraft: sameProvider,
+});
+
+// A draft in the right shape that trips the parser's own word screen comes
+// back with no body, so it reads as 'malformed_shape' (kept for the log and
+// the response). The repair note names the words instead: telling the writer
+// its titles were wrong would leave the real fault in the next draft.
+function repairReasonFor(rejection, parsed) {
+  const words = rejection === 'malformed_shape' && Array.isArray(parsed?.violations) ? parsed.violations.map(String).filter(Boolean) : [];
+  return words.length ? `banned:${words.join(',')}` : rejection;
+}
+
+function repairNoteFor(repairNote, rejected, providerName) {
+  if (typeof repairNote !== 'function' || !rejected) return '';
+  return repairNote(rejected.draft, rejected.rejection, { sameProvider: rejected.provider === providerName }) || '';
 }
 
 // Last-resort copy when both AI providers miss. Only structured, technician-
@@ -26796,7 +26824,7 @@ Service Date: ${serviceDate || 'Not specified'}
 Arrival Time: ${arrivalTime || 'Not specified'}
 
 ${writerRulesOn
-    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
+    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}${noteAbsenceHint(promptNotes)}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
 Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}${sweepNotDone === true ? `\n${SWEEP_NOT_DONE_LINE}` : ''}${stationLines.completed}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
@@ -26952,11 +26980,14 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+    const writerScreenInputs = {
+      activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
+    };
     const writerRulesScreen = (text) => (writerRulesOn
-      ? writerRulesRejection(text, {
-        activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
-      })
+      ? writerRulesRejection(text, writerScreenInputs)
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // Under the writer rules a rejected draft goes back with what it broke.
+    const repairNote = writerRepairNote(writerScreenInputs);
     // A cached draft is served only if it still passes both screens as they
     // read now: a product, alias or active ingredient added since it was
     // cached must not ride out on the cache.
@@ -26983,7 +27014,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         lawnTimingUnchecked = false;
         return lawnDraftTimingRejection(text, { remainingMs, onUnchecked: () => { lawnTimingUnchecked = true; } });
       },
-      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
+      ...(writerRulesOn ? { maxTokens: 2000, requireSections: true, repairNote } : {}),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
