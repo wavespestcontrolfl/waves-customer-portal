@@ -5403,7 +5403,8 @@ async function archiveCustomerAsAdmin({ customerId, actor = {}, precheck = null 
 }
 
 // PATCH /api/admin/customers/:id/restore — restore a soft-deleted customer (admin only)
-router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
+router.patch('/:id/restore', requireAdmin, customerRestoreHandler);
+async function customerRestoreHandler(req, res, next) {
   try {
     const customer = await db('customers').where({ id: req.params.id }).whereNotNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found or not deleted' });
@@ -5458,7 +5459,30 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
     if (err && err.restoreNotDeleted) return res.status(404).json({ error: err.message });
     next(err);
   }
-});
+}
+
+// The customer-page restore without an HTTP request — the Intelligence Bar's
+// delete_duplicate_customer undoes its own delete with this when history
+// landed on the record after the emptiness check. Same pattern as
+// archiveCustomerAsAdmin: it runs the route's own handler above and resolves
+// the reply it would send, { status, json }; an error passed to next()
+// rejects.
+async function restoreCustomerAsAdmin({ customerId, actor = {} }) {
+  const req = {
+    params: { id: customerId },
+    technicianId: actor.technicianId || null,
+    ip: null,
+    get: (name) => (String(name).toLowerCase() === 'user-agent' ? (actor.userAgent || 'intelligence-bar') : undefined),
+  };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    customerRestoreHandler(req, res, reject).catch(reject);
+  });
+}
 
 // GET /api/admin/customers/:id/deposit-credit — the customer's open
 // (unapplied, unrefunded) estimate-deposit balance, if any. Used by the
@@ -6719,6 +6743,7 @@ router.ensureCustomerAccount = ensureCustomerAccount;
 router.findAccountByContact = findAccountByContact;
 // Same handler as DELETE /:id — see archiveCustomerAsAdmin above.
 router.archiveCustomerAsAdmin = archiveCustomerAsAdmin;
+router.restoreCustomerAsAdmin = restoreCustomerAsAdmin;
 // Canonical membership predicate — consumers (estimate edit-source) must
 // classify sentinel tiers (One-Time/Commercial/...) the same way this file
 // does rather than re-deriving from raw tier truthiness.

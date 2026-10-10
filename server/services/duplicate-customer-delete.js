@@ -36,11 +36,13 @@
  * version (`_version`) and every check result, so the route's fingerprint
  * pin refuses Confirm when either changed. The commit then re-checks the
  * approved version and every check INSIDE the archive transaction, under
- * the customer row lock, before any write.
+ * the customer row lock, before any write, and once more after the commit
+ * (commit-then-verify: a record that gained history is restored at once).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
 
 // Tables a pointer may sit in without making the record "not empty".
 // customer_properties is allowed only as ONE primary row (checked below).
@@ -208,10 +210,17 @@ function customerName(row) {
   return `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
 }
 
+// The date a record was created, as the office sees it: the repo's Eastern
+// calendar date (utils/datetime-et etDateString). The database session runs
+// in UTC, so formatting the timestamp in SQL puts an evening record on the next
+// day.
+const createdOnET = (row) => (row.created_at ? etDateString(new Date(row.created_at)) : null);
+
 async function loadStub(customerId, conn = db) {
-  return conn('customers').where({ id: customerId })
-    .select('*', db.raw('updated_at::text AS version'), db.raw("to_char(created_at, 'YYYY-MM-DD') AS created_on"))
+  const row = await conn('customers').where({ id: customerId })
+    .select('*', db.raw('updated_at::text AS version'))
     .first();
+  return row ? { ...row, created_on: createdOnET(row) } : row;
 }
 
 // Above this many records sharing the contact the bar does not decide.
@@ -230,10 +239,10 @@ async function findLiveTwins(stub, conn = db) {
       if (phone) q.orWhereRaw("right(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone]);
       if (email) q.orWhereRaw('lower(email) = ?', [email]);
     })
-    .select('*', db.raw("to_char(created_at, 'YYYY-MM-DD') AS created_on"))
+    .select('*')
     .orderBy('created_at', 'asc')
     .limit(TWIN_LIMIT);
-  return rows.filter((r) => String(r.id) !== String(stub.id));
+  return rows.filter((r) => String(r.id) !== String(stub.id)).map((r) => ({ ...r, created_on: createdOnET(r) }));
 }
 
 function twinView(stub, r) {
@@ -251,11 +260,36 @@ function twinView(stub, r) {
   };
 }
 
-// The selected record must be the one the duplicate engine would DISCARD
-// against every live record sharing its phone or email (customer-dedupe.js
-// decideWinner — the queue's own pickWinner + business weight). No twin, or
-// the engine keeping this record over any twin, refuses. Refusals never name
-// a person (the route runs the preview before validating the target).
+// The selected record must be a duplicate the existing merge machinery would
+// accept, not merely one that loses a keep/discard comparison. Reused as is
+// (customer-dedupe.js):
+//   - duplicatePairEligibility(twin, stub): the duplicate queue's own verdict
+//     on the pair — phone identity clusters, name and address conflicts
+//     (red tier, address conflict), live/active state, operator "not a
+//     duplicate" dismissals. Same call executeMerge makes under its lock.
+//   - rowLevelMergeConflict + dbLevelMergeConflict: every other refusal the
+//     merge executor raises (billing, payer, a loser in a multi-property
+//     account with other live members, ...).
+// The queue is phone-keyed and there is no email-keyed pair check, so a
+// record whose only link is a shared email is refused. Account ownership has
+// one case the merge handles by promoting the winner (a primary profile with
+// siblings in its account); a delete has no winner to promote, so it refuses.
+// Refusals never name a person (the route runs the preview before validating
+// the target).
+async function accountPrimaryRefusal(stub, conn) {
+  if (!stub.account_id || stub.is_primary_profile !== true) return null;
+  const sibling = await conn('customers')
+    .where({ account_id: stub.account_id })
+    .whereNull('deleted_at')
+    .whereNot('id', stub.id)
+    .first('id');
+  if (!sibling) return null;
+  return {
+    error: 'This record is the primary profile of a multi-property account that has other live members — deleting it would strand them. Reconcile the account first, or use merge_customers.',
+    code: 'account_primary_has_members',
+  };
+}
+
 async function duplicateRoleRefusal(stub, twins, conn) {
   if (!twins.length) {
     return { error: 'No live duplicate found — this tool only removes a duplicate of a real customer (no other live record shares its phone or email).', code: 'no_duplicate' };
@@ -263,17 +297,36 @@ async function duplicateRoleRefusal(stub, twins, conn) {
   if (twins.length >= TWIN_LIMIT) {
     return { error: `At least ${TWIN_LIMIT} live records share this phone or email — resolve these from the duplicates queue instead.`, code: 'too_many_duplicates' };
   }
-  const { decideWinner } = require('./customer-dedupe');
-  for (const twin of twins) {
-    const kept = await decideWinner(conn, [stub, twin]);
-    if (String(kept.id) === String(stub.id)) {
-      return {
-        error: 'The duplicate engine keeps this record over another live record that shares its phone or email — this is the record to keep, not the duplicate. Select the other record, or use merge_customers.',
-        code: 'not_the_duplicate',
-      };
-    }
+  const phone = phone10(stub.phone);
+  const phoneTwins = phone ? twins.filter((r) => phone10(r.phone) === phone) : [];
+  if (!phoneTwins.length) {
+    return {
+      error: 'The only live record linked to this one shares an email, not a phone. The duplicate queue is phone-based and the bar has no email duplicate check, so it will not delete this record. Use merge_customers or the customer page.',
+      code: 'email_only_duplicate',
+    };
   }
-  return null;
+  const { duplicatePairEligibility, rowLevelMergeConflict, dbLevelMergeConflict } = require('./customer-dedupe');
+  let firstVerdict = null;
+  let retained = null;
+  for (const twin of phoneTwins) {
+    const verdict = await duplicatePairEligibility(twin.id, stub.id, conn);
+    if (verdict.eligible) { retained = twin; break; }
+    firstVerdict = firstVerdict || verdict;
+  }
+  if (!retained) {
+    return {
+      error: `The duplicate queue does not list this record as a mergeable duplicate of the record sharing its phone (${firstVerdict?.code || 'not_in_queue'}: ${firstVerdict?.reason || 'pair is not a queue candidate'}). Select the other record, or use merge_customers.`,
+      code: 'not_a_mergeable_duplicate',
+      pair_code: firstVerdict?.code || 'not_in_queue',
+    };
+  }
+  const conflict = rowLevelMergeConflict(retained, stub) || await dbLevelMergeConflict(conn, retained, stub);
+  if (conflict) {
+    return { error: `The merge path would refuse this duplicate (${conflict.code}: ${conflict.message}). Use merge_customers after resolving it.`, code: 'merge_conflict', merge_code: conflict.code };
+  }
+  const accountRefusal = await accountPrimaryRefusal(stub, conn);
+  if (accountRefusal) return accountRefusal;
+  return { retained };
 }
 
 async function countTable(table, customerId, conn = db, columns = ['customer_id']) {
@@ -358,7 +411,7 @@ function notEmptyRefusal(found) {
   };
 }
 
-const RESTORE_LINE = 'Restorable: the admin restore route (PATCH /api/admin/customers/:id/restore) brings it back. The customer page has no Restore button yet.';
+const RESTORE_LINE = 'Restorable: an admin can bring it back (PATCH /api/admin/customers/:id/restore); the customer page has no Restore button yet. If history lands on the record while it is being deleted, the bar restores it at once and says so.';
 const NO_MESSAGE_LINE = 'No customer message is sent';
 
 async function previewDeleteDuplicateCustomer(customerId) {
@@ -369,13 +422,13 @@ async function previewDeleteDuplicateCustomer(customerId) {
   const refusal = notEmptyRefusal(await readEmptiness(stub));
   if (refusal) return refusal;
   const twinRows = await findLiveTwins(stub);
-  const roleRefusal = await duplicateRoleRefusal(stub, twinRows, db);
-  if (roleRefusal) return roleRefusal;
+  const role = await duplicateRoleRefusal(stub, twinRows, db);
+  if (role.error) return role;
 
-  const twins = twinRows.map((r) => twinView(stub, r));
+  const twins = twinRows.map((r) => ({ ...twinView(stub, r), retained: String(r.id) === String(role.retained.id) }));
   const checks = Object.fromEntries(CHECKS.map((c) => [c.label, 'none']));
   const stubLine = identityLine(stub);
-  const twinLine = twinRows.map((r, i) => `${identityLine(r)} — shares ${twins[i].shares}; stays as is`).join(' | ');
+  const twinLine = twinRows.map((r, i) => `${identityLine(r)} — shares ${twins[i].shares}${twins[i].retained ? '; the duplicate queue keeps this one' : ''}; stays as is`).join(' | ');
   return {
     preview: true,
     customer_id: stub.id,
@@ -400,10 +453,20 @@ async function previewDeleteDuplicateCustomer(customerId) {
 // The decisive check runs INSIDE the archive transaction, after the
 // customer row lock and before any write (archiveCustomerAsAdmin's
 // precheck): the record must still be live, still at the approved version
-// (the card's `_version`, pinned by the route), and still empty. A throw
-// rolls the archive back. Writers that add history rows do not take the
-// customer row lock, so a row that commits after this read attaches to a
-// soft-deleted, restorable record — the same as against the page's delete.
+// (the card's `_version`, pinned by the route), still empty, and still a
+// duplicate the merge machinery accepts.
+//
+// What the row lock does and does not fence. The archive takes FOR UPDATE on
+// the customer row, which conflicts with the FOR KEY SHARE every foreign-key
+// child insert takes on its parent: a visit or invoice insert in flight
+// finishes before the lock is granted, and a new one waits for the commit. A
+// pointer with no foreign key (a call, text or lead matched by phone or
+// email, a polymorphic notification pointer) takes no such lock, and no
+// shared advisory lock exists that every history writer takes (the merge
+// executor says the same, lockSameNameGroupRows). So after the archive
+// commits the same emptiness check runs again on the committed state; if
+// anything attached in the window, the record is restored at once through
+// the customer page's own restore handler and the operator is told.
 async function commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion = null) {
   const changed = (error, code) => Object.assign(new Error(error), { previewChanged: true, code });
   const precheck = async (trx) => {
@@ -414,27 +477,66 @@ async function commitDeleteDuplicateCustomer(customerId, actionContext, approved
     }
     const refusal = notEmptyRefusal(await readEmptiness(row, trx))
       || await duplicateRoleRefusal(row, await findLiveTwins(row, trx), trx);
-    if (refusal) throw changed(refusal.error, refusal.code);
+    if (refusal && refusal.error) throw changed(refusal.error, refusal.code);
   };
-  const { archiveCustomerAsAdmin } = require('../routes/admin-customers');
+  const { archiveCustomerAsAdmin, restoreCustomerAsAdmin } = require('../routes/admin-customers');
+  const actor = { technicianId: actionContext.technicianId || null, userAgent: 'intelligence-bar:delete_duplicate_customer' };
   let reply;
   try {
-    reply = await archiveCustomerAsAdmin({
-      customerId,
-      actor: { technicianId: actionContext.technicianId || null, userAgent: 'intelligence-bar:delete_duplicate_customer' },
-      precheck,
-    });
+    reply = await archiveCustomerAsAdmin({ customerId, actor, precheck });
   } catch (err) {
     if (err && err.previewChanged) return { error: err.message, code: err.code, preview_changed: true };
     throw err;
   }
   const { status, json } = reply;
   if (status === 200 && json?.success) {
+    const late = await historyAppearedAfterCommit(customerId);
+    if (late) return restoreAfterLateHistory(customerId, late, restoreCustomerAsAdmin, actor);
     logger.info(`[intelligence-bar] delete_duplicate_customer soft-deleted customer ${customerId}`);
     return { success: true, customer_id: customerId, deleted: true, restore: RESTORE_LINE, customer_message: NO_MESSAGE_LINE };
   }
   const message = json?.message || json?.error || `Delete failed (HTTP ${status})`;
   return { error: message, ...(status === 404 ? { preview_changed: true } : {}) };
+}
+
+// Commit-then-verify: the emptiness check again, on committed state, outside
+// the archive transaction. An unreadable result counts as history (fail
+// closed) — a restore is cheap and safe, a delete over unknown history is not.
+async function historyAppearedAfterCommit(customerId) {
+  try {
+    const row = await loadStub(customerId);
+    if (!row) return { found: { other: ['the record could not be re-read'] } };
+    return notEmptyRefusal(await readEmptiness(row));
+  } catch (err) {
+    logger.error(`[intelligence-bar] delete_duplicate_customer post-commit check failed for ${customerId}: ${err.message}`);
+    return { found: { other: ['the post-delete check could not run'] } };
+  }
+}
+
+async function restoreAfterLateHistory(customerId, late, restoreCustomerAsAdmin, actor) {
+  const named = Object.entries(late.found || {}).map(([key, list]) => `${key}: ${list.join(', ')}`).join('; ');
+  let restored = false;
+  try {
+    const { status, json } = await restoreCustomerAsAdmin({ customerId, actor });
+    restored = status === 200 && json?.success === true;
+  } catch (err) {
+    logger.error(`[intelligence-bar] delete_duplicate_customer restore after late history failed for ${customerId}: ${err.message}`);
+  }
+  if (!restored) {
+    logger.error(`[intelligence-bar] delete_duplicate_customer: history appeared on ${customerId} after the delete and the restore did not complete`);
+    return {
+      error: `History appeared on this record while it was being deleted (${named}) and the automatic restore did not complete. Restore it now with PATCH /api/admin/customers/${customerId}/restore, then use merge_customers.`,
+      code: 'history_appeared_restore_failed',
+      deleted: true,
+    };
+  }
+  logger.warn(`[intelligence-bar] delete_duplicate_customer: history appeared on ${customerId} after the delete; restored (${named})`);
+  return {
+    error: `Not deleted: history appeared on this record while it was being deleted (${named}), so it was restored. Use merge_customers to fold it into the real customer.`,
+    code: 'history_appeared_restored',
+    deleted: false,
+    restored: true,
+  };
 }
 
 module.exports = {

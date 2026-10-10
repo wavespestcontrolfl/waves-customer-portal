@@ -613,14 +613,14 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       ],
     }],
     // delete_duplicate_customer reads the stub (its own seed) and the merge
-    // engine's emptiness readers (spied below — their SQL is covered by
+    // engine's emptiness readers and pair verdicts (spied below — their SQL is covered by
     // customer-dedupe.test.js).
     ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'delete_duplicate_customer', {
       customer_id: '00000000-0000-0000-0000-00000000e001',
     }, {
       customers: [
-        { id: '00000000-0000-0000-0000-00000000e001', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null, version: 'v1', created_on: '2026-10-01' },
-        { id: '00000000-0000-0000-0000-00000000e002', first_name: 'Real', last_name: 'Keeper', phone: '9415550100', email: null, deleted_at: null, created_on: '2025-01-01' },
+        { id: '00000000-0000-0000-0000-00000000e001', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null, version: 'v1', created_at: '2026-10-01T15:00:00Z' },
+        { id: '00000000-0000-0000-0000-00000000e002', first_name: 'Real', last_name: 'Keeper', phone: '9415550100', email: null, deleted_at: null, created_at: '2025-01-01T15:00:00Z' },
       ],
     }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
@@ -883,7 +883,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       ? [
         jest.spyOn(require('../services/customer-dedupe'), 'loserAutoBlockers').mockResolvedValue([]),
         jest.spyOn(require('../services/customer-dedupe'), 'previewMergeEffects').mockResolvedValue({ moving: { total_rows: 0 } }),
-        jest.spyOn(require('../services/customer-dedupe'), 'decideWinner').mockImplementation(async (_conn, rows) => rows.find((r) => r.id !== '00000000-0000-0000-0000-00000000e001')),
+        jest.spyOn(require('../services/customer-dedupe'), 'duplicatePairEligibility').mockResolvedValue({ eligible: true, code: 'eligible', reason: null, candidate: {} }),
+        jest.spyOn(require('../services/customer-dedupe'), 'rowLevelMergeConflict').mockReturnValue(null),
+        jest.spyOn(require('../services/customer-dedupe'), 'dbLevelMergeConflict').mockResolvedValue(null),
       ] : [];
     const outsideFixture = OUTSIDE_WRITE_FIXTURES[toolName];
     const savedEnv = {};
