@@ -31,7 +31,7 @@ describe('releaseInFlightForShutdown with the gate off (unit)', () => {
       processor = require('../services/call-recording-processor');
     });
     const summary = await processor.releaseInFlightForShutdown({ graceMs: 0 });
-    expect(summary).toEqual({ enabled: false, inFlight: 0, finished: 0, released: 0, lost: 0 });
+    expect(summary).toEqual({ enabled: false, inFlight: 0, finished: 0, released: 0, kept: 0, lost: 0 });
     expect(processor.inFlightPassCount()).toBe(0);
   });
 });
@@ -90,7 +90,7 @@ maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () 
     expect(claimed.processing_token).toBeTruthy();
 
     const summary = await processor.releaseInFlightForShutdown({ graceMs: 100 });
-    expect(summary).toEqual({ enabled: true, inFlight: 1, finished: 0, released: 1, lost: 0 });
+    expect(summary).toEqual({ enabled: true, inFlight: 1, finished: 0, released: 1, kept: 0, lost: 0 });
 
     const released = await readRow();
     // Pre-claim status restored (NULL: a fresh row), token cleared, stamped.
@@ -164,6 +164,33 @@ maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () 
     await db('call_log').where({ twilio_call_sid: SID }).update({
       processing_status: null, extraction_attempts: 0, transcription_status: 'pending', metadata: JSON.stringify({ fixture: 'shutdown-release' }),
     });
+  });
+
+  test('an operator force-reprocess of a processed row keeps its claim at SIGTERM; the stale reclaim resumes it (Codex r2 P2)', async () => {
+    processor._test.resetShutdownForTests();
+    await db('call_log').where({ twilio_call_sid: SID }).update({ processing_status: 'processed', processing_token: null });
+    let releaseDownload;
+    fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseDownload = () => resolve(new Response('not found', { status: 404 }));
+    }));
+    const pass = processor.processRecording(SID, { force: true });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(processor.inFlightPassCount()).toBe(1);
+    const summary = await processor.releaseInFlightForShutdown({ graceMs: 100 });
+    expect(summary.kept).toBe(1);
+    expect(summary.released).toBe(0);
+    // Claim untouched: still 'processing' under this pass's token, no stamp.
+    const held = await readRow();
+    expect(held.processing_status).toBe('processing');
+    expect(held.processing_token).toBeTruthy();
+    expect(held.metadata.shutdown_released_at).toBeUndefined();
+    // The pass still owns the row, so its own release lands as before.
+    releaseDownload();
+    expect((await pass).reason).toBe('recording_not_ready');
+    const after = await readRow();
+    expect(after.processing_status).toBe('processed');
+    expect(after.processing_token).toBeNull();
+    await db('call_log').where({ twilio_call_sid: SID }).update({ processing_status: null });
   });
 
   test('a pass that finishes inside the grace is counted finished and nothing is written', async () => {

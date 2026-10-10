@@ -3794,6 +3794,17 @@ let shuttingDown = false;
 // branches and the claim's retry backoff) lets a stamped row through once; the
 // claim that honours the stamp clears it.
 const SHUTDOWN_RELEASED_SQL = "metadata ->> 'shutdown_released_at' IS NOT NULL";
+// Claim transactions in flight right now. The release waits for these to
+// settle before it reads the registry, so a claim that was past the
+// in-transaction drain check when SIGTERM landed is registered — and handed
+// back — rather than orphaned (Codex #6260 r1 P2, r2 P2).
+const pendingClaims = new Set();
+// Pre-claim statuses the sweep will pick up again once released. A pass over a
+// row in any OTHER state (an operator force-reprocess of a processed row, a
+// takeover of a voicemail/spam row) keeps its claim at shutdown: the sweep's
+// 10-minute stale reclaim resumes it exactly as before this change, whereas a
+// release would park it behind a terminal status for good (Codex #6260 r2 P2).
+const RELEASABLE_PRE_CLAIM_STATUSES = new Set([null, 'pending', 'no_transcription', 'extraction_failed']);
 // COALESCE, not a bare comparison: with a NULL processing_started_at the
 // comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
 // branch — permanently unreclaimable, the worst possible bug in a lock.
@@ -9336,7 +9347,24 @@ const CallRecordingProcessor = {
     // in flight either commits before the lock (pre-claim, correctly the
     // baseline) or waits and lands post-claim, where the CAS stales it.
     let contactCasBaselineAtClaim = null;
-    await db.transaction(async (trx) => {
+    // Registered INSIDE the claim transaction, the moment the claim UPDATE
+    // returns a row, so a settled transaction means a registered claim and
+    // the shutdown release can wait on exactly that (pendingClaims).
+    let inFlightEntry = null;
+    const registerInFlight = () => {
+      inFlightEntry = {
+        callSid,
+        procToken,
+        // What the release restores — 'processing' (a dead pass we took
+        // over) maps to NULL, the same rule as the recording-not-ready
+        // release below.
+        preClaimStatus: call.processing_status === 'processing' ? null : (call.processing_status || null),
+        settled: null,
+      };
+      inFlightEntry.done = new Promise((resolve) => { inFlightEntry.settled = resolve; });
+      inFlightPasses.set(call.id, inFlightEntry);
+    };
+    const claimTransaction = db.transaction(async (trx) => {
       if (call.customer_id) {
         contactCasBaselineAtClaim = await trx('customers')
           .where({ id: call.customer_id })
@@ -9429,6 +9457,7 @@ const CallRecordingProcessor = {
         }
         procGeneration = claimedRows?.[0]?.processing_generation != null
           ? Number(claimedRows[0].processing_generation) : null;
+        registerInFlight();
       } else {
         // force=true bypasses the early-exit on 'processed' rows so admin
         // Reprocess can re-run extraction. It must NOT bypass an actively-
@@ -9491,8 +9520,20 @@ const CallRecordingProcessor = {
         }
         procGeneration = claimedRows?.[0]?.processing_generation != null
           ? Number(claimedRows[0].processing_generation) : null;
+        registerInFlight();
       }
     });
+    pendingClaims.add(claimTransaction);
+    try {
+      await claimTransaction;
+    } catch (claimErr) {
+      // A claim that did not commit holds nothing: drop the entry it may have
+      // registered before the rollback.
+      if (inFlightEntry && inFlightPasses.get(call.id) === inFlightEntry) inFlightPasses.delete(call.id);
+      throw claimErr;
+    } finally {
+      pendingClaims.delete(claimTransaction);
+    }
     if (refusedForShutdown) {
       logger.info(`[call-proc] Not claiming ${maskSid(callSid)} — process began shutting down before the claim`);
       return { success: false, skipped: true, reason: 'shutting_down' };
@@ -9531,19 +9572,8 @@ const CallRecordingProcessor = {
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
-    // The claim is ours from here: register it so a SIGTERM can hand it back
-    // (releaseInFlightForShutdown). The pre-claim status is what that release
-    // restores — 'processing' (a dead pass we took over) maps to NULL, the
-    // same rule as the recording-not-ready release below.
-    const inFlightEntry = {
-      callSid,
-      procToken,
-      preClaimStatus: call.processing_status === 'processing' ? null : (call.processing_status || null),
-      settled: null,
-    };
-    inFlightEntry.done = new Promise((resolve) => { inFlightEntry.settled = resolve; });
-    inFlightPasses.set(call.id, inFlightEntry);
-    // Beat while we work: transcription of a
+    // The claim is ours from here (registered in the claim transaction above
+    // for releaseInFlightForShutdown). Beat while we work: transcription of a
     // long recording is one multi-minute await with no natural checkpoints,
     // and without a beat the reclaim predicates cannot tell that pass from a
     // wedged one. unref() so a draining process never lingers for the timer.
@@ -22820,7 +22850,7 @@ const CallRecordingProcessor = {
       // claimed again by a peer, but never by this process (it refuses new
       // claims while draining), so a token check is belt-and-suspenders.
       if (inFlightPasses.get(call.id)?.procToken === procToken) inFlightPasses.delete(call.id);
-      inFlightEntry.settled();
+      if (inFlightEntry) inFlightEntry.settled();
     }
   },
 
@@ -22844,13 +22874,16 @@ const CallRecordingProcessor = {
   async releaseInFlightForShutdown({ graceMs = 10000 } = {}) {
     const enabled = isEnabled('callProcShutdownRelease');
     const inFlight = inFlightPasses.size;
-    const summary = { enabled, inFlight, finished: 0, released: 0, lost: 0 };
+    const summary = { enabled, inFlight, finished: 0, released: 0, kept: 0, lost: 0 };
     if (!enabled) return summary;
     shuttingDown = true;
-    // The passes held at this moment get the grace. A claim whose transaction
-    // was already past the in-transaction drain check commits and registers
-    // during the grace; the loop below reads the registry AFTER the grace and
-    // again until nothing new appears, so those are handed back too.
+    // A claim transaction already past its in-transaction drain check commits
+    // and registers its entry inside the transaction; wait for every such
+    // transaction to settle so the registry read below is complete. New
+    // transactions refuse at the recheck, so this set only drains.
+    while (pendingClaims.size) await Promise.allSettled([...pendingClaims]);
+    // The passes held at this moment get the grace. The loop below reads the
+    // registry AFTER the grace and again until nothing new appears.
     const atStart = new Set(inFlightPasses.values());
     if (atStart.size) {
       await Promise.race([
@@ -22864,6 +22897,13 @@ const CallRecordingProcessor = {
       if (!pending.length) break;
       for (const [callId, entry] of pending) {
         handled.add(entry);
+        if (!RELEASABLE_PRE_CLAIM_STATUSES.has(entry.preClaimStatus)) {
+          // Restoring a terminal status would park the row for good; the
+          // stale reclaim resumes this pass as it always has.
+          summary.kept += 1;
+          logger.info(`[call-proc] shutdown: keeping claim on ${maskSid(entry.callSid)} (pre-claim status ${entry.preClaimStatus}; the stale reclaim resumes it)`);
+          continue;
+        }
         try {
           const rows = await db('call_log')
             .where({ id: callId })
