@@ -1277,3 +1277,73 @@ describe('sweep', () => {
     expect(state.updates.scheduled_services).toHaveLength(1);
   });
 });
+
+// GATE_LAWN_NOV_LARGE_PATCH_N (codex #6256 r3 P1): the brief states the November bag's target the way the plan does.
+describe('the November nitrogen target on the lawn brief', () => {
+  const { LAWN_V13_VERSION } = require('../services/lawn-program');
+  const areas = require('../services/lawn-trouble-areas');
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
+  const november = (version = LAWN_V13_VERSION) => mockSummarize.mockReturnValue({
+    version,
+    window: { key: 'nov_v13_spreader_feeding', month: 11, title: 'November', visitType: 'granular', goal: 'Feed' },
+    products: [
+      { productName: BAG, productId: 'f24', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, gates: { targetN: '0.75 lb N/1000', blackoutSensitive: true } },
+      { productName: 'Velista', productId: 'vel', role: 'fungicide', applicationMode: 'spot', ratePer1000: 0.3, rateUnit: 'oz', defaultInPlan: false, gates: { trigger: 'large patch' } },
+    ],
+  });
+  let loadActive;
+  let propertyOf;
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    loadActive = jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+    propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue('7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d');
+  });
+  afterEach(() => { for (const name of GATES) delete process.env[name]; loadActive.mockRestore(); propertyOf.mockRestore(); });
+  const guidanceFor = async () => {
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-11-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+    return storedBrief(state).brief.product_guidance;
+  };
+  const bagOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === BAG);
+
+  test('active fungus: the bag states 0.5 lb N/1000 with the reason and the normal figure; nothing else changes', async () => {
+    november();
+    const guidance = await guidanceFor();
+    expect(bagOf(guidance).gates).toEqual({ targetN: '0.5 lb N/1000 (active fungus mapped; normal 0.75 lb N/1000)', blackoutSensitive: true });
+    expect(JSON.stringify(guidance)).not.toContain('"targetN":"0.75');
+    expect(guidance.conditional_products.find((p) => p.name === 'Velista').gates).toEqual({ trigger: 'large patch' });
+  });
+
+  test('the projection leaves the stored protocol rows alone (a copy is changed, not the row)', async () => {
+    november();
+    const summary = mockSummarize();
+    await guidanceFor();
+    expect(summary.products[0].gates.targetN).toBe('0.75 lb N/1000');
+  });
+
+  test('no change, and no trouble-area read, when the gate is off, the program is not v13, the month is not November, or no fungus is mapped', async () => {
+    november();
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    const off = await guidanceFor();
+    expect(bagOf(off).gates.targetN).toBe('0.75 lb N/1000');
+    november('2026.05');
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+    expect(loadActive).not.toHaveBeenCalled();
+    expect(propertyOf).not.toHaveBeenCalled();
+    process.env.GATE_LAWN_NOV_LARGE_PATCH_N = 'true';
+    november();
+    mockSummarize.mockReturnValue({ ...mockSummarize(), window: { key: 'oct', month: 10, title: 'October', visitType: 'granular', goal: 'Feed' } });
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+    expect(loadActive).not.toHaveBeenCalled();
+    november();
+    loadActive.mockResolvedValue([{ id: 'b', type: 'take_all' }]);
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+  });
+
+  test('a failed trouble-area read keeps the stored target', async () => {
+    november();
+    loadActive.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
+  });
+});

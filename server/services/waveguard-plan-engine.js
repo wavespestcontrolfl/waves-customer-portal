@@ -771,16 +771,25 @@ function fungusAdjustedVisit(visit, cut) {
   return { ...visit, primary, notes };
 }
 
-// The ONE place a visit's nutrient targets come from, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the
-// completion defaults, the yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the
-// lines are parsed from (an adjusted copy when GATE_LAWN_NOV_LARGE_PATCH_N cut the nitrogen target: see config/lawn-v13-nitrogen-targets.js;
-// else the visit itself), its targets, and `nitrogenCut` (the reduced N target, else null). Never raises a target; gate off, not v13,
-// no matching month or no active mapped area = the visit and its target, untouched. Call it BEFORE the visit's lines are parsed.
+// The ONE decision whether the nitrogen target of a November visit at one property is cut, for every reader that states it (the plan,
+// the tank sheet, the previsit brief): the reduced target (config/lawn-v13-nitrogen-targets.js), else null. Gate first: with
+// GATE_LAWN_NOV_LARGE_PATCH_N off (or not a v13 program) nothing is read. Never raises a target; no matching month, a target already
+// at or under the cut, or no active mapped area of the rule's type = null.
+async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active }) {
+  if (!v13Active || !featureGates.lawnNovLargePatchNLive()) return null;
+  const rule = V13_TROUBLE_N_TARGETS.find((entry) => entry.month === monthNumber);
+  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType))) return null;
+  return rule.targetNPer1000;
+}
+
+// A visit's nutrient targets, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the completion defaults, the
+// yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the lines are parsed from (an
+// adjusted copy when the nitrogen target was cut: fungusNitrogenCut; else the visit itself), its targets, and `nitrogenCut` (the
+// reduced N target, else null). Call it BEFORE the visit's lines are parsed.
 async function visitNutrientTargets(knex, service, { visit, month, v13Active }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
-  const rule = v13Active && visit && featureGates.lawnNovLargePatchNLive() ? V13_TROUBLE_N_TARGETS.find((entry) => entry.month === MONTH_ABBR.indexOf(month) + 1) : null;
-  if (!rule || !(targets.targetNPer1000 > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType))) return { visit, targets, nitrogenCut: null };
-  const cut = rule.targetNPer1000;
+  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active }) : null;
+  if (cut == null) return { visit, targets, nitrogenCut: null };
   return { visit: fungusAdjustedVisit(visit, cut), targets: { ...targets, targetNPer1000: cut }, nitrogenCut: cut };
 }
 
@@ -2491,6 +2500,7 @@ module.exports = {
   calculateProductAmount,
   parseVisitNutrientTargets,
   visitNutrientTargets,
+  fungusNitrogenCut,
   visitOnV13Protocol,
   fungusNitrogenNotes,
   summarizeMaterialCost,

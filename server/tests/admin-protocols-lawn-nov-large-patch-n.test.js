@@ -172,6 +172,21 @@ describe('the cut follows the protocol the PLANNER resolves for the visit (codex
     expect(bag(await sheet()).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
   });
 
+  test('the gate is off (or the trouble-areas gate is): a pinned visit makes NO protocol lookup of its own, and the sheet is unchanged', async () => {
+    Object.assign(visit, pin(LAWN_V13_VERSION));
+    for (const name of ['GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_TROUBLE_AREAS']) {
+      process.env.GATE_LAWN_NOV_LARGE_PATCH_N = 'true';
+      process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+      delete process.env[name];
+      operatingLayer.getProtocolWindowContext.mockClear();
+      const body = await sheet();
+      expect(pinnedCalls()).toHaveLength(0);
+      expect(bag(body).raw).toBe(STALE);
+      expect(bag(body).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
+    }
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+
   test('pinned to v13: the cut applies', async () => {
     Object.assign(visit, pin(LAWN_V13_VERSION));
     const body = await sheet();

@@ -115,6 +115,35 @@ describe('visitNutrientTargets', () => {
   });
 });
 
+describe('fungusNitrogenCut, the one decision every reader shares (codex #6256 r3)', () => {
+  const cutFor = (args = {}) => engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, ...args });
+
+  test('0.5 for a November v13 visit with active fungus at a stored target above it', async () => {
+    expect(await cutFor()).toBe(0.5);
+  });
+
+  test.each([
+    ['not v13', { v13Active: false }],
+    ['October', { monthNumber: 10 }],
+    ['no month', { monthNumber: NaN }],
+    ['a target at the cut', { targetN: 0.5 }],
+    ['a target under the cut', { targetN: 0.45 }],
+    ['no stated target', { targetN: null }],
+  ])('null for %s, with no area read', async (_label, args) => {
+    expect(await cutFor(args)).toBeNull();
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+
+  test('gate first: with the gate off nothing is read at all, not even the property', async () => {
+    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    const areas = require('../services/lawn-trouble-areas');
+    areas.propertyOf.mockClear();
+    expect(await cutFor()).toBeNull();
+    expect(areas.propertyOf).not.toHaveBeenCalled();
+    expect(mockLoadActive).not.toHaveBeenCalled();
+  });
+});
+
 describe('the visit text staff read agrees with the cut (codex #6256 r1 P1)', () => {
   const PRIMARY = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 3.1 lb per 1,000 sq ft (0.75 lb N), spreader';
 
