@@ -1,58 +1,61 @@
-// SIGTERM hands a call-processing claim back (GATE_CALL_PROC_SHUTDOWN_RELEASE).
+// A deploy stamps the call-processing passes it interrupts
+// (GATE_CALL_PROC_SHUTDOWN_RELEASE).
 //
 // Why: 2026-10-09 a 56-second lead call took 30 minutes to process — three
 // deploys in ten minutes killed the pass mid-transcription and the row waited
-// for the 10-minute quiet reclaim plus a sweep tick. With the gate on, the
-// draining process releases the claim (status restored, token cleared,
-// metadata.shutdown_released_at stamped) and the next pod's sweep takes the
-// row without the 10-minute CDN-settle age gate — once.
+// for the 10-minute quiet reclaim plus a sweep tick. With the gate on, SIGTERM
+// stamps every row this process holds a claim for (metadata
+// .shutdown_interrupted_at) and changes nothing else: the dying pass keeps its
+// claim, so no second pass can overlap it. On the replacing pod a stamped
+// claim is reclaimable after 2 quiet heartbeat minutes instead of 10; a
+// stamped claim that is still beating is never taken; the claim that takes
+// the row clears the stamp.
 //
-// The claim and the sweep predicates are raw SQL a mocked builder cannot
-// evaluate, so the behavior suite runs the REAL processRecording /
-// processAllPending against a real call_log row (DATABASE_URL only, same
-// convention as call-processing-claim-concurrency.test.js). The download is
-// stubbed: a hanging fetch keeps the pass in flight; a 404 maps to the
-// recording-not-ready release. No provider key is ever used. Fixtures are
-// fictitious: 555-01xx numbers, fake SIDs, no transcript text.
+// The claim and sweep predicates are raw SQL a mocked builder cannot evaluate,
+// so the behavior suite runs the REAL processRecording / processAllPending
+// against real call_log rows (DATABASE_URL only, same convention as
+// call-processing-claim-concurrency.test.js). The download is stubbed: a held
+// fetch keeps a pass in flight; a 404 maps to the recording-not-ready release.
+// No provider key is ever used. Fixtures are fictitious: 555-01xx numbers,
+// fake SIDs, no transcript text.
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const SID = 'CA' + '8'.repeat(30) + 'd1';
+const sid = (tail) => 'CA' + '8'.repeat(30) + tail;
+const SID = sid('d1');
+const SID_DEAD = sid('d2');
+const SID_BEATING = sid('d3');
+const SID_UNSTAMPED = sid('d4');
+const SID_LATE = sid('d5');
 const REC = 'RE' + '8'.repeat(32);
 const RECORDING_URL = `https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/${REC}.mp3`;
+const ALL_SIDS = [SID, SID_DEAD, SID_BEATING, SID_UNSTAMPED, SID_LATE];
 
-describe('releaseInFlightForShutdown with the gate off (unit)', () => {
-  test('is a no-op that reports counts only, and processRecording is not refused', async () => {
+describe('markInFlightForShutdown with the gate off (unit)', () => {
+  test('is a no-op that reports counts only', async () => {
     let processor;
     jest.isolateModules(() => {
       delete process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE;
       processor = require('../services/call-recording-processor');
     });
-    const summary = await processor.releaseInFlightForShutdown({ graceMs: 0 });
-    expect(summary).toEqual({ enabled: false, inFlight: 0, finished: 0, released: 0, kept: 0, lost: 0 });
+    const summary = await processor.markInFlightForShutdown({ deadlineMs: 0 });
+    expect(summary).toEqual({ enabled: false, inFlight: 0, stamped: 0, failed: 0 });
     expect(processor.inFlightPassCount()).toBe(0);
   });
 });
 
-maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () => {
+maybeDescribe('deploy-interrupted call passes with the gate on (live Postgres)', () => {
   let db;
   let processor;
   let fetchSpy;
-  const rowIds = [];
 
-  const readRow = () => db('call_log').where({ twilio_call_sid: SID }).first();
-
-  beforeAll(async () => {
-    process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE = 'true';
-    jest.resetModules();
-    db = require('../models/db');
-    processor = require('../services/call-recording-processor');
-    fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response('not found', { status: 404 }));
-    await db('call_log').where({ twilio_call_sid: SID }).del();
+  const readRow = (s) => db('call_log').where({ twilio_call_sid: s }).first();
+  const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
+  const insertCall = async (s, overrides = {}) => {
     const [row] = await db('call_log').insert({
-      twilio_call_sid: SID,
+      twilio_call_sid: s,
       direction: 'inbound',
       from_phone: '+15555550133',
       to_phone: '+15555550100',
@@ -64,20 +67,29 @@ maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () 
       transcription_status: 'pending',
       processing_status: null,
       metadata: JSON.stringify({ source: 'voice_webhook', fixture: 'shutdown-release' }),
+      ...overrides,
     }).returning('id');
-    rowIds.push(row.id);
+    return row.id;
+  };
+
+  beforeAll(async () => {
+    process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE = 'true';
+    jest.resetModules();
+    db = require('../models/db');
+    processor = require('../services/call-recording-processor');
+    fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response('not found', { status: 404 }));
+    await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del();
   });
 
   afterAll(async () => {
     fetchSpy.mockRestore();
     delete process.env.GATE_CALL_PROC_SHUTDOWN_RELEASE;
-    if (rowIds.length) await db('call_log').whereIn('id', rowIds).del();
+    await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del();
     await db.destroy();
   });
 
-  test('a pass in flight at SIGTERM hands its claim back; its own later write matches no rows; the sweep takes the row at once, once', async () => {
-    // Hold the download open so the pass is genuinely mid-flight when the
-    // shutdown path runs.
+  test('SIGTERM stamps a pass in flight and leaves its claim with it; the pass still owns its own release', async () => {
+    await insertCall(SID);
     let releaseDownload;
     fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
       releaseDownload = () => resolve(new Response('not found', { status: 404 }));
@@ -85,132 +97,82 @@ maybeDescribe('releaseInFlightForShutdown with the gate on (live Postgres)', () 
     const pass = processor.processRecording(SID);
     await new Promise((r) => setTimeout(r, 400));
     expect(processor.inFlightPassCount()).toBe(1);
-    const claimed = await readRow();
+    const claimed = await readRow(SID);
     expect(claimed.processing_status).toBe('processing');
-    expect(claimed.processing_token).toBeTruthy();
 
-    const summary = await processor.releaseInFlightForShutdown({ graceMs: 100 });
-    expect(summary).toEqual({ enabled: true, inFlight: 1, finished: 0, released: 1, kept: 0, lost: 0 });
+    const summary = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
+    expect(summary).toEqual({ enabled: true, inFlight: 1, stamped: 1, failed: 0 });
 
-    const released = await readRow();
-    // Pre-claim status restored (NULL: a fresh row), token cleared, stamped.
-    expect(released.processing_status).toBeNull();
-    expect(released.processing_token).toBeNull();
-    expect(released.metadata.shutdown_released_at).toEqual(expect.any(String));
-    expect(Number(released.processing_generation)).toBe(1);
+    // Stamp only: claim, token and status untouched, so nothing can overlap
+    // the pass while it is alive.
+    const stamped = await readRow(SID);
+    expect(stamped.processing_status).toBe('processing');
+    expect(stamped.processing_token).toBe(claimed.processing_token);
+    expect(stamped.metadata.shutdown_interrupted_at).toEqual(expect.any(String));
 
-    // The dying pass wakes up: its not-ready release is token-fenced and
-    // changes nothing; the row keeps the handed-back state.
-    releaseDownload();
-    const result = await pass;
-    expect(result.reason).toBe('recording_not_ready');
-    const afterPass = await readRow();
-    expect(afterPass.processing_status).toBeNull();
-    expect(afterPass.processing_token).toBeNull();
-    expect(afterPass.metadata.shutdown_released_at).toEqual(released.metadata.shutdown_released_at);
-    expect(processor.inFlightPassCount()).toBe(0);
-
-    // The draining process itself refuses a new claim — and stamps the
-    // unclaimed row so the replacing pod's sweep takes it at once (r3 P1).
-    await db('call_log').where({ twilio_call_sid: SID }).update({ metadata: JSON.stringify({ fixture: 'shutdown-release' }) });
-    const refused = await processor.processRecording(SID);
-    expect(refused).toEqual({ success: false, skipped: true, reason: 'shutting_down' });
-    const stampedOnRefusal = await readRow();
-    expect(stampedOnRefusal.processing_status).toBeNull();
-    expect(stampedOnRefusal.processing_token).toBeNull();
-    expect(stampedOnRefusal.metadata.shutdown_released_at).toEqual(expect.any(String));
-    expect(Number(stampedOnRefusal.processing_generation)).toBe(1);
-
-    // The replacing pod (same module, drain flag reset) sweeps: updated_at is
-    // seconds old, so only the stamp lets the row in; the claim clears the
-    // stamp and the 404 releases the row as not ready.
-    processor._test.resetShutdownForTests();
-    const before = fetchSpy.mock.calls.length;
-    await processor.processAllPending();
-    expect(fetchSpy.mock.calls.length).toBe(before + 1);
-    const swept = await readRow();
-    expect(Number(swept.processing_generation)).toBe(2);
-    expect(swept.processing_status).toBeNull();
-    expect(swept.processing_token).toBeNull();
-    expect(swept.metadata.shutdown_released_at).toBeUndefined();
-    expect(swept.metadata.fixture).toBe('shutdown-release');
-
-    // Stamp gone, updated_at fresh: the age gate holds again.
-    await processor.processAllPending();
-    expect(fetchSpy.mock.calls.length).toBe(before + 1);
-    expect(Number((await readRow()).processing_generation)).toBe(2);
-  });
-
-  test('a stamped extraction_failed retry is swept and claimed inside the 10-minute backoff, once (Codex r1 P1)', async () => {
-    processor._test.resetShutdownForTests();
-    // A retry pass handed back at a deploy: status restored to
-    // extraction_failed, attempts under the cap, updated_at seconds old, stamped.
-    await db('call_log').where({ twilio_call_sid: SID }).update({
-      processing_status: 'extraction_failed',
-      extraction_attempts: 1,
-      processing_token: null,
-      // Not 'pending': only the extraction_failed sweep branch may admit it.
-      transcription_status: 'completed',
-      updated_at: new Date(),
-      metadata: JSON.stringify({ fixture: 'shutdown-release', shutdown_released_at: new Date().toISOString() }),
-    });
-    const generation = Number((await readRow()).processing_generation);
-    const before = fetchSpy.mock.calls.length;
-    await processor.processAllPending();
-    // Swept AND claimed (the claim's own backoff guard honours the stamp too):
-    // the 404 releases the row as not ready with the retry status restored.
-    expect(fetchSpy.mock.calls.length).toBe(before + 1);
-    const swept = await readRow();
-    expect(Number(swept.processing_generation)).toBe(generation + 1);
-    expect(swept.processing_status).toBe('extraction_failed');
-    expect(Number(swept.extraction_attempts)).toBe(1);
-    expect(swept.metadata.shutdown_released_at).toBeUndefined();
-    // Stamp cleared, updated_at fresh: the backoff holds again.
-    await processor.processAllPending();
-    expect(fetchSpy.mock.calls.length).toBe(before + 1);
-    await db('call_log').where({ twilio_call_sid: SID }).update({
-      processing_status: null, extraction_attempts: 0, transcription_status: 'pending', metadata: JSON.stringify({ fixture: 'shutdown-release' }),
-    });
-  });
-
-  test('an operator force-reprocess of a processed row keeps its claim at SIGTERM; the stale reclaim resumes it (Codex r2 P2)', async () => {
-    processor._test.resetShutdownForTests();
-    await db('call_log').where({ twilio_call_sid: SID }).update({ processing_status: 'processed', processing_token: null });
-    let releaseDownload;
-    fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
-      releaseDownload = () => resolve(new Response('not found', { status: 404 }));
-    }));
-    const pass = processor.processRecording(SID, { force: true });
-    await new Promise((r) => setTimeout(r, 400));
-    expect(processor.inFlightPassCount()).toBe(1);
-    const summary = await processor.releaseInFlightForShutdown({ graceMs: 100 });
-    expect(summary.kept).toBe(1);
-    expect(summary.released).toBe(0);
-    // Claim untouched: still 'processing' under this pass's token, no stamp.
-    const held = await readRow();
-    expect(held.processing_status).toBe('processing');
-    expect(held.processing_token).toBeTruthy();
-    expect(held.metadata.shutdown_released_at).toBeUndefined();
-    // The pass still owns the row, so its own release lands as before.
+    // The pass finishes on its own: its release lands as before.
     releaseDownload();
     expect((await pass).reason).toBe('recording_not_ready');
-    const after = await readRow();
-    expect(after.processing_status).toBe('processed');
+    const after = await readRow(SID);
+    expect(after.processing_status).toBeNull();
     expect(after.processing_token).toBeNull();
-    await db('call_log').where({ twilio_call_sid: SID }).update({ processing_status: null });
+    expect(processor.inFlightPassCount()).toBe(0);
   });
 
-  test('a pass that finishes inside the grace is counted finished and nothing is written', async () => {
+  test('the replacing pod reclaims a stamped dead claim after 2 quiet minutes, never a stamped claim that still beats, and an unstamped dead claim waits its 10', async () => {
     processor._test.resetShutdownForTests();
-    // Instant 404: the pass claims and releases itself within the grace.
-    const pass = processor.processRecording(SID);
-    const summary = await processor.releaseInFlightForShutdown({ graceMs: 5000 });
-    await pass;
-    expect(summary.enabled).toBe(true);
-    expect(summary.released).toBe(0);
-    expect(summary.finished + (summary.inFlight === 0 ? 1 : 0)).toBeGreaterThanOrEqual(1);
-    const row = await readRow();
-    expect(row.processing_token).toBeNull();
-    expect(row.metadata.shutdown_released_at).toBeUndefined();
+    const stamp = { fixture: 'shutdown-release', shutdown_interrupted_at: minutesAgo(3).toISOString() };
+    const claimedRow = (heartbeatMinutesAgo, metadata) => ({
+      processing_status: 'processing',
+      processing_token: 'deadbeef'.repeat(4),
+      processing_generation: 3,
+      processing_started_at: minutesAgo(heartbeatMinutesAgo + 1),
+      processing_heartbeat_at: minutesAgo(heartbeatMinutesAgo),
+      updated_at: minutesAgo(heartbeatMinutesAgo + 1),
+      metadata: JSON.stringify(metadata),
+    });
+    await insertCall(SID_DEAD, claimedRow(3, stamp));
+    await insertCall(SID_BEATING, claimedRow(1, stamp));
+    await insertCall(SID_UNSTAMPED, claimedRow(3, { fixture: 'shutdown-release' }));
+    fetchSpy.mockClear();
+
+    await processor.processAllPending();
+
+    // Exactly one download: the dead, stamped claim was taken.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const dead = await readRow(SID_DEAD);
+    expect(Number(dead.processing_generation)).toBe(4);
+    expect(dead.processing_token).toBeNull();
+    // Takeover of a dead pass maps the pre-claim 'processing' to NULL on the
+    // not-ready release, and the claim consumed the stamp.
+    expect(dead.processing_status).toBeNull();
+    expect(dead.metadata.shutdown_interrupted_at).toBeUndefined();
+    expect(dead.metadata.fixture).toBe('shutdown-release');
+
+    for (const s of [SID_BEATING, SID_UNSTAMPED]) {
+      const row = await readRow(s);
+      expect(row.processing_status).toBe('processing');
+      expect(row.processing_token).toBe('deadbeef'.repeat(4));
+      expect(Number(row.processing_generation)).toBe(3);
+    }
+    expect((await readRow(SID_BEATING)).metadata.shutdown_interrupted_at).toEqual(expect.any(String));
+  });
+
+  test('a claim taken while the process is already draining stamps itself', async () => {
+    processor._test.resetShutdownForTests();
+    await insertCall(SID_LATE);
+    // Nothing in flight: the mark only sets the drain flag.
+    expect(await processor.markInFlightForShutdown({ deadlineMs: 0 })).toEqual({ enabled: true, inFlight: 0, stamped: 0, failed: 0 });
+    fetchSpy.mockClear();
+    expect((await processor.processRecording(SID_LATE)).reason).toBe('recording_not_ready');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const row = await readRow(SID_LATE);
+    expect(row.metadata.shutdown_interrupted_at).toEqual(expect.any(String));
+    expect(Number(row.processing_generation)).toBe(1);
+    // The stamp speaks only for a claimed row: back to NULL it changes nothing
+    // (the fresh-row age gate still holds), and the next claim clears it.
+    processor._test.resetShutdownForTests();
+    await processor.processAllPending();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

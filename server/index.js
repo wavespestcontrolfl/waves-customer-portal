@@ -1770,17 +1770,17 @@ function shutdown(signal) {
     .catch(err => logger.warn(`[shutdown] lead fallback flush failed: ${err.message}`));
   const leadFallbacksFlushed = flushLeadFallbacks();
   // A call-processing pass in flight (transcription + extraction run for
-  // minutes) would die with this process and leave its claim on the row for
-  // the 10-minute quiet reclaim. Give it a short grace, then hand the claim
-  // back so the next pod's sweep takes the row at once. Gated
-  // (GATE_CALL_PROC_SHUTDOWN_RELEASE); fail-soft; done before the pool closes.
-  const callPassesReleased = (async () => {
+  // minutes) dies with this process. Stamp its row so the next pod reclaims
+  // it after 2 quiet minutes instead of 10; the pass keeps its claim until the
+  // kill, so nothing overlaps it. Gated (GATE_CALL_PROC_SHUTDOWN_RELEASE);
+  // fail-soft; one bounded UPDATE per pass; done before the pool closes.
+  const callPassesMarked = (async () => {
     try {
       const processor = require('./services/call-recording-processor');
-      const r = await processor.releaseInFlightForShutdown({ graceMs: 10000 });
-      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.released} released, ${r.lost} finished or taken, gate ${r.enabled ? 'on' : 'off'}`);
+      const r = await processor.markInFlightForShutdown({ deadlineMs: 5000 });
+      if (r.inFlight) logger.info(`[shutdown] call passes: ${r.inFlight} in flight, ${r.stamped} stamped, ${r.failed} not stamped, gate ${r.enabled ? 'on' : 'off'}`);
     } catch (err) {
-      logger.warn(`[shutdown] call pass release failed: ${err.message}`);
+      logger.warn(`[shutdown] call pass stamp failed: ${err.message}`);
     }
   })();
   io.close(() => {
@@ -1789,7 +1789,7 @@ function shutdown(signal) {
       logger.info('[shutdown] HTTP server closed, exiting');
       await leadFallbacksFlushed;
       await flushLeadFallbacks();
-      await callPassesReleased;
+      await callPassesMarked;
       try {
         const db = require('./models/db');
         await Promise.race([

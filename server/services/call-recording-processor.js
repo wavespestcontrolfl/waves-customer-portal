@@ -3782,39 +3782,44 @@ function summarizeBatch(results) {
 const LEGACY_CLAIM_QUIET_MINUTES = 10;
 // What a human forcing a reprocess waits for a claim that IS beating.
 const FORCE_CLAIM_QUIET_MINUTES = 3;
-// Passes this process currently holds a claim for, keyed by call_log.id.
-// Each entry carries the claim token and the status the row had BEFORE the
-// claim, so a SIGTERM (every production deploy) can hand the claim back the
-// same way the recording-not-ready release does — token-fenced, status
-// restored — instead of leaving the row to the 10-minute quiet reclaim.
-// Behind GATE_CALL_PROC_SHUTDOWN_RELEASE; see releaseInFlightForShutdown.
-const inFlightPasses = new Map();
-let shuttingDown = false;
-// A row handed back at a deploy. Every 10-minute age gate (the sweep's three
-// branches and the claim's retry backoff) lets a stamped row through once; the
-// claim that honours the stamp clears it.
-const SHUTDOWN_RELEASED_SQL = "metadata ->> 'shutdown_released_at' IS NOT NULL";
-// Claim transactions in flight right now. The release waits for these to
-// settle before it reads the registry, so a claim that was past the
-// in-transaction drain check when SIGTERM landed is registered — and handed
-// back — rather than orphaned (Codex #6260 r1 P2, r2 P2).
-const pendingClaims = new Set();
-// Pre-claim statuses the sweep will pick up again once released. A pass over a
-// row in any OTHER state (an operator force-reprocess of a processed row, a
-// takeover of a voicemail/spam row) keeps its claim at shutdown: the sweep's
-// 10-minute stale reclaim resumes it exactly as before this change, whereas a
-// release would park it behind a terminal status for good (Codex #6260 r2 P2).
-const RELEASABLE_PRE_CLAIM_STATUSES = new Set([null, 'pending', 'no_transcription', 'extraction_failed']);
 // COALESCE, not a bare comparison: with a NULL processing_started_at the
 // comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
+// A pass interrupted by a deploy (GATE_CALL_PROC_SHUTDOWN_RELEASE). At SIGTERM
+// every pass this process holds a claim for is STAMPED — nothing else changes:
+// the claim, token and status stay with the dying pass, so no second pass can
+// run while it is still alive (a released claim let the replacement pod resend
+// a DOI email the dying pass had just sent — Codex #6260 r4 P1). A stamped
+// claim becomes reclaimable after a SHORT heartbeat silence instead of the
+// 10-minute window: the pass beats every 60 s while alive and Railway kills
+// the old pod within 30 s of SIGTERM, so 2 quiet minutes on a stamped row is
+// proof the pass is dead, and a pass that somehow survived keeps beating and
+// is never taken. The claim that takes the row clears the stamp.
+const SHUTDOWN_RECLAIM_QUIET_MINUTES = 2;
+const SHUTDOWN_STAMP_KEY = 'shutdown_interrupted_at';
+const shutdownInterruptedClaim = "("
+  + `metadata ->> '${SHUTDOWN_STAMP_KEY}' IS NOT NULL`
+  + ` AND COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${SHUTDOWN_RECLAIM_QUIET_MINUTES} minutes'`
+  + ")";
 const reclaimableClaim = (quietMinutes) => "("
   + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
   + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
+  + ` OR ${shutdownInterruptedClaim}`
   + ")";
+// Passes this process currently holds a claim for (call_log.id → claim token),
+// so markInFlightForShutdown knows which rows to stamp. Filled right after the
+// claim, cleared in processRecording's outer finally.
+const inFlightPasses = new Map();
+// Set at SIGTERM: a claim taken after this point is stamped by its own claim
+// write, since it will die with the process too.
+let shuttingDown = false;
+const shutdownStampSql = (conn) => conn.raw(
+  `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
+  [new Date().toISOString()],
+);
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -9321,10 +9326,6 @@ const CallRecordingProcessor = {
     // instead (PR #3304 — replaces the token-NULL predicates).
     let procGeneration = null;
     let claimBlocked = false;
-    // SIGTERM landed between the entry guard above and the claim write: the
-    // transaction below re-reads the drain flag right before the UPDATE so no
-    // claim can be committed after releaseInFlightForShutdown took its view.
-    let refusedForShutdown = false;
     // A forced-quarantine verdict whose invalidation AND durable queue write
     // did not land this pass (codex #4815 r5 P1 / r8 P1). Declared here, at
     // pass scope, so the outer guard's extraction_failed release can write
@@ -9340,24 +9341,7 @@ const CallRecordingProcessor = {
     // in flight either commits before the lock (pre-claim, correctly the
     // baseline) or waits and lands post-claim, where the CAS stales it.
     let contactCasBaselineAtClaim = null;
-    // Registered INSIDE the claim transaction, the moment the claim UPDATE
-    // returns a row, so a settled transaction means a registered claim and
-    // the shutdown release can wait on exactly that (pendingClaims).
-    let inFlightEntry = null;
-    const registerInFlight = () => {
-      inFlightEntry = {
-        callSid,
-        procToken,
-        // What the release restores — 'processing' (a dead pass we took
-        // over) maps to NULL, the same rule as the recording-not-ready
-        // release below.
-        preClaimStatus: call.processing_status === 'processing' ? null : (call.processing_status || null),
-        settled: null,
-      };
-      inFlightEntry.done = new Promise((resolve) => { inFlightEntry.settled = resolve; });
-      inFlightPasses.set(call.id, inFlightEntry);
-    };
-    const claimTransaction = db.transaction(async (trx) => {
+    await db.transaction(async (trx) => {
       if (call.customer_id) {
         contactCasBaselineAtClaim = await trx('customers')
           .where({ id: call.customer_id })
@@ -9371,31 +9355,6 @@ const CallRecordingProcessor = {
       // side-effect-heavy pipeline over and over (codex P1). `operator` does
       // one thing and one thing only: it shortens the heartbeat-quiet window
       // INSIDE this predicate, below.
-      // A draining process takes no new claim: a pass started seconds before
-      // the kill would only have to be released again, and the pod replacing
-      // this one owns the sweep from here (releaseInFlightForShutdown). The
-      // refused row is stamped the same way a released one is, so that sweep
-      // takes it on its next tick instead of after the 10-minute age gate —
-      // the recording-status timer retries only recording_not_ready, so
-      // without the stamp a refusal would cost the whole deploy delay
-      // (Codex #6260 r3 P1). Unclaimed rows only (token fence): a peer's
-      // claim is the peer's to release.
-      if (shuttingDown && isEnabled('callProcShutdownRelease')) {
-        refusedForShutdown = true;
-        const preClaimStatus = call.processing_status === 'processing' ? null : (call.processing_status || null);
-        if (RELEASABLE_PRE_CLAIM_STATUSES.has(preClaimStatus)) {
-          await trx('call_log')
-            .where({ id: call.id })
-            .whereNull('processing_token')
-            .update({
-              metadata: trx.raw(
-                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{shutdown_released_at}', to_jsonb(?::text), true)",
-                [new Date().toISOString()],
-              ),
-            });
-        }
-        return;
-      }
       if (!opts.force) {
         // Reclaim stale 'processing' rows older than 10 min — server crash or
         // Gemini hang between claim (this UPDATE) and terminal status write
@@ -9430,12 +9389,7 @@ const CallRecordingProcessor = {
             this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
               .orWhere(function () {
                 this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-                  // Same stamp exception as the sweep: a retry handed back at
-                  // a deploy already waited out the backoff. Cap still holds.
-                  .andWhere(function () {
-                    this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-                      .orWhereRaw(SHUTDOWN_RELEASED_SQL);
-                  });
+                  .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
               });
           })
           // An operator adopting a recording claims FOR that recording: a
@@ -9456,9 +9410,12 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
-            // A shutdown-release stamp bypasses the sweep's 10-minute age
-            // gate exactly once: the claim that honours it clears it.
-            metadata: trx.raw("metadata - 'shutdown_released_at'"),
+            // A deploy stamp (markInFlightForShutdown) is consumed by the
+            // claim that takes the row; a claim taken while this process is
+            // already draining stamps itself, since it dies with the process.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -9471,7 +9428,6 @@ const CallRecordingProcessor = {
         }
         procGeneration = claimedRows?.[0]?.processing_generation != null
           ? Number(claimedRows[0].processing_generation) : null;
-        registerInFlight();
       } else {
         // force=true bypasses the early-exit on 'processed' rows so admin
         // Reprocess can re-run extraction. It must NOT bypass an actively-
@@ -9520,9 +9476,12 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
-            // A shutdown-release stamp bypasses the sweep's 10-minute age
-            // gate exactly once: the claim that honours it clears it.
-            metadata: trx.raw("metadata - 'shutdown_released_at'"),
+            // A deploy stamp (markInFlightForShutdown) is consumed by the
+            // claim that takes the row; a claim taken while this process is
+            // already draining stamps itself, since it dies with the process.
+            metadata: shuttingDown && isEnabled('callProcShutdownRelease')
+              ? shutdownStampSql(trx)
+              : trx.raw(`metadata - '${SHUTDOWN_STAMP_KEY}'`),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -9534,24 +9493,8 @@ const CallRecordingProcessor = {
         }
         procGeneration = claimedRows?.[0]?.processing_generation != null
           ? Number(claimedRows[0].processing_generation) : null;
-        registerInFlight();
       }
     });
-    pendingClaims.add(claimTransaction);
-    try {
-      await claimTransaction;
-    } catch (claimErr) {
-      // A claim that did not commit holds nothing: drop the entry it may have
-      // registered before the rollback.
-      if (inFlightEntry && inFlightPasses.get(call.id) === inFlightEntry) inFlightPasses.delete(call.id);
-      throw claimErr;
-    } finally {
-      pendingClaims.delete(claimTransaction);
-    }
-    if (refusedForShutdown) {
-      logger.info(`[call-proc] Not claiming ${maskSid(callSid)} — process began shutting down before the claim`);
-      return { success: false, skipped: true, reason: 'shutting_down' };
-    }
     // A blocked claim did NO work — success: false so no caller can mistake
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
@@ -9586,8 +9529,8 @@ const CallRecordingProcessor = {
     }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
-    // The claim is ours from here (registered in the claim transaction above
-    // for releaseInFlightForShutdown). Beat while we work: transcription of a
+    // The claim is ours from here: on the registry so a SIGTERM can stamp it
+    // (markInFlightForShutdown). Beat while we work: transcription of a
     // long recording is one multi-minute await with no natural checkpoints,
     // and without a beat the reclaim predicates cannot tell that pass from a
     // wedged one. unref() so a draining process never lingers for the timer.
@@ -9609,6 +9552,7 @@ const CallRecordingProcessor = {
         .catch((e) => logger.warn(`[call-proc] heartbeat skipped for ${maskSid(callSid)}: ${e.message}`));
     }, 60 * 1000);
     if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+    inFlightPasses.set(call.id, { callSid, procToken });
 
     // Outer guard: any unhandled throw between the claim above and the
     // terminal-status writes below would otherwise wedge the row in
@@ -22860,11 +22804,7 @@ const CallRecordingProcessor = {
       throw procErr;
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      // Only this pass's own entry: after a shutdown release the row may be
-      // claimed again by a peer, but never by this process (it refuses new
-      // claims while draining), so a token check is belt-and-suspenders.
       if (inFlightPasses.get(call.id)?.procToken === procToken) inFlightPasses.delete(call.id);
-      if (inFlightEntry) inFlightEntry.settled();
     }
   },
 
@@ -22874,88 +22814,51 @@ const CallRecordingProcessor = {
   },
 
   /**
-   * SIGTERM path (server/index.js shutdown). Stops this process taking new
-   * claims, gives the passes in flight `graceMs` to finish on their own, then
-   * hands back every claim still held: a token-fenced UPDATE that restores the
-   * row's pre-claim processing_status, clears the token and stamps
-   * metadata.shutdown_released_at so processAllPending on the pod replacing
-   * this one takes the row on its next 5-minute tick instead of after the
-   * 10-minute quiet window. The dying pass keeps running until the kill; its
-   * later writes are token-fenced and no-op, the same as a peer takeover.
+   * SIGTERM path (server/index.js shutdown). Stamps every call_log row this
+   * process holds a claim for with metadata.shutdown_interrupted_at — one
+   * token-fenced UPDATE per pass, all at once, each bounded by `deadlineMs`.
+   * Nothing else changes: the dying pass keeps its claim, token and status
+   * until Railway kills it, so no second pass can overlap it. The stamp only
+   * shortens the reclaim window on the replacing pod from 10 quiet minutes to
+   * SHUTDOWN_RECLAIM_QUIET_MINUTES (reclaimableClaim), and the claim that
+   * takes the row clears it. Also marks this process as draining so a claim
+   * taken from here on stamps itself.
    *
    * No-op (counts only) while GATE_CALL_PROC_SHUTDOWN_RELEASE is off.
    */
-  async releaseInFlightForShutdown({ graceMs = 10000 } = {}) {
+  async markInFlightForShutdown({ deadlineMs = 5000 } = {}) {
     const enabled = isEnabled('callProcShutdownRelease');
-    const inFlight = inFlightPasses.size;
-    const summary = { enabled, inFlight, finished: 0, released: 0, kept: 0, lost: 0 };
+    const entries = [...inFlightPasses.entries()];
+    const summary = { enabled, inFlight: entries.length, stamped: 0, failed: 0 };
     if (!enabled) return summary;
     shuttingDown = true;
-    // One grace budget for both waits, so a claim transaction blocked on an
-    // unrelated lock (the customer FOR UPDATE taken before the claim) can
-    // never hold the release of the passes already registered past the
-    // 25-second shutdown deadline (Codex #6260 r3 P1).
-    const deadline = Date.now() + Math.max(0, graceMs);
-    const untilDeadline = () => new Promise((resolve) => {
-      const t = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+    if (!entries.length) return summary;
+    const deadline = new Promise((resolve) => {
+      const t = setTimeout(() => resolve('deadline'), Math.max(0, deadlineMs));
       if (typeof t.unref === 'function') t.unref();
     });
-    // A claim transaction already past its in-transaction drain check commits
-    // and registers its entry inside the transaction; wait (bounded) for such
-    // transactions to settle so the registry read below is complete. New
-    // transactions refuse at the recheck and stamp their row, so this set only
-    // drains. One still open at the deadline keeps its claim and the stale
-    // reclaim resumes it, as before this change.
-    while (pendingClaims.size && Date.now() < deadline) {
-      await Promise.race([Promise.allSettled([...pendingClaims]), untilDeadline()]);
-    }
-    // The passes held at this moment get the rest of the grace. The loop below
-    // reads the registry AFTER the grace and again until nothing new appears.
-    const atStart = new Set(inFlightPasses.values());
-    if (atStart.size) {
-      await Promise.race([Promise.all([...atStart].map((e) => e.done)), untilDeadline()]);
-    }
-    const handled = new Set();
-    for (;;) {
-      const pending = [...inFlightPasses.entries()].filter(([, e]) => !handled.has(e));
-      if (!pending.length) break;
-      for (const [callId, entry] of pending) {
-        handled.add(entry);
-        if (!RELEASABLE_PRE_CLAIM_STATUSES.has(entry.preClaimStatus)) {
-          // Restoring a terminal status would park the row for good; the
-          // stale reclaim resumes this pass as it always has.
-          summary.kept += 1;
-          logger.info(`[call-proc] shutdown: keeping claim on ${maskSid(entry.callSid)} (pre-claim status ${entry.preClaimStatus}; the stale reclaim resumes it)`);
-          continue;
-        }
-        try {
-          const rows = await db('call_log')
+    await Promise.all(entries.map(async ([callId, entry]) => {
+      try {
+        const rows = await Promise.race([
+          db('call_log')
             .where({ id: callId })
             .where('processing_token', entry.procToken)
-            .update({
-              processing_status: entry.preClaimStatus,
-              processing_token: null,
-              metadata: db.raw(
-                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{shutdown_released_at}', to_jsonb(?::text), true)",
-                [new Date().toISOString()],
-              ),
-              updated_at: new Date(),
-            });
-          if (rows) {
-            summary.released += 1;
-            logger.info(`[call-proc] shutdown: released claim on ${maskSid(entry.callSid)} (status restored to ${entry.preClaimStatus || 'pending'})`);
-          } else {
-            // The pass finished (or a peer took the row) between the grace and
-            // this write — nothing to hand back.
-            summary.lost += 1;
-          }
-        } catch (err) {
-          logger.warn(`[call-proc] shutdown: release failed for ${maskSid(entry.callSid)}: ${err.message}`);
+            .update({ metadata: shutdownStampSql(db) }),
+          deadline,
+        ]);
+        if (rows === 'deadline') {
+          summary.failed += 1;
+          logger.warn(`[call-proc] shutdown: stamp for ${maskSid(entry.callSid)} did not land before the deadline`);
+        } else if (rows) {
+          summary.stamped += 1;
+          logger.info(`[call-proc] shutdown: stamped interrupted pass ${maskSid(entry.callSid)}`);
         }
+        // 0 rows: the pass finished, or a peer already took the row.
+      } catch (err) {
+        summary.failed += 1;
+        logger.warn(`[call-proc] shutdown: stamp failed for ${maskSid(entry.callSid)}: ${err.message}`);
       }
-    }
-    // Passes held at the start that finished on their own during the grace.
-    summary.finished = [...atStart].filter((e) => !handled.has(e)).length;
+    }));
     return summary;
   },
 
@@ -23013,10 +22916,7 @@ const CallRecordingProcessor = {
                     .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
                 });
             })
-            .andWhere(function () {
-              this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-                .orWhereRaw(SHUTDOWN_RELEASED_SQL);
-            });
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         });
       })
       .where(function () {
@@ -23033,25 +22933,13 @@ const CallRecordingProcessor = {
                 this.where('transcription_status', 'pending').whereNull('transcription');
               });
           })
-          .andWhere(function () {
-            this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-              // A claim handed back at a deploy (releaseInFlightForShutdown)
-              // already waited out the CDN window once; take it now. The
-              // claim clears the stamp, so this bypass applies exactly once.
-              .orWhereRaw(SHUTDOWN_RELEASED_SQL);
-          });
+          .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .orWhere('processing_status', 'no_transcription')
         .orWhere(function () {
           this.where('processing_status', 'extraction_failed')
             .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
-            // The 10-minute backoff spaces retries; a retry pass handed back at
-            // a deploy had already waited it out, so the stamp admits it once.
-            // The attempt cap and the 7-day fence still hold.
-            .andWhere(function () {
-              this.where('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
-                .orWhereRaw(SHUTDOWN_RELEASED_SQL);
-            })
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
             .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
         })
         .orWhere(function () {
