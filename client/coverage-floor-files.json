@@ -1,0 +1,11 @@
+[
+  "src/components/BiometricGate.jsx",
+  "src/components/InstallPrompt.jsx",
+  "src/components/NotificationBell.jsx",
+  "src/components/brand/CustomerDialogHost.jsx",
+  "src/glass/glass-engine.js",
+  "src/hooks/useAuth.jsx",
+  "src/native/nativeLinks.js",
+  "src/native/nativePush.js",
+  "src/pages/LoginPage.jsx"
+]

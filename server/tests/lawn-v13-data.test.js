@@ -18,7 +18,10 @@ const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixe
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
+const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+const finalPassMigration = require('../models/migrations/20261009150000_lawn_v13_final_pass');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -34,15 +37,21 @@ describe('the v13 recipe', () => {
   test('three tracks (no bahia), one universal program, 12 months in the existing visit shape', () => {
     expect(Object.keys(v13)).toEqual(GRASSES);
     for (const grass of GRASSES) {
-      expect(v13[grass].visits).toEqual(v13.st_augustine.visits);
+      // One universal program: the visits match once the optional bermuda removal
+      // addOns block (St. Augustine and Zoysia only) is set aside.
+      const withoutAddOns = (visits) => visits.map(({ addOns, ...visit }) => visit);
+      expect(withoutAddOns(v13[grass].visits)).toEqual(withoutAddOns(v13.st_augustine.visits));
       expect(v13[grass].visits.map((v) => v.month)).toEqual(MONTH_ABBR);
       expect(v13[grass].visits.map((v) => v.visit)).toEqual(MONTHS);
       expect(v13[grass].exact_catalog_names).toBe(true);
       expect(v13[grass].notes).toEqual(v13.st_augustine.notes);
       expect(v13[grass].safety_rules.length).toBeGreaterThan(0);
       for (const visit of v13[grass].visits) {
-        // April alone carries the 9x plan step (cadenceVariants); every other visit is the plain shape.
-        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : [])].sort());
+        // April alone carries the 9x plan step (cadenceVariants); addOns is the bermuda
+        // removal step on the April and June St. Augustine and Zoysia visits
+        // (GATE_LAWN_BERMUDA_REMOVAL); every other visit is the plain shape.
+        const bermudaStep = ['st_augustine', 'zoysia'].includes(grass) && ['Apr', 'Jun'].includes(visit.month);
+        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : []), ...(bermudaStep ? ['addOns'] : [])].sort());
         expect(Object.values(visit.tiers)).toEqual([true, true, true, true]);
       }
     }
@@ -79,9 +88,11 @@ describe('the v13 recipe', () => {
   test('N targets parse from the visit notes and total the program', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
     // October is Dimension 18-0-10 at 4.04 lb per 1,000 sq ft (commercial label, Coastal South): 0.73 lb N, 0.40 lb K2O.
-    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.5]);
-    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.23);
+    // December is LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (owner 2026-10-08): 0.45 lb N, 0.99 lb K2O.
+    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.45]);
+    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.18);
     expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.4);
+    expect(engine.parseVisitNutrientTargets(visitFor(12).notes).targetKPer1000).toBe(0.99);
     // No N or P in Jun-Sep.
     for (const m of [6, 7, 8, 9]) expect(n[m - 1]).toBe(0);
   });
@@ -90,7 +101,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
     ]);
   });
 });
@@ -169,7 +180,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -300,17 +311,23 @@ describe('staged migration 20261005120000', () => {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
       // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
+      // The staged December row names the 24-0-11; 20261008130000 swaps it for LESCO 10-0-22.
       // 20261007180000 turns the April Artavia row into Headway and adds its own rows (Arena keeps its name: 20261007181000 undoes the rename).
       // (The July 0-0-50 row 180000 inserts is deleted by 20261007189000: the recipe has no July potash.)
-      const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP);
+      // 20261009100000 retires the Advion add-on rows and inserts the fire ant granule rows in their place.
+      const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec));
       const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
-      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0])), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
-      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name)];
+      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : s[0]))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
+      // 20261009150000 (v13 final pass) inserts the December weed rows into November (Blindside is compared below).
+      const finalPass = windowKey === finalPassMigration.WINDOWS.NOV ? finalPassMigration.WEED_NAMES.filter((n) => n !== BLINDSIDE) : [];
+      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
       // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
-      expect(spots.filter((n) => n !== migration.NAMES.DIS).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      // 20261008130000 retires February's Certainty and surfactant rows (Celsius alone in February); the recipe lines are gone.
+      const retiredHere = new Set((decemberMigration.RETIRE.find(([key]) => key === windowKey) || [, []])[1]);
+      expect(spots.filter((n) => n !== migration.NAMES.DIS && !retiredHere.has(n)).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');
@@ -352,8 +369,8 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
     for (const month of MONTHS) {
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
-    // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row.
-    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name)];
+    // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22; 20261009100000 uses the existing Topchoice row.
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, granuleMigration.GRANULE];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));
@@ -548,13 +565,18 @@ describe('migration 20261005140000: rollback order, EPA numbers, Blindside rows'
         }
       }
     }
-    // The windows that list Blindside are exactly the recipe months that list it.
+    // The staged windows list Blindside beside every Celsius line; the recipe lists it for January, March and December only
+    // (owner 2026-10-08: November through March, February Celsius alone), and 20261008130000 retires the other staged rows.
     const recipeMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith(BLINDSIDE)));
-    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')));
-    expect(recipeMonths).toEqual(celsiusMonths);
+    // 20261009150000 gives November the December weed lines and a Blindside row of its own (tested in lawn-v13-final-pass.db.test.js), so the
+    // staged chain before it still has none in November.
+    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')) && m !== 11);
+    expect(recipeMonths).toEqual([1, 3, 11, 12]);
     const protocol = v13Protocols(db)[0];
     const monthsWithBlindside = db.lawn_protocol_windows.filter((w) => w.lawn_protocol_id === protocol.id && db.lawn_protocol_products.some((r) => r.lawn_protocol_window_id === w.id && r.product_name === BLINDSIDE)).map((w) => w.month).sort((a, b) => a - b);
-    expect(monthsWithBlindside).toEqual(recipeMonths);
+    expect(monthsWithBlindside).toEqual(celsiusMonths);
+    const retiredMonths = decemberMigration.RETIRE.filter(([, names]) => names.includes(BLINDSIDE)).map(([key]) => migration.WINDOWS.find((w) => w[1] === key)[0]).sort((a, b) => a - b);
+    expect(monthsWithBlindside.filter((m) => !retiredMonths.includes(m))).toEqual(recipeMonths.filter((m) => m !== 11));
     // Idempotent.
     const count = db.lawn_protocol_products.length;
     await round2.up(knex);

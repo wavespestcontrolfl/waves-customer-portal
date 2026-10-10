@@ -163,7 +163,7 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\([\s\S]*?"family_account_candidates"[\s\S]*?\]\);/);
     expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
-    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence };');
+    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence };');
     expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
   });
 });

@@ -1,0 +1,101 @@
+{
+  "blocks": {
+    "whole": {
+      "v": 1,
+      "visitDay": "2026-10-07",
+      "sodLaidOn": "2026-10-03",
+      "covers": "whole",
+      "planRan": true,
+      "swap": null,
+      "held": [
+        {
+          "kind": "fertilizer",
+          "until": "2026-11-02",
+          "rootedCheck": false
+        },
+        {
+          "kind": "weedKiller",
+          "until": "2026-11-02",
+          "rootedCheck": true
+        }
+      ]
+    },
+    "swap": {
+      "v": 1,
+      "visitDay": "2026-10-20",
+      "sodLaidOn": "2026-08-01",
+      "covers": "whole",
+      "planRan": true,
+      "swap": {
+        "name": "LESCO 24-0-11 with PolyPlus OPTI"
+      },
+      "held": [
+        {
+          "kind": "preEmergent",
+          "until": "2027-10-01",
+          "rootedCheck": false
+        }
+      ]
+    },
+    "part": {
+      "v": 1,
+      "visitDay": "2026-10-07",
+      "sodLaidOn": "2026-10-03",
+      "covers": "part",
+      "planRan": true,
+      "swap": null,
+      "held": [
+        {
+          "kind": "fertilizer",
+          "until": "2026-11-02",
+          "rootedCheck": false
+        },
+        {
+          "kind": "preEmergent",
+          "until": "2027-10-01",
+          "rootedCheck": false
+        },
+        {
+          "kind": "dylox",
+          "until": "2026-11-02",
+          "rootedCheck": false
+        }
+      ]
+    }
+  },
+  "cards": {
+    "whole": {
+      "title": "New sod (laid Oct 3)",
+      "lead": "Today we held:",
+      "items": [
+        "fertilizer until Nov 2. New sod needs 30 days to root.",
+        "weed spot spray until Nov 2, and until the sod has been mowed twice and does not lift."
+      ],
+      "rest": null,
+      "swap": null,
+      "close": "Everything else ran as normal. Same visit, same price."
+    },
+    "swap": {
+      "title": "New sod (laid Aug 1)",
+      "lead": "Today we held:",
+      "items": [
+        "pre-emergent until Oct 1, 2027, so the new runners can knit in."
+      ],
+      "rest": null,
+      "swap": "We used a fertilizer without pre-emergent in place of the usual bag.",
+      "close": "Everything else ran as normal. Same visit, same price."
+    },
+    "part": {
+      "title": "New sod (laid Oct 3)",
+      "lead": "Today we held these on the new sod area:",
+      "items": [
+        "fertilizer until Nov 2. New sod needs 30 days to root.",
+        "pre-emergent until Oct 1, 2027, so the new runners can knit in.",
+        "Dylox until Nov 2, while the new sod settles in."
+      ],
+      "rest": "The rest of the lawn was treated as planned.",
+      "swap": null,
+      "close": "Everything else ran as normal. Same visit, same price."
+    }
+  }
+}

@@ -46,6 +46,9 @@ import {
   termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from "../../lib/typed-findings-rules";
+// The station labels and the typed station counts are shared with the Fast Complete
+// sheet (lib/station-checks.js): one copy of each rule.
+import { STATION_PROGRAM_UI, STATION_STATUS_UI, stationAutoCounts, stationStatusLabel } from "../../lib/station-checks";
 // Typed findings rules live in lib/typed-findings-rules.js (shared with the
 // tech Fast Complete sheet, which never imports this module); re-exported
 // here for existing importers.
@@ -62,7 +65,6 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
 import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
-import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
@@ -161,7 +163,8 @@ import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
-import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
+import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
@@ -2297,6 +2300,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // How a shared stop moves (the choice box near the date and time). Declared
   // here because the availability search below answers for that move.
   const [comboMove, setComboMove] = useState("together");
+  const editServices = [
+    { name: form.serviceType, key: form.serviceKey },
+    ...serviceLines.map((line) => ({ name: line.serviceType, key: line.serviceKey })),
+  ].filter((item) => typeof item.name === "string" && item.name.trim());
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
     moveScope: comboMove,
@@ -2324,6 +2331,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
+    // The same two best-times rows as New Appointment (owner 2026-10-08),
+    // ranked for what the save will book: the form's primary service (it can
+    // be re-picked here) and its add-on lines, in the same order as their
+    // catalog keys. The server adds a shared stop's other services when they
+    // move with it (moveScope).
+    serviceTypes: editServices.map((item) => item.name),
+    serviceKeys: editServices.map((item) => item.key || ""),
+    bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -6205,6 +6220,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
+                bestRows
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -7501,6 +7517,11 @@ function JobCardTank({ tank, serviceId, D }) {
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
+            {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
+              <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
+                {mix.rotationWarnings.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
+              </div>
+            )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
@@ -8422,6 +8443,51 @@ export function ProtocolPanel({ service, onClose }) {
                                 key={`${step.step}-${step.productId}`}
                                 style={{
                                   fontSize: 11,
+                                  color: D.text,
+                                  marginBottom: 3,
+                                }}
+                              >
+                                {" "}
+                                <strong>
+                                  {step.step}. {step.productName}
+                                </strong>
+                                {step.instruction && (
+                                  <div
+                                    style={{ color: D.muted, marginLeft: 14 }}
+                                  >
+                                    {step.instruction}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {lawnMix.bermudaMixingOrder?.length > 0 && (
+                          <div
+                            style={{
+                              marginTop: 10,
+                              paddingTop: 10,
+                              borderTop: `1px solid ${D.border}`,
+                            }}
+                          >
+                            {" "}
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 500,
+                                color: D.muted,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.6,
+                                marginBottom: 6,
+                              }}
+                            >
+                              Bermuda backpack mix
+                            </div>
+                            {lawnMix.bermudaMixingOrder.map((step) => (
+                              <div
+                                key={`${step.step}-${step.productId}`}
+                                style={{
+                                  fontSize: 14,
                                   color: D.text,
                                   marginBottom: 3,
                                 }}
@@ -9507,6 +9573,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    // The server reads what the visit books from its own rows (serviceId).
+    bestRows: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -11549,37 +11618,6 @@ function clampStationView(view) {
     y: round(Math.min(Math.max(0, view.y), STATION_FRAME_H - view.h)),
   };
 }
-const STATION_STATUS_UI = {
-  ok: { color: "#10b981", label: "OK" },
-  activity: { color: "#ef4444", label: "Activity" },
-  serviced: { color: "#f59e0b", label: "Serviced" },
-  inaccessible: { color: "#94a3b8", label: "No access" },
-};
-const STATION_PROGRAM_UI = {
-  termite: {
-    title: "Bait station map",
-    hint: "Every station starts as OK — tap a pin to flag activity, service, or no access.",
-    activityLabel: "Activity",
-    activityCounter: "with activity",
-  },
-  rodent: {
-    title: "Rodent bait station map",
-    hint: "Every station starts as OK — tap a pin to flag consumption, service, or no access.",
-    activityLabel: "Consumption",
-    activityCounter: "with consumption",
-  },
-  trapping: {
-    title: "Rodent trap map",
-    hint: "Every trap starts as OK — tap a pin to record a capture, service, or no access.",
-    activityLabel: "Capture",
-    activityCounter: "with captures",
-  },
-};
-function stationStatusLabel(status, program) {
-  if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
-  return STATION_STATUS_UI[status]?.label || status;
-}
-
 export function StationMarkingStep({
   map,
   stations, // [{ key, id?, number, label?, shape: {cx,cy,r}|null, stale }]
@@ -12234,6 +12272,12 @@ function PestRecapCard({ serviceId }) {
     </div>
   );
 }
+
+// Shown beside the Additional work selector while the bermuda removal mix carries the
+// server's spray conditions; the test-patch line is the short wording for a CitraBlue or
+// unconfirmed St. Augustine cultivar.
+const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "zoysia2eeOnHand", "testPatchFirst"];
+const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
 
 export function CompletionPanel({
   service,
@@ -12985,40 +13029,17 @@ export function CompletionPanel({
     // let the termite report (which falls back to the typed counts when a
     // visit has no check rows) tell the declined customer every station
     // was inspected (codex round-2 P1).
-    const isInspectionOnly = visitOutcome === "inspection_only";
-    const isCustomerDeclined = visitOutcome === "customer_declined";
-    const checkedKeys = isCustomerDeclined
-      ? []
-      : isInspectionOnly
-        ? activeKeys.filter((key) => stationMoves[key]
-          || stationNew.some((station) => station.key === key)
-          || Object.prototype.hasOwnProperty.call(stationStatuses, key))
-        : activeKeys;
-    const statusOf = (key) => stationStatuses[key] || "ok";
-    const inaccessible = checkedKeys.filter((key) => statusOf(key) === "inaccessible").length;
-    // Each program maps to ITS schema's count keys — never auto-write a key
-    // the schema doesn't own, or submit validation rejects the unknown
-    // field. Trapping owns traps_checked only: captures is a tech-judgment
-    // count (one trap can hold multiple captures), and the schema has no
-    // total/inaccessible keys.
-    const counts = stationProgram === "trapping"
-      ? { traps_checked: String(checkedKeys.length - inaccessible) }
-      : {
-        // total_stations is termite-only since 2026-07-23: the rodent
-        // schema retired it (the map's pins ARE the roster), and writing it
-        // there would trip the unknown-field rejection at submit
-        // (codex P1 on #2963).
-        ...(stationProgram === "termite"
-          ? { total_stations: String(activeKeys.length) }
-          : {}),
-        stations_checked: String(checkedKeys.length - inaccessible),
-        stations_inaccessible: String(inaccessible),
-        // Only the termite schema carries a per-station activity COUNT; the
-        // rodent flow records consumption as a select (tech judgment).
-        ...(stationProgram === "termite"
-          ? { stations_with_activity: String(checkedKeys.filter((key) => statusOf(key) === "activity").length) }
-          : {}),
-      };
+    // The counts rule (and why an inspection_only or declined visit counts only
+    // what was explicitly checked) lives in lib/station-checks.js.
+    const counts = stationAutoCounts({
+      program: stationProgram,
+      activeKeys,
+      statuses: stationStatuses,
+      visitOutcome,
+      isExplicit: (key) => stationMoves[key]
+        || stationNew.some((station) => station.key === key)
+        || Object.prototype.hasOwnProperty.call(stationStatuses, key),
+    });
     // Snapshot the last auto-written values BEFORE scheduling the state
     // updates: the updater callbacks run after this effect finishes, so
     // reading the ref inside them would see the values we're about to
@@ -14883,7 +14904,7 @@ export function CompletionPanel({
   // changes, so this never loops).
   useEffect(() => {
     if (techTips?.available !== true) return;
-    const known = new Set((techTips.groups || []).flatMap((g) => (g.tips || []).map((t) => t.id)));
+    const known = pickableTipIds(techTips);
     setSelectedTipIds((prev) => {
       const kept = prev.filter((id) => known.has(id));
       return kept.length === prev.length ? prev : kept;
@@ -15048,7 +15069,7 @@ export function CompletionPanel({
       }
       if (lawnDefaultsEnabled) {
         setProtocolActions(lawnPlanActionOptions(lawnCompletionDefaults.options));
-        setProtocolActionMeta({ source: "appointment_plan" });
+        setProtocolActionMeta({ source: "appointment_plan", ...(lawnCompletionDefaults.planWarnings ? { warnings: lawnCompletionDefaults.planWarnings } : {}) });
         setProtocolActionsLoaded(true);
         setProtocolActionsLoading(false);
         return () => { cancelled = true; };
@@ -15065,6 +15086,8 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
+      // The server reads the visit's account (bermuda removal) itself.
+      if (service.id) params.set("scheduledServiceId", service.id);
     }
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
@@ -15160,7 +15183,11 @@ export function CompletionPanel({
       .then((data) => {
         if (cancelled) return;
         lawnPlanVerifiedRef.current = service.id;
-        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
+        // The plan's own bermuda removal warnings (why the mix is not offered) ride with the completion
+        // defaults, so the drawer shows them beside the Additional work selector like the actions list's.
+        const planWarnings = (Array.isArray(data?.plan?.propertyGate?.warnings) ? data.plan.propertyGate.warnings : [])
+          .filter((warning) => String(warning?.code || "").startsWith("lawn_bermuda_"));
+        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id, ...(planWarnings.length ? { planWarnings } : {}) });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
           data?.plan?.protocol?.blocked ||
@@ -17149,7 +17176,13 @@ export function CompletionPanel({
       action.product?.id &&
       !selectedProducts.find((p) => p.productId === action.product.id)
     ) {
-      addProduct(action.product);
+      addProduct({
+        ...action.product,
+        ...(action.prefillAmount === false ? { prefillAmount: false } : {}),
+        group: action.group,
+        // A spot action (the bermuda removal mix, /completion-actions path) records as spot work.
+        ...(action.applicationMode === "spot" ? { applicationMode: "spot", applicationMethod: action.product.applicationMethod || "spot_treatment" } : {}),
+      });
     }
   }
   function handleOneTimeRecapOnlyChange(checked) {
@@ -17180,10 +17213,11 @@ export function CompletionPanel({
     // r6 P1) — under the protocol row's application mode: the catalog
     // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
     // method, area requirement and rate prefill all follow the mode (r7 P1).
-    const catalogProduct = lawnDefaultsEnabled
+    const spotAction = product.applicationMode === "spot";
+    const catalogProduct = lawnDefaultsEnabled || spotAction
       ? products.find((row) => String(row.id) === String(product.id)) || product
       : product;
-    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+    let row = buildSelectedProduct((lawnDefaultsEnabled || spotAction) && product.applicationMethod
       ? { ...catalogProduct, application_method: product.applicationMethod }
       : catalogProduct);
     if (lawnDefaultsEnabled) {
@@ -17201,6 +17235,11 @@ export function CompletionPanel({
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
+    }
+    // A spot line (the bermuda removal mix) has no catalog-derived amount: no rate, area or
+    // total is suggested; the tech enters the area treated and the amount used.
+    if (product.prefillAmount === false) {
+      row = { ...row, rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used.", areaUnit: "sqft", ...(product.group ? { group: product.group } : {}) };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
@@ -17426,9 +17465,46 @@ export function CompletionPanel({
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
+    // Products that share a completion group (the bermuda removal mix) come off together. The group is the
+    // ROW's own persisted id (a restored draft has it before any protocol action loads), else the loaded
+    // action's; the members are every row with that group plus the loaded actions' products.
+    const group = selectedProducts.find((p) => p.productId === productId)?.group
+      || protocolActions.find((a) => a.group && a.product?.id === productId)?.group;
+    const members = group ? selectedProducts.filter((p) => p.group === group) : [];
+    const removedIds = new Set([productId, ...members.map((p) => p.productId), ...(group
+      ? protocolActions.filter((a) => a.group === group && a.product?.id).map((a) => a.product.id)
+      : [])]);
+    // The group's chips go with its products: the labels, scopes and [Protocol] note lines
+    // handleProtocolActionSelect added for each member (a member's label is its product name).
+    if (group) {
+      const labels = new Set([
+        ...members.map((p) => String(p.name)),
+        ...protocolActions.filter((a) => a.group === group).map((a) => String(a.note || a.label || a.raw || "Completed protocol item")),
+      ]);
+      for (const label of labels) removeSelectedLabel("protocol", label);
+    }
     setSelectedProducts((prev) =>
-      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
+      promoteTankOwner(prev.filter((p) => !removedIds.has(p.productId))),
     );
+  }
+  // The x on a report pill. A label that belongs to a completion group (the bermuda
+  // removal mix) takes the whole group with it: every label, scope and note line, and
+  // every product row, the same as removing one of its product rows.
+  function removeSelectionPill(kind, label) {
+    if (generating) return;
+    // A pill of a group row: found by the row's own group and name first (works before the actions load).
+    const row = kind === "protocol" ? selectedProducts.find((p) => p.group && String(p.name) === label) : null;
+    const member = kind === "protocol" && !row
+      ? protocolActions.find((a) => a.group && String(a.note || a.label || a.raw || "Completed protocol item") === label)
+      : null;
+    const groupProductId = row?.productId
+      || (member && protocolActions.find((a) => a.group === member.group && a.product?.id)?.product.id);
+    if (groupProductId) removeProduct(groupProductId);
+    else if (member) {
+      for (const mate of protocolActions.filter((a) => a.group === member.group)) {
+        removeSelectedLabel("protocol", String(mate.note || mate.label || mate.raw || "Completed protocol item"));
+      }
+    } else removeSelectedLabel(kind, label);
   }
   function updateProduct(productId, field, value) {
     if (generating) return;
@@ -17509,7 +17585,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
-            governed, next.propertyServiceAreaField,
+            governed || !!next.group, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -18862,9 +18938,9 @@ export function CompletionPanel({
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
-      if (service?.completionInvoiceAlreadySent) {
-        body.invoiceAlreadySent = true;
-      }
+      // The invoice fields of the body: the Fast Complete sheets build theirs
+      // with the same helper (lib/completion-invoice-fields.js).
+      Object.assign(body, completionInvoiceFields(service));
       // Once the completion is KNOWN COMMITTED, every submit — automatic
       // retry or the manual one after give-up — replays the committed body
       // byte-for-byte through replayCommittedCompletion above; a fresh build
@@ -19080,6 +19156,18 @@ export function CompletionPanel({
     selected: isProtocolActionSelected(action),
     action,
   }));
+  // The bermuda removal mix carries the server's spray conditions (active growth, the June
+  // morning limit, rain and irrigation, mowing, and the test patch on a CitraBlue or
+  // unconfirmed cultivar): one short line each beside the selector, the same line shown
+  // once however many of the three products carry it.
+  const bermudaConditionLines = [...new Set(effectiveProtocolActions
+    .filter((action) => action.group)
+    .flatMap((action) => action.gateNotes || [])
+    .filter((note) => BERMUDA_CONDITION_KEYS.includes(note.key))
+    .map((note) => (note.key === "testPatchFirst" ? BERMUDA_TEST_PATCH_LINE : note.text)))];
+  // The actions list's own warnings (/completion-actions): why the bermuda removal mix is not
+  // offered (an excluded cultivar, a blocked or capped product), one short line each.
+  const protocolActionWarningLines = [...new Set((protocolActionMeta?.warnings || []).map((warning) => warning?.message).filter(Boolean))];
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
@@ -19164,19 +19252,34 @@ export function CompletionPanel({
         }
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
+      // Options that share a group (the bermuda removal mix) go on together.
+      if (option.action.group) {
+        for (const mate of effectiveProtocolActions) {
+          if (mate !== option.action && mate.group === option.action.group) applyProtocolAction(mate);
+        }
+        normalizeGroupRows(option.action.group);
+      }
     }
   }
-  // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).
-  // Ticking it is the same as picking the sweep from the old dropdown
-  // (applyProtocolAction: label, scope, [Protocol] note line); unticking is
-  // the same as the x on its pill (removeSelectedLabel).
-  const pestSweepLabel = activeSelectedLabels(selectedProtocolActionLabels).find(
-    (label) => String(label).trim().toLowerCase() === PEST_SWEEP_ACTION.label.toLowerCase(),
-  );
-  function handlePestSweepChange(checked) {
-    if (generating) return;
-    if (checked) applyProtocolAction(PEST_SWEEP_ACTION);
-    else if (pestSweepLabel) removeSelectedLabel("protocol", pestSweepLabel);
+  // A product of the group that was added or restored BEFORE the group was applied has its own row
+  // (a catalog method, a catalog rate and area): it takes the group's spot shape, no catalog area
+  // or rate, and no derived total (a total the tech typed stays). Rows the group adds already have it.
+  function normalizeGroupRows(group) {
+    const members = new Map(effectiveProtocolActions.filter((a) => a.group === group && a.product?.id).map((a) => [String(a.product.id), a]));
+    setSelectedProducts((prev) => prev.map((row) => {
+      const member = members.get(String(row.productId));
+      if (!member || (member.prefillAmount !== false && member.applicationMode !== "spot")) return row;
+      const method = member.product.applicationMethod || "spot_treatment";
+      const unit = requiredApplicationArea(method, serviceTypeForArea, true)?.unit || "sqft";
+      // A typed total is the tech's actual and stays (with its manual flag); the catalog rate, the area
+      // and the area default flags are cleared either way.
+      const kept = row.totalAmountManual === true;
+      return {
+        ...row, applicationMethod: method, group, areaUnit: unit,
+        rate: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false,
+        ...(kept ? {} : { totalAmount: "", lawnAmountReason: "Spot work: enter the area treated and the amount used." }),
+      };
+    }));
   }
   function handleLawnFindingAdd(text) {
     if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
@@ -20456,7 +20559,7 @@ export function CompletionPanel({
                     <button
                       type="button"
                       aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                      onClick={() => removeSelectedLabel(kind, label)}
+                      onClick={() => removeSelectionPill(kind, label)}
                       style={{
                         border: "none",
                         background: "transparent",
@@ -20499,30 +20602,6 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {isRegularPestVisit && (
-              <div style={{ marginBottom: 20 }}>
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    fontFamily: font,
-                    fontSize: 14,
-                    color: M.ink,
-                    cursor: "pointer",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={Boolean(pestSweepLabel)}
-                    disabled={generating}
-                    onChange={(e) => handlePestSweepChange(e.target.checked)}
-                    style={{ width: 18, height: 18, accentColor: M.ink }}
-                  />
-                  Swept eaves and webs
-                </label>
-              </div>
-            )}
             {!isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -20565,6 +20644,16 @@ export function CompletionPanel({
                             </option>
                           ))}
                     </select>
+                    {bermudaConditionLines.map((line) => (
+                      <div key={line} style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
+                    {protocolActionWarningLines.map((line) => (
+                      <div key={line} role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
                     {selectedProtocolActionCount > 0 && (
                       <div
                         style={{
@@ -21387,7 +21476,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, serviceTypeForArea),
                           serviceTypeForArea,
-                          lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -22972,7 +23061,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                    onClick={() => removeSelectedLabel(kind, label)}
+                    onClick={() => removeSelectionPill(kind, label)}
                     style={{
                       border: "none",
                       background: "transparent",
@@ -23020,22 +23109,6 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {isRegularPestVisit && (
-              <div style={{ marginBottom: 12 }}>
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: D.text, cursor: "pointer" }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={Boolean(pestSweepLabel)}
-                    disabled={generating}
-                    onChange={(e) => handlePestSweepChange(e.target.checked)}
-                    style={{ width: 16, height: 16 }}
-                  />
-                  Swept eaves and webs
-                </label>
-              </div>
-            )}
             {!isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -23084,6 +23157,12 @@ export function CompletionPanel({
                           </option>
                         ))}
                   </select>
+                  {bermudaConditionLines.map((line) => (
+                    <div key={line} style={{ fontSize: 14, color: D.muted }}>{line}</div>
+                  ))}
+                  {protocolActionWarningLines.map((line) => (
+                    <div key={line} role="note" style={{ fontSize: 14, color: D.muted }}>{line}</div>
+                  ))}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>
                       {selectedProtocolActionCount} protocol action
@@ -23860,7 +23939,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, serviceTypeForArea),
                       serviceTypeForArea,
-                      lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -25139,12 +25218,15 @@ function TechTipPicker({
     if (String(customTip || "").trim()) setShowCustom(true);
   }, [customTip]);
   const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
-  const groups = library?.groups || [];
+  const groups = useMemo(() => rotatedTipGroups(library), [library]);
   const allTips = useMemo(
     () => groups.flatMap((g) => (g.tips || []).map((t) => ({ ...t, groupLabel: g.label }))),
     [groups],
   );
-  const tipById = useMemo(() => new Map(allTips.map((t) => [t.id, t])), [allTips]);
+  // A search reads the whole library (`more`: the tips this visit's list
+  // leaves out, owner 2026-10-09); the open list stays the visit's own.
+  const searchTips = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
+  const tipById = useMemo(() => new Map(searchTips.map((t) => [t.id, t])), [searchTips]);
   // The custom line takes a slot like a library pick (the server caps the
   // frozen set the same way), so the count and the cap include it.
   const customCount = String(customTip || "").trim() ? 1 : 0;
@@ -25155,7 +25237,7 @@ function TechTipPicker({
   // would drop over cap.
   const customLocked = !customCount && selectedIds.length >= TECH_TIP_MAX;
   const q = query.trim().toLowerCase();
-  const ranked = q ? rankTechTips(allTips, q) : null;
+  const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
   const inactive = disabled || loading || !!error;
@@ -25430,6 +25512,8 @@ const MONTH_NAMES = [
 
 /* Product descriptions — plain-language for techs and Virginia */
 const PRODUCT_DESCRIPTIONS = {
+  // Before the generic key: the plain product is the caterpillar product on lawn and tree & shrub lines.
+  "acelepryn insecticide": "chlorantraniliprole for leaf-feeding caterpillars (IRAC 28)",
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
@@ -25506,12 +25590,13 @@ const PRODUCT_DESCRIPTIONS = {
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",
-  mainspring: "non-neonic option for whiteflies, caterpillars, leafminers, and resistance management (IRAC 28)",
-  "distance igr": "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
-  distance: "insect growth regulator for whitefly and scale eggs/nymphs/crawlers (IRAC 7C)",
+  mainspring: "non-neonic option for whiteflies, leafminers, and resistance management (IRAC 28)",
+  "distance igr": "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
+  distance: "insect growth regulator for whitefly eggs and nymphs (IRAC 7C)",
   talus: "insect growth regulator for immature whitefly and scale stages (IRAC 16)",
   "kphite 7lp": "phosphite support for root/oomycete pressure; FRAC P07",
   kphite: "phosphite support for root/oomycete pressure; FRAC P07",
+  reliant: "phosphite support for root/oomycete pressure; FRAC P07",
   conserve: "spinosyn option for caterpillar/thrips-type work where labeled",
   floramite: "miticide for confirmed mite pressure only",
   "liquid copper": "contact protectant for labeled leaf or bacterial disease; keep separate from oil",
@@ -25564,6 +25649,8 @@ const TRACK_SAFETY_RULES = {
 const PRODUCT_DESCRIPTIONS_V13 = {
   "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
   celsius: "selective weed killer for warm-season grass (max 2x/year)",
+  "lesco 10-0-22":
+    "slow-release fertilizer with extra potassium for winter hardiness",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

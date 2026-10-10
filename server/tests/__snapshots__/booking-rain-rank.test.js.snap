@@ -3,6 +3,7 @@
 exports[`catalog identity beats the words in a name exactly these catalog keys are rain-OK 1`] = `
 [
   "bed_bug_treatment",
+  "cockroach_control",
   "german_roach",
   "german_roach_initial",
   "lawn_inspection",
@@ -19,6 +20,7 @@ exports[`catalog identity beats the words in a name exactly these catalog keys a
   "rodent_trapping_followup",
   "rodent_trapping_followup_3pack",
   "termite_inspection",
+  "vehicle_german_roach",
   "waves_assessment",
   "waves_assessment_plus",
   "wdo_inspection",

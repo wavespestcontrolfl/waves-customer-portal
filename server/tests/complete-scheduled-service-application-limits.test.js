@@ -46,6 +46,7 @@ let checkLimits;
 // hard product-level count limit. `queried` records every table the closeout's limit check touched.
 let catalogRows;
 let limitedIds;
+let programTaggedIds;
 let queried;
 
 const celsiusViolation = { type: 'annual_max_apps', message: 'Celsius WG: 2/2 other applications in the year — LIMIT REACHED.', current: 2, max: 2 };
@@ -83,10 +84,11 @@ beforeEach(() => {
   };
   catalogRows = [{ id: CELSIUS_ID, name: 'Celsius WG' }, { id: DEFAULT_ID, name: 'Default fixture' }];
   limitedIds = new Set([CELSIUS_ID]);
+  programTaggedIds = new Set();
   queried = [];
   db.mockImplementation((table) => {
     if (table === 'products_catalog') return batched(table, (ids) => catalogRows.filter((row) => ids.includes(row.id)));
-    if (table === 'product_limits') return batched(table, (ids) => ids.filter((id) => limitedIds.has(id)).map((id) => ({ product_id: id })));
+    if (table === 'product_limits') return batched(table, (ids) => ids.filter((id) => limitedIds.has(id)).map((id) => ({ product_id: id, match_value: programTaggedIds.has(id) ? 'bermuda_removal' : null })));
     return builder;
   });
   attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
@@ -139,6 +141,13 @@ describe('closeout: hard count limits flag, they never refuse', () => {
     // Only product-level hard count limits are audited (the audit method returns nothing else).
     checkLimits.mockResolvedValue([]);
     expect(await findings([CELSIUS_ID])).toEqual([]);
+  });
+
+  test('a product whose only hard rows are the bermuda removal step\'s own (program-tagged) is never asked of the audit (codex #6035 r45 P2)', async () => {
+    limitedIds.add(DEFAULT_ID);
+    programTaggedIds.add(DEFAULT_ID);
+    expect(await findings([DEFAULT_ID])).toEqual([]);
+    expect(checkLimits).not.toHaveBeenCalled();
   });
 
   test('EVERY violated hard limit of a product is its own finding (yearly count and minimum interval), each worded for its limit', async () => {
@@ -202,6 +211,34 @@ describe('closeout: hard count limits flag, they never refuse', () => {
     queried.length = 0;
     expect(await findings(['00000000-0000-4000-8000-000000009999'])).toEqual([]);
     expect(queried).toEqual(['products_catalog']);
+  });
+});
+
+describe('closeout: a spot application is audited at its place (GATE_LAWN_TROUBLE_AREAS)', () => {
+  const record = { id: 'record-1', service_date: etDateString() };
+  // The ledger lookup answers `rows`; every other table is the suite's mocked database.
+  const placedLedger = (rows) => (table) => (table === 'property_application_history'
+    ? { where: () => ({ whereNull: () => ({ whereNotNull: () => ({ distinct: async (...columns) => { placedLedger.columns = columns; return rows; } }) }) }) }
+    : db(table));
+
+  test('the place of the recorded product is handed to the audit; a product with none is audited on the lawn', async () => {
+    process.env.GATE_LAWN_SPOT_RULES = 'true';
+    process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
+    try {
+      const database = placedLedger([{ product_id: CELSIUS_ID, treated_place: 'back' }, { product_id: DEFAULT_ID, treated_place: null }]);
+      limitedIds.add(DEFAULT_ID);
+      await recordedProductLimitFindings({ svc: service, record, database });
+      expect(placedLedger.columns).toEqual(['product_id', 'treated_place']);
+      expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID, place: 'back' });
+      expect(checkLimits).toHaveBeenCalledWith(service.customer_id, DEFAULT_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
+    } finally { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; }
+  });
+
+  test('gate off: the ledger is read for the product ids alone and the audit gets no place', async () => {
+    const database = placedLedger([{ product_id: CELSIUS_ID }]);
+    await recordedProductLimitFindings({ svc: service, record, database });
+    expect(placedLedger.columns).toEqual(['product_id']);
+    expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
   });
 });
 

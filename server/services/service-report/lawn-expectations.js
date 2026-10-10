@@ -195,8 +195,11 @@ function recognizedCauses(applications, issueMap) {
   return new Set([...issueMap.keys(), ...fromTargets]);
 }
 
-function isCurative(family, app, causes, modeLock) {
+// `tied` is the set of families the visit's frozen finding-to-product tie says treated a finding
+// (GATE_LAWN_REPORT_FACTS): a product that treated what the photos or the technician found is curative.
+function isCurative(family, app, causes, modeLock, tied = new Set()) {
   if (modeLock) return modeLock === 'curative';
+  if (tied.has(family)) return true;
   const tagged = appTargets(app).some((t) => t.family === family);
   return tagged || (CURATIVE_ISSUE_KEYS[family] || []).some((cause) => causes.has(cause));
 }
@@ -256,7 +259,7 @@ function materializeRow(base, { causes, gapDays, celsiusYtdCount }) {
   };
 }
 
-function resolveProductRows(applications, causes) {
+function resolveProductRows(applications, causes, tied) {
   const mapped = applications.filter((app) => classifyLawnProductStatus(appName(app)) === 'mapped');
   const unmapped = applications
     .filter((app) => classifyLawnProductStatus(appName(app)) === 'unmapped')
@@ -264,9 +267,12 @@ function resolveProductRows(applications, causes) {
     .filter(Boolean);
   const familyCurative = new Map(); // family -> curative?
   for (const app of mapped) {
-    const { family, modeLock } = classifyLawnProduct(appName(app));
-    // One curative application is enough to make the family's row curative.
-    familyCurative.set(family, familyCurative.get(family) || isCurative(family, app, causes, modeLock));
+    const { family, modeLock, alsoFamilies } = classifyLawnProduct(appName(app));
+    // One curative application is enough to make the family's row curative. A product that is two
+    // things at once (a pre-emergent with fertilizer) counts toward each family it names.
+    for (const f of [family, ...alsoFamilies]) {
+      familyCurative.set(f, familyCurative.get(f) || isCurative(f, app, causes, modeLock, tied));
+    }
   }
   const rows = [...familyCurative].map(([family, curative]) => Object.values(PRODUCT_ROWS)
     .find((r) => r.family === family && (!r.mode || r.mode === (curative ? 'curative' : 'preventive'))));
@@ -292,6 +298,8 @@ const ISSUE_WITHHOLD_RULES = [
  * @param {string|Date} [input.nextVisitDate]
  * @param {number} [input.nextVisitGapDays] used instead of the two dates when given
  * @param {number} [input.celsiusYtdCount] year-to-date Celsius count INCLUDING this visit
+ * @param {string[]} [input.tiedFamilies] families a frozen tie says treated a finding ('fungicide' | 'insecticide');
+ *   their product row reads curative (lawn-report-facts.js frozenTiedFamilies)
  * @param {object} [opts]
  * @param {boolean} [opts.includeUnapproved=false] tests and owner preview only
  */
@@ -303,7 +311,8 @@ function buildLawnExpectations(input = {}, { includeUnapproved = false } = {}) {
   const causes = recognizedCauses(applications, issueMap);
   const ctx = { causes, gapDays, celsiusYtdCount };
 
-  const { rows: productRows, unmapped, families } = resolveProductRows(applications, causes);
+  const tied = new Set(Array.isArray(input?.tiedFamilies) ? input.tiedFamilies : []);
+  const { rows: productRows, unmapped, families } = resolveProductRows(applications, causes, tied);
   const month = visitMonth(visitDate);
   const issueRows = [];
   const withheld = [];

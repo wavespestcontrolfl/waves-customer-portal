@@ -123,6 +123,12 @@ export function customerEstimateHref(customer) {
   return query ? `/admin/estimates?${query}` : "/admin/estimates";
 }
 
+// The staff page for one estimate (the Estimates workspace, scrolled to it).
+// Staff-only: it is an admin route, never the customer's token link.
+export function adminEstimateHref(estimateId) {
+  return `/admin/estimates?estimateId=${encodeURIComponent(estimateId)}`;
+}
+
 export function CustomerActionBar({ customer, standalone }) {
   // The call bridge is owner-only: a technician login gets no Call action.
   const canCall = useCanAccessCalls();

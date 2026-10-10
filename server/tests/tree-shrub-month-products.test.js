@@ -41,20 +41,21 @@ describe('resolveMonthProducts', () => {
     // The due gates (60-day/quarter Snapshot, 3-month palm) decide what shows.
     // Lines still waiting on an exact label (13-0-13, Copper) are withheld too.
     expect(ids('2026-01-15')).toEqual(['snapshot', 'palm']);
-    // KPHITE and Sequestar lines say their method is unverified: withheld.
-    expect(ids('2026-02-10')).toEqual(['snapshot', 'palm', 'tritek']);
+    // TriTek is a secondary (live find) line in every month now (owner
+    // 2026-10-09), so it is never a suggestion. NutriRoot is ambiguous in
+    // this catalog; Mn Combo and the Sequestar/KPHITE lines are not primary.
+    expect(ids('2026-02-10')).toEqual(['snapshot', 'palm']);
     expect(ids('2026-03-10')).toEqual(['snapshot', 'palm', 'mainspring', 'distance']);
     expect(ids('2026-04-10')).toEqual(['snapshot', 'palm']);
     expect(ids('2026-05-10')).toEqual(['snapshot', 'mainspring', 'palm']);
-    // June's "Fe/Mn micros" line is not a suggestion: Iron Plus is 12-0-0 N.
     // The summer palm feeding is the 0-0-16 palm SKU, never the lawn winterizer.
-    expect(ids('2026-06-10')).toEqual(['snapshot', 'palm16', 'tritek']);
+    expect(ids('2026-06-10')).toEqual(['snapshot', 'palm16']);
     expect(ids('2026-07-10')).toEqual(['snapshot', 'palm16']);
-    expect(ids('2026-08-10')).toEqual(['snapshot', 'palm16', 'mainspring', 'distance', 'tritek', 'cytogro']);
+    expect(ids('2026-08-10')).toEqual(['snapshot', 'palm16', 'mainspring', 'distance', 'cytogro']);
     // Talus and Headway are gone from the program; TriStar is secondary only.
-    expect(ids('2026-09-10')).toEqual(['snapshot', 'palm16', 'distance', 'tritek']);
+    expect(ids('2026-09-10')).toEqual(['snapshot', 'palm16', 'distance']);
     expect(ids('2026-10-01')).toEqual(['snapshot', 'palm']);
-    expect(ids('2026-11-10')).toEqual(['snapshot', 'palm', 'tritek', 'espoma']);
+    expect(ids('2026-11-10')).toEqual(['snapshot', 'palm', 'espoma']);
     expect(ids('2026-12-10')).toEqual(['snapshot', 'palm', 'cytogro']);
   });
 
@@ -79,6 +80,8 @@ describe('resolveMonthProducts', () => {
       expect(lines.some((l) => (summer ? /8-0-12/ : /0-0-16/).test(l))).toBe(false);
       expect(visit.tier_6x).toBe(true);
       expect(visit.tier_4x).toBe(false);
+      // 6 and 9 visits a year are the sold tiers; the protocol calendar badges read these.
+      expect(visit.tier_9x).toBe(true);
     }
   });
 
@@ -87,11 +90,76 @@ describe('resolveMonthProducts', () => {
     expect(text).not.toMatch(/talus|headway|talstar|sevin/i);
     for (const visit of protocols.tree_shrub.visits) {
       expect(primaryLines(visit).join('\n')).not.toMatch(/tristar/i);
-      if (/scale|whitefl/i.test(`${visit.primary}\n${visit.secondary}`)) {
-        expect(visit.secondary).toMatch(/^TriStar 8\.5 SL \(acetamiprid\): armored scale crawlers or whitefly, live finds only; label rate$/m);
-      }
+    }
+    // The nine cards that carry TriStar (ruling a, owner 2026-10-09); May, Nov and Dec never did.
+    const withTriStar = protocols.tree_shrub.visits.filter((v) => /^TriStar/m.test(v.secondary)).map((v) => v.month);
+    expect(withTriStar).toEqual(['Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct']);
+    for (const visit of protocols.tree_shrub.visits.filter((v) => withTriStar.includes(v.month))) {
+      expect(visit.secondary).toMatch(/^TriStar 8\.5 SL \(acetamiprid\): whitefly, mealybug, aphid or soft scale \(wax, cottony cushion\), live finds only; foliar only; not for armored scale \(use Distance, oil or a Zylam drench\); label rate$/m);
     }
     expect(protocols.tree_shrub.notes.join('\n')).toMatch(/Visits start on the customer's signup date/);
+  });
+
+  test('TriStar is never offered for armored scale on any card, annual rotation or guide entry', () => {
+    const program = protocols.tree_shrub;
+    const guide = require('../config/tree-shrub-field-guide.json');
+    const tristarLines = [
+      ...program.visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')),
+      ...program.annual_rotation.insect_miticide,
+      guide.products.tristar.targets,
+      ...program.visits.flatMap((v) => v.fieldGuide.conditional.filter((c) => c.key === 'tristar').map((c) => c.where)),
+    ].filter((line) => /tristar/i.test(line) || /live finds/i.test(line));
+    expect(tristarLines.length).toBeGreaterThan(10);
+    for (const line of tristarLines) {
+      if (/armored scale/i.test(line)) expect(line).toMatch(/\bnot for armored scale\b/i);
+    }
+    expect(program.annual_rotation.insect_miticide.join('\n')).toMatch(/TriStar[^\n]*counts toward the annual 4A log[^\n]*not for armored scale/);
+  });
+
+  test('no month card offers TriTek or Mn Combo as a primary line, so neither is ever suggested (owner 2026-10-09)', () => {
+    const months = ['01-15', '02-10', '03-10', '04-10', '05-10', '06-10', '07-10', '08-10', '09-10', '10-01', '11-10', '12-10'];
+    const withMn = [...CATALOG, row('mn', 'Mn Combo')];
+    for (const visit of protocols.tree_shrub.visits) {
+      expect(primaryLines(visit).join('\n')).not.toMatch(/tritek|mn combo|fe\/mn micros|kphite|copper|azatin/i);
+    }
+    for (const m of months) {
+      expect(ids(`2026-${m}`, withMn)).not.toContain('tritek');
+      expect(ids(`2026-${m}`, withMn)).not.toContain('mn');
+    }
+    // Where the oil stays: one conditional secondary line per card, with the safety conditions.
+    for (const month of ['Jan', 'Feb', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Nov']) {
+      const oil = protocols.tree_shrub.visits.find((v) => v.month === month).secondary.split('\n').filter((l) => /^TriTek/.test(l));
+      expect(oil).toHaveLength(1);
+      expect(oil[0]).toMatch(/under 90°F; not on drought-stressed plants/);
+    }
+    // Every card's oil line carries all the limits: the job card shows this raw
+    // text when GATE_TREE_SHRUB_FIELD_GUIDE is off (Codex r2 #6185).
+    for (const month of ['Jan', 'Feb', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Nov']) {
+      const oil = protocols.tree_shrub.visits.find((v) => v.month === month).secondary.split('\n').find((l) => /^TriTek/.test(l));
+      expect(oil).toMatch(/on live scale crawlers, nymphs or mites only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap/);
+    }
+    for (const month of ['Jun', 'Jul', 'Aug', 'Sep']) {
+      expect(protocols.tree_shrub.visits.find((v) => v.month === month).secondary).toMatch(/TriTek spray oil 1\.0% only, before 9 AM,/);
+    }
+  });
+
+  test('the phosphite line is Reliant, off the base program; copper and the routine fungicide line too; Azatin O is gone (owner 2026-10-09)', () => {
+    const program = protocols.tree_shrub;
+    for (const month of ['Mar', 'Jun', 'Oct']) {
+      const visit = program.visits.find((v) => v.month === month);
+      expect(visit.primary).not.toMatch(/kphite|reliant/i);
+      const reliant = visit.secondary.split('\n').find((l) => /^Reliant Systemic Fungicide \(phosphite\) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp\/gal, repeat at 14–21 days;/.test(l));
+      expect(reliant).toBeDefined();
+      for (const limit of [
+        'not on dormant, heat-stressed or drought-stressed plants', 'not when rain is forecast within 24 hours',
+        'keep people and pets out until the spray dries', 'no tank mix with copper', 'no soil drench on the program; FRAC P07',
+      ]) expect(reliant).toContain(limit);
+    }
+    expect(JSON.stringify(program)).not.toMatch(/kphite/i);
+    expect(JSON.stringify(program)).not.toMatch(/azatin|azamax/i);
+    expect(JSON.stringify(program.visits)).not.toMatch(/Labeled ornamental fungicide|Copper: exact container label/);
+    expect(program.annual_rotation.fungicide_disease.join('\n')).toMatch(/Copper only for a diagnosed labeled bacterial or leaf disease, after the exact container label is verified; not a routine program line/);
+    expect(program.annual_rotation.fungicide_disease.join('\n')).toMatch(/7 to 28 day intervals; the 40 to 60 day visit cannot protect foliage\. No routine fungicide on the base program\./);
   });
 
   test('each entry carries the application method', () => {
@@ -106,7 +174,6 @@ describe('resolveMonthProducts', () => {
     expect(NON_PRODUCT_LINE.test('Sequestar EDDHA: exact container label needed; no verified dose or injector recipe')).toBe(true);
     // An exact label still needed / a held dose is withheld too (Codex r3 #5089).
     expect(NON_PRODUCT_LINE.test('13-0-13 ornamental fertilizer: exact bag label needed; hold dose')).toBe(true);
-    expect(NON_PRODUCT_LINE.test('Copper: exact container label needed; separate from oil')).toBe(true);
     expect(NON_PRODUCT_LINE.test('Snapshot 2.5TG Q4: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)')).toBe(false);
   });
 
@@ -127,8 +194,8 @@ describe('resolveMonthProducts', () => {
   });
 
   test('inactive rows do not count: an inactive near-duplicate neither matches nor makes the entry ambiguous', () => {
-    const withInactiveDup = [...CATALOG, row('tritek-old', 'TriTek Spray Oil Emulsion', { active: false })];
-    expect(ids('2026-02-10', withInactiveDup)).toEqual(['snapshot', 'palm', 'tritek']);
+    const withInactiveDup = [...CATALOG, row('distance-old', 'Distance IGR', { active: false })];
+    expect(ids('2026-03-10', withInactiveDup)).toEqual(['snapshot', 'palm', 'mainspring', 'distance']);
     expect(ids('2026-07-10', CATALOG.map((r) => (r.id === 'snapshot' ? { ...r, active: false } : r)))).toEqual(['palm16']);
   });
 

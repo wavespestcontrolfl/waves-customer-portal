@@ -22,6 +22,14 @@ vi.mock('./SchedulePage', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: ({ service }) => <div>Tree and shrub sheet for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({ default: ({ service }) => <div>Lawn sheet for {service.id}</div> }));
+vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
+  default: ({ service, onFullForm }) => (
+    <div>
+      Lawn re-service sheet for {service.id}
+      <button type="button" onClick={onFullForm}>Full form</button>
+    </div>
+  ),
+}));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, voiceFillEnabled, onClose, onCompleted, onFullForm }) => (
     <div>
@@ -39,7 +47,7 @@ vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ ser
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({ default: () => null }));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true, known: true }) }));
 
 const visit = (id, overrides = {}) => ({
   id,
@@ -117,6 +125,48 @@ describe('Dispatch completion routing for regular pest visits', () => {
     await open('svc-other');
     expect(await screen.findByText('Completion panel for svc-other')).toBeInTheDocument();
     expect(screen.queryByText(/Pest sheet/)).not.toBeInTheDocument();
+  });
+
+  // Owner 2026-10-08: the Schedule screen opens the sheet for the specialty
+  // visits the technician home sends there.
+  it('opens the sheet for a typed visit the reader reads, with its form, and Full form opens CompletionPanel', async () => {
+    mount([visit('svc-roach', {
+      typedReportFlowEnabled: true,
+      fastCompleteReportEnabled: false,
+      completionProfile: { category: 'pest_control', serviceKey: 'cockroach_control', findingsType: 'cockroach' },
+      findingsSchema: { type: 'cockroach' },
+    })]);
+    await open('svc-roach');
+    expect(await screen.findByText(/Pest sheet for svc-roach \(flow true, trace false, key cockroach_control/)).toBeInTheDocument();
+    expect(screen.queryByText('Completion panel for svc-roach')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
+    expect(await screen.findByText('Completion panel for svc-roach')).toBeInTheDocument();
+    expect(screen.queryByText(/Pest sheet/)).not.toBeInTheDocument();
+  });
+
+  it('opens the lawn re-service sheet for a lawn re-service under its gate, before any other rule, and Full form opens CompletionPanel', async () => {
+    mount([visit('svc-lawn-re', {
+      lawnReserviceFastCompleteEnabled: true,
+      lawnFastCompleteEnabled: true,
+      typedReportFlowEnabled: true,
+      completionProfile: { category: 'lawn_care', serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment' },
+      findingsSchema: { type: 'one_time_lawn_treatment' },
+    })]);
+    await open('svc-lawn-re');
+    expect(await screen.findByText(/Lawn re-service sheet for svc-lawn-re/)).toBeInTheDocument();
+    expect(screen.queryByText(/Pest sheet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Lawn sheet for/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
+    expect(await screen.findByText('Completion panel for svc-lawn-re')).toBeInTheDocument();
+  });
+
+  it('opens the sheet for a lane visit under the lane voice fill', async () => {
+    mount([visit('svc-lane', {
+      laneVoiceFillEnabled: true,
+      completionProfile: { category: 'pest_control', serviceKey: 'bed_bug_treatment', findingsType: null },
+    })]);
+    await open('svc-lane');
+    expect(await screen.findByText(/Pest sheet for svc-lane \(flow true, trace false/)).toBeInTheDocument();
   });
 
   it('keeps lawn and tree & shrub on their own routes (the pest rule never claims them)', async () => {

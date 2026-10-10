@@ -21,6 +21,7 @@ import { Button, Input, Select, UiSurface } from "../ui";
 const PILL = "!rounded-full !uppercase !tracking-[0.3px]";
 const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
 const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
+import CloseUpPrompt, { BLADE_CROWN, closeUpBlocked, useCloseUpPrompt } from "./CloseUpPrompt";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
 // The lawn sheet's (compact) shot list: four named slots, one short line each
@@ -197,6 +198,9 @@ function LawnAssessmentCompletionBlock({
   // completion form passes neither and is unchanged.
   compact = false,
   onProgress,
+  // The lawn sheet's treatment guide (GATE_LAWN_TREATMENT_GUIDE): one soft prompt for a close-up of
+  // the blades and crown when the photos include a problem area. Off everywhere else.
+  closeUpPrompt,
 }, ref) {
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
@@ -530,6 +534,7 @@ function LawnAssessmentCompletionBlock({
 
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
+  const closeUp = useCloseUpPrompt({ enabled: closeUpPrompt, shotList, photos, hasResult });
   const confirmed = !!confirmedId;
   // What each button can do right now: the in-flow buttons' own disabled rules,
   // reported to the sheet and enforced again by the handle below. A photo still
@@ -700,6 +705,13 @@ function LawnAssessmentCompletionBlock({
               2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
             </div>
           )}
+          <CloseUpPrompt
+            open={closeUp.open}
+            onAdd={() => { pendingShotRef.current = BLADE_CROWN; fileRef.current?.click(); }}
+            addDisabled={closeUpBlocked({ disabled, analyzing, photos, photoCap, readingShots, isFull: shotIsFull })}
+            onDismiss={closeUp.dismiss}
+            buttonClassName={PILL_OUTLINE}
+          />
           <Button
             className={PILL}
             onClick={analyze}

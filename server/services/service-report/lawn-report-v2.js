@@ -19,7 +19,10 @@ const featureGates = require('../../config/feature-gates');
 const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
+const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
 const { photoZoneLabel } = require('../lawn-visit-input');
+const { waterPolishFields, snapshotForCard } = require('./lawn-report-polish');
+const { withCappedRain, rainCardAllowed, applyRainCard, waterStatusFor, deficitRootCause } = require('./lawn-water-rain');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
@@ -154,8 +157,8 @@ function waterExplanation(advice, target, grassLabel) {
 
 // Interpretation (from the area water-intake snapshot) → customer copy. Uses
 // "your area received" wording and stays honest about confidence/coverage.
-function snapshotWaterExplanation(snap, grassLabel) {
-  const t = snap.target_water_inches_per_week != null ? `~${round1(snap.target_water_inches_per_week)}"/wk` : 'the seasonal target';
+// The sentence(s) that lead a snapshot explanation: where the rain figure came from and the week's totals.
+function snapshotLead(snap) {
   const rain = snap.adjusted_rain_7day_inches != null ? snap.adjusted_rain_7day_inches : snap.rain_7day_inches;
   const lead = snap.confidence === 'high'
     ? `Based on rainfall for your area and the irrigation schedule on file, `
@@ -165,19 +168,25 @@ function snapshotWaterExplanation(snap, grassLabel) {
   const totals = (rain != null && snap.irrigation_inches_per_week != null && snap.total_water_7day_inches != null)
     ? `your area received about ${round1(rain)}" of rain and your irrigation adds about ${round1(snap.irrigation_inches_per_week)}", for roughly ${round1(snap.total_water_7day_inches)}" this week. `
     : '';
+  return `${lead}${totals}`;
+}
+
+function snapshotWaterExplanation(snap, grassLabel) {
+  const t = snap.target_water_inches_per_week != null ? `~${round1(snap.target_water_inches_per_week)}"/wk` : 'the seasonal target';
+  const lead = snapshotLead(snap);
   switch (snap.interpretation) {
     case 'wet_condition_watch':
-      return `${lead}${totals}That's above ${t}. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.`;
+      return `${lead}That's above ${t}. Easing back on irrigation should help reduce fungus, mushrooms, and weed pressure.`;
     case 'coverage_issue_possible':
-      return `${lead}${totals}That's right around ${t}. Since one area still looks dry, we recommend checking sprinkler coverage there rather than watering the whole yard more.`;
+      return `${lead}That's right around ${t}. Since one area still looks dry, we recommend checking sprinkler coverage there rather than watering the whole yard more.`;
     case 'water_deficit_likely':
-      return `${lead}${totals}That's below ${t}. A little more irrigation time will help your ${grassLabel} handle the heat.`;
+      return `${lead}That's below ${t}. A little more irrigation time will help your ${grassLabel} handle the heat.`;
     case 'irrigation_unknown':
       return `We don't have your irrigation schedule on file yet. The seasonal target for your ${grassLabel} is ${t}.`;
     case 'rain_unknown':
       return `We couldn't fully read this week's rainfall for your area, so we're using the schedule on file and your lawn's condition. The seasonal target is ${t}.`;
     default:
-      return `${lead}${totals}That's right around ${t} — right where we want it.`;
+      return `${lead}That's right around ${t} — right where we want it.`;
   }
 }
 
@@ -185,8 +194,10 @@ const SNAP_STATUS = { low: 'low', high: 'high', balanced: 'balanced', unknown: '
 
 // Prefer the area-calibrated water-intake snapshot (Phase 2) when it has a real
 // reading; otherwise fall back to the live irrigation-advice water context.
-function mapWater(waterContext, waterSnapshot = null) {
+function mapWater(waterContext, storedSnapshot = null) {
   const grassLabel = 'lawn';
+  // GATE_LAWN_REPORT_POLISH: a snapshot whose irrigation figure is not the one the report resolves now is not used.
+  const waterSnapshot = snapshotForCard(waterContext, storedSnapshot);
   // Property-level rainfall (Open-Meteo at the client's exact lat/lng, behind
   // waterContext.rainfallInches7d) is authoritative — it's more precise than the
   // regional area centroid and is the same source the 7-day chart now uses, so the
@@ -204,6 +215,7 @@ function mapWater(waterContext, waterSnapshot = null) {
   if (!clientRainKnown && !snapshotUnconfirmed && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
+    const snapshotScheduleOnFile = (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0;
     return {
       rainInches: num(rain),
       irrigationInches: num(waterSnapshot.irrigation_inches_per_week),
@@ -218,10 +230,12 @@ function mapWater(waterContext, waterSnapshot = null) {
       // schedule on file — the "add your watering schedule" CTA should not show. A
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
-      scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      scheduleOnFile: snapshotScheduleOnFile,
       scheduleUnconfirmed: false,
       // The sent plan is independent of which rainfall source the card uses.
       weekPlan: (waterContext && waterContext.weekPlan) || null,
+      // GATE_LAWN_REPORT_POLISH: the card's third state (nothing while the gate is off).
+      ...waterPolishFields(waterContext, { target: num(waterSnapshot.target_water_inches_per_week), scheduleOnFile: snapshotScheduleOnFile }),
     };
   }
   if (!waterContext) return null;
@@ -254,6 +268,8 @@ function mapWater(waterContext, waterSnapshot = null) {
     // This week's legal-first watering plan (GATE_IRRIGATION_WEEK_PLAN):
     // { title, detail } or null — rendered as its own callout on the card.
     weekPlan: waterContext.weekPlan || null,
+    // GATE_LAWN_REPORT_POLISH: the card's third state, the basis line of a derived figure (nothing while the gate is off).
+    ...waterPolishFields(waterContext, { target, scheduleOnFile: advice.profileMissing === false }),
   };
 }
 
@@ -396,7 +412,7 @@ function statusHeadline(overallStatus, topIssue) {
 
 // Cross-signal root cause — a small deterministic decision table that connects the
 // separate signals into ONE driver, so the report reads like an expert wrote it.
-function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan = null }) {
+function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan = null, rainCard = false }) {
   const mowShort = mowing && mowing.status === 'too_short';
   const damage = (diagnosis || []).find((c) => c.key === 'damage_disease_signals');
   const damageBad = damage && (damage.status === 'needs_attention' || damage.status === 'watch');
@@ -420,6 +436,8 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
     if (planRuns) return 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.';
     if (hasPlan) return 'The lawn is simply running a little dry — this week’s watering plan below weighs that against the week’s rain, so follow it as written.';
+    // GATE_LAWN_WATER_RAIN (water.rainCard): the card says to water only when the wilt signs show, so the root cause says it too.
+    if (rainCard) return deficitRootCause();
     return 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
   }
   if (coverageWatch && mowShort) {
@@ -453,6 +471,11 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // wateringHold, water_in sets creditableWaterIn, and a mixed visit is a hold.
 // State none keeps the neutral aftercare; state null (or no instruction)
 // leaves the legacy fail-closed reading exactly as it was.
+// The re-entry line an aftercare card states: the frozen condition when the record has one, else the label's line.
+function pickReentry(labelLine, opts) {
+  return opts && opts.reentryText ? opts.reentryText : labelLine;
+}
+
 function buildAftercare(applications, opts = {}) {
   const apps = Array.isArray(applications) ? applications : [];
   const productNotes = [];
@@ -471,6 +494,9 @@ function buildAftercare(applications, opts = {}) {
     if (productNote && !productNotes.includes(productNote)) productNotes.push(productNote);
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
+  // GATE_LAWN_REPORT_FACTS: the re-entry rule frozen at completion replaces the label's line, so the card, the
+  // hero and the PDF all say the one condition (opts.reentryText comes from the record, never a gate).
+  reentry = pickReentry(reentry, opts);
   const instruction = opts && opts.instruction;
   // The instruction is a record of the visit, never re-phased by the clock
   // (owner ruling 2026-09-30): only the live banner ends at expiresAt.
@@ -543,6 +569,27 @@ const ISSUE_TOPIC = {
   coverage: 'thin areas', mowing: 'mowing height', customer_concern: 'what you flagged',
 };
 
+// GATE_LAWN_WATER_RAIN: the aftercare (computed once, first), whether the rain card may change this card, and the
+// assessment whose water context counts the rain with the per-day cap. No frozen permission, a withheld schedule or a
+// hold / water-in instruction = the assessment itself, unchanged.
+function prepareRainCard(assessment, { applications, wateringInstruction, reentryText, rainAdvice }) {
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: assessment.waterContext?.weekPlan || null, reentryText });
+  const rainAllowed = rainCardAllowed({ rainAdvice, waterContext: assessment.waterContext, instruction: wateringInstruction, aftercare });
+  return { lawnAssessment: rainAllowed ? withCappedRain(assessment) : assessment, aftercare, rainAllowed };
+}
+
+// The target as the card sentences format it: 'about 1.25"/wk' (live), '~1.25"/wk' (snapshot), or the seasonal target.
+function waterTargetLabel(water) {
+  if (water.targetInches == null) return 'the seasonal target';
+  return water.source === 'area_snapshot' ? `~${round1(water.targetInches)}"/wk` : `about ${water.targetInches}"/wk`;
+}
+
+function applyRainCardToWater(water, waterSnapshot, rainAdvice, rainAllowed) {
+  if (!water || !rainAllowed) return water;
+  const prefix = water.source === 'area_snapshot' ? snapshotLead(waterSnapshot) : '';
+  return applyRainCard(water, { rainAdvice, allowed: true, targetLabel: waterTargetLabel(water), prefix });
+}
+
 /**
  * @param {object} input
  * @param {object} input.lawnAssessment  buildLawnAssessmentReportData(...) return
@@ -554,15 +601,22 @@ const ISSUE_TOPIC = {
  *   has no gauge reading (same shape subset as mowingHeight)
  * @param {object} [input.wateringInstruction]  buildWateringInstruction(...) result
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
+ * @param {string} [input.reentryText]  the re-entry condition frozen at completion
+ *   (GATE_LAWN_REPORT_FACTS); null = the product label's re-entry line, as before
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6 } = {}) {
-  if (!lawnAssessment) return null;
+function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot: storedWaterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6, reentryText, rainAdvice } = {}) {
+  if (!assessmentIn) return null;
+  // GATE_LAWN_WATER_RAIN: the aftercare comes first (the rain card stands down for a post-treatment watering instruction),
+  // then the water context with the capped rain. Without the frozen permission this is the very same assessment.
+  const { lawnAssessment, aftercare, rainAllowed } = prepareRainCard(assessmentIn, { applications, wateringInstruction, reentryText, rainAdvice });
+  // GATE_LAWN_REPORT_POLISH: the card, the diagnosis and the insights all read the SAME snapshot, or none.
+  const waterSnapshot = snapshotForCard(lawnAssessment.waterContext, storedWaterSnapshot);
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
   const advice = lawnAssessment.waterContext?.irrigationAdvice || {};
 
-  const water = mapWater(lawnAssessment.waterContext, waterSnapshot);
+  const water = applyRainCardToWater(mapWater(lawnAssessment.waterContext, waterSnapshot), waterSnapshot, rainAdvice, rainAllowed);
   // Unify the water status the diagnosis + insights reason about with the water
   // card mapWater just produced. Priority must match mapWater EXACTLY or the card
   // and the Water/Coverage diagnosis can contradict each other:
@@ -581,8 +635,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const usingSnapshot = !clientRainKnown && !movedSnapshot && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
-  const effectiveWaterStatus = usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null);
-  const overwatering = !!lawnAssessment.overwateringSignal || (usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch');
+  const effectiveWaterStatus = waterStatusFor(water, usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null));
+  // GATE_LAWN_WATER_RAIN: a snapshot the card reclassified as "rain covered" is no longer a wet-condition watch; the
+  // photo-derived overwateringSignal is independent evidence and stays.
+  const snapshotWet = usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch' && effectiveWaterStatus !== 'rain_covered';
+  const overwatering = !!lawnAssessment.overwateringSignal || snapshotWet;
 
   const categories = buildVisualDiagnosisCategories({
     scores,
@@ -652,9 +709,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
 
-  // Aftercare is computed early enough for the insight builder to reconcile
+  // Aftercare is computed first (above) so the insight builder can reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
-  const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
   if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({
@@ -738,7 +794,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
-  const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
+  const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, rainCard: !!(water && water.rainCard === true), weekPlan: water ? water.weekPlan : null });
   // GATE_LAWN_EXPECTATIONS (P9): while live, snapshot.seasonalNote is the
   // month's lawn program v13 line, anchored on the same noon-UTC visit month
   // the dormancy guard uses (host-timezone safe, stable for a permanent token).
@@ -861,4 +917,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, monthLabel, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };
+// The exported builder: the lawn reportV2 above, then (GATE_LAWN_REPORT_COPY_FIXES live) the copy
+// fixes. The builder above carries none of the gate's decisions; lawn-report-copy-fixes.js owns them.
+function buildLawnReportV2WithCopyFixes(args) {
+  const v2 = buildLawnReportV2(args);
+  return v2 && copyFixesLive() ? applyLawnCopyFixes(v2, args) : v2;
+}
+
+module.exports = { buildLawnReportV2: buildLawnReportV2WithCopyFixes, monthLabel, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };

@@ -22,6 +22,7 @@ const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-l
 const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 // The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
@@ -61,7 +62,37 @@ describe('gate and loader', () => {
 
   test('gate off hands every reader protocols.json lawn itself; on hands v13', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
-    expect(withGate('true', () => lawnProtocols())).toBe(v13);
+    // Gate on, bermuda removal gate off: v13 without the per-visit addOns blocks.
+    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) }]));
+    expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
+    expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+  });
+
+  test('the bermuda removal addOns reach the shared reader only while GATE_LAWN_BERMUDA_REMOVAL is on', () => {
+    const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
+    try {
+      process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('addOns');
+      // The removal gate cannot surface the add-on while v13 itself is off.
+      expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
+      delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
+  test('gate off: the protocol reader and the engine see no addOns anywhere', () => {
+    withGate('true', () => {
+      expect(JSON.stringify(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }))).not.toContain('addOns');
+      for (const grass of V13_GRASSES) { // bahia has no v13 program at all
+        for (const month of [4, 6]) {
+          const got = engine.selectProtocolVisit({ track_key: grass }, new Date(Date.UTC(2026, month - 1, 15, 16)));
+          expect(got.visit).not.toHaveProperty('addOns');
+        }
+      }
+    });
   });
 
   test('a feature-gates mock without the reader reads as off', () => {
@@ -124,7 +155,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toBe(v13.zoysia);
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, ...visit }) => visit) });
     });
   });
 
@@ -181,8 +212,10 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
   const date = new Date(Date.UTC(2026, 9, 6, 16));
   const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
 
-  test('the three v13 copies are one program, so any key serves any grass', () => {
-    const body = ({ name, ...rest }) => JSON.stringify(rest);
+  test('the v13 copies are one program, so any key serves any grass', () => {
+    // The bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL) exists only on the St. Augustine and
+    // Zoysia copies, by design; the base program is compared without it.
+    const body = ({ name, ...rest }) => JSON.stringify({ ...rest, visits: rest.visits.map(({ addOns, ...visit }) => visit) });
     for (const grass of V13_GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
   });
 
@@ -232,7 +265,10 @@ const BLINDSIDE = 'Blindside Herbicide';
 // the staged Stonewall 15-0-15 line).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
+const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+// December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
+const F10_22 = decemberMigration.NEW_NAME;
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -426,7 +462,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     9: [migration.NAMES.NT],
     10: [DIMENSION_18],
     11: [migration.NAMES.F24],
-    12: [migration.NAMES.F24],
+    12: [F10_22],
   };
   const catalog = buildCatalog(PRICE_SCENARIOS['every catalog row unpriced and needing pricing, decoys priced']);
   const idOf = (name) => catalog.find((c) => c.name === name).id;
@@ -442,12 +478,17 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
       ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
       : spec);
+    // 20261008130000 swaps December's 24-0-11 row for the 10-0-22 (still a lb_n row; the target is 0.45 lb N).
+    const decSwapped = (spec) => (spec[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW
+      ? [F10_22, spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], { ...spec[7], ...decemberMigration.NEW_GATES }]
+      : spec);
     // 20261007180000 adds its rows (its July 0-0-50 row is deleted by 20261007189000) and turns the April Artavia row into Headway (Arena keeps its name: 20261007181000).
     const matrixName = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
-    const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
+    const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => decSwapped(swapped(s))).map((s) => ({
       productId: idOf(matrixName(s[0])), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
-    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => ({
+    // 20261009100000 retires the Advion add-on rows and inserts the fire ant granule rows in their place.
+    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec)).map((spec) => ({
       productId: idOf(spec.name), defaultInPlan: spec.defaultInPlan, gates: spec.gates, applicationMode: spec.mode, ratePer1000: spec.rate, rateUnit: spec.unit,
     }));
     const products = [...staged, ...added];
@@ -506,6 +547,23 @@ describe('plan engine reads the matched v13 protocol row', () => {
     expect(withGate('true', () => engine.v13ProtocolRows({ ...structured, version: '2026.06' }).size)).toBe(0);
     expect(withGate('true', () => engine.v13ProtocolRows(null).size)).toBe(0);
     expect(withGate('true', () => engine.v13ProtocolRows(structured).get('stw').ratePer1000)).toBe(0.5);
+  });
+
+  test('an ordinary row and a bermuda step row for one catalog product stay two rows: each line reads its own (codex #6229 r2 P2)', () => {
+    const ordinary = { productId: 'nis', ratePer1000: null, gates: { weedMix: true } };
+    const step = { productId: 'nis', ratePer1000: null, gates: { bermudaRemoval: true, morningUnderF: 85 } };
+    // Either order in the list: the step row never overwrites the ordinary one.
+    for (const products of [[ordinary, step], [step, ordinary]]) {
+      const rows = withGate('true', () => engine.v13ProtocolRows({ version: LAWN_V13_VERSION, products }));
+      const ordinaryLine = withGate('true', () => engine.v13LineState({ id: 'nis' }, rows, new Set(), {}, { bermudaStep: false }));
+      const stepLine = withGate('true', () => engine.v13LineState({ id: 'nis' }, rows, new Set(), {}, { bermudaStep: true }));
+      expect(ordinaryLine.row).toBe(ordinary);
+      expect(stepLine.row).toBe(step);
+    }
+    // A step line with no step row is unavailable, never read on the ordinary row.
+    const onlyOrdinary = withGate('true', () => engine.v13ProtocolRows({ version: LAWN_V13_VERSION, products: [ordinary] }));
+    expect(engine.v13LineState({ id: 'nis' }, onlyOrdinary, new Set(), {}, { bermudaStep: true }).state).toBe('unavailable');
+    expect(engine.v13LineState({ id: 'nis' }, onlyOrdinary, new Set(), {}, {}).row).toBe(ordinary);
   });
 
   test('every rate the migration states for a whole-lawn product reaches the engine as a positive protocol rate', () => {
@@ -777,10 +835,22 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
     product, lawnSqft: 1000, areaFactor: 1, ...engine.parseVisitNutrientTargets(visitFor(month).notes), ...engine.v13RateOptions(row),
   });
 
-  test.each([[2, 3.125], [4, 2.083], [11, 3.125], [12, 2.083]])('24-0-11 in month %i is %f lb per 1,000 sq ft', (month, lb) => {
+  test.each([[2, 3.125], [4, 2.083], [11, 3.125]])('24-0-11 in month %i is %f lb per 1,000 sq ft', (month, lb) => {
     const result = amountFor(f24, month, rowFor(month, migration.NAMES.F24));
     expect(result).toMatchObject({ rateSource: 'target_n_analysis', rateUnit: 'lb' });
     expect(result.amount).toBeCloseTo(lb, 3);
+  });
+
+  test('December LESCO 10-0-22 derives 4.5 lb per 1,000 sq ft from the 0.45 lb N target (0.99 lb K2O, 50% slow-release N)', () => {
+    const f10 = { id: 'f10', name: F10_22, analysis_n: 10, analysis_k: 22, slow_release_n_pct: 50, default_rate_per_1000: 4.5, rate_unit: 'lb' };
+    const row = rowFor(12, migration.NAMES.F24); // the staged lb_n row: the swap changes its name and target, not its rate shape
+    expect(row).toEqual({ ratePer1000: null, rateUnit: 'lb_n' });
+    const result = amountFor(f10, 12, row);
+    expect(result).toMatchObject({ rateSource: 'target_n_analysis', rateUnit: 'lb', amount: 4.5 });
+    expect(result.amount * 0.10).toBeCloseTo(0.45, 6);
+    expect(result.amount * 0.22).toBeCloseTo(0.99, 6);
+    // The catalog default rate agrees with the derived one, so a row that loses its target still plans 4.5 lb.
+    expect(amountFor(f10, 12, { ratePer1000: null, rateUnit: null })).toMatchObject({ amount: 4.5 });
   });
 
   test('October Dimension 18-0-10 is its stated 4.04 lb (0.73 lb N, 0.40 lb K2O, the commercial Coastal South rate)', () => {
@@ -812,18 +882,96 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
 });
 
 describe('Blindside in the recipe', () => {
-  test('every Celsius spot window lists Blindside by its exact catalog name, after the Celsius lines, and the line stays a spot line', () => {
+  // Owner 2026-10-08: Blindside is a November-through-March product, and February is Celsius alone
+  // (20261008130000 retires the staged rows): of the Celsius windows only January, March and December list it. The v13 final pass
+  // (20261009150000) gives November the December weed lines, so November lists it too.
+  const BLINDSIDE_MONTHS = [1, 3, 11, 12];
+
+  test('every Celsius spot window lists Blindside by its exact catalog name, after the Celsius lines, and the line stays a spot line; none in February or April through October', () => {
     for (const month of MONTHS) {
       const secondary = lines(visitFor(month).secondary);
       const hasCelsius = secondary.some((l) => l.startsWith('Celsius WG'));
       const blind = secondary.filter((l) => l.startsWith(`${BLINDSIDE} — `));
-      expect(blind).toHaveLength(hasCelsius ? 1 : 0);
-      if (!hasCelsius) continue;
+      expect(blind).toHaveLength(BLINDSIDE_MONTHS.includes(month) ? 1 : 0);
+      expect(hasCelsius || !BLINDSIDE_MONTHS.includes(month)).toBe(true);
+      if (!BLINDSIDE_MONTHS.includes(month)) continue;
       expect(secondary.indexOf(blind[0])).toBeGreaterThan(secondary.findIndex((l) => l.startsWith('Celsius WG')));
       const [parsed] = engine.parseProtocolLines(blind[0], 'conditional', { exactName: true });
       expect(parsed.scope).toBe('SPOT_ALLOWANCE');
       expect(parsed.conditional).toBe(true);
     }
     expect(JSON.stringify(v13)).not.toMatch(/Blindside WDG/);
+  });
+
+  test('February is Celsius alone: no Certainty, no surfactant, no Blindside, and the line says so', () => {
+    expect(lines(visitFor(2).secondary)).toEqual(['Celsius WG — light weed spots only during green-up, 0.085 oz per 1,000 sq ft, alone: no Certainty and no surfactant this month']);
+    const [parsed] = engine.parseProtocolLines(lines(visitFor(2).secondary)[0], 'conditional', { exactName: true });
+    expect(parsed).toMatchObject({ scope: 'SPOT_ALLOWANCE', conditional: true });
+  });
+
+  test('program notes and safety rules keep Blindside to November through March and state the April-October rule', () => {
+    for (const grass of V13_GRASSES) {
+      const notes = v13[grass].notes.join('\n');
+      expect(notes).toMatch(/Blindside Herbicide in its place from November through March \(April through October: no weed spray once the Celsius cap is reached\)/);
+      expect(v13[grass].safety_rules.join('\n')).toMatch(/use Blindside after the Celsius cap, November through March only \(April through October: no weed spray once the Celsius cap is reached\)/);
+    }
+  });
+
+  test('November carries the same four weed lines as December (v13 final pass), Blindside at 0.149 oz', () => {
+    const weed = (month) => lines(visitFor(month).secondary).filter((l) => /^(Celsius|Certainty|Blindside|LESCO 90\/10 Nonionic)/.test(l));
+    expect(weed(11)).toHaveLength(4);
+    expect(weed(11)).toEqual(weed(12));
+    expect(weed(11).find((l) => l.startsWith(BLINDSIDE))).toContain('0.149 oz per 1,000 sq ft');
+  });
+
+  test('every Blindside line states 0.149 oz per 1,000 sq ft, one application per lawn per year (the label\'s warm-season rate; 0.23 oz is the yearly limit)', () => {
+    for (const grass of V13_GRASSES) {
+      const blind = v13[grass].visits.flatMap((visit) => lines(visit.secondary)).filter((l) => l.startsWith(`${BLINDSIDE} — `));
+      expect(blind).toHaveLength(4);
+      for (const line of blind) expect(line).toContain('0.149 oz per 1,000 sq ft, one application per lawn per year');
+    }
+  });
+});
+
+describe('chinch bug trigger wording (owner 2026-10-08: the edge of a damaged patch, not a count)', () => {
+  test('no chinch line in the recipe states a count per square foot; the staged trigger key keeps its name', () => {
+    expect(JSON.stringify(v13)).not.toMatch(/20 to 25|20-25/);
+    for (const grass of V13_GRASSES) {
+      expect(v13[grass].notes.join('\n')).toMatch(/Chinch bugs \(found at the edge of a damaged patch, float test only if unsure, 4 gal per 1,000 sq ft into the thatch\)/);
+    }
+    const chinch = ['Apr', 'May', 'Jun'].map((m) => lines(v13.st_augustine.visits.find((v) => v.month === m).secondary).find((l) => l.startsWith('Arena 50 WDG')));
+    const tail = ', 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)';
+    expect(chinch).toEqual([
+      `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure)${tail}`,
+      `Arena 50 WDG — chinch bugs outside the sunny turf, found at the edge of a damaged patch (float test only if unsure)${tail}`,
+      `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure)${tail}`,
+    ]);
+    expect(JSON.stringify(migration.PRODUCTS)).toContain('chinch_20_to_25_per_sqft');
+  });
+});
+
+describe('Arena at the label\'s low turf rate (owner 2026-10-08)', () => {
+  test('every Arena line states 0.147 oz (6.4 oz per acre) and the 8-week repeat; the program note says so once, cites the label and names the current Florida 2(ee) sheet', () => {
+    const arena = Array.from(new Set([4, 5, 6].flatMap((m) => lines(visitFor(m).secondary).filter((l) => l.startsWith('Arena 50 WDG')))));
+    expect(arena).toHaveLength(2);
+    for (const line of arena) expect(line).toMatch(/0\.147 oz per 1,000 sq ft \(6\.4 oz per acre\) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later/);
+    for (const grass of V13_GRASSES) {
+      const note = v13[grass].notes.find((n) => n.startsWith('Chinch bugs'));
+      expect(note).toContain('Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons)');
+      expect(note).toContain('up to 2 applications per lawn per year at least 8 weeks (56 days) apart (app-enforced)');
+      // The owner holds the current sheet (2026-10-08): the note gives its expiry and says to carry it.
+      expect(note).toContain("Valent's Florida 2(ee) recommendation for southern chinch bug (EPA Reg. No. 59639-152; expires December 31, 2028): keep a copy on the truck.");
+      expect(note).not.toMatch(/never treat the same area twice/);
+    }
+  });
+
+  test('a v13 spot row carries its own stated rate for the readers that size a dose (the job card\'s product search), not the catalog default', () => {
+    const arenaRow = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4, gates: { trigger: 'chinch_20_to_25_per_sqft' } };
+    const product = { id: 'a', name: 'Arena 50 WDG', default_rate_per_1000: 0.29, rate_unit: 'oz' };
+    const fields = engine.v13ItemFields({ row: arenaRow, state: 'spot' }, {}, product);
+    expect(fields.spot).toMatchObject({ reference: 'Label rate 0.147 oz per 1,000 sq ft', ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4 });
+    // A spot row with no stated rate falls back to the catalog reference text and carries no number.
+    const bare = engine.v13ItemFields({ row: { ratePer1000: null, rateUnit: 'label_rate', gates: {} }, state: 'spot' }, {}, product);
+    expect(bare.spot).toMatchObject({ reference: 'Label rate 0.29 oz per 1,000 sq ft', ratePer1000: null, rateUnit: null, carrierGalPer1000: null });
   });
 });

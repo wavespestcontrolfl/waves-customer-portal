@@ -3,6 +3,7 @@
 // customers, is never reported as over a per-lawn cap on a total. Runs on the migrated test
 // database with synthetic rows, removed afterwards.
 const { randomUUID } = require('crypto');
+const { etDateString } = require('../utils/datetime-et');
 const db = require('../models/db');
 const ComplianceService = require('../services/compliance');
 const { fixture } = require('./helpers/lawn-history-db');
@@ -30,7 +31,7 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     made.customers.push(f.customerId);
     const [propertyB] = await db('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
     const properties = [f.property.id, propertyB.id];
-    const today = new Date().toISOString().slice(0, 10);
+    const today = etDateString();
     for (const index of applicationsAt) {
       const [visit] = await db('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[index], scheduled_date: today, service_type: 'Lawn fixture' }).returning('*');
       const [record] = await db('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: today, service_type: 'Lawn fixture' }).returning('*');
@@ -104,6 +105,118 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     } finally {
       if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved;
     }
+  });
+
+  // Arena carries three v13 limits (the count of 2, the 56-day gap, the yearly amount): the summaries report all of them.
+  describe('Arena\'s v13 limits are all reported (count, minimum interval, yearly amount)', () => {
+    const shape = (rows) => rows.map((l) => [l.limit_type, l.match_type, Number(l.limit_value), l.severity]);
+    const arenaRows = async (hardOnly = false) => (await ComplianceService.limitRowsWithV13Caps({ hardOnly })).filter((l) => l.product_name === 'Arena 50 WDG' || l.product_name === 'Arena S.E. 50 WDG Insecticide 2.5 lb. (Florida Only)');
+    const ALL = [['annual_max_apps', 'product', 2, 'hard_block'], ['min_interval_days', 'product', 56, 'hard_block'], ['annual_max_rate', 'v13_amount', 0.294, 'hard_block']];
+    const sorted = (rows) => rows.sort((a, b) => String(a[0]).localeCompare(b[0]));
+    const withGate = async (value, fn) => {
+      const saved = process.env.GATE_LAWN_V13;
+      if (value === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = value;
+      try { return await fn(); } finally { if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved; }
+    };
+
+    test('no stored row: the synthetic count, interval and amount rows are all there with the gate on, none with it off', async () => {
+      const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      expect(await db('product_limits').where({ product_id: arena.id })).toEqual([]);
+      expect(sorted(shape(await withGate('true', () => arenaRows())))).toEqual(sorted([...ALL]));
+      expect(sorted(shape(await withGate('true', () => arenaRows(true))))).toEqual(sorted([...ALL]));
+      expect(await withGate(undefined, () => arenaRows())).toEqual([]);
+    });
+
+    test('stored count and interval rows: each is reported once (lowered / raised / hard), the amount joins, nothing is duplicated', async () => {
+      const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const stored = await db('product_limits').insert([
+        { product_id: arena.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 5, limit_unit: 'applications', severity: 'warning', description: 'fixture count' },
+        { product_id: arena.id, match_type: 'product', limit_type: 'min_interval_days', limit_value: 30, limit_unit: 'days', severity: 'warning', description: 'fixture interval' },
+      ]).returning('*');
+      made.limits.push(...stored.map((r) => r.id));
+      try {
+        const rows = await withGate('true', () => arenaRows());
+        expect(sorted(shape(rows))).toEqual(sorted([...ALL]));
+        expect(rows.filter((l) => l.limit_type !== 'annual_max_rate').map((l) => l.id).sort()).toEqual(stored.map((r) => r.id).sort());
+        // Gate off: exactly the stored rows as stored.
+        expect(sorted(shape(await withGate(undefined, () => arenaRows())))).toEqual(sorted([['annual_max_apps', 'product', 5, 'warning'], ['min_interval_days', 'product', 30, 'warning']]));
+      } finally {
+        await db('product_limits').whereIn('id', stored.map((r) => r.id)).del();
+      }
+    });
+
+    // Real usage and status for the interval and the amount rows (not the application count): the same evaluators the plan and the
+    // closeout run, per lawn.
+    describe('usage and status of the interval and amount rows', () => {
+      const dayStamp = (daysAgo) => {
+        // The Eastern calendar day, as getProductLimits reads "today" (not the UTC day).
+        const [y, m, d] = etDateString().split('-').map(Number);
+        return new Date(Date.UTC(y, m - 1, d - daysAgo, 12)).toISOString().slice(0, 10);
+      };
+      // apps: [{ daysAgo, rate, property }] with property 0 or 1 (two properties).
+      async function arenaCustomer(apps) {
+        const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+        const f = await fixture(db);
+        made.customers.push(f.customerId);
+        const [propertyB] = await db('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+        const properties = [f.property.id, propertyB.id];
+        for (const { daysAgo, rate, property = 0 } of apps) {
+          const date = dayStamp(daysAgo);
+          const [visit] = await db('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[property], scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+          const [record] = await db('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+          made.records.push(record.id);
+          await db('property_application_history').insert({ customer_id: f.customerId, product_id: arena.id, application_date: date, application_rate: rate, rate_unit: 'oz', service_record_id: record.id });
+        }
+        const limits = (await withGate('true', () => ComplianceService.getProductLimits(f.customerId))).limits.filter((l) => l.productId === arena.id);
+        return Object.fromEntries(limits.map((l) => [l.limitType, { usage: l.currentUsage, status: l.status, limit: Number(l.limitValue) }]));
+      }
+
+      test('the interval: within 56 days is exceeded with the days since, at 56 it is ok, none yet is ok with no usage', async () => {
+        expect((await arenaCustomer([{ daysAgo: 55, rate: 0.147 }])).min_interval_days).toEqual({ usage: 55, status: 'exceeded', limit: 56 });
+        expect((await arenaCustomer([{ daysAgo: 56, rate: 0.147 }])).min_interval_days).toEqual({ usage: 56, status: 'ok', limit: 56 });
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.147 }])).min_interval_days).toEqual({ usage: 0, status: 'exceeded', limit: 56 });
+        expect((await arenaCustomer([])).min_interval_days).toEqual({ usage: null, status: 'ok', limit: 56 });
+      });
+
+      test('the interval looks past New Year: the latest application counts even when it is not this year\'s', async () => {
+        const [y, m, d] = etDateString().split('-').map(Number);
+        const daysIntoYear = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 86400000);
+        const result = await arenaCustomer([{ daysAgo: daysIntoYear + 5, rate: 0.147 }]);
+        expect(result.min_interval_days.usage).toBe(daysIntoYear + 5);
+        expect(result.min_interval_days.status).toBe(daysIntoYear + 5 < 56 ? 'exceeded' : 'ok');
+      });
+
+      test('the interval is the lawn\'s most recent pass: an application at either property counts', async () => {
+        expect((await arenaCustomer([{ daysAgo: 70, rate: 0.147, property: 0 }, { daysAgo: 20, rate: 0.147, property: 1 }])).min_interval_days).toEqual({ usage: 20, status: 'exceeded', limit: 56 });
+      });
+
+      test('the amount: 0.147 used is ok, 0.29 is a warning at the limit, 0.294 and 0.437 are exceeded', async () => {
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.147 }])).annual_max_rate).toEqual({ usage: 0.147, status: 'ok', limit: 0.294 });
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.29 }])).annual_max_rate).toEqual({ usage: 0.29, status: 'warning', limit: 0.294 });
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.147 }, { daysAgo: 0, rate: 0.147 }])).annual_max_rate).toEqual({ usage: 0.294, status: 'exceeded', limit: 0.294 });
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.29 }, { daysAgo: 0, rate: 0.147 }])).annual_max_rate).toEqual({ usage: 0.437, status: 'exceeded', limit: 0.294 });
+        expect((await arenaCustomer([])).annual_max_rate).toEqual({ usage: 0, status: 'ok', limit: 0.294 });
+      });
+
+      test('the amount is per lawn: 0.147 at each of two properties is 0.147 (ok), never 0.294 (at the limit)', async () => {
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.147, property: 0 }, { daysAgo: 0, rate: 0.147, property: 1 }])).annual_max_rate).toEqual({ usage: 0.147, status: 'ok', limit: 0.294 });
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.29, property: 0 }, { daysAgo: 0, rate: 0.147, property: 1 }])).annual_max_rate).toEqual({ usage: 0.29, status: 'warning', limit: 0.294 });
+      });
+
+      test('the count row keeps reading the application count', async () => {
+        expect((await arenaCustomer([{ daysAgo: 0, rate: 0.147 }, { daysAgo: 0, rate: 0.147 }])).annual_max_apps).toMatchObject({ usage: 2, status: 'exceeded', limit: 2 });
+      });
+    });
+
+    test('getProductLimits lists the three rows for a customer, and only Arena, Certainty, Blindside, Velista and Artavia are given an interval or an amount row', async () => {
+      const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const customerId = await customerWithTwoProperties([0], arena);
+      const limits = (await withGate('true', () => ComplianceService.getProductLimits(customerId))).limits.filter((l) => l.productId === arena.id);
+      expect(limits.map((l) => l.limitType).sort()).toEqual(['annual_max_apps', 'annual_max_rate', 'min_interval_days']);
+      const others = (await withGate('true', () => ComplianceService.limitRowsWithV13Caps())).filter((l) => l.match_type === 'v13_amount' || (l.synthetic && l.limit_type === 'min_interval_days'));
+      const named = await db('products_catalog').whereIn('name', ['Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide', 'Velista', 'Artavia 2 SC (Azoxy)']).select('id');
+      expect(new Set(others.map((l) => l.product_id))).toEqual(new Set(named.map((r) => r.id)));
+    });
   });
 
   test('getPropertyComplianceStatus (the compliance page, the context aggregator) is per lawn: one application at each of two properties is no block; two at one property is', async () => {

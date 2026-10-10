@@ -4,7 +4,9 @@ const v13 = require('../config/lawn-protocol-v13.json');
 const engine = require('../services/waveguard-plan-engine');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const october = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
+const granule = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 const prohibited = require('../services/lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 
@@ -20,7 +22,9 @@ describe('the three tracks carry the same adds', () => {
   test('every track has the same visits, notes and safety rules', () => {
     expect(TRACKS).toEqual(['st_augustine', 'bermuda', 'zoysia']);
     for (const track of TRACKS) {
-      expect(v13[track].visits).toEqual(v13.st_augustine.visits);
+      // The bermuda removal add-on (visit.addOns, St. Augustine and Zoysia only) is set aside.
+      const withoutAddOns = (visits) => visits.map(({ addOns, ...visit }) => visit);
+      expect(withoutAddOns(v13[track].visits)).toEqual(withoutAddOns(v13.st_augustine.visits));
       expect(v13[track].notes).toEqual(v13.st_augustine.notes);
       expect(v13[track].safety_rules).toEqual(v13.st_augustine.safety_rules);
     }
@@ -34,7 +38,7 @@ describe('the three tracks carry the same adds', () => {
   });
 
   test('no new line reads as an inspection or a premium step, and none says "if"', () => {
-    const added = [matrix.HEAD, matrix.ADVION, N.VEL, N.GRA];
+    const added = [matrix.HEAD, granule.GRANULE, N.VEL, N.GRA];
     for (const visit of v13.st_augustine.visits) {
       for (const line of lines(visit.secondary).filter((l) => added.includes(nameOf(l)))) {
         const [parsed] = engine.parseProtocolLines(line, 'conditional', { exactName: true });
@@ -223,7 +227,7 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
   });
 
   test('one tool per visit: spreader visits carry granulars, hose visits carry liquids, July none', () => {
-    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME]);
+    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME, december.NEW_NAME]);
     const HOSE_PRODUCTS = new Set([N.NT, N.STW, N.DIM, N.TET]);
     for (const [month, mode] of [[1, 'hose'], [2, 'spreader'], [3, 'hose'], [4, 'spreader'], [5, 'hose'], [6, 'hose'], [7, 'none'], [8, 'hose'], [9, 'hose'], [10, 'spreader'], [11, 'spreader'], [12, 'spreader']]) {
       const tools = lines(visitFor(month).primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
@@ -235,18 +239,23 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
   });
 });
 
-describe('7. Advion fire ant bait: an optional add-on in April and October (both spreader visits)', () => {
-  test('a secondary line only, priced by the office, 1.5 lb per acre', () => {
+describe('7. Fire ant granule (Topchoice Granular Insecticide): an optional add-on in April and October (both spreader visits)', () => {
+  // The Advion bait was the add-on until 2026-10-09 (20261007180000 staged it, frozen); 20261009100000 replaced it.
+  test('a secondary line only, priced by the office, 2 lb per 1,000 sq ft as its own pass, one application a year', () => {
     for (const m of [4, 10]) {
-      const [line] = lineFor(m, matrix.ADVION);
+      const [line] = lineFor(m, granule.GRANULE);
       expect(line).toMatch(/optional add-on, office prices it/);
-      expect(line).toMatch(/1\.5 lb per acre \(0\.0344 lb per 1,000 sq ft\) with a hand spreader, on request only/);
-      expect(lines(visitFor(m).primary).map(nameOf)).not.toContain(matrix.ADVION);
+      expect(line).toMatch(/2 lb per 1,000 sq ft \(87 lb per acre\) with a spreader, as its own pass, never blended with the month's granular \(the label says not to apply it in combination with other materials\)/);
+      expect(line).toMatch(/one application per lawn per year, so April or October, not both/);
+      expect(line).toMatch(/on request only$/);
+      expect(lines(visitFor(m).primary).map(nameOf)).not.toContain(granule.GRANULE);
+      expect(lineFor(m, matrix.ADVION)).toEqual([]);
     }
-    for (const m of [1, 2, 3, 5, 6, 7, 8, 9, 11, 12]) expect(lineFor(m, matrix.ADVION)).toEqual([]);
-    const spec = matrix.INSERTS.filter((s) => s.name === matrix.ADVION);
-    expect(spec.map((s) => s.defaultInPlan)).toEqual([false, false]);
-    expect(matrix.CATALOG.find((p) => p.name === matrix.ADVION).epa_reg_number).toBeNull();
+    for (const m of [1, 2, 3, 5, 6, 7, 8, 9, 11, 12]) expect(lineFor(m, granule.GRANULE)).toEqual([]);
+    expect(JSON.stringify(v13)).not.toMatch(/Advion/);
+    const spec = granule.ROW;
+    expect(spec.defaultInPlan).toBe(false);
+    expect(granule.EPA).toBe('432-1217');
   });
 });
 
@@ -471,27 +480,27 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
     expect(note).toMatch(/The 9-visit plan keeps the October Dimension step/);
   });
 
-  test('2026 behavior is untouched: October Dimension 4.04 lb, November 24-0-11 3.1 lb, December 24-0-11 2.1 lb', () => {
+  test('2026 behavior is untouched: October Dimension 4.04 lb, November 24-0-11 3.1 lb, December LESCO 10-0-22 4.5 lb', () => {
     expect(lines(visitFor(10).primary)[0]).toBe(`${october.NEW_NAME} — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader`);
     expect(lines(visitFor(11).primary)[0]).toMatch(/^LESCO 24-0-11 with PolyPlus OPTI — 3\.1 lb per 1,000 sq ft/);
-    expect(lines(visitFor(12).primary)[0]).toMatch(/^LESCO 24-0-11 with PolyPlus OPTI — 2\.1 lb per 1,000 sq ft/);
+    expect(lines(visitFor(12).primary)[0]).toBe(`${december.NEW_NAME} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`);
     expect(lines(visitFor(1).primary)[0]).toMatch(/^LESCO Stonewall 4FL/);
   });
 
-  test('N per application and per year: Oct 0.60, Nov 0.73, and the 2026 December step 0.75, under 1 lb each and under the 4 lb ordinance cap', () => {
+  test('N per application and per year: Oct 0.60, Nov 0.73, and the 2026 December step 0.45 (10-0-22), under 1 lb each and under the 4 lb ordinance cap', () => {
     const oct = 2.5 * 0.24;
     const nov = 4.04 * 0.18;
-    const dec = 3.1 * 0.24;
-    expect([oct, nov, dec].map((n) => Math.round(n * 100) / 100)).toEqual([0.6, 0.73, 0.74]);
+    const dec = 4.5 * 0.10;
+    expect([oct, nov, dec].map((n) => Math.round(n * 100) / 100)).toEqual([0.6, 0.73, 0.45]);
     expect(note).toMatch(/October LESCO 24-0-11 with PolyPlus OPTI at 2\.5 lb per 1,000 sq ft \(0\.60 lb N\)/);
     expect(note).toMatch(/November LESCO Dimension 0\.21% 18-0-10 at 4\.04 lb per 1,000 sq ft \(0\.73 lb N, 0\.37 lb dithiopyr per acre/);
     // December is defined separately (another lane owns it): the note carries no December line.
     expect(note).toMatch(/December is defined separately/);
     expect(note).not.toMatch(/December LESCO|3\.1 lb/);
     for (const n of [oct, nov, dec]) expect(n).toBeLessThanOrEqual(1);
-    // Feb 0.75 + Apr 0.5 + Oct 0.6 + Nov 0.73 + Dec 0.75 = 3.33 lb N a year.
-    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.75).toBeCloseTo(3.33, 2);
-    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.75).toBeLessThan(4);
+    // Feb 0.75 + Apr 0.5 + Oct 0.6 + Nov 0.73 + Dec 0.45 = 3.03 lb N a year.
+    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.45).toBeCloseTo(3.03, 2);
+    expect(0.75 + 0.5 + 0.6 + 0.73 + 0.45).toBeLessThan(4);
   });
 
   test('dithiopyr stays under 1.5 lb ai per acre: March and June 2EW 0.5 fl oz each plus the November bag at 4.04 lb', () => {

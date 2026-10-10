@@ -183,3 +183,26 @@ it('a default-on flag stays closed while a refetch is in flight (pre-push P1)', 
   expect(await screen.findByText('b:true')).toBeInTheDocument();
   view.unmount();
 });
+
+// `known` tells a flag the server says is off from one a failed read left off
+// (fail closed): a caller that unlocks something only when a flag is OFF needs
+// the difference (the station map, Codex P1 on #6140).
+it('useFeatureFlagReady says whether the flags were read from the server', async () => {
+  localStorage.setItem('waves_admin_token', 'login-a');
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ flags: {} }) })));
+  let mod = await import('./useFeatureFlag');
+  function Gate() {
+    const flag = mod.useFeatureFlagReady('station-map-v1');
+    return <div>{`enabled ${flag.enabled}, ready ${flag.ready}, known ${flag.known}`}</div>;
+  }
+  const view = render(<Gate />);
+  expect(await screen.findByText('enabled false, ready true, known true')).toBeInTheDocument();
+  view.unmount();
+
+  vi.resetModules();
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  mod = await import('./useFeatureFlag');
+  render(<Gate />);
+  expect(await screen.findByText('enabled false, ready true, known false')).toBeInTheDocument();
+});

@@ -157,7 +157,7 @@ Label maximum: 3 applications per year per property. Waves lawn program (v13): m
 
 ## Application Tracking
 - Track Celsius apps per property in service notes
-- Flag customers approaching their 2nd application under the v13 program (the 3rd is the label maximum) — after the Celsius cap use Blindside (also capped at 2 applications per lawn per year under v13) or manual pulling. Certainty goes with Celsius and shares the same 2 per lawn per year, so it is not the switch
+- Flag customers approaching their 2nd application under the v13 program (the 3rd is the label maximum) — after the Celsius cap use Blindside (1 application per lawn per year at 0.149 oz per 1,000 sq ft; label: warm-season rate 0.149 to 0.23 oz a pass, no more than 0.23 oz per 1,000 sq ft a year) or manual pulling. Certainty goes with Celsius and shares the same 2 per lawn per year, so it is not the switch
 - Do NOT apply if the property has received 2 applications this calendar year under the v13 program, or 3 under the label, regardless of who applied them
 
 ## Alternatives After Cap

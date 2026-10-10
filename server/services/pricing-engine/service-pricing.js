@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
@@ -10,6 +10,7 @@ const {
   BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } = require('./lawn-cost-plus-knobs');
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
@@ -1901,8 +1902,8 @@ function resolveLawnTier(tier, lawnFreq) {
 // The -8%/-4% spread implies it, but only against an UNCAPPED enhanced cell —
 // binding it to the capped enhanced value keeps the ladder monotonic even if
 // an operator edits a single cell through the admin bracket panel.
-function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
-  const result = lookupLawnBracketUncapped(lawnSqFt, tierIndex, track);
+function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine', schedule = liveLawnMarketSchedule()) {
+  const result = lookupLawnBracketUncapped(lawnSqFt, tierIndex, track, schedule);
   if (!(result.monthly > 0) || tierIndex === LAWN_TIERS.standard.index) return result;
   // Armed = the discounted schedule is live (in-code default true;
   // migrate:down of 20260807120000 writes lawn_pricing_v2.
@@ -1925,15 +1926,15 @@ function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   // m12 ≥ ceil(m6·12/6)) — which is literally "no frequency discount" and
   // restores 12x > 9x > 6x profit ordering (per-app parity ⇒ profit scales
   // with visits). Uses only the live extrapolated anchor — no shadow grid.
-  const discountLive = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  const discountLive = schedule.cadenceFreqDiscountArmed;
   // inTable ALSO covers a rolled-back edge-parity schedule (migrate:down of
   // 20260808000000 writes edgeParityFloorArmed=false): >20k then falls back
   // to the _FREQ_DISCOUNT semantics — caps applied at every size — so the
   // restored version label and the runtime behavior revert together.
   const inTable = lawnSqFt <= LAWN_TABLE_MAX_SQFT
-    || LAWN_PRICING_V2.edgeParityFloorArmed === false;
+    || !schedule.edgeParityFloorArmed;
   const standard = discountLive
-    ? lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.standard.index, track)
+    ? lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.standard.index, track, schedule)
     : null;
   if (tierIndex === LAWN_TIERS.enhanced.index) {
     if (standard && standard.monthly > 0) {
@@ -1944,7 +1945,7 @@ function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
     return result;
   }
   if (tierIndex === LAWN_TIERS.premium.index) {
-    const enhancedUncapped = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track).monthly;
+    const enhancedUncapped = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track, schedule).monthly;
     if (standard && standard.monthly > 0) {
       if (inTable) {
         const bounds = [Math.floor(standard.monthly * LAWN_PREMIUM_MONTHLY_CAP_RATIO)];
@@ -1987,8 +1988,8 @@ function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   return result;
 }
 
-function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track = 'st_augustine') {
-  const brackets = LAWN_BRACKETS[track];
+function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track, schedule) {
+  const brackets = schedule.brackets[track];
   if (!brackets || !brackets.length) {
     return { monthly: 0, pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
   }
@@ -2024,29 +2025,35 @@ function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track = 'st_augustine') 
   return { monthly: brackets[brackets.length - 1][tierIndex + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
 }
 
-function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, options = {}) {
-  const turfK = lawnSqFt / 1000;
-  const materialCostPerK = Number.isFinite(Number(options.lawnMaterialCostPerK))
-    ? Math.max(0, Number(options.lawnMaterialCostPerK))
-    : 8;
-  const laborMinutesBase = Number.isFinite(Number(options.lawnLaborMinutesBase))
-    ? Math.max(0, Number(options.lawnLaborMinutesBase))
-    : LAWN_PRICING_V2.laborMinutesBase;
-  const laborMinutesPerK = Number.isFinite(Number(options.lawnLaborMinutesPerK))
-    ? Math.max(0, Number(options.lawnLaborMinutesPerK))
-    : LAWN_PRICING_V2.laborMinutesPer1000Sqft;
+// The tuning numbers behind one cadence's cost floor. In cost-plus mode
+// (options.costPlusBasis) they come ONLY from the resolved basis and every
+// caller option is ignored; otherwise the caller options override the live
+// config exactly as before.
+function lawnCostFloorTuning(visits, property, options) {
+  if (options.costPlusBasis) return costPlusFloorTuning(options.costPlusBasis, visits, property);
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : fallback);
   const routeDensity = String(options.routeDensity || property.routeDensity || LAWN_PRICING_V2.defaultRouteDensity)
     .toUpperCase();
-  const routeDriveMinutes = Number.isFinite(Number(options.routeDriveMinutes))
-    ? Math.max(0, Number(options.routeDriveMinutes))
-    : (Number.isFinite(Number(property.routeDriveMinutes))
-      ? Math.max(0, Number(property.routeDriveMinutes))
-      : (LAWN_PRICING_V2.routeDensityMinutes[routeDensity] ?? LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity]));
-  const targetGrossMargin = Number.isFinite(Number(options.targetLawnGrossMargin))
-    && Number(options.targetLawnGrossMargin) > 0
-    && Number(options.targetLawnGrossMargin) < 1
-    ? Number(options.targetLawnGrossMargin)
-    : LAWN_PRICING_V2.targetCollectedMarginFloor;
+  const margin = Number(options.targetLawnGrossMargin);
+  return {
+    materialCostPerK: num(options.lawnMaterialCostPerK, 8),
+    annualMaterialBudget: Number.isFinite(Number(options.annualMaterialBudget)) ? Number(options.annualMaterialBudget) : null,
+    laborMinutesBase: num(options.lawnLaborMinutesBase, LAWN_PRICING_V2.laborMinutesBase),
+    laborMinutesPerK: num(options.lawnLaborMinutesPerK, LAWN_PRICING_V2.laborMinutesPer1000Sqft),
+    routeDensity,
+    routeDriveMinutes: num(options.routeDriveMinutes, num(property.routeDriveMinutes,
+      LAWN_PRICING_V2.routeDensityMinutes[routeDensity] ?? LAWN_PRICING_V2.routeDensityMinutes[LAWN_PRICING_V2.defaultRouteDensity])),
+    targetGrossMargin: margin > 0 && margin < 1 ? margin : LAWN_PRICING_V2.targetCollectedMarginFloor,
+    annualAdmin: num(options.adminAnnual, LAWN_PRICING_V2.adminAnnualDefault),
+    laborRate: LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE,
+    callbackReserveDefault: LAWN_PRICING_V2.callbackReservePerVisitDefault,
+    equipmentReserve: LAWN_PRICING_V2.equipmentReservePerVisit,
+  };
+}
+
+function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, options = {}) {
+  const turfK = lawnSqFt / 1000;
+  const tune = lawnCostFloorTuning(visits, property, options);
   const features = property.features || {};
   const complexity = String(features.complexity || property.landscapeComplexity || '').toLowerCase();
   const shrubs = String(features.shrubs || property.shrubDensity || '').toLowerCase();
@@ -2059,35 +2066,27 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
       .toString().toLowerCase().includes('privacy'),
   });
   const callbackReservePerVisit =
-    LAWN_PRICING_V2.callbackReservePerVisitDefault +
+    tune.callbackReserveDefault +
     (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) +
     (['HIGH', 'SEVERE', 'VERY_HIGH'].includes(pressure) ? 5 : 0);
 
-  const annualMaterialBudget = Number.isFinite(Number(options.annualMaterialBudget))
-    ? Number(options.annualMaterialBudget)
-    : null;
   // Material-per-visit: shared (unclamped) budget scaling, or the $/K fallback.
-  const materialCostPerVisit = annualMaterialBudget !== null
-    ? lawnMaterialCostPerVisit(annualMaterialBudget, lawnSqFt, visits)
-    : turfK * materialCostPerK;
-  const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
-  const annualAdmin = Number.isFinite(Number(options.adminAnnual))
-    ? Math.max(0, Number(options.adminAnnual))
-    : LAWN_PRICING_V2.adminAnnualDefault;
-
+  const materialCostPerVisit = tune.annualMaterialBudget !== null
+    ? lawnMaterialCostPerVisit(tune.annualMaterialBudget, lawnSqFt, visits)
+    : turfK * tune.materialCostPerK;
   const floor = computeLawnCostFloor({
     lawnSqFt,
     visits,
     materialCostPerVisit,
-    laborMinutesBase,
-    laborMinutesPer1000Sqft: laborMinutesPerK,
+    laborMinutesBase: tune.laborMinutesBase,
+    laborMinutesPer1000Sqft: tune.laborMinutesPerK,
     complexityMinutes,
-    laborRate,
-    routeDriveMinutes,
+    laborRate: tune.laborRate,
+    routeDriveMinutes: tune.routeDriveMinutes,
     callbackReservePerVisit,
-    equipmentReservePerVisit: LAWN_PRICING_V2.equipmentReservePerVisit,
-    adminAnnual: annualAdmin,
-    targetGrossMargin,
+    equipmentReservePerVisit: tune.equipmentReserve,
+    adminAnnual: tune.annualAdmin,
+    targetGrossMargin: tune.targetGrossMargin,
   });
   return {
     annualMaterial: roundMoney(floor.annualMaterial),
@@ -2099,16 +2098,65 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
     annualCost: roundMoney(floor.annualCost),
     minimumCollectedAnnualPrice: floor.minimumCollectedAnnualPrice,
     laborMinutesPerVisit: roundMoney(floor.laborMinutesPerVisit),
-    routeDriveMinutes,
-    routeDensity,
-    targetCollectedMarginFloor: targetGrossMargin,
+    routeDriveMinutes: tune.routeDriveMinutes,
+    routeDensity: tune.routeDensity,
+    targetCollectedMarginFloor: tune.targetGrossMargin,
     pricingMode: LAWN_PRICING_V2.pricingMode,
     pricingVersion: LAWN_PRICING_V2.pricingVersion,
   };
 }
 
+// Annual cost of the bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL), for margin
+// reporting only: sprays per year x (product cost over the whole lawn + labor). The
+// prices and minutes are LAWN_PRICING_V2.bermudaSuppression.cost, read here at call
+// time, so a pricing_config edit changes the cost with no deploy (see
+// BERMUDA_SUPPRESSION_COST_DEFAULTS for the sources). A key the row lacks or holds as a
+// non-number or non-positive value reads as its code default.
+function bermudaRemovalCostConfig() {
+  const row = LAWN_PRICING_V2.bermudaSuppression?.cost || {};
+  const pick = (key) => (Number.isFinite(Number(row[key])) && Number(row[key]) > 0 ? Number(row[key]) : BERMUDA_SUPPRESSION_COST_DEFAULTS[key]);
+  return {
+    productPer1000: pick('recognitionPer1000') + pick('fusiladePer1000') + pick('surfactantPer1000'),
+    mixMinutes: pick('mixMinutes'),
+    minutesPer1000: pick('minutesPer1000'),
+  };
+}
+
+function calcBermudaRemovalAnnualCost(lawnSqFt) {
+  const c = bermudaRemovalCostConfig();
+  const turfK = lawnSqFt / 1000;
+  const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
+  const perSpray = c.productPer1000 * turfK
+    + ((c.mixMinutes + c.minutesPer1000 * turfK) / 60) * laborRate;
+  return Math.round(LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR * perSpray * 100) / 100;
+}
+
 function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options = {}) {
   return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPrice;
+}
+
+// What one lawn calculation prices from. Cost-plus mode (owner ruling
+// 2026-10-09, GATE_LAWN_COST_PLUS_LIST) is on when options.costPlusList is
+// true, or follows the live gate when the option is absent, so direct callers
+// track the same state as generateEstimate; callers that need the raw market
+// baseline (the one-time anchor) pass false. In the mode everything comes from
+// the cost basis: options.costPlusListBasis is the server-only snapshot a
+// saved estimate was priced with, and without it the live server config is
+// resolved. An unusable basis fails the calculation instead of silently
+// pricing off the market table (same posture as the Bermuda knob error);
+// persistence rethrows failClosed errors rather than CLIENT_FALLBACK.
+function lawnPriceBasis(options) {
+  const on = (options.costPlusList ?? require('../../config/feature-gates').gateEnvValue('GATE_LAWN_COST_PLUS_LIST')) === true;
+  if (!on) return { costPlusBasis: null, costPlusKnobs: null, marketSchedule: liveLawnMarketSchedule() };
+  const { basis, error } = resolveLawnCostPlusBasis(options.costPlusListBasis);
+  if (error) {
+    const err = new Error(`Lawn cost-plus list cost basis is invalid: ${error}. The mode never silently prices off the market table.`);
+    err.statusCode = 400;
+    err.code = 'LAWN_COST_PLUS_LIST_KNOBS_INVALID';
+    err.failClosed = true;
+    throw err;
+  }
+  return { costPlusBasis: basis, costPlusKnobs: basis.costPlusList, marketSchedule: basis.market };
 }
 
 function priceLawnCare(property, options = {}) {
@@ -2141,6 +2189,9 @@ function priceLawnCare(property, options = {}) {
     // v13 program (the one-time anchor) skip the v13 bahia review below.
     skipBahiaNoProgramReview = false,
   } = options;
+  // Cost-plus mode reads the market schedule from its basis, so a saved
+  // quote replays against the table it was priced with.
+  const { costPlusBasis, costPlusKnobs, marketSchedule } = lawnPriceBasis(options);
 
   const requestedGrassType = String(track || '').trim();
   const matchedTrack = matchGrassTrack(track);
@@ -2202,6 +2253,7 @@ function priceLawnCare(property, options = {}) {
   // the cost-floor model (floors are disarmed; margin stays reporting-only).
   const bsCfg = LAWN_PRICING_V2.bermudaSuppression || {};
   const bermudaSuppressionEligible = normalizedTrack === 'st_augustine';
+  const bermudaRemovalLive = require('../../config/feature-gates').lawnBermudaRemovalLive?.() === true;
   let bermudaSuppressionPerApp = 0;
   if (bermudaSuppression === true && bermudaSuppressionEligible) {
     // Gate enforcement lives HERE, the deepest chokepoint, so every entry
@@ -2235,34 +2287,54 @@ function priceLawnCare(property, options = {}) {
     }
     bermudaSuppressionPerApp = adder;
   }
+  // Add-on spray cost for margin reporting (gate on only). Added to the cost the
+  // margin and the WaveGuard "looks low" check read, never to the cost-floor
+  // details: floors stay exactly what they were without the add-on.
+  const bermudaRemovalCost = bermudaRemovalLive && bermudaSuppressionPerApp > 0
+    ? calcBermudaRemovalAnnualCost(lawnSqFt)
+    : 0;
   // Discount scope mirrors lookupLawnBracket: armed AND inside the table —
   // above LAWN_TABLE_MAX_SQFT the discount (and therefore its floor-lift
   // resolution) does not apply (owner ruling 2026-08-07 on #3274), unless
   // the edge-parity schedule is rolled back, which restores the
   // _FREQ_DISCOUNT everywhere-semantics the lift shipped with.
-  const cadenceDiscountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
-    && (lawnSqFt <= LAWN_TABLE_MAX_SQFT
-      || LAWN_PRICING_V2.edgeParityFloorArmed === false);
+  const cadenceDiscountArmed = marketSchedule.cadenceFreqDiscountArmed
+    && (lawnSqFt <= LAWN_TABLE_MAX_SQFT || !marketSchedule.edgeParityFloorArmed);
   const tierCalcs = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
     const tierAnnualBudget = lawnMaterialBudget(normalizedTrack, tc.freq);
-    const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack);
+    const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack, marketSchedule);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
-    const costFloorOpts = { ...options };
-    if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
-      costFloorOpts.annualMaterialBudget = tierAnnualBudget;
-    }
+    // Cost-plus mode: the basis is the ONLY source of tuning numbers; the
+    // caller's options are not passed on.
+    const costFloorOpts = costPlusBasis
+      ? { costPlusBasis }
+      : { ...options, ...(Number.isFinite(Number(options.lawnMaterialCostPerK)) ? {} : { annualMaterialBudget: tierAnnualBudget }) };
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPrice;
-    const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
-    let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    // Every mechanism that can set this cadence's price, as [name, annual].
+    // The highest one sets it; on a tie the earlier one names it. A price
+    // that is not the market's is charged in whole dollars per application.
+    // Cost-plus mode adds list = cost / (1 - listMargin) and the per-visit
+    // minimum, and always arms the collected-margin floor: a listMargin set
+    // under the floor margin must not list a line below the price its
+    // discounts stop at.
+    const costPlusListAnnual = costPlusKnobs
+      ? Math.ceil(roundMoney(costFloorDetails.annualCost / (1 - costPlusKnobs.listMargin)) / tc.freq) * tc.freq
+      : null;
+    const [base, baseAnnual] = [
+      ['MARKET', marketAnnual],
+      ...(costPlusKnobs ? [['COST_PLUS_LIST', costPlusListAnnual], ['MINIMUM_PER_VISIT', costPlusKnobs.minimumPerVisit * tc.freq]] : []),
+      ...(useLawnCostFloor || costPlusKnobs ? [['COST_FLOOR', costFloorAnnual]] : []),
+    ].reduce((best, candidate) => (candidate[1] > best[1] ? candidate : best));
+    let ann = base === 'MARKET' ? marketAnnual : Math.ceil(baseAnnual / tc.freq) * tc.freq;
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
     return {
-      t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, ann,
-      cadenceLadderLiftApplied: false,
+      t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, base, programMinimumApplied, ann,
+      costPlusListAnnual, cadenceLadderLiftApplied: false,
     };
   }).filter(Boolean);
 
@@ -2278,7 +2350,7 @@ function priceLawnCare(property, options = {}) {
   // Disarmed floors — today's prod default (owner 2026-07-17) — skip this
   // entirely, and the lift rides the discount arm switch so migrate:down
   // restores the pre-discount floor behavior bit-for-bit.
-  if (useLawnCostFloor && cadenceDiscountArmed && tierCalcs.some((c) => c.costFloorApplied)) {
+  if (cadenceDiscountArmed && tierCalcs.some((c) => c.base !== 'MARKET')) {
     const byTier = {};
     for (const calc of tierCalcs) byTier[calc.t] = calc;
     const lift = (leg, neededAnnual) => {
@@ -2295,7 +2367,21 @@ function priceLawnCare(property, options = {}) {
   }
 
   const allTiers = tierCalcs.map((calc) => {
-    const { t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, cadenceLadderLiftApplied } = calc;
+    const { t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, base, programMinimumApplied, cadenceLadderLiftApplied, costPlusListAnnual } = calc;
+    // A cadence-lifted leg outranks its own mechanisms in the label: its
+    // final annual exceeds whatever floor/minimum/market set it, so
+    // stamping the leg MARKET_TABLE (or COST_FLOOR) would store a
+    // non-market price as market-derived with no record of the lift
+    // (codex #3274 r4 P2).
+    const setBy = (cadenceLadderLiftApplied && 'CADENCE_LADDER_LIFT') || (programMinimumApplied && 'PROGRAM_MINIMUM') || base;
+    const [pricingBasis, pricingSource] = {
+      CADENCE_LADDER_LIFT: [LAWN_PRICING_V2.pricingMode, 'CADENCE_LADDER_LIFT'],
+      PROGRAM_MINIMUM: ['PROGRAM_MINIMUM_MONTHLY', 'PROGRAM_MINIMUM'],
+      COST_PLUS_LIST: ['COST_PLUS_LIST_MARGIN', 'COST_PLUS_LIST'],
+      MINIMUM_PER_VISIT: ['MINIMUM_PER_VISIT_PRICE', 'MINIMUM_PER_VISIT'],
+      COST_FLOOR: [LAWN_PRICING_V2.pricingMode, 'COST_FLOOR'],
+      MARKET: [market.pricingBasis, market.pricingSource],
+    }[setBy];
     let { ann } = calc;
     // Bermuda suppression bakes into the per-app AFTER floor/minimum
     // resolution — the adder is add-on revenue, never a way to satisfy them.
@@ -2314,6 +2400,7 @@ function priceLawnCare(property, options = {}) {
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
       bermudaSuppressionPerApp: bermudaSuppressionPerApp > 0 ? bermudaSuppressionPerApp : null,
+      ...(bermudaRemovalCost > 0 ? { bermudaRemovalAnnualCost: bermudaRemovalCost } : {}),
       cadenceLadderLiftApplied: cadenceLadderLiftApplied || undefined,
       tier: t,
       index: tc.index,
@@ -2324,30 +2411,24 @@ function priceLawnCare(property, options = {}) {
       monthly: Math.round(ann / 12 * 100) / 100,
       label: tc.label,
       recommended: t === selectedTier,
-      // A cadence-lifted leg outranks its own mechanisms in the label: its
-      // final annual exceeds whatever floor/minimum/market set it, so
-      // stamping the leg MARKET_TABLE (or COST_FLOOR) would store a
-      // non-market price as market-derived with no record of the lift
-      // (codex #3274 r4 P2).
-      pricingBasis: cadenceLadderLiftApplied
-        ? LAWN_PRICING_V2.pricingMode
-        : (programMinimumApplied
-          ? 'PROGRAM_MINIMUM_MONTHLY'
-          : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis)),
-      pricingSource: cadenceLadderLiftApplied
-        ? 'CADENCE_LADDER_LIFT'
-        : (programMinimumApplied
-          ? 'PROGRAM_MINIMUM'
-          : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource)),
+      pricingBasis,
+      pricingSource,
       programMinimumApplied,
       programMinimumMonthly: programMinimumAnnual > 0 ? programMinimumMonthly : null,
       marketMonthly,
       marketAnnual,
       marketSource: market.pricingSource,
       costFloorAnnual,
-      costFloorApplied,
+      costFloorApplied: base === 'COST_FLOOR',
       costFloorDetails,
       minimumCollectedAnnualPrice: costFloorAnnual,
+      ...(costPlusKnobs
+        ? {
+          costPlusListApplied: setBy === 'COST_PLUS_LIST',
+          listMargin: costPlusKnobs.listMargin,
+          costPlusListAnnual,
+        }
+        : {}),
     };
   }).filter(Boolean);
   const tiers = includeHiddenTiers
@@ -2358,7 +2439,8 @@ function priceLawnCare(property, options = {}) {
   const annual = selected.annual;
   const perApp = selected.perApp;
   const selectedCosts = selected.costFloorDetails || {};
-  const selectedAnnualCost = Number.isFinite(Number(selectedCosts.annualCost)) ? Number(selectedCosts.annualCost) : annualCost;
+  const selectedAnnualCost = (Number.isFinite(Number(selectedCosts.annualCost)) ? Number(selectedCosts.annualCost) : annualCost)
+    + bermudaRemovalCost;
   const margin = annual > 0 ? (annual - selectedAnnualCost) / annual : 0;
   const customQuoteFlag = lawnSqFt > LAWN_TABLE_MAX_SQFT;
   const display = LAWN_TRACK_DISPLAY[normalizedTrack] || LAWN_TRACK_DISPLAY.st_augustine;
@@ -2461,6 +2543,7 @@ function priceLawnCare(property, options = {}) {
       annualEquipment: roundMoney(selectedCosts.annualEquipment ?? 0),
       annualCallbackReserve: roundMoney(selectedCosts.annualCallbackReserve ?? 0),
       annualAdmin: roundMoney(selectedCosts.annualAdmin ?? GLOBAL.ADMIN_ANNUAL),
+      ...(bermudaRemovalCost > 0 ? { annualBermudaRemoval: roundMoney(bermudaRemovalCost) } : {}),
       total: roundMoney(selectedAnnualCost),
     },
     minimumCollectedAnnualPrice: selected.minimumCollectedAnnualPrice,
@@ -6167,6 +6250,9 @@ function priceOneTimeLawn(property, options = {}) {
     // (9x, discounted) per-app here, inflating every one-time lawn quote.
     includeHiddenTiers: true,
     useLawnCostFloor: false,
+    // The anchor is the raw market rate, never the recurring cost-plus list
+    // (GATE_LAWN_COST_PLUS_LIST).
+    costPlusList: false,
     // One-time derives from the raw recurring per-app market rate; the
     // recurring program minimum (a floor on sold PLANS) must not inflate it.
     applyProgramMinimum: false,
@@ -9373,6 +9459,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
+  calcBermudaRemovalAnnualCost,
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,

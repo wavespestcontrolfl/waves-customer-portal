@@ -706,6 +706,24 @@ describe('mixForProduct', () => {
     expect(evaluateApprovals).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ plan: cleanPlan, products: [{ productId: 'p1', name: 'Celsius WG', rate: 0.113, rateUnit: 'oz' }] }));
     // Approved by every guard → doses normally under the same plan.
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: approve() }, ...at })).amount).toBe(6.215);
+    // A chemical-group repeat is a warning (owner 2026-10-09, "show the mix amount"): the amount is given and the
+    // finding stays in planBlocks. Any other finding beside it still withholds the amount, with its own reason.
+    const repeat = { code: 'repeat_hrac_group', message: 'Celsius WG repeats HRAC 2; last matching application was Celsius WG on 2026-03-01.' };
+    const fracRepeat = { code: 'fungicide_frac_rotation_approval', message: 'Celsius WG repeats FRAC 11; last matching application was Artavia on 2026-03-01.' };
+    for (const finding of [repeat, fracRepeat]) {
+      const warned = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [finding], warnings: [] }) }, ...at });
+      expect(warned).toMatchObject({ amount: 6.215, rotationWarnings: [finding.message], planBlocks: [{ code: finding.code, message: finding.message }] });
+    }
+    const both = jest.fn().mockResolvedValue({ blocks: [repeat, { code: 'off_protocol_product', message: 'Celsius WG is not part of the current WaveGuard protocol card.' }], warnings: [] });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: both }, ...at }))
+      .toMatchObject({ amount: null, reason: 'Celsius WG is not part of the current WaveGuard protocol card.', rotationWarnings: [], planBlocks: [{ code: 'repeat_hrac_group' }, { code: 'off_protocol_product' }] });
+    // A product that repeats two groups (Headway: FRAC 3 and FRAC 11) shows both warnings.
+    const two = jest.fn().mockResolvedValue({ blocks: [fracRepeat, { ...fracRepeat, message: 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.' }], warnings: [] });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: two }, ...at })).rotationWarnings)
+      .toEqual([fracRepeat.message, 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.']);
+    // A failed approval read is not a group repeat: it still withholds.
+    const failed = jest.fn().mockRejectedValue(new Error('rotation read failed'));
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: failed }, ...at })).amount).toBeNull();
   });
 
   test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
@@ -725,6 +743,29 @@ describe('mixForProduct', () => {
     // Not on the plan → catalog rate.
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
+  });
+
+  test('a v13 spot row (Arena in the May and June windows) is dosed at its own rate over its own carrier: a 4-gallon fill is 1,000 sq ft and 0.147 oz; a row with no carrier falls back as before', async () => {
+    const arena = { id: 'p1', name: 'Arena 50 WDG', category: 'insecticide', default_rate_per_1000: 0.29, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const planWith = (spot, windowCarrier = 1) => jest.fn().mockResolvedValue({
+      propertyGate: { blocks: [] },
+      mixCalculator: { carrierGalPer1000: windowCarrier, items: [], conditionalOptions: [{ product: { id: 'p1' }, selected: false, spot }] },
+    });
+    const dose = (rows, buildPlan) => jobCard.mixForProduct('p1', 4, { serviceId: 'svc1', dbh: makeDb({ scheduled_services: [lawnVisit], products_catalog: [arena], equipment_calibrations: rows }), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    const row = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4 };
+    // May and June windows carry 1 gal per 1,000 sq ft; the rig (2 gal) is not the product's carrier either.
+    for (const [month, windowCarrier] of [['May', 1], ['June', 1]]) {
+      for (const rig of [[], [live]]) {
+        const out = await dose(rig, planWith(row, windowCarrier));
+        expect({ month, rig: rig.length, amount: out.amount, unit: out.unit, coversSqft: out.coversSqft, ratePer1000: out.ratePer1000 }).toEqual({ month, rig: rig.length, amount: 0.147, unit: 'oz', coversSqft: 1000, ratePer1000: 0.147 });
+      }
+    }
+    // No carrier on the row: the window's carrier (no rig) or the rig's, as before.
+    const noCarrier = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: null };
+    expect(await dose([], planWith(noCarrier, 1))).toMatchObject({ amount: 0.588, coversSqft: 4000 });
+    expect(await dose([live], planWith(noCarrier, 1))).toMatchObject({ amount: 0.294, coversSqft: 2000 });
+    // A spot row with no stated rate keeps the catalog rate over the usual carrier.
+    expect(await dose([live], planWith({ ratePer1000: null, rateUnit: null, carrierGalPer1000: 4 }))).toMatchObject({ amount: 0.58, ratePer1000: 0.29 });
   });
 
   test('a rig pick doses a full tank of that rig on its own carrier and volume; without one the visit\'s rig resolves as the card does', async () => {

@@ -1,4 +1,5 @@
-// The Celsius applications a customer's lawn has had this year, as the portal's cap copy shows them.
+// The Celsius applications a customer's lawn has had since a start day (the cap's window: the last 365 days under the v13 program,
+// the calendar year before it), as the portal's cap copy shows them.
 // Counted the way the cap is enforced (application-limits): per lawn, from the application ledger, the
 // treated property being the one frozen on the ledger row (a legacy row without one: its visit's
 // property). With a property in scope the count is that lawn's (rows that cannot be placed at any

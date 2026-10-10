@@ -87,9 +87,51 @@ per-product target pests; the question and all free text scrubbed of phones,
 emails, codes and street addresses, but a customer name written in prose is
 not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
-(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word. Next-visit questions, and any schedule question the rule router leaves unrouted ("when are you coming again?", `asksAboutSchedule`), keep the fixed-rule answer; the fact sheet carries no appointment; and an AI answer that states a calendar date, weekday, clock time, month or relative day ("tomorrow", "next week", "next weekend") is rejected; "today" (the visit itself) and "this week" (rain and watering facts) are allowed (2026-10-06). The symptom guard replaces the answer only for symptoms or ingestion (dizzy, vomiting, trouble breathing, ate or licked the bait, in the eyes); a question that mentions spray plus a person, a pet or a body part from the cue list (`exposureSafetyLine`: people and relationships, pets and animals, body parts, personal pronouns; an unlisted word gets no line) gets the fixed line "If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911." before the normal answer, with the gate on or off (owner 2026-10-05, option A). A house number before a street (one to six street-name words and any USPS Publication 28 street type, any case) is masked; the street name itself passes, as a name without its number is not an address.
+(`server/services/service-report/report-ask-ai.js`). It serves Pest, Lawn and
+Tree & Shrub reports (`data.serviceLine`) for product, finding and summary
+questions. Results, score, trend, pest-pressure and weather questions keep the
+fixed-rule answer (owner 2026-10-08), as do next-visit,
+next-steps (care-permission questions included), re-entry and watering,
+which keep the fixed-rule answer word for word, and photo, lawn-size and
+lawn/tree product-location questions. A narrow part of that guard
+(`reroutedTopic`) also picks the fixed answer itself, gate on or off: a
+question the rule router left generic (`unrouted`, `applied`, `findings`,
+`summary`) that reads as re-entry or a future visit gets that topic's own rule answer (`routeServiceReportQuestion` with
+`forceTopic`) and that topic in the recorded event. The router's own topic
+always wins, and a question about the completed visit's date is never
+re-routed to the next visit. Termite, rodent,
+mosquito and specialty reports, any report a typed snapshot drives
+(`data.typedReport`) and any report with a customer-visible companion section
+(`data.companionReports`) keep the fixed-rule answer, with no model call. The
+recorded instructions the fixed-rule answer states (watering holds and tasks,
+pet precautions) go to the model as `required_lines` and must appear in the AI
+answer word for word, or the reply is the fixed-rule answer. A required line a
+technician typed (a recommendation, the next step, a finding's recommendation)
+never goes to the model: that question keeps the fixed-rule answer.
+Next-visit and next-step questions also keep the fixed-rule answer (the model may not write care instructions of its own), and an AI answer may
+not state a calendar date, weekday, clock time, month or relative day of its
+own (required lines keep theirs; "today", the visit itself, and "this week"
+are allowed). An answer with required lines may not grant unconditional
+permission on their subject ("pets can go out right away"). Every number the model writes must be a
+fact-sheet number of the same kind (a score out of 100, an inch figure).
+While the aftercare holds watering, no model sentence may tell the customer
+to water. Scrub: a house number before a street (any USPS street type, any
+case) and lockbox or keypad shorthand ("lockbox 42") are masked.
 
-Symptom and ingestion questions (behavior change to the public route, owner review round 5, 2026-10-05; narrowed by owner option A, 2026-10-05): a question that reports a symptom or an ingestion or eye/skin contact ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged. A question that only says something was sprayed on a person or pet (no symptom) is not replaced: it keeps its normal answer with the fixed Poison Control line in front (`exposureSafetyLine`, see above).
+Symptom and ingestion questions (behavior change to the public route, owner review round 5, 2026-10-05; narrowed by owner option A, 2026-10-05): a question that reports a symptom, an ingestion or eye/skin contact ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged. A question that mentions spray plus a person, a pet or a body part from the cue list (`exposureSafetyLine`) and reports no symptom keeps its normal answer, with the fixed line "If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911." in front, gate on or off (owner 2026-10-05, option A); an unlisted word gets no line.
+
+Tips from your tech, aftercare flag (owner 2026-10-09): on the service-report
+payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), an entry of `techNote.tips` (present only while
+`GATE_TECH_TIPS` is `true`) may carry the optional key `aftercare: true`. The
+server sets it at completion from the tip registry
+(`server/services/service-report/tip-library.js`) and freezes it with the
+tip's copy in `structured_notes.techTips`; the client never supplies it, and
+a tip in the technician's own words never carries it. The web report reads it
+only to choose the note's opening line (a note made only of aftercare tips
+opens "Here is what to expect after this visit:"). Tips frozen before this
+change carry no key and render as before. Auth, headers and routes are
+unchanged.
 
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
@@ -746,6 +788,14 @@ With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
 use whole-route feasibility, technician eligibility, existing arrival promises,
 blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
 on the shared customer grid (09:00–17:00 ET, `scheduling/customer-windows.js`;
+09:00–16:00 while `GATE_CUSTOMER_LAST_START_16` is set, owner 2026-10-09: the
+17:00 start is not offered, and a 17:00 offer signed before the gate was set
+is refused when taken. The assistant booking engine (`services/availability.js`
+`getAvailableSlots` and `confirmBooking`, used by the portal assistant and
+text open-time drafts) applies the same rule at offer and at commit. Two exceptions keep a time the customer already has:
+an existing estimate hold on 17:00 is returned by a repeat `/reserve` and
+committed at acceptance, and a `/api/booking/confirm` retry of a 17:00
+booking that already committed replays that booking;
 the customer-facing day closes at 18:00, and `booking_config.day_end` was
 migrated to 18:00 on 2026-09-23) are offered; estimate ASAP and booking
 open-day expansion cannot create additional starts. 12:00 is an ordinary
@@ -782,6 +832,36 @@ was minted under (a rollback or a mixed rolling deploy inside the 45-minute
 offer window) — the customer gets the standard "pick your time again" 409
 instead of a silently mis-ordered commit. The staff save probe
 (`checkArrivalPlacement`) stays append-only too.
+
+Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
+dark, read at call time in `routes/reschedule-public.js`): `GET
+/api/public/reschedule/:token` may carry `nextVisit: { currentDate, byDate }`.
+`currentDate` is the next plan visit's date today (`YYYY-MM-DD`); `byDate` maps
+an offered date in `availability.days` to the cadence date a move to that date
+gives the next visit. Both come from `SmartRebooker.projectNextVisitDates`
+(the sibling selection and projector of `rescheduleSeries`); the client only
+looks the picked date up and never computes a shift. The key is OMITTED, never
+null, when: the gate is off; the visit is not a series visit or
+`GATE_COLLECTIVE_SERIES_ANCHOR` is off; no later visit can move; the
+customer's move would not write the date on the next visit (its stop is shared
+with another live service or its visit is frozen; under
+`GATE_CUSTOMER_RECURRING_DISPATCH` also a row that is not pending/confirmed, is
+customer-confirmed, is dispatch-locked or excluded, or has a sendable
+reminder); the projection fails. `byDate` has no entry for the visit's own
+date (a time-only move does not shift the plan). `POST .../find-slots` and
+the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
+return, and the client replaces the dates it holds with that answer (no key =
+no date named); a date with no entry shows no line. Confirm pin: the commit body carries
+`disclosed_next_visit_date` and `disclosed_next_visit_current_date` (the new
+date and the current date the line named for the picked slot, or null when it
+named none). While the gate is on, the series mover hands its own verdict for
+the next visit (the date it is on and the date the move writes on it, null
+when the move keeps it in place) to `moveGuard` on its locked transaction,
+before its first write; when the page said something else (the next visit became
+customer-confirmed, dispatch-locked, reminded, shared or frozen after the page
+loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
+page reloads. A page loaded before the gate was set sends no field and gets
+the same reload when a date would be named.
 
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
@@ -2132,6 +2212,14 @@ Reschedule button when it is `null`, and (only when `merged === true`) folds
 this card into the "Your plan" section (title "Your upcoming visits" when
 there is no plan summary). Gate off: neither field is present and the two
 sections stay separate, byte-identical to before.
+`GATE_LAWN_REPORT_CLARITY` (owner 2026-10-08; dark, strict `true`, read at call
+time): on a LAWN report only, the card lists ONE visit, the next upcoming lawn
+visit at this report's property (same property scoping as below, same
+service-line classifier as the report's next-visit pick; the scan pages on until
+one lawn visit is found). With none, or when the read fails, the card is
+`{ visits: [] }` (plus `merged: true` with `GATE_REPORT_PLAN_RESCHEDULE`), which
+the client renders as no visits and no "next visit" line. Other service lines
+and gate off: unchanged.
 Lists every one of the customer's upcoming scheduled visits across ANY
 program (pest, lawn, tree & shrub, mosquito, termite, rodent, …), not just
 the report's own service line (`nextAppointment` above is unchanged and
@@ -2286,7 +2374,10 @@ hold, water-in or hold-then-water-in: `reportV2.banner`
 `{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
 `hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
 finished customer sentences with absolute Eastern clock times; `holdUntil`,
-`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+`waterInBy` and `expiresAt` are ISO instants or `null`; `waterInBy` is completion
+plus the product's window, or, when a timed hold reaches that (owner 2026-10-09:
+every post-emergent herbicide holds 24 hours), the hold's printed end plus the
+window, so the water-in always follows the hold; an "until the treatment
 has dried" hold has no printed duration and `expiresAt: null` (dryness is a
 condition, so no instruction that waits for drying, including one followed by a
 water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
@@ -2384,6 +2475,23 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+Amount-only water-in (owner 2026-10-08, permanent and ungated since 2026-10-09;
+requires `GATE_LAWN_WATERING_RULE`): when a water-in is BUILT AT COMPLETION for a
+customer with no sprinkler head type or measured rate on file, its `lines` give
+the amount and no minutes ("Water in today’s treatment with about ½ inch by Fri
+8 PM.", then "Run it even if it is not your usual day."; hold-then-water-in keeps
+its hold line and continues "After that, water in today’s treatment with about ½
+inch by …") and the frozen instruction records `amountOnly: true`. The frozen
+instruction is replayed as written; an unfrozen re-render prints the generic
+minutes as before. Minutes still print when the customer's portal setup gives
+them (a head type on file, or a measured rate). A LIVE-VIEW-ONLY optional string
+`reportV2.banner.setupLine` ("Add your sprinkler setup and we’ll give you minutes
+for each zone.") exists only under a frozen `amountOnly` water-in or
+hold-then-water-in; it is deleted from every non-live render
+(`stripLiveOnlyScheduleFields`), is never in `lines`, and counts toward
+`reportV2.lead`'s word budget when present. The client shows it as a link to the
+portal property tab. The watering text, PDF, hero task and Ask Waves read `lines`
+only. No new route, query parameter or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
@@ -2449,6 +2557,65 @@ row key alike); PDFs cached before a flip re-render, and again when the gate is
 turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
 found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
 not served either.
+`GATE_LAWN_REPORT_FACTS` (dark, read at call time; gate off leaves the payload, the PDF and every
+cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload and the PDF that share
+`buildReportV1Data` and `buildServiceReportDynamicContext` (lawn only; no new route, token, privacy or
+rate-limit surface). Three facts are frozen at completion, not computed at render: the lawn write gate stores
+`structured_notes.lawnReportFacts = { v: 1, reentry, productUse, ties, frozenAt }` once per visit (first
+writer wins, before the first report build; nothing is stored when the product or catalog read failed), and a
+render reads only that block, never the gate. New or changed public fields, each present only for a lawn
+record that carries the frozen block (every other record is byte-identical): (1)
+`dynamicContext.reentry.condition = { rule, text, pets, statusLabel }` with `rule` one of `dry`,
+`watered_in_and_dry`, `text` and `pets` fixed sentences chosen by code ("Ready to walk on once the
+application has dried — your technician confirms timing." / "... once today's treatment has dried and, after you water it in, the grass is dry again — your technician confirms timing."
+and "Keep people and pets off the lawn until then."), `statusLabel` a short word ("Once dry", "After watering
+in"); for such a record `dynamicContext.reentry.targets` is `[]` (no ready-at time, no countdown), and
+`customerSummary` / `petAdvisory` carry the same two sentences. A record whose rule is marked `default` (a product with no approved frozen facts or no plain until-dry label), or one an
+admin corrected afterwards, keeps the clock targets. `reportV2.aftercare.reentry` carries the same
+condition `text` for such a record. (2) `applications[].areaUse`, a string ("Spot treatment, about 250 sq ft"
+or "Spot treatment"), present only on a spot-treatment product row of such a record; the report prints it in
+place of the zone text ("Your whole lawn"). (3) The Visit Summary (`reportV2.lead` / recap text, already public)
+may carry the finding-to-product sentences of a version 4 entry; no new key. The tie facts and the per-product
+rules stay in `structured_notes` and never reach the payload. The lawn PDF signature carries `:rf=<hash>` only
+for a record that holds a frozen decision (read from the record's own `structured_notes`, so a partial
+cache-lookup row and a full render row key alike); PDFs cached before the freeze re-render once.
+`GATE_LAWN_REPORT_COPY_FIXES` (dark, strict `true`, read at call time; gate off leaves the
+payload, the PDF and every cached PDF key byte-identical) changes the lawn
+`/api/reports/:token/data` payload and the PDF that share `buildReportV1Data` (lawn
+only; no new route, token, privacy or rate-limit surface; tree & shrub and pest
+payloads never change). New optional keys, absent while the gate is off:
+top-level `lawnCopyFixes: true` (the page then prints none of the pest program's
+re-service wording: the footer sentence, its booking link and the legacy re-service
+header), `reportV2.water.targetNote` (one fixed sentence from the closed table
+`WATER_TARGET_NOTES` in `lawn-report-copy-fixes.js`, only when the target came from the property's own weather or
+the seasonal lookup; none for an area-snapshot target). Changed values while the
+gate is live: the `weed_pressure` card's `label` reads "Weed Cleanliness";
+`reportV2.snapshot.treatmentSummary` names product categories, never an active
+ingredient or a product name (the AI treatment narrative is not called for a lawn
+report); `reportV2.progressionNote`, `reportV2.trends.seasonalNote` and the
+shoulder/dormant `snapshot.seasonalNote` are null/absent unless the visit month is in
+the cool season and the overall score did not rise; `reportV2.trends.waterGap` and
+`.mowing` (with `.mowingBand`) are absent when the newest point is more than 45 days
+before the visit, and `reportV2.trends` is null when that leaves no chart. The v6
+"what we applied" field and the technician paragraph freeze their category form only
+for a visit completed or first rendered while the gate is live (the paragraph's slots
+gain a `categories` list); every older frozen entry replays unchanged. The lawn PDF
+signature carries `:copyfix=1` only while the gate is live, and the narrative key
+part is the `-tn0` sentinel for a lawn report.
+`GATE_LAWN_NEW_SOD_REPORT_CARD` (dark, strict `true`, read at call time; also needs `GATE_LAWN_NEW_SOD_NOTE`; gate off leaves the payload byte-identical) adds one optional top-level key to the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface): `lawnNewSod: { title, lead, items: [string, ...], rest: string | null, swap: string | null, close }`. Every value is a fixed sentence built by `server/services/lawn-sod-report-card.js` from the block frozen at completion (`structured_notes.lawnNewSod = { v: 1, visitDay, sodLaidOn, covers, planRan, held: [{ kind, until, rootedCheck }], swap: { name } | null }`); the only variable parts are calendar dates (the day the sod was laid and the day each held product class starts again). No staff free text is in the payload: the office's name for the sod area (`property_preferences.sod_area`) is never frozen or sent, and the swap product name is frozen but not printed. `rest` and the long form of `close` ("Everything else ran as normal.") are sent only when the frozen `planRan` is true (every other planned product was applied); else `rest` is null and `close` is "Same visit, same price.". The key is absent when the visit record has no valid frozen block (no planned product was held, the sheet's sod record no longer matched at completion, or the visit completed before the gate was on). The live web report prints it as the "New sod" card; the PDF and static views ignore it.
+
+`GATE_LAWN_REPORT_POLISH` (dark, strict `true`, read at call time; gate off leaves the payload, the PDF and every cached PDF key byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys, absent while the gate is off: top-level `lawnPolish: true`; `reportV2.water.scheduleKind` (`'inches'`, `'runtime_only'` or `'none'`), `reportV2.water.scheduleText` (state `runtime_only` only: what the customer's own portal entries say, "45 min, Mondays"), `reportV2.water.scheduleParts` (state `runtime_only` only: `minutes_and_days` | `minutes_only` | `days_only`) `reportV2.water.irrigationBasis` (a figure derived from minutes and days, one fixed sentence) and `reportV2.water.longerCycles` (`true` only: the one fixed longer-cycles advice sentence prints on the Water card; set from the decision frozen at completion in `lawnReportFacts.waterAdvice`, and only when the visit has no hold or water-in banner, weekly plan or after-visit watering note); the same `scheduleKind` and, for `runtime_only`, `scheduleText` and `scheduleParts` ride `lawnAssessment.waterContext`. Changed values while the gate is live: `reportV2.water.explanation` for `runtime_only` (it no longer says no schedule is on file); `reportV2.water.irrigationInches` and `lawnAssessment.turfProfile.irrigationInchesPerWeek` for a customer whose figure is derived (one turf head type, drip ignored, the owner's rate table); `applications[].product.precaution_summary` for a record whose frozen `lawnReportFacts.labelLines` drops a sentence. The lawn PDF signature carries `:polish=1` only while the gate is live.
+
+`GATE_LAWN_WATER_RAIN` (dark, strict `true`; the freeze needs `GATE_LAWN_REPORT_FACTS` too; a render reads the record's frozen `lawnReportFacts.waterAdvice` version 2, so a record without it, or frozen before the flip, is byte-identical) changes the lawn `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit surface). New optional keys on `reportV2.water`, present only for a record frozen with the permission and a visit with no hold / water-in instruction: `status` may be `rain_covered` (a new value beside `low`, `high`, `balanced`, `unknown`), `rainCard` (`true`: the explanation is one of the rain card's fixed sentences), `rainSensorLine` (`true` in a rain-covered week only). Changed values for such a record: `reportV2.water.explanation` (the rain-covered, deficit and surplus sentences), the insights and root cause (they read the card's status), and the status itself (counted with each day's rain capped at 0.75 inch). `reportV2.water.rainInches` and `totalInches` stay the measured figures.
+`GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
+payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
+`/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
+surface; tree & shrub and pest payloads never change): top-level `lawnLayout:
+{ mowingRange: { minInches, maxInches, grassLabel } | null }`. `mowingRange` is the row of the
+Mowing Height table (`HEIGHT_BAND_BY_GRASS`, `turf-height.js`) for the lawn's grass (the visit's
+own reading, else the turf profile); null for a grass the table does not list. The live web page
+orders and trims the lawn report from the key (a lead is also needed); the PDF document, static
+and SMS renders ignore it, so the lawn PDF signature carries no part for this gate.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
@@ -5335,6 +5502,8 @@ changes. `day_end` carries the stored `booking_config.day_end` (18:00 since
 the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
 start grid is the shared 09:00–17:00 customer grid with 12:00 present unless
 `GATE_BOOKING_LUNCH_BLOCK` is set.
+`GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
+unchanged by it.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.
