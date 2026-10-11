@@ -60,6 +60,7 @@
 const db = require('../../models/db');
 const BillingModeRules = require('../billing-mode-rules');
 const { resolveBillingLane } = require('../billing-lane');
+const { tryLockCustomerPaymentMethods } = require('../../utils/payment-method-lock');
 
 const BILLING_EDIT_FIELDS = ['billing_mode', 'per_application_fee'];
 // decimal(10,2) — migration 20260709000010.
@@ -297,7 +298,9 @@ async function chargeContext(dbh, customerId, row) {
 //                stamped on each: the top-up copies a root's payer to every visit it
 //                mints, so a payer-stamped root is payer-owned billing even with no
 //                live visit today. Locked FOR UPDATE at commit (the Schedule save's
-//                row lock), after the visits.
+//                row lock), after the visits; and the price the top-up would copy onto
+//                the visits it mints (an exhausted-but-ongoing root has no live priced
+//                visit, yet its next one would carry the template price).
 //   processing — when the edit leaves monthly membership, this month's (and last
 //                month's) dues payments still `processing` by bank debit: the debit
 //                settles after the lane moves (retry-collectibility.js
@@ -308,8 +311,20 @@ const NO_FACTS = { roots: [], processing: [] };
 async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   const ids = await require('../recurring-series-topup').eligibleSeriesParentIds(dbh, { customerId });
   if (!ids.length) return [];
-  const q = dbh('scheduled_services').whereIn('id', ids).orderBy('id', 'asc').select('id', 'payer_id');
-  return lock ? q.forUpdate() : q;
+  const q = dbh('scheduled_services').whereIn('id', ids).orderBy('id', 'asc').select('id', 'payer_id', 'service_type');
+  const rows = await (lock ? q.forUpdate() : q);
+  // The price the top-up would copy onto each visit it mints from the root (its own
+  // resolver, admin-schedule.js seriesNextOccurrencesPrice: extension price template +
+  // due add-on lines, read after the root lock). A priced template is billing the new
+  // lane would never see: completion prefers a visit's estimated_price over the
+  // per-application fee.
+  const { seriesNextOccurrencesPrice } = require('../../routes/admin-schedule');
+  const out = [];
+  for (const r of rows) {
+    const verdict = await seriesNextOccurrencesPrice(dbh, r.id);
+    out.push({ ...r, price: verdict ? verdict.price : 0, unverified: !!(verdict && verdict.unverified) });
+  }
+  return out;
 }
 
 async function processingDues(dbh, customerId) {
@@ -338,7 +353,7 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id)]);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified']);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
   return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing])}`;
@@ -385,6 +400,7 @@ const SIDE_FLOW_CHECKS = [
     const verdict = await require('../monthly-dues-eligibility')
       .monthlyDuesVerdict(dbh, customerId, { overrides: fields });
     if (verdict.eligible) return null;
+    if (verdict.reason === 'collection_hold') return refuse(`${verdict.message} Nothing was proposed.`, 'billing_collection_hold');
     return ['skipped_disabled', 'skipped_paused'].includes(verdict.reason)
       ? refuse('Turn on Auto Pay first; the monthly dues run skips customers without it. Nothing was proposed.', 'autopay_off')
       : refuse(`${verdict.message} Fix that first. Nothing was proposed.`, 'dues_not_collectible');
@@ -468,6 +484,11 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   // prepayment, invoices, dues coverage all move completion's amount): a visit
   // that carries any of them keeps the change on the customer page, which shows
   // each visit's charge.
+  const pricedRoot = facts.roots.find((r) => r.unverified || r.price > 0);
+  if (pricedRoot) {
+    const what = pricedRoot.unverified ? 'a schedule too long to check' : `a price of ${money(pricedRoot.price)} on each visit it adds`;
+    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+  }
   const priced = pricedVisitCount(visits);
   if (priced > 0) {
     return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
@@ -668,12 +689,18 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   // method writers (autopay-setup-link.js, stripe-webhook.js) take no customer lock, but
   // they contend on these row locks; NOWAIT because they may hold a method row and then
   // want the customer row this transaction holds. A method INSERTED after this read
-  // cannot be locked (no row exists to lock): the full list of method ids is pinned and
-  // re-read here, which covers every insert that committed before this point; only an
-  // insert in the instant between this read and the commit is not fenced.
+  // cannot be locked (no row exists to lock): the inserter's advisory key is try-locked
+  // first and held to the end of this transaction, so an insert cannot commit between
+  // the re-read and this commit, and the full list of method ids is pinned and re-read.
   let facts;
   try {
     facts = await billingFacts(trx, customerId, lockedBefore, fields, { lock: true });
+    // The one writer that INSERTS a method (StripeService.savePaymentMethod) takes this
+    // key around its insert (utils/payment-method-lock.js); try-lock, because its insert
+    // needs the customer row this transaction holds. Taken BEFORE the method re-read.
+    if (!(await tryLockCustomerPaymentMethods(trx, customerId))) {
+      throw changed('A payment method is being saved for this customer right now — nothing was updated. Try again in a minute.');
+    }
     await trx('payment_methods').where({ customer_id: customerId }).orderBy('id', 'asc').forUpdate().noWait().select('id');
   } catch (e) {
     if (e && e.code === '55P03') throw changed('A plan or saved payment method for this customer is being changed right now — nothing was updated. Try again in a minute.');

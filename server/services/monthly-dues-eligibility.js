@@ -13,6 +13,9 @@
  *   GUARD 1/2 Auto Pay off, or paused through today        (autopayGuard)
  *   GUARD 3b/3c billing lane is not monthly membership     (laneGuard)
  *   GUARD 4/5 annual prepay covers today / invoice pending (prepayGuard)
+ *   hold      no active collections DISPUTE hold: StripeService.chargeMonthly refuses
+ *             before Stripe (assertNoCollectionHold) and the cron defers the month
+ *             (isCollectionHoldRefusal), so the verdict asks the same two
  *   charge()  a default, enabled, valid saved Stripe method (customerOnAutopay,
  *             which mirrors StripeService.charge's own method walk)
  *
@@ -22,6 +25,7 @@
 const { isPaused, customerOnAutopay } = require('./autopay-eligibility');
 const { resolveBillingLane } = require('./billing-lane');
 const { etDateString } = require('../utils/datetime-et');
+const { assertNoCollectionHold, isCollectionHoldRefusal } = require('./collections/collection-hold');
 
 // Columns the cron selects for each cohort customer (plus ach_status, which
 // only the saved-method check needs).
@@ -83,6 +87,7 @@ const PLAIN = {
   skipped_annual_prepay: 'An annual prepay term covers today, so the monthly dues run skips this customer.',
   skipped_annual_prepay_pending: 'An annual prepay invoice is still unpaid, so the monthly dues run skips this customer.',
   no_chargeable_method: 'This customer has no saved payment method the monthly dues run can charge (it needs a default Auto Pay card or bank account that is valid today).',
+  collection_hold: 'This customer has a billing dispute hold, so the monthly dues run will not charge until the office releases it.',
   unreadable: 'Could not confirm whether the monthly dues run would charge this customer.',
 };
 
@@ -114,9 +119,12 @@ async function monthlyDuesVerdict(dbh, customerId, { overrides = {}, now = new D
     const prepay = prepayGuard(customer, covered, pending);
     if (prepay) return no(prepay.event);
     if (!(await customerOnAutopay(customer, { db: dbh, failClosed: true, now }))) return no('no_chargeable_method');
+    // The cron's own hold check (the default-on guard chargeMonthly runs before Stripe).
+    // A refusal, or a lookup that failed closed, defers the month: not eligible.
+    await assertNoCollectionHold(customerId, dbh);
     return { eligible: true, reason: null, message: null };
-  } catch {
-    return no('unreadable');
+  } catch (err) {
+    return no(isCollectionHoldRefusal(err) ? 'collection_hold' : 'unreadable');
   }
 }
 

@@ -5953,6 +5953,34 @@ function recurringWithoutBillableAmount({
   };
 }
 
+// The price each date's extension row would carry, one entry per date: the series
+// price template (resolveSeriesExtensionPriceTemplate) plus the add-on lines due on
+// that date, through storedOccurrenceFloorPrice. The one read seriesExtensionUnbillable
+// takes its minimum from and the Intelligence Bar billing type card takes its maximum
+// from (seriesNextOccurrencesPrice): the price the top-up copies onto the visits it mints.
+async function seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate = null }) {
+  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+  // Codex pre-push audit P1 (deferred fast-follow): routed through
+  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
+  // pricing + real catalog caps every extension write site's own
+  // applyDiscountStackRestack already stamps rows with — see that
+  // function's own comment for the concrete under-count this fixes.
+  // discountCaps is gated so the gate-off path makes no extra query, and
+  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
+  // once per date: gatePriceParent's line_discount_id is fixed and
+  // parentAddons is a superset of every date's own dueAddons, so the whole
+  // cap set is knowable up front — a validation guard that can be asked
+  // about many dates has no reason to repeat the same catalog read.
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+    : null;
+  return dates.map((d) => storedOccurrenceFloorPrice(
+    gatePriceParent,
+    filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent),
+    parentAddons, storedDiscountScope, discountCaps,
+  ));
+}
+
 // The SAME billable-amount verdict for every OFFICE writer that grows an
 // existing series — the Edit Appointment count raise and fixed→ongoing flip
 // (reconcileRecurringSeriesVisitCount) and the recurring-plan alert actions
@@ -5989,27 +6017,7 @@ async function seriesExtensionUnbillable(conn, {
   const liveCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
   if (!liveCustomer) return null;
   const gateCustomer = customerOverride ? { ...liveCustomer, ...customerOverride } : liveCustomer;
-  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
-  // Codex pre-push audit P1 (deferred fast-follow): routed through
-  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
-  // pricing + real catalog caps every extension write site's own
-  // applyDiscountStackRestack already stamps rows with — see that
-  // function's own comment for the concrete under-count this fixes.
-  // discountCaps is gated so the gate-off path makes no extra query, and
-  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
-  // once per date: gatePriceParent's line_discount_id is fixed and
-  // parentAddons is a superset of every date's own dueAddons, so the whole
-  // cap set is knowable up front — a validation guard that can be asked
-  // about many dates has no reason to repeat the same catalog read.
-  const discountCaps = discountStackingLive()
-    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
-    : null;
-  let floor = Infinity;
-  for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
-    const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
-    floor = Math.min(floor, price);
-  }
+  const floor = Math.min(...await seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate }));
   const extendProfile = await resolveCompletionProfileForScheduledService(parent, conn).catch(() => null);
   // The PARENT's own label — asks whether the series' service is always-free;
   // children still resolve the live catalog identity at insert (same
@@ -6064,7 +6072,7 @@ const SERIES_VERDICT_UNVERIFIED = {
 // takes the minimum over the dates it is given, so the verdict is the same one
 // the per-date walk would give. Read-only (the legacy cap freeze the extension
 // writes is skipped). Null when the series has nothing to extend or bills.
-async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
+async function seriesVerdictWalk(conn, parentId) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (!parent?.is_recurring || !parent.recurring_pattern) return null;
@@ -6095,17 +6103,39 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
     const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
       .map((addon) => parentAddons.indexOf(addon)).join(',');
     if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
-    if (past) {
-      return seriesExtensionUnbillable(conn, {
-        parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent, customerOverride,
-        storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
-        seriesCioc: cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined,
-      });
-    }
+    if (past) return { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent };
   }
-  // The attempt cap ended the walk before the horizon: refused as unverified, never passed.
+  // The attempt cap ended the walk before the horizon: unverified, never passed.
   return SERIES_VERDICT_UNVERIFIED;
 }
+
+async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk || walk === SERIES_VERDICT_UNVERIFIED) return walk;
+  const { parent, cols, parentAddons } = walk;
+  return seriesExtensionUnbillable(conn, {
+    ...walk, customerOverride,
+    storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+    seriesCioc: cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined,
+  });
+}
+
+// The highest price the top-up would copy onto a visit it mints on series `parentId`
+// within the same walk (seriesVerdictWalk, the verdict's own): the extension price
+// template + the add-on lines due on each date (seriesExtensionDatePrices, the read
+// seriesExtensionUnbillable takes its minimum from). `{ unverified: true }` when the walk
+// could not finish; null when the series has nothing to extend.
+async function seriesNextOccurrencesPrice(conn, parentId) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk) return null;
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0 };
+  const { parent, parentAddons } = walk;
+  const prices = await seriesExtensionDatePrices(conn, {
+    ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+  });
+  return { unverified: false, price: Math.max(0, ...prices) };
+}
+
 
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
@@ -28776,6 +28806,7 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
 module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
+module.exports.seriesNextOccurrencesPrice = seriesNextOccurrencesPrice;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;

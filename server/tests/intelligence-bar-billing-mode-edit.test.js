@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, traceTender: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, unverifiedRoots: new Set(), holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -72,6 +72,10 @@ jest.mock('../models/db', () => {
       mockState.log.push('prepay');
       return { rows: [{ locked: !mockState.prepayBusy }] };
     }
+    if (String(sql).includes('pg_try_advisory_xact_lock') && Array.isArray(args) && args[0] === 'payment-methods') {
+      mockState.log.push('methods:advisory');
+      return { rows: [{ locked: !mockState.methodsAdvisoryBusy }] };
+    }
     return { __raw: true };
   });
   db.transaction = jest.fn(async (cb) => cb(db));
@@ -101,7 +105,21 @@ jest.mock('../services/recurring-series-topup', () => ({ eligibleSeriesParentIds
 jest.mock('../routes/admin-schedule', () => ({
   seriesNextOccurrencesUnbillable: jest.fn(async (conn, id) => (mockState.unbillableSeries.has(String(id))
     ? { code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' } : null)),
+  seriesNextOccurrencesPrice: jest.fn(async (conn, id) => ({
+    unverified: mockState.unverifiedRoots.has(String(id)),
+    price: mockState.rootPrices[String(id)] || 0,
+  })),
 }));
+// The collections hold the cron's own charge guard reads (collections/collection-hold.js).
+jest.mock('../services/collections/collection-hold', () => {
+  const actual = jest.requireActual('../services/collections/collection-hold');
+  return {
+    ...actual,
+    assertNoCollectionHold: jest.fn(async () => {
+      if (mockState.holdActive) throw Object.assign(new Error('hold'), { code: 'COLLECTION_HOLD_ACTIVE' });
+    }),
+  };
+});
 jest.mock('../routes/admin-customers', () => ({ _private: { ANNUAL_PREPAY_LOCK_NS: 0x4150 } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockNotifyAdmin = jest.fn(async () => {});
@@ -150,6 +168,10 @@ beforeEach(() => {
   mockState.inFlight = false;
   mockState.processing = null;
   mockState.methodsBusy = false;
+  mockState.methodsAdvisoryBusy = false;
+  mockState.rootPrices = {};
+  mockState.unverifiedRoots = new Set();
+  mockState.holdActive = false;
   mockState.traceTender = false;
   mockState.methodRows = [{ id: 'pm-1' }];
   mockState.invoiceBusy = false;
@@ -501,7 +523,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       });
       expect(result).toMatchObject({ preview_changed: true });
       expect(result.error).toMatch(/billing or upcoming visits changed since the card/);
-      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock']);
+      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:advisory', 'methods:lock']);
       expect(customerWrites()).toHaveLength(0);
     });
 
@@ -514,7 +536,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       mockState.log = [];
       const result = await commit(BASE, LEAVE, visits);
       expect(result.error).toBeUndefined();
-      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock']);
+      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:advisory', 'methods:lock']);
     });
   });
 
@@ -591,7 +613,7 @@ describe('Codex round 4 on #6118', () => {
       customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: pinFor(BASE, [], LEAVE),
     });
     expect(result.error).toBeUndefined();
-    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock']);
+    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:advisory', 'methods:lock']);
     // A non-billing edit takes no comms lock here.
     mockState.log = [];
     await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: { city: 'Sample City' } });
@@ -1088,7 +1110,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.log = [];
       mockState.traceTender = true;
       expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
-      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock', 'tender:read']);
+      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:advisory', 'methods:lock', 'tender:read']);
     });
 
     test('a method row another writer holds is never waited on under the customer row: refuse, nothing written', async () => {
@@ -1120,6 +1142,126 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
     });
   });
 
+  describe('Codex round 14: an ongoing root whose template carries a price', () => {
+    const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
+    const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
+
+    test('no live visit but the top-up would copy a positive price onto the next one: refused, naming the series and the price', async () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [];
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [ROOT];
+      mockState.rootPrices = { 'root-1': 500 };
+      expect(await propose(PER_APP)).toMatchObject({
+        code: 'billing_visits_priced',
+        error: expect.stringContaining("ongoing Pest Control plan has a price of $500.00 on each visit it adds"),
+      });
+    });
+
+    test('an unpriced root passes and its price is pinned; a price added after the card refuses at commit', async () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [];
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [ROOT];
+      const card = await propose(PER_APP);
+      expect(card.error).toBeUndefined();
+      expect(card.pin).toContain('["root-1",null,"0","verified"]');
+      mockState.rootPrices = { 'root-1': 500 };
+      const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+      expect(stale).toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('a series whose price cannot be verified is refused, never passed', async () => {
+      mockState.customer = { ...BASE };
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [ROOT];
+      mockState.unverifiedRoots = new Set(['root-1']);
+      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced', error: expect.stringContaining('a schedule too long to check') });
+    });
+
+    test('source contract: the price is the top-up\'s own resolver (template + due add-ons), shared with the unbillable verdict', () => {
+      const fs = require('fs');
+      const route = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+      const card = fs.readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
+      const datePrices = route.slice(route.indexOf('async function seriesExtensionDatePrices'), route.indexOf('// The SAME billable-amount verdict for every OFFICE writer'));
+      expect(datePrices).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+      expect(datePrices).toContain('storedOccurrenceFloorPrice(');
+      // Both verdicts read the one function; neither re-derives a price.
+      const unbillable = route.slice(route.indexOf('async function seriesExtensionUnbillable'), route.indexOf('const SERIES_VERDICT_MAX_ATTEMPTS'));
+      expect(unbillable).toContain('seriesExtensionDatePrices(');
+      const priceFn = route.slice(route.indexOf('async function seriesNextOccurrencesPrice'), route.indexOf('// GET /api/admin/schedule'));
+      expect(priceFn).toContain('seriesVerdictWalk(conn, parentId)');
+      expect(priceFn).toContain('seriesExtensionDatePrices(');
+      expect(priceFn).not.toMatch(/estimated_price|calculateStoredVisitFinancials/);
+      expect(card).toContain('seriesNextOccurrencesPrice');
+      expect(card).not.toMatch(/storedOccurrenceFloorPrice|calculateStoredVisitFinancials|resolveSeriesExtensionPriceTemplate/);
+    });
+  });
+
+  describe('Codex round 14: a collections hold reads as not eligible for monthly dues', () => {
+    test('a move INTO monthly for a customer with an active hold: refused as billing_collection_hold', async () => {
+      mockState.customer = { ...BASE, monthly_rate: 55, autopay_enabled: true };
+      mockState.holdActive = true;
+      expect(await propose({ billing_mode: 'monthly_membership' })).toMatchObject({
+        code: 'billing_collection_hold',
+        error: expect.stringContaining('billing dispute hold'),
+      });
+      mockState.holdActive = false;
+      expect((await propose({ billing_mode: 'monthly_membership' })).error).toBeUndefined();
+    });
+
+    test('the verdict asks the cron\'s own predicate and guard, not a parallel definition', async () => {
+      const { monthlyDuesVerdict } = require('../services/monthly-dues-eligibility');
+      const hold = require('../services/collections/collection-hold');
+      mockState.customer = { ...BASE, monthly_rate: 55, autopay_enabled: true };
+      mockState.holdActive = true;
+      expect(await monthlyDuesVerdict(require('../models/db'), CUSTOMER_ID, { overrides: { billing_mode: 'monthly_membership' } })).toMatchObject({ eligible: false, reason: 'collection_hold' });
+      expect(hold.assertNoCollectionHold).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+      const fs = require('fs');
+      const dues = fs.readFileSync(require.resolve('../services/monthly-dues-eligibility.js'), 'utf8');
+      const cron = fs.readFileSync(require.resolve('../services/billing-cron.js'), 'utf8');
+      expect(dues).toContain("require('./collections/collection-hold')");
+      expect(dues).toMatch(/isCollectionHoldRefusal\(err\)/);
+      expect(cron).toMatch(/isCollectionHoldRefusal\(err\)/);
+    });
+  });
+
+  describe('Codex round 14: the one writer that inserts a saved method serializes behind the edit', () => {
+    test('the advisory key is try-locked before the method rows are re-read, and a held key refuses without waiting', async () => {
+      mockState.customer = { ...MONTHLY };
+      const card = await propose(LEAVE);
+      mockState.log = [];
+      expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
+      expect(mockState.log.indexOf('methods:advisory')).toBeGreaterThan(-1);
+      expect(mockState.log.indexOf('methods:advisory')).toBeLessThan(mockState.log.indexOf('methods:lock'));
+      mockState.customer = { ...MONTHLY };
+      mockState.methodsAdvisoryBusy = true;
+      mockState.log = [];
+      const busy = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+      expect(busy).toMatchObject({ preview_changed: true, error: expect.stringMatching(/payment method is being saved/) });
+      expect(mockState.log).not.toContain('methods:lock');
+    });
+
+    test('source contract: savePaymentMethod takes the same key, around its insert, in the same transaction', () => {
+      const fs = require('fs');
+      const lock = require('../utils/payment-method-lock');
+      const stripe = fs.readFileSync(require.resolve('../services/stripe.js'), 'utf8');
+      const card = fs.readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
+      const save = stripe.slice(stripe.indexOf('async savePaymentMethod'), stripe.indexOf('async getCards'));
+      const txn = save.slice(save.indexOf('db.transaction'));
+      expect(txn.indexOf('lockCustomerPaymentMethods(trx, customerId)')).toBeGreaterThan(-1);
+      expect(txn.indexOf('lockCustomerPaymentMethods(trx, customerId)')).toBeLessThan(txn.indexOf("trx('payment_methods').insert("));
+      expect(card).toContain('tryLockCustomerPaymentMethods(trx, customerId)');
+      // One module owns the key: both sides use the same namespace and hash.
+      const src = fs.readFileSync(require.resolve('../utils/payment-method-lock.js'), 'utf8');
+      expect(src.match(/hashtext\(\?\), hashtext\(\?::text\)/g)).toHaveLength(2);
+      expect(lock.PAYMENT_METHODS_LOCK_NS).toBe('payment-methods');
+      // And the only inserter of a payment_methods row is savePaymentMethod.
+      expect(stripe.match(/payment_methods'\)\.insert\(/g)).toHaveLength(1);
+    });
+  });
+
   describe('Codex round 13: an ongoing root stamped with a Bill-To payer', () => {
     const rootRow = (payer) => ({ id: 'root-1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2026-09-01', payer_id: payer });
 
@@ -1143,7 +1285,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.roots = [rootRow(null)];
       const card = await propose(LEAVE);
       expect(card.error).toBeUndefined();
-      expect(card.pin).toContain('[[["root-1",null]],[]]');
+      expect(card.pin).toContain('[[["root-1",null,"0","verified"]],[]]');
       mockState.log = [];
       expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
       expect(mockState.log).toContain('roots:lock');

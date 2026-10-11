@@ -1023,7 +1023,7 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
       languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs' },
       rules: { complexity: ['error', 20] },
     }, 'admin-schedule.js');
-    expect(messages.filter((m) => /seriesNextOccurrencesUnbillable/.test(m.message)).map((m) => m.message)).toEqual([]);
+    expect(messages.filter((m) => /seriesNextOccurrencesUnbillable|seriesVerdictWalk|seriesNextOccurrencesPrice|seriesExtensionDatePrices/.test(m.message)).map((m) => m.message)).toEqual([]);
   });
 
   test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
