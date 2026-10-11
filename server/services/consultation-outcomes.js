@@ -1077,6 +1077,53 @@ async function recordOutcomeOnce(params = {}, { trx, duringCompletion = false } 
 }
 
 /**
+ * The open consultation outcomes a sale booking can convert for this customer: warm, cold or lost (never a
+ * no-show loss), on the customer or, with no customer snapshot, on its leads, whose visit was scheduled in the
+ * last 90 ET days and not after today, and that did happen. The selection markWonForCustomer works from; shared
+ * so the Intelligence Bar card can disclose the same rows.
+ */
+async function openConsultationCandidates(database, customerId, now = new Date()) {
+  const leadRows = await database('leads').where({ customer_id: customerId }).select('id');
+  const leadIds = leadRows.map((r) => r.id);
+  const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
+  // Upper bound (P1-2): a consultation scheduled in the future must never
+  // be marked won by today's booking — that would also send
+  // median_days_to_close negative. Bounds the window on BOTH sides.
+  const nowDateStr = etDateString(now);
+  const rows = await database('consultation_outcomes as co')
+    .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
+    .whereIn('co.outcome', CONVERTIBLE_OUTCOMES)
+    // The outcome's OWN customer snapshot decides (Codex #4710 r7 P2);
+    // lead linkage is only a fallback for outcomes with no customer —
+    // a call relinked to another customer moves its lead, not the
+    // consultation, and must not credit it with the new customer's sale.
+    .where(function matchCustomerOrItsLeads() {
+      this.where('co.customer_id', customerId);
+      if (leadIds.length) {
+        this.orWhere(function unlinkedOutcomeViaLead() {
+          this.whereNull('co.customer_id').whereIn('co.lead_id', leadIds);
+        });
+      }
+    })
+    .where('ss.scheduled_date', '>=', cutoff)
+    .where('ss.scheduled_date', '<=', nowDateStr)
+    // A consultation that never happened (no-show, cancelled, skipped)
+    // is never won — even if its best-effort no-show write failed and
+    // the row is still open.
+    .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES)
+    .select('co.id as outcome_id', 'co.scheduled_service_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date', 'ss.window_start');
+  return rows.filter(isConvertibleOutcome);
+}
+
+/**
+ * Does this booking row convert open consultations? The gate every direct hook applies before it calls
+ * markWonForCustomer: not a Waves Assessment, and a real sale (isQualifyingSaleBooking).
+ */
+async function bookingMarksConsultationsWon(svc, database) {
+  return !(await require('./assessment-booking').isAssessmentBooking(svc, database)) && isQualifyingSaleBooking(svc);
+}
+
+/**
  * Reconciliation: a real booking/accept closed for this customer. Stamps
  * 'won' on every open (warm/cold) consultation_outcomes row for the
  * customer OR its leads whose VISIT was scheduled within the last 90 ET
@@ -1123,14 +1170,7 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
     // case, e.g. admin-leads.js, estimate-converter.js) is a no-op.
     await trx.transaction(async (sp) => {
       await lockCustomerRow(sp, customerId);
-      const leadRows = await sp('leads').where({ customer_id: customerId }).select('id');
-      const leadIds = leadRows.map((r) => r.id);
-      const cutoff = etDateString(addETDays(now, -WON_WINDOW_DAYS));
-      // Upper bound (P1-2): a consultation scheduled in the future must never
-      // be marked won by today's booking — that would also send
-      // median_days_to_close negative. Bounds the window on BOTH sides.
       const nowDateStr = etDateString(now);
-
       // Per open outcome, the EARLIEST qualifying evidence wins (Codex
       // #4710 r4 P2) — the same findSaleEvidenceForConsultation search the
       // sweep and recordOutcome use, so provenance and median_days_to_close
@@ -1140,31 +1180,9 @@ async function markWonForCustomer(customerId, { via, trx, now = new Date() } = {
       // left open. Each write is a guarded
       // UPDATE on the row's still-current outcome, under the customer lock,
       // so a row resolved meanwhile is never overwritten.
-      const candidates = await sp('consultation_outcomes as co')
-        .join('scheduled_services as ss', 'ss.id', 'co.scheduled_service_id')
-        .whereIn('co.outcome', CONVERTIBLE_OUTCOMES)
-        // The outcome's OWN customer snapshot decides (Codex #4710 r7 P2);
-        // lead linkage is only a fallback for outcomes with no customer —
-        // a call relinked to another customer moves its lead, not the
-        // consultation, and must not credit it with the new customer's sale.
-        .where(function matchCustomerOrItsLeads() {
-          this.where('co.customer_id', customerId);
-          if (leadIds.length) {
-            this.orWhere(function unlinkedOutcomeViaLead() {
-              this.whereNull('co.customer_id').whereIn('co.lead_id', leadIds);
-            });
-          }
-        })
-        .where('ss.scheduled_date', '>=', cutoff)
-        .where('ss.scheduled_date', '<=', nowDateStr)
-        // A consultation that never happened (no-show, cancelled, skipped)
-        // is never won — even if its best-effort no-show write failed and
-        // the row is still open.
-        .whereNotIn('ss.status', DEAD_CONSULTATION_STATUSES)
-        .select('co.id as outcome_id', 'co.scheduled_service_id', 'co.outcome', 'co.lost_reason', 'ss.scheduled_date', 'ss.window_start');
+      const candidates = await openConsultationCandidates(sp, customerId, now);
 
       for (const row of candidates) {
-        if (!isConvertibleOutcome(row)) continue;
         // The consultation locked and re-read under the customer lock (Codex
         // #4710 r16 P2), as the record and sweep paths do: dispatch may have
         // moved or killed it since the candidate read.
@@ -1780,6 +1798,8 @@ module.exports = {
   isQualifyingSaleBooking,
   recordOutcome,
   markWonForCustomer,
+  openConsultationCandidates,
+  bookingMarksConsultationsWon,
   reconcileOpenConsultationOutcomes,
   markNoShow,
   consultationStats,

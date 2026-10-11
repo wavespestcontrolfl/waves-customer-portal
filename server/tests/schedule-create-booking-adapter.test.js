@@ -231,6 +231,17 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(inserts).toEqual([]);
     });
 
+    test('approvedConsultations threads to the rail: a consultation the card did not list refuses with CONSULTATIONS_CHANGED', async () => {
+      const Consultations = require('../services/consultation-outcomes');
+      const spy = jest.spyOn(Consultations, 'openConsultationCandidates').mockResolvedValue([{ outcome_id: 9, outcome: 'warm' }]);
+      const refused = await createScheduleBooking({ body: oneOff, actor, approvedConsultations: [] });
+      expect(refused.status).toBe(409);
+      expect(refused.json.code).toBe('CONSULTATIONS_CHANGED');
+      expect(inserts).toEqual([]);
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedConsultations: ['9:warm'] })).status).toBe(201);
+      spy.mockRestore();
+    });
+
     test('an open estimate found inside the transaction refuses with ESTIMATE_OPENED; none books', async () => {
       const StartProgram = require('../services/intelligence-bar/start-program');
       const spy = jest.spyOn(StartProgram, 'openEstimateForCustomer').mockResolvedValueOnce({ id: 'est-1', status: 'sent' });

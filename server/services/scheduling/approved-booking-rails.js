@@ -61,6 +61,24 @@ const RAILS = [
     approved: (ctx) => billingString(ctx.req.approvedBilling),
   },
   {
+    // The consultations the booking marks won (the handler's markWonForCustomer hook): the card listed
+    // them by id and outcome. The read is the hook's own selection (openConsultationCandidates), taken
+    // under the customer row lock every consultation writer also takes, so a consultation recorded
+    // while the booking waited is seen.
+    code: 'CONSULTATIONS_CHANGED',
+    message: 'The customer\'s open consultations changed since the card was shown. Nothing was booked.',
+    applies: (ctx) => Array.isArray(ctx.req.approvedConsultations),
+    lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
+    read: async (trx, ctx) => {
+      const StartProgram = require('../intelligence-bar/start-program');
+      const rows = await require('../consultation-outcomes').openConsultationCandidates(trx, ctx.customerId);
+      return StartProgram.consultationPinKeys(StartProgram.consultationPinList(
+        rows.map((r) => ({ id: r.outcome_id, outcome: r.outcome })),
+      )).join(',');
+    },
+    approved: (ctx) => ctx.req.approvedConsultations.join(','),
+  },
+  {
     // The card's open-estimate check: the SAME any-open condition the card's own check uses
     // (openEstimateForCustomer; no service-family reading). Every estimate insert and reopening
     // for a customer takes this lock first (utils/customer-estimate-lock.js),

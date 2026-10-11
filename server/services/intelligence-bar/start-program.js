@@ -297,7 +297,7 @@ function serviceAnchorAddress(place) {
 async function resolveProgramService(serviceText, cadence) {
   const RateChange = require('./rate-change');
   const services = await db('services').where({ is_active: true })
-    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'default_duration_minutes', 'frequency', 'visits_per_year');
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'default_duration_minutes', 'frequency', 'visits_per_year', 'updated_at');
   const { resolveBookingCatalogRow } = require('./tools');
   const all = Array.isArray(services) ? services : [];
   // Only a recurring catalog row can start a program: the catalog's own
@@ -574,6 +574,31 @@ async function openInspectionCredit(customerId) {
   return { amount };
 }
 
+// The booking's consultation-win hook (the Schedule handler's insertParentRow -> markWonForCustomer) flips an open
+// warm, cold or lost consultation outcome from the last 90 days to won. The card discloses the SAME selection
+// (openConsultationCandidates, not a copy) and pins each row's id and outcome; a rail recomputes it under the
+// customer lock. The hook itself is not suppressed: the Schedule page's booking does the same.
+async function consultationPins(customerId) {
+  let rows;
+  try {
+    rows = await require('../consultation-outcomes').openConsultationCandidates(db, customerId);
+  } catch {
+    return refusal('Could not check the customer\'s open consultations. Try again in a moment. Nothing was proposed.', 'program_consultations_unverified');
+  }
+  const { toDateStr } = require('../auto-dispatch/dates');
+  return { pins: consultationPinList(rows.map((r) => ({ id: r.outcome_id, outcome: r.outcome, date: toDateStr(r.scheduled_date) }))) };
+}
+
+// One shape for the card, the version and the rail: "<outcome id>:<outcome>", sorted.
+function consultationPinList(rows) {
+  return rows.map((r) => ({ id: String(r.id), outcome: String(r.outcome), date: r.date || null }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function consultationPinKeys(pins) {
+  return pins.map((p) => `${p.id}:${p.outcome}`);
+}
+
 // The planner's checks, in order. Each step reads the results of the steps
 // before it (o) and returns its result, or a refusal ({ error, code }) that
 // stops the plan with nothing proposed.
@@ -612,6 +637,7 @@ const PLAN_STEPS = [
   ['planSync', (o) => predictPlanSync(o.loaded.customer, o.service.catalogRow, o.args.firstDate, o.args.cadence)],
   ['welcome', (o) => welcomeVerdict(o.args)],
   ['credit', (o) => openInspectionCredit(o.args.customerId)],
+  ['consultations', (o) => consultationPins(o.args.customerId)],
 ];
 
 async function runPlanSteps(steps, ...extra) {
@@ -641,6 +667,7 @@ async function buildProgramPlan(input, actionContext) {
   const { reprice } = out.repriced;
   const { welcomeCandidate } = welcome;
   const inspectionCredit = out.credit.amount;
+  const consultations = out.consultations.pins;
 
   // update_customer's implied-lane rule (#3140): a write that turns a row
   // into an inferred monthly member stamps the lane. A customer this tool
@@ -659,16 +686,16 @@ async function buildProgramPlan(input, actionContext) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
+      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, consultations, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
       // before anything is written.
       version: crypto.createHash('sha256').update(JSON.stringify([
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
-        customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.firstDate,
+        customer.payer_id || null, catalogRow.id, catalogRow.name, catalogRow.updated_at || null, family, args.tier, args.cadence, args.firstDate,
         window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
-        overlap.map((o) => o.fact), planSync.updates,
+        overlap.map((o) => o.fact), planSync.updates, consultations,
       ])).digest('hex'),
     },
   };
@@ -686,7 +713,12 @@ function cardLines(plan) {
   add('operational', `First visit: ${when}, technician ${plan.tech.name}, at ${plan.serviceAddress}`);
   add('operational', `Visit dates booked now: ${plan.visitDates.map((d) => dateLabel(d)).join('; ')}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
-  add('operational', 'Leads: no lead status changes (this booking marks no lead won)');
+  add('operational', 'Leads: no lead status changes');
+  if (plan.consultations.length) {
+    plan.consultations.forEach((c) => add('operational', `Marks consultation of ${c.date ? dateLabel(c.date) : 'an unknown date'} (outcome ${c.outcome}) as won`));
+  } else {
+    add('operational', 'No consultation is marked won');
+  }
   add('operational', plan.overlap.length
     ? `No other visits at the ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times beyond the overlaps listed here (if a new one appears, nothing is booked)`
     : `No other visits at the first ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times (if one appears, nothing is booked)`);
@@ -923,6 +955,8 @@ async function bookSeries(plan, actionContext) {
       // The address the card showed; the handler refuses any other anchor.
       approvedServiceAnchor: { propertyId: plan.propertyId, address: plan.serviceAddress },
       approvedVisitDates: plan.visitDates,
+      // The consultations the card said it marks won; the handler refuses any other set under the lock.
+      approvedConsultations: consultationPinKeys(plan.consultations),
       // Re-run the open-estimate check inside the booking transaction.
       approvedNoOpenEstimate: true,
       // The welcome verdict the card pinned: the handler and the appointment tagger use it, no second lookup.
@@ -944,7 +978,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }
@@ -1075,7 +1109,7 @@ Ongoing programs only (no visit count). Refuses: a customer who is not on a mont
 
 module.exports = {
   START_PROGRAM_TOOL,
-  openEstimateForCustomer,
+  openEstimateForCustomer, consultationPinKeys, consultationPinList,
   startProgram,
   serviceAnchorAddress,
   startProgramLive,

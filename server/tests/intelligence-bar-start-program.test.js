@@ -235,8 +235,75 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
 
   test('the card says no lead status changes', async () => {
     const preview = await run(BASE_INPUT);
-    expect(lines(preview, 'operational')).toContain('Leads: no lead status changes (this booking marks no lead won)');
+    expect(lines(preview, 'operational')).toContain('Leads: no lead status changes');
     expect(lines(preview, 'operational')).toContain('No other visits at the first four visit times (if one appears, nothing is booked)');
+  });
+
+  test('no open consultation: the card says no consultation is marked won, and pins the empty set', async () => {
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'operational')).toContain('No consultation is marked won');
+    expect(lines(preview, 'operational').filter((l) => l.startsWith('Marks consultation'))).toEqual([]);
+  });
+
+  test('an open warm consultation: the card names it, and the booking pins it by id and outcome', async () => {
+    tables['consultation_outcomes as co'] = [
+      { outcome_id: 'co-1', scheduled_service_id: 'visit-9', outcome: 'warm', lost_reason: null, scheduled_date: '2099-02-10', window_start: '09:00' },
+    ];
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'operational')).toContain('Marks consultation of Tue, Feb 10, 2099 (outcome warm) as won');
+    expect(lines(preview, 'operational')).not.toContain('No consultation is marked won');
+    const version = preview._version;
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
+    await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
+    expect(createScheduleBooking.mock.calls[0][0].approvedConsultations).toEqual(['co-1:warm']);
+  });
+
+  test('the card reads the consultations through the hook\'s own selection, not a copy', async () => {
+    const Consultations = require('../services/consultation-outcomes');
+    const spy = jest.spyOn(Consultations, 'openConsultationCandidates').mockResolvedValue([]);
+    await run(BASE_INPUT);
+    expect(spy).toHaveBeenCalledWith(db, CUSTOMER_ID);
+    spy.mockRestore();
+  });
+
+  test('a consultation that appears after the card refuses with preview_changed; a changed outcome refuses too', async () => {
+    const version = await (async () => (await run(BASE_INPUT))._version)();
+    tables['consultation_outcomes as co'] = [
+      { outcome_id: 'co-1', scheduled_service_id: 'visit-9', outcome: 'cold', lost_reason: null, scheduled_date: '2099-02-10', window_start: '09:00' },
+    ];
+    const appeared = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(appeared.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+    const withCold = (await run(BASE_INPUT))._version;
+    tables['consultation_outcomes as co'][0].outcome = 'warm';
+    const changed = await run({ ...BASE_INPUT, _verified_program_version: withCold }, { confirmed: true });
+    expect(changed.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the handler\'s locked consultation rail refuses as preview_changed', async () => {
+    const version = await (async () => (await run(BASE_INPUT))._version)();
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'consultations changed', code: 'CONSULTATIONS_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'CONSULTATIONS_CHANGED', preview_changed: true, nothing_changed: true });
+  });
+
+  test('a catalog rename between the card and the commit refuses with preview_changed (the booking would send the new name)', async () => {
+    const version = await (async () => (await run(BASE_INPUT))._version)();
+    tables.services[0] = { ...tables.services[0], name: 'Lawn Care Plus' };
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  test('a catalog row edited after the card (updated_at moved) refuses with preview_changed', async () => {
+    tables.services[0] = { ...tables.services[0], updated_at: '2026-10-01T10:00:00Z' };
+    const version = (await run(BASE_INPUT))._version;
+    tables.services[0] = { ...tables.services[0], updated_at: '2026-10-02T10:00:00Z' };
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
   });
 
   test('tech notice gate on and the confirming actor is not the technician: the card and contract name the notice', async () => {

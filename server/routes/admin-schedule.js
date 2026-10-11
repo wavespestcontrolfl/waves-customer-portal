@@ -8386,8 +8386,7 @@ async function insertParentRow(trx, c) {
   // calendar tool is excluded the same way admin-leads.js excludes one
   // (an assessment is never itself a win). Best-effort,
   // savepoint-isolated inside markWonForCustomer (waves-db §5b).
-  if (!(await require('../services/assessment-booking').isAssessmentBooking(svc, trx))
-    && require('../services/consultation-outcomes').isQualifyingSaleBooking(svc)) {
+  if (await require('../services/consultation-outcomes').bookingMarksConsultationsWon(svc, trx)) {
     // round 12 fix (codex P1 audit, post-push): this route is an
     // office/admin tool — never pass svc.technician_id as a
     // closeout-detection hint. That field is the visit's ASSIGNEE, not
@@ -10521,10 +10520,11 @@ async function scheduleCreateHandler(req, res, next) {
 // difference); approvedNoOpenEstimate: re-check that the customer has no open
 // estimate inside the transaction (ESTIMATE_OPENED). approvedWelcome: the
 // new-customer welcome verdict the card pinned; the handler and the appointment tagger use it
-// instead of looking again (page bookings pass nothing and look as before).
+// instead of looking again (page bookings pass nothing and look as before). approvedConsultations: the
+// open consultation outcomes ("<id>:<outcome>") the card said the booking marks won; CONSULTATIONS_CHANGED on any difference.
 async function createScheduleBooking({
   body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling,
-  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome,
+  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome, approvedConsultations,
 }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
@@ -10534,6 +10534,7 @@ async function createScheduleBooking({
     ...(approvedServiceAnchor ? { approvedServiceAnchor } : {}),
     ...(approvedBilling ? { approvedBilling } : {}),
     ...(Array.isArray(approvedVisitDates) ? { approvedVisitDates } : {}),
+    ...(Array.isArray(approvedConsultations) ? { approvedConsultations } : {}),
     ...(approvedNoOpenEstimate === true ? { approvedNoOpenEstimate: true } : {}),
     ...(typeof approvedWelcome === 'boolean' ? { approvedWelcome } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
