@@ -11,7 +11,7 @@ const {
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
-const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
+const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
@@ -125,6 +125,7 @@ const GATED_ACTIONS = {
   reprice_future_visits: () => repriceVisitsLive(),
   search_ib_history: () => threadsEnabled(),
   merge_customers: () => mergeCustomersEnabled(),
+  delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
   charge_invoice: () => invoiceActionsLive(),
 };

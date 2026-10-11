@@ -30,7 +30,7 @@ jest.mock('../services/newsletter-subscribers', () => ({
   relinkSubscribersFromArchivedCustomer: jest.fn(async () => ({ relinked: 2 })),
 }));
 
-const mockState = { customer: null, updates: [] };
+const mockState = { customer: null, updates: [], locks: [] };
 let mockTrx;
 jest.mock('../models/db', () => {
   const builder = (table, viaTrx) => {
@@ -44,7 +44,8 @@ jest.mock('../models/db', () => {
     // table read must keep resolving null/no-row through these no-op chains.
     q.whereNot = () => q;
     q.whereNotIn = () => q;
-    q.whereIn = () => q;
+    q.whereIn = (column, values) => { q._in = [column, values]; return q; };
+    q.orderBy = (column) => { q._orderBy = column; return q; };
     q.whereRaw = () => q;
     q.leftJoin = () => q;
     // findPendingPrepayInvoice (admin-cancellation.js, reused by
@@ -54,7 +55,7 @@ jest.mock('../models/db', () => {
     q.select = () => q;
     // The archive/restore/stage transactions take the customers row lock
     // before the guard (pre-push audit on 1e776e385e).
-    q.forUpdate = () => q;
+    q.forUpdate = () => { mockState.locks.push({ table, viaTrx, where: { ...q._where }, whereIn: q._in || null, orderBy: q._orderBy || null }); return q; };
     q.first = async () => (table === 'customers' ? mockState.customer : null);
     q.update = async (patch) => { mockState.updates.push({ table, viaTrx, where: { ...q._where }, patch }); return 1; };
     return q;
@@ -82,7 +83,7 @@ async function withServer(fn) {
   try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
 }
 
-beforeEach(() => { jest.clearAllMocks(); mockState.updates = []; });
+beforeEach(() => { jest.clearAllMocks(); mockState.updates = []; mockState.locks = []; });
 
 describe('DELETE /admin/customers/:id (archive)', () => {
   beforeEach(() => { mockState.customer = { id: 'cust-1', email: 'Household@Example.com', deleted_at: null }; });
@@ -129,6 +130,88 @@ describe('DELETE /admin/customers/:id (archive)', () => {
       expect(res.status).toBe(500);
     });
     expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+});
+
+// The Intelligence Bar's delete_duplicate_customer runs the SAME handler
+// without an HTTP request (owner ruling 2026-10-07): same writes, same
+// relink, same audit row, the operator as the actor.
+describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
+  beforeEach(() => { mockState.customer = { id: 'cust-1', email: 'Household@Example.com', deleted_at: null }; });
+
+  test('resolves the reply the route sends and makes the same writes + audit as DELETE /:id', async () => {
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9', userAgent: 'intelligence-bar:delete_duplicate_customer' } }))
+      .resolves.toEqual({ status: 200, json: { success: true } });
+    expect(mockState.updates).toEqual([
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
+      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
+    ]);
+    expect(relinkSubscribersFromArchivedCustomer).toHaveBeenCalledWith(mockTrx, 'cust-1');
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'customer.archive', resource_id: 'cust-1', actor_id: 'admin-9', critical: true, trx: mockTrx,
+      user_agent: 'intelligence-bar:delete_duplicate_customer',
+    }));
+  });
+
+  test('a missing or already-deleted customer resolves the route\'s 404, writing nothing', async () => {
+    mockState.customer = null;
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' } }))
+      .resolves.toEqual({ status: 404, json: { error: 'Customer not found' } });
+    expect(mockState.updates).toEqual([]);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('precheck runs inside the archive transaction after the row lock; a throw rolls back before any write', async () => {
+    const precheck = jest.fn(async (trx) => {
+      expect(trx).toBe(mockTrx);
+      throw Object.assign(new Error('no longer empty'), { previewChanged: true });
+    });
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
+      .rejects.toMatchObject({ message: 'no longer empty', previewChanged: true });
+    expect(precheck).toHaveBeenCalledTimes(1);
+    expect(mockState.updates).toEqual([]);
+    expect(relinkSubscribersFromArchivedCustomer).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('alsoLock: BOTH customer rows are locked FOR UPDATE in one ascending-id statement before the precheck, and held through the archive', async () => {
+    // Either id order: the statement is one whereIn + orderBy(id), so the
+    // database takes the rows in ascending id, never "archived row first".
+    for (const [stubId, keeperId] of [['cust-1', 'cust-0'], ['cust-1', 'cust-2']]) {
+      mockState.locks = [];
+      let locksSeenByPrecheck = null;
+      const precheck = jest.fn(async () => { locksSeenByPrecheck = [...mockState.locks]; });
+      await expect(router.archiveCustomerAsAdmin({ customerId: stubId, actor: { technicianId: 'admin-9' }, precheck, alsoLock: keeperId }))
+        .resolves.toEqual({ status: 200, json: { success: true } });
+      const customerLocks = mockState.locks.filter((l) => l.table === 'customers' && l.viaTrx);
+      expect(customerLocks).toHaveLength(1);
+      expect(customerLocks[0]).toMatchObject({ whereIn: ['id', [stubId, keeperId]], orderBy: 'id' });
+      // Locked before the precheck ran (so before every check and write), inside the archive transaction.
+      expect(locksSeenByPrecheck.filter((l) => l.table === 'customers' && l.viaTrx)).toHaveLength(1);
+      // The archive write follows on the same transaction; no second lock statement releases or reorders it.
+      expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', viaTrx: true, patch: { deleted_at: expect.any(Date) } }));
+    }
+  });
+
+  test('without alsoLock (the customer page) the single-row lock is unchanged', async () => {
+    await router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: {} });
+    const customerLocks = mockState.locks.filter((l) => l.table === 'customers' && l.viaTrx);
+    expect(customerLocks).toEqual([{ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, whereIn: null, orderBy: null }]);
+  });
+
+  test('a passing precheck lets the same archive run', async () => {
+    const precheck = jest.fn(async () => {});
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
+      .resolves.toEqual({ status: 200, json: { success: true } });
+    expect(precheck).toHaveBeenCalledWith(mockTrx);
+    expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', patch: { deleted_at: expect.any(Date) } }));
+  });
+
+  test('an error the handler passes to next() rejects', async () => {
+    relinkSubscribersFromArchivedCustomer.mockRejectedValueOnce(new Error('relink exploded'));
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: {} })).rejects.toThrow('relink exploded');
   });
 });
 

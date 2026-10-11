@@ -20,7 +20,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 // Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
 // survivor (owed_customer_open_ids).
-const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];
+const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates', 'name_spelling_differs'];
 // Cards only an admin sees and settles: property-role proposals embed the customer's other property
 // addresses, and a family-account suggestion lists customers and the caller's number for the office to
 // link. Hidden from the tech list and counts, and refused on every shared transition.
@@ -28,9 +28,9 @@ const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candid
 // refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
 const VERSION_BOUND_REASONS = [
   'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
-  'auto_booking_skipped_after_approval', 'missing_first_name', 'family_account_candidates',
+  'auto_booking_skipped_after_approval', 'missing_first_name', 'family_account_candidates', 'name_spelling_differs',
 ];
-const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];
 // Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
 // the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
 // what the card asks).
@@ -41,6 +41,7 @@ const NOT_A_VERDICT_MESSAGES = {
   attached_booking_followup_unbooked: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.',
   missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
   family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
+  name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
 };
 
 
@@ -2243,6 +2244,8 @@ router.post('/:id/verdict', async (req, res) => {
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
           // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
           'family_account_candidates',
+          // …and a name-spelling check, settled by its own Resolve / Dismiss.
+          'name_spelling_differs',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

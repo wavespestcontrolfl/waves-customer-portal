@@ -86,6 +86,9 @@ old list).
   is a pure pricing engine and stays available.
 - `block_sender` is a `record` write with no record id; `validateSenderBlock`
   binds it to the task customer's own address.
+- `delete_duplicate_customer` is a `record` write: it carries `customer_id`
+  directly (the empty duplicate record), bound to the task customer by
+  `validateRecordTarget`.
 - `merge_customers` is `record`: its two role-named ids (`winner_customer_id`,
   `loser_customer_id`) are mapped to the customer collection by
   `validateRecordTarget` (`CUSTOMER_PAIR_SELECTORS`), so both halves are loaded
