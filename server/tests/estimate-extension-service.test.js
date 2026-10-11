@@ -45,7 +45,12 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
 }));
 
-afterEach(() => { mockLockedRow = null; });
+// Round 13: extendEstimate takes the customer KEY SHARE (customer -> estimate, like the merge) before any estimate row
+// lock. The unit fakes below have no customers table, so the row lock is a spy here; its order is asserted explicitly.
+const CustomerLock = require('../utils/customer-estimate-lock');
+let customerRowSpy;
+beforeEach(() => { customerRowSpy = jest.spyOn(CustomerLock, 'lockCustomerRowsForEstimate').mockResolvedValue(undefined); });
+afterEach(() => { mockLockedRow = null; customerRowSpy.mockRestore(); });
 
 const db = require('../models/db');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -163,6 +168,17 @@ describe('extendEstimate validation (pre-write throws)', () => {
       .rejects.toMatchObject({ code: 'FIXED_BID_VALIDITY' });
     expect(locked).toBe(true);
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it('takes the customer row share before the estimate row lock (customer, then estimate)', async () => {
+    const estimate = { id: 'ordinary', customer_id: 'cust-1', status: 'viewed', sent_at: PAST, expires_at: PAST, estimate_data: {} };
+    const query = { update: jest.fn(), first: jest.fn(async () => ({ customer_id: 'cust-1', estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } })) };
+    for (const method of ['where', 'whereNull', 'forUpdate']) query[method] = jest.fn(() => query);
+    const trx = jest.fn(() => query);
+    db.transaction.mockImplementationOnce(async (run) => run(trx));
+    await extendEstimate({ estimate, days: 7, silent: true }).catch(() => {});
+    expect(customerRowSpy).toHaveBeenCalledWith(trx, estimate);
+    expect(customerRowSpy.mock.invocationCallOrder[0]).toBeLessThan(query.forUpdate.mock.invocationCallOrder[0]);
   });
 
   it('classifies a fixed hold added to an ungrouped row after preflight before any extension write', async () => {

@@ -476,6 +476,12 @@ async function contactDriftOutcome(row, meta, finish) {
   return { sent: false, skipped: true, reason: 'contact_drift' };
 }
 
+// The welcome sender's own customer read: the RAW row (a secondary profile's blank phone or email is NOT filled from
+// the account primary). The card's welcome pin reads it through this same function.
+async function loadWelcomeCustomer(customerId, conn = db) {
+  return conn('customers').where({ id: customerId }).first();
+}
+
 async function deliverQueuedWelcome(row) {
   const emailOnly = row.sequence_type === EMAIL_SEQUENCE_TYPE;
   const meta = parseMetadata(row);
@@ -494,7 +500,7 @@ async function deliverQueuedWelcome(row) {
     return { sent: false, skipped: true };
   }
 
-  const customer = await db('customers').where({ id: row.customer_id }).first();
+  const customer = await loadWelcomeCustomer(row.customer_id);
   if (!customer) {
     await finish('cancelled', { skip_reason: 'customer_missing' });
     return { sent: false, skipped: true };
@@ -755,6 +761,7 @@ module.exports = {
   isNewRecurringSignupCandidate,
   sendNewRecurringWelcome,
   processDueWelcomes,
+  loadWelcomeCustomer,
   _internals: {
     isNewRecurringSignupCandidate,
     hasWelcomeSequence,

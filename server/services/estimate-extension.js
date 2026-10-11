@@ -275,6 +275,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // concurrent sweep flip (status guard). Zero rows → 409, callers surface
   // retry/failure.
   await db.transaction(async (trx) => {
+    // Lock order customer -> estimate, like the merge (customer rows first, then the estimate repoint): the customer
+    // row share comes BEFORE any estimate row lock. The snapshot names the customer; the locked row is re-checked below
+    // (409 estimate_owner_changed on a change).
+    await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
     let anchor;
     if (estimate.estimate_group_id) {
       // Proposal saves and grouped sends take this lock before row locks.

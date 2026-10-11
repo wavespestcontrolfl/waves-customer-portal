@@ -8,6 +8,11 @@
  *   - the text recipients: customer-contact getAppointmentContacts, as safeSendAppointment calls it;
  *   - the email recipients: appointment-email resolveRecipients;
  *   - the welcome goes to the account holder's own phone and email (new-recurring-welcome-sms reads the row).
+ * Each pin is built from the row ITS sender reads, through that sender's own exported loader (no copy): the text leg from
+ * the raw row appointment-reminders getCustomerAndTech returns (a secondary profile's blank phone stays blank), the email
+ * leg from appointment-email loadCustomer, the welcome from new-recurring-welcome-sms loadWelcomeCustomer. Every read goes
+ * through `conn` (the booking transaction when one is given), never the global pool: a booking holding its connection
+ * must not wait on a second one.
  *
  * Two scopes, two keys. The CONFIRMATION is scoped to the property the visits are stamped with: the real sender passes
  * the visit id, so a saved property's own toggles and "send these to me too" (property_notification_prefs, via
@@ -37,23 +42,27 @@ const toggleSet = (prefs) => ({
 
 // `propertyId`: the saved property the visits are stamped with (null = the customer row decides, as for a primary or
 // unstamped visit). `toggles`/`textTo`/`emailTo` are that property's; `accountToggles` and `holder` are the account's.
-async function bookingContactState(customerId, { propertyId = null } = {}) {
+async function bookingContactState(customerId, { propertyId = null, conn = null } = {}) {
   try {
     const AppointmentReminders = require('./appointment-reminders');
     const AppointmentEmail = require('./appointment-email')._private;
+    const { loadWelcomeCustomer } = require('./new-recurring-welcome-sms');
     const { getAppointmentContacts } = require('./customer-contact');
-    const accountPrefs = await AppointmentReminders.getReminderPrefs(customerId);
+    const handle = conn || require('../models/db');
+    const accountPrefs = await AppointmentReminders.getReminderPrefs(customerId, { conn: handle });
     if (accountPrefs.unavailable) return { unavailable: true };
-    const prefs = propertyId ? await AppointmentReminders.getReminderPrefs(customerId, { propertyId }) : accountPrefs;
+    const prefs = propertyId ? await AppointmentReminders.getReminderPrefs(customerId, { propertyId, conn: handle }) : accountPrefs;
     if (prefs.unavailable) return { unavailable: true };
-    const customer = await AppointmentEmail.loadCustomer(customerId);
-    if (!customer) return { unavailable: true };
-    const emailRecipients = await AppointmentEmail.resolveRecipients(customer, { propertyId });
+    const textCustomer = (await AppointmentReminders.getCustomerAndTech(customerId, null, handle)).customer;
+    const emailCustomer = await AppointmentEmail.loadCustomer(customerId, handle);
+    const welcomeCustomer = await loadWelcomeCustomer(customerId, handle);
+    if (!textCustomer || !emailCustomer || !welcomeCustomer) return { unavailable: true };
+    const emailRecipients = await AppointmentEmail.resolveRecipients(emailCustomer, { propertyId, conn: handle });
     return {
       unavailable: false,
-      textTo: uniqueSorted(getAppointmentContacts(customer, prefs.raw).map((c) => digits10(c.phone))),
+      textTo: uniqueSorted(getAppointmentContacts(textCustomer, prefs.raw).map((c) => digits10(c.phone))),
       emailTo: uniqueSorted(emailRecipients.map((r) => String(r.email || '').trim().toLowerCase())),
-      holder: { phone: digits10(customer.phone), email: String(customer.email || '').trim().toLowerCase() || null },
+      holder: { phone: digits10(welcomeCustomer.phone), email: String(welcomeCustomer.email || '').trim().toLowerCase() || null },
       toggles: toggleSet(prefs),
       accountToggles: toggleSet(accountPrefs),
     };
@@ -73,8 +82,8 @@ const contactKey = confirmationKey;
 
 // Cheap helper for callers that only need one key (rail, post-commit check, send-time check).
 // kind 'confirmation' (default) is scoped to `propertyId`; kind 'welcome' is account-level.
-async function currentContactKey(customerId, { propertyId = null, kind = 'confirmation' } = {}) {
-  const state = await bookingContactState(customerId, kind === 'welcome' ? {} : { propertyId });
+async function currentContactKey(customerId, { propertyId = null, kind = 'confirmation', conn = null } = {}) {
+  const state = await bookingContactState(customerId, kind === 'welcome' ? { conn } : { propertyId, conn });
   if (state.unavailable) return null;
   return kind === 'welcome' ? welcomeKey(state) : confirmationKey(state);
 }

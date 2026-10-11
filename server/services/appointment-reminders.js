@@ -2021,8 +2021,8 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
 
 // ── Get customer + tech info ──
 
-async function getCustomerAndTech(customerId, scheduledServiceId) {
-  const customer = await db('customers').where({ id: customerId }).first();
+async function getCustomerAndTech(customerId, scheduledServiceId, conn = db) {
+  const customer = await conn('customers').where({ id: customerId }).first();
   let techName = null;
 
   if (scheduledServiceId) {
@@ -2049,7 +2049,7 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 // `customerRow` is an optional pre-fetched customers row (must include
 // account_id / is_primary_profile) so callers that already loaded the customer
 // skip the extra query. Falls back to the passed `prefs` row on any miss.
-async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null) {
+async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null, conn = db) {
   let channelPrefs = prefs;
   // A FAILED owner-resolution read (as distinct from "no row") must surface
   // on the returned row (Codex #3361 r28 P1): the fallback prefs below are
@@ -2064,14 +2064,14 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
   const swallow = () => { resolutionFailed = true; return null; };
   const customer = (customerRow && customerRow.account_id !== undefined)
     ? customerRow
-    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(swallow);
+    : await conn('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(swallow);
   if (customer && customer.is_primary_profile !== true && customer.account_id) {
-    const primary = await db('customers')
+    const primary = await conn('customers')
       .where({ account_id: customer.account_id, is_primary_profile: true })
       .first('id')
       .catch(swallow);
     if (primary && String(primary.id) !== String(customerId)) {
-      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(swallow);
+      const ownerPrefs = await conn('notification_prefs').where({ customer_id: primary.id }).first().catch(swallow);
       if (ownerPrefs) channelPrefs = ownerPrefs;
     }
   }
@@ -2096,24 +2096,24 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 // by getReminderPrefs and the direct reschedule / cancellation / no-show /
 // series-cancellation notices, whose recipient list (appointment_notify_
 // primary) must follow the property too (GitHub codex r0 P1).
-async function visitPrefsRow(customerId, scheduledServiceId = null, propertyId = null) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+async function visitPrefsRow(customerId, scheduledServiceId = null, propertyId = null, conn = db) {
+  const prefs = await conn('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
   // Sentinel read inline: partial test doubles of customer-contact carry
   // PREFS_UNAVAILABLE but not the prefsUnavailable() helper.
   if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !(scheduledServiceId || propertyId)) return prefs;
   try {
     // A visit not booked yet (a confirm card) resolves by the property the booking will stamp: the same rule.
-    if (!scheduledServiceId) return await require('./property-notification-prefs').prefsForProperty(prefs, customerId, propertyId);
-    return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
+    if (!scheduledServiceId) return await require('./property-notification-prefs').prefsForProperty(prefs, customerId, propertyId, conn);
+    return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders', conn);
   } catch (err) {
     logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
     return PREFS_UNAVAILABLE;
   }
 }
 
-async function getReminderPrefs(customerId, { scheduledServiceId = null, propertyId = null } = {}) {
-  const prefs = await visitPrefsRow(customerId, scheduledServiceId, propertyId);
-  const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
+async function getReminderPrefs(customerId, { scheduledServiceId = null, propertyId = null, conn = db } = {}) {
+  const prefs = await visitPrefsRow(customerId, scheduledServiceId, propertyId, conn);
+  const channelPrefs = await resolveChannelPrefsRow(customerId, prefs, null, conn);
 
   return {
     raw: prefs || {},
@@ -5853,6 +5853,8 @@ AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel
 // resolution the appointment reminders use.
 AppointmentReminders.apptChannel = apptChannel;
 AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
+// The confirmation text sender's own customer read (the RAW row: no backfill from the account primary).
+AppointmentReminders.getCustomerAndTech = getCustomerAndTech;
 // Shared re-arm boundaries (see each function's own comment) — the dispatch
 // and reschedule-sms compensating re-arms consult these instead of hardcoding
 // the cron's 24.25h / start-in-the-future cutoffs.

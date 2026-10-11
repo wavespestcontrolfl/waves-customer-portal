@@ -20,15 +20,23 @@
  * The state is mutable, so it lives in its own table (migration 20261011020000); every transition also appends an
  * audit_log event (recordAuditEvent), the immutable record.
  *
- * findOpenMarker runs under the customer row lock (the lock the booking transaction takes), so a request that arrives
- * while a booking is committing waits for it and then sees its stamps. It answers:
- *   {}                        nothing blocks a new program start
- *   { inProgress: marker }    a booking younger than BOOKING_STALE_MINUTES with no stamped visits is still running
- *   { owed: marker }          visits are booked and the bill step is owed (the office sets it by hand)
- * and THROWS on any read failure or malformed row: the caller refuses, it never falls through to planning.
+ * One open row per customer: a partial unique index (migration 20261011030000) is the hard guarantee, and writeMarker
+ * maps its unique violation to MARKER_OPEN_EXISTS (the caller refuses program_start_in_progress).
  *
- * Clearing an owed row: the office marks the alert done (the row reads notifications.done_at on the stored alert id), or
- * after OWED_EXPIRY_HOURS the row expires to abandoned (the backstop when the alert never got an id).
+ * Two readers, one answer shape:
+ *   readOpenMarker(customerId)  SELECT only, no lock, no write. The preview path uses it: a preview never changes state.
+ *   findOpenMarker(customerId)  the confirmed path, under the customer row lock (the lock the booking transaction takes), so
+ *                               a request that arrives while a booking is committing waits for it and then sees its
+ *                               stamps. It may move a row (stamped booking -> booked_pending_bill, an old unstamped
+ *                               booking -> abandoned plus a bell, a done alert -> abandoned).
+ * They answer:
+ *   {}                        nothing blocks a new program start
+ *   { inProgress: marker }    a booking with no stamped visits is still running (or, read-only, is old: the sweep clears it)
+ *   { owed: marker }          visits are booked and the bill step is owed (the office sets it by hand)
+ * and THROW on any read failure or malformed row: the caller refuses, it never falls through to planning.
+ *
+ * Clearing an owed row: the office marks the alert done (the row reads notifications.done_at on the stored alert id).
+ * There is NO expiry. A row with no alert id (the alert post failed) is posted again by the sweep until it has one.
  */
 const crypto = require('crypto');
 const db = require('../../models/db');
@@ -39,7 +47,6 @@ const STAMP_ACTION = 'booking_action_stamp';
 const OPEN_PHASES = ['booking', 'booked_pending_bill'];
 const ALERT_MINUTES = 10;
 const BOOKING_STALE_MINUTES = 30;
-const OWED_EXPIRY_HOURS = 24;
 
 const OWED_INSTRUCTION = 'Set the tier and monthly bill by hand on the customer page, then mark this done.';
 const UNFINISHED_INSTRUCTION = 'Check the schedule for this customer. If the visits are there, set the tier and monthly bill by hand on the customer page.';
@@ -73,13 +80,26 @@ async function audit(id, phase, extra = {}) {
   }
 }
 
-// Throws on a failed write: the caller books nothing without its phase row. Returns { id, actionKey }.
+const ONE_OPEN_INDEX = 'ib_action_phases_one_open_per_customer';
+const isOneOpenViolation = (err) => err && err.code === '23505' && (!err.constraint || err.constraint === ONE_OPEN_INDEX);
+
+// Throws on a failed write: the caller books nothing without its phase row. Returns { id, actionKey }. The insert runs
+// under the customer row lock (the lock the booking takes); the partial unique index is the hard guarantee, and its
+// violation (another open attempt for this customer) becomes MARKER_OPEN_EXISTS.
 async function writeMarker({ customerId, target, actorId = null }) {
   const id = crypto.randomUUID();
   const actionKey = `${target.version}:${id}`;
-  await db('ib_action_phases').insert({
-    id, tool: TOOL, customer_id: customerId, action_key: actionKey, phase: 'booking', payload: JSON.stringify({ target }),
-  });
+  try {
+    await db.transaction(async (trx) => {
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      await trx('ib_action_phases').insert({
+        id, tool: TOOL, customer_id: customerId, action_key: actionKey, phase: 'booking', payload: JSON.stringify({ target }),
+      });
+    });
+  } catch (err) {
+    if (isOneOpenViolation(err)) throw Object.assign(new Error('another program start for this customer is open'), { code: 'MARKER_OPEN_EXISTS' });
+    throw err;
+  }
   await audit(id, 'booking', { customer_id: customerId, actor: actorId ? String(actorId) : null });
   return { id, actionKey };
 }
@@ -170,8 +190,6 @@ async function alertIsDone(marker, conn) {
   return !!(row && row.done_at);
 }
 
-const ageHours = (marker) => (Date.now() - marker.createdAt.getTime()) / 3600000;
-
 // What the lookup does with an open row, as a table. Each handler runs in the customer-locked transaction and returns
 // { out } (the answer) plus an optional { audit: [phase, extra], bell } to do after the commit.
 const OPEN_ROW = {
@@ -185,26 +203,45 @@ const OPEN_ROW = {
     return { out: {}, audit: ['abandoned', { reason: 'no_stamped_visits' }], bell: alertUnfinished };
   },
   async booked_pending_bill(marker, conn) {
-    const reason = (await alertIsDone(marker, conn)) ? 'marked_done' : (ageHours(marker) >= OWED_EXPIRY_HOURS ? 'expired' : null);
-    if (!reason) return { out: { owed: marker } };
-    await setPhase(marker.id, 'abandoned', { reason }, conn);
-    return { out: {}, audit: ['abandoned', { reason }] };
+    if (!(await alertIsDone(marker, conn))) return { out: { owed: marker } };
+    await setPhase(marker.id, 'abandoned', { reason: 'marked_done' }, conn);
+    return { out: {}, audit: ['abandoned', { reason: 'marked_done' }] };
   },
 };
 
+// The open row for a customer, newest first. Throws on a malformed row.
+async function openRow(conn, customerId) {
+  const row = await conn('ib_action_phases')
+    .where({ tool: TOOL, customer_id: customerId }).whereIn('phase', OPEN_PHASES)
+    .orderBy('created_at', 'desc').first();
+  return row ? readMarker(row) : null;
+}
+
 /**
- * The customer's open attempt, read under the customer row lock. Throws on a read failure or a malformed row.
+ * The preview path: SELECT only, no lock, no write, no alert. Same answers as findOpenMarker, except that nothing is
+ * moved: a stamped booking reads as owed, a done alert reads as clear, and an old booking with no stamped visits reads as
+ * in progress with `stale: true` (check the schedule; the sweep clears it). Throws on a read failure or malformed row.
+ */
+async function readOpenMarker(customerId) {
+  if (!isUuid(customerId)) return {};
+  const marker = await openRow(db, customerId);
+  if (!marker) return {};
+  if (marker.phase === 'booked_pending_bill') return (await alertIsDone(marker, db)) ? {} : { owed: marker };
+  if ((await module.exports.stampedVisitIds(marker.actionKey, db)).length) return { owed: marker };
+  return { inProgress: marker, stale: marker.createdAt <= minutesAgo(BOOKING_STALE_MINUTES) };
+}
+
+/**
+ * The confirmed path: the customer's open attempt, read under the customer row lock, and moved when it should be.
+ * Throws on a read failure or a malformed row.
  */
 async function findOpenMarker(customerId) {
   if (!isUuid(customerId)) return {};
   let after = null;
   const found = await db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
-    const row = await trx('ib_action_phases')
-      .where({ tool: TOOL, customer_id: customerId }).whereIn('phase', OPEN_PHASES)
-      .orderBy('created_at', 'desc').first();
-    if (!row) return {};
-    const marker = readMarker(row);
+    const marker = await openRow(trx, customerId);
+    if (!marker) return {};
     const step = await OPEN_ROW[marker.phase](marker, trx);
     after = { marker, step };
     return step.out;
@@ -229,7 +266,9 @@ async function ringAfterAbandon(marker, alert) {
 // A younger booking with no stamped visits is left alone: it may still be running.
 async function sweepStalePending() {
   const rows = await db('ib_action_phases')
-    .where({ tool: TOOL }).whereIn('phase', OPEN_PHASES).whereNull('alerted_at')
+    .where({ tool: TOOL }).whereIn('phase', OPEN_PHASES)
+    // Not yet alerted, or owed with no alert id (the earlier post failed or came back without one): post it again.
+    .where((q) => q.whereNull('alerted_at').orWhere((r) => r.where('phase', 'booked_pending_bill').whereRaw("payload->>'alert_id' IS NULL")))
     .where('created_at', '<', minutesAgo(ALERT_MINUTES))
     .orderBy('created_at', 'asc').limit(25);
   let raised = 0;
@@ -242,8 +281,14 @@ async function sweepStalePending() {
         phase = 'booked_pending_bill';
       }
       if (phase === 'booked_pending_bill') {
-        await stampAlerted(marker.id, { payload: db.raw('payload || ?::jsonb', [JSON.stringify({ alert_id: await alertOwed(marker) })]) });
-        raised += 1;
+        const alertId = await alertOwed(marker);
+        if (!alertId) {
+          // No id to store: leave the row unstamped so the next pass posts it again. The row never expires.
+          logger.warn(`[start-program-marker] bill-owed alert for ${marker.id} came back without an id; it will be posted again`);
+        } else {
+          await stampAlerted(marker.id, { payload: db.raw('payload || ?::jsonb', [JSON.stringify({ alert_id: alertId })]) });
+          raised += 1;
+        }
       } else if (marker.createdAt <= minutesAgo(BOOKING_STALE_MINUTES)) {
         await alertUnfinished(marker);
         await settle(marker.id, 'abandoned', { reason: 'no_stamped_visits' });
@@ -258,6 +303,6 @@ async function sweepStalePending() {
 }
 
 module.exports = {
-  TOOL, STAMP_ACTION, ALERT_MINUTES, BOOKING_STALE_MINUTES, OWED_EXPIRY_HOURS, OWED_INSTRUCTION,
-  writeMarker, setPhase, settle, audit, markBooked, stampedVisitIds, findOpenMarker, sweepStalePending,
+  TOOL, STAMP_ACTION, ONE_OPEN_INDEX, ALERT_MINUTES, BOOKING_STALE_MINUTES, OWED_INSTRUCTION,
+  writeMarker, setPhase, settle, audit, markBooked, stampedVisitIds, readOpenMarker, findOpenMarker, sweepStalePending,
 };

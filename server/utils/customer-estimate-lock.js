@@ -59,7 +59,7 @@ async function lockCustomerEstimates(trx, customerId) {
  * linked row. Both ids are locked in sorted order (one order everywhere); a failed lookup locks the linked
  * customer when there is one and throws (503) when the estimate is ownerless. Same leaf rule as lockCustomerEstimates: take it after the row and other locks.
  */
-async function lockCustomerEstimatesForEstimate(trx, estimate) {
+async function estimateOwnerIds(trx, estimate) {
   const ids = new Set();
   if (estimate?.customer_id) ids.add(String(estimate.customer_id));
   // A failed owner lookup (a throw or lookupFailed) cannot fence an estimate that already has an owner any less than the
@@ -75,7 +75,23 @@ async function lockCustomerEstimatesForEstimate(trx, estimate) {
     if (!ids.size) throw unverified(err.message);
     require('../services/logger').warn(`[customer-estimate-lock] prospective owner lookup failed; locking the linked customer only: ${err.message}`);
   }
-  await lockCustomersThenEstimates(trx, [...ids]);
+  return [...ids];
 }
 
-module.exports = { lockCustomerEstimates, lockCustomerEstimatesForEstimate };
+async function lockCustomerEstimatesForEstimate(trx, estimate) {
+  await lockCustomersThenEstimates(trx, await estimateOwnerIds(trx, estimate));
+}
+
+/**
+ * Customer rows only (FOR KEY SHARE), for a caller that is about to take an `estimates` row FOR UPDATE. The merge locks
+ * customer rows first and repoints estimates second, so a caller that held the estimate row and then asked for the
+ * customer row could deadlock with it. Call this BEFORE the estimate FOR UPDATE (on an unlocked read or the caller's
+ * snapshot), re-check customer_id on the locked estimate (refuse on change), and take the advisory lock afterwards with
+ * lockCustomerEstimatesForEstimate, which finds the rows already held.
+ */
+async function lockCustomerRowsForEstimate(trx, estimate) {
+  const ids = [...new Set((await estimateOwnerIds(trx, estimate)).map(String))].sort();
+  for (const id of ids) await trx('customers').where({ id }).forKeyShare().first('id');
+}
+
+module.exports = { lockCustomerEstimates, lockCustomerEstimatesForEstimate, lockCustomerRowsForEstimate };

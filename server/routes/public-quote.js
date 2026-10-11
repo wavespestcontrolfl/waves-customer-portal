@@ -3290,11 +3290,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // pricing, it just mints no self-book handoff for it.
         await db.transaction(async (trx) => {
           await draftVerdictLock(trx);
+          // Customer -> estimate, like the merge: the customer row share before the estimate row lock. The refresh
+          // reactivates the draft, so the owner is the merged row (the lock below takes the same view).
+          await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, { ...existingEst, ...estFields });
           const lockedEst = await trx('estimates')
             .where({ id: existingEst.id })
             .forUpdate()
-            .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data');
+            .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data', 'customer_id');
           if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
+          // A merge or relink that committed while this waited moved the draft to another customer: refuse the refresh.
+          if (!estFields.customer_id && (lockedEst.customer_id || null) !== (existingEst.customer_id || null)) return;
           if (lockedEst.archived_at) {
             const consumedBy = await trx('scheduled_services')
               .where({ source_estimate_id: existingEst.id })

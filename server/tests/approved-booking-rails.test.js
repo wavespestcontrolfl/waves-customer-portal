@@ -180,8 +180,14 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     const anchor = { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' };
     const req = { approvedContact: 'confirm-prop-1', approvedWelcomeContact: 'welcome-a', approvedServiceAnchor: anchor };
     expect(await codeOf(run(req))).toBeNull();
-    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, { propertyId: 'prop-1' });
-    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, { kind: 'welcome' });
+    // Round 13: the reads go through the booking transaction handle, never the global pool.
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, { propertyId: 'prop-1', conn: expect.any(Function) });
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, { kind: 'welcome', conn: expect.any(Function) });
+    const trx = fakeTrx();
+    spy.mockClear();
+    await runApprovedBookingRails(trx, { ...baseCtx(req) });
+    expect(spy.mock.calls.every(([, opts]) => opts.conn === trx)).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(2);
     // The welcome moved (the account holder's address), the confirmation did not.
     expect(await codeOf(run({ ...req, approvedWelcomeContact: 'welcome-old' }))).toBe('CONTACT_CHANGED');
     // The confirmation moved for that property alone.

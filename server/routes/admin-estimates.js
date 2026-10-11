@@ -4508,9 +4508,14 @@ router.put('/:id/proposal', async (req, res, next) => {
         ['estimate-group-send', String(groupId)],
       );
     }
+    // A revival reopens the estimate: customer -> estimate, like the merge (customer row share before the estimate row).
+    if (revivingBid) await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
     const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || (locked.estimate_group_id || null) !== groupId) {
       throw retry('This estimate changed groups while you were editing — reload and retry.');
+    }
+    if (revivingBid && (locked.customer_id || null) !== (estimate.customer_id || null)) {
+      throw retry('This estimate moved to a different customer while you were editing — reload and retry.');
     }
     if (estimateEditVersion(locked) !== estimateEditVersion(estimate)
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
@@ -5091,6 +5096,8 @@ router.post('/:id/unarchive', async (req, res, next) => {
     // committed while this request waited for the row lock has moved the estimate to another customer, and
     // locking the old owner would leave the booking's open-estimate check unfenced. A moved owner refuses.
     const unarchived = await db.transaction(async (trx) => {
+      // Customer -> estimate, like the merge: the customer row share first, then the estimate row.
+      await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
       const locked = await trx('estimates').where({ id: req.params.id }).forUpdate().first();
       if (!locked) return { gone: true };
       if ((locked.customer_id || null) !== (estimate.customer_id || null)) return { ownerChanged: true };

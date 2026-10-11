@@ -1106,6 +1106,10 @@ const COMMIT_PHASES = {
       plan.markerId = marker.id;
       plan.markerKey = marker.actionKey;
     } catch (err) {
+      // The database allows one open row per customer: a second confirm that got past the precheck lands here.
+      if (err.code === 'MARKER_OPEN_EXISTS') {
+        return { result: markerRefusal('program_start_in_progress', 'Another program start for this customer is already open. Wait a minute, then ask again. Nothing was changed.') };
+      }
       logger.error(`[intelligence-bar] start_program could not write its phase row for customer ${plan.customerId}: ${err.message}`);
       return { result: { error: 'The start of this program could not be recorded, so nothing was booked. Try again in a moment.', code: 'program_marker_failed', nothing_changed: true } };
     }
@@ -1219,16 +1223,20 @@ const markerRefusal = (code, error) => ({ error, code, nothing_changed: true });
 
 // An earlier start for this customer still blocks a new one: refuse, never plan around it. A ledger that cannot be read
 // refuses too (retryable), because a booking in flight or a bill owed would otherwise be missed.
-async function openMarkerRefusal(customerId) {
+// A preview (`confirmed` false) only READS the ledger: no row moves, no audit event, no alert. The confirmed path takes
+// the customer lock and may close an old row.
+async function openMarkerRefusal(customerId, { confirmed = false } = {}) {
   let found;
   try {
-    found = await Marker.findOpenMarker(customerId);
+    found = confirmed ? await Marker.findOpenMarker(customerId) : await Marker.readOpenMarker(customerId);
   } catch (err) {
     logger.warn(`[intelligence-bar] start_program ledger unreadable for customer ${customerId}: ${err.message}`);
     return markerRefusal('program_marker_unreadable', 'The record of earlier program starts for this customer could not be read, so nothing was changed. Try again in a moment.');
   }
   if (found.inProgress) {
-    return markerRefusal('program_start_in_progress', 'Another program start for this customer is still booking. Wait a minute, then ask again. Nothing was changed.');
+    return markerRefusal('program_start_in_progress', found.stale
+      ? 'An earlier program start for this customer never showed its visits. Check the schedule; the sweep will clear it. Nothing was changed.'
+      : 'Another program start for this customer is still booking. Wait a minute, then ask again. Nothing was changed.');
   }
   if (found.owed) {
     return markerRefusal('program_bill_step_owed', `An earlier program start for this customer booked its visits but did not finish the monthly bill. ${Marker.OWED_INSTRUCTION} Nothing was changed.`);
@@ -1240,7 +1248,7 @@ async function startProgram(input, actionContext = {}) {
   if (!startProgramLive()) {
     return { error: 'Starting a program from the Intelligence Bar is not enabled (GATE_IB_START_PROGRAM). Use the Schedule screen and the customer profile.', code: 'gate_off' };
   }
-  const blocked = await openMarkerRefusal(input.customer_id);
+  const blocked = await openMarkerRefusal(input.customer_id, { confirmed: actionContext.confirmed === true });
   if (blocked) return blocked;
   // ONLY the server-derived context confirms (same rule as merge_customers).
   if (actionContext.confirmed !== true) {

@@ -136,11 +136,13 @@ const RAILS = [
     lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
     // Two keys, as the senders split them: the confirmation for the property the visits are stamped with
     // (property-level toggles and recipient overrides), and the account-level welcome.
-    read: async (_trx, ctx) => {
+    // Every read goes through the booking transaction: a second connection from the pool would wait on a pool the
+    // booking already holds one connection of (a deadlock at a pool of two).
+    read: async (trx, ctx) => {
       const Contact = require('../booking-contact-state');
       return {
-        confirmation: await Contact.currentContactKey(ctx.customerId, { propertyId: ctx.req.approvedServiceAnchor?.propertyId || null }),
-        welcome: typeof ctx.req.approvedWelcomeContact === 'string' ? await Contact.currentContactKey(ctx.customerId, { kind: 'welcome' }) : null,
+        confirmation: await Contact.currentContactKey(ctx.customerId, { propertyId: ctx.req.approvedServiceAnchor?.propertyId || null, conn: trx }),
+        welcome: typeof ctx.req.approvedWelcomeContact === 'string' ? await Contact.currentContactKey(ctx.customerId, { kind: 'welcome', conn: trx }) : null,
       };
     },
     approved: (ctx) => ({ confirmation: ctx.req.approvedContact, welcome: typeof ctx.req.approvedWelcomeContact === 'string' ? ctx.req.approvedWelcomeContact : null }),

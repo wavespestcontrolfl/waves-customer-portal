@@ -721,7 +721,7 @@ describe('booking route wiring (source contracts)', () => {
     // Both locked reads carry the address the comparison needs.
     // The draft locks also read estimate_data since #4667 (the county-roll
     // address block is carried across the refresh).
-    expect((publicQuote.match(/\.first\('id', 'source', 'status', 'archived_at', 'address'(?:, 'estimate_data')?\)/g) || []).length).toBe(2);
+    expect((publicQuote.match(/\.first\('id', 'source', 'status', 'archived_at', 'address'(?:, 'estimate_data')?(?:, 'customer_id')?\)/g) || []).length).toBe(2);
   });
 
   test('activation sends the new-recurring welcome through the shared candidacy gate, not the paid-tier tagger gate', () => {
