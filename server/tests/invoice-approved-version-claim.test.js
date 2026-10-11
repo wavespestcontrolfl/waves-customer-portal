@@ -138,6 +138,26 @@ describe('claimInvoiceForSend with an approved version', () => {
       .rejects.toThrow('Invoice send already in progress');
   });
 
+  test('the Intelligence Bar\'s effects check runs on the claimed row with its pre-claim status; a different list, or one that cannot be read, hands the claim back', async () => {
+    const row = baseRow();
+    const seen = [];
+    const withEffects = (verifyEffects) => ({ ...approved(row), verifyEffects });
+    // Same list: the claim stands, and the check saw the pre-claim status ('sent'), not 'sending'.
+    makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withEffects(async (claimed) => { seen.push(claimed.status); return true; }) }))
+      .resolves.toMatchObject({ claimed: true });
+    expect(seen).toEqual(['sent']);
+    // A different list: nothing is sent; the invoice returns to its status with no claim token.
+    const changed = makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withEffects(async () => false) })).rejects.toMatchObject({ code: 'approved_version_changed' });
+    expect(changed.currentRow().status).toBe('sent');
+    expect(changed.currentRow().send_claim_token).toBeNull();
+    // A check that throws fails closed the same way.
+    const broken = makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withEffects(async () => { throw new Error('read failed'); }) })).rejects.toMatchObject({ code: 'approved_version_changed' });
+    expect(broken.currentRow().status).toBe('sent');
+  });
+
   test('a caller that passes no version is unchanged', async () => {
     const row = baseRow();
     makeDb({ ...row, updated_at: new Date('2099-02-02T00:00:00Z'), credit_applied: '25.00' });

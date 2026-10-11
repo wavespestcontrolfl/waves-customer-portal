@@ -16,6 +16,18 @@ jest.mock('../routes/admin-invoices', () => ({
 }));
 jest.mock('../services/stripe', () => ({ quoteInvoiceSavedCardCharge: jest.fn() }));
 jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: jest.fn(async () => null) }));
+// The sources the effects plan reads (each is the handler's own function; their own tests cover them).
+jest.mock('../services/lead-estimate-link', () => ({ invoiceSentConversionTargets: jest.fn(async () => ({ leadIds: [] })) }));
+jest.mock('../services/invoice-followups', () => ({
+  planFollowupSequence: jest.fn(async () => ({ arms: true, state: 'active', cadence: [3, 7, 14, 30] })),
+  stopOnPaymentVerdict: jest.fn((seq) => (seq ? { stops: true, thankYou: false } : { stops: false, thankYou: false })),
+  activePaymentPlan: jest.fn(async () => null),
+}));
+jest.mock('../services/review-request', () => ({
+  completionNotes: jest.fn(async () => ({})),
+  paidInvoiceReviewSkip: jest.fn(() => 'not_completion_invoice'),
+}));
+jest.mock('../services/project-report-hold', () => ({ heldReportsForInvoice: jest.fn(async () => []) }));
 jest.mock('../services/collections/collection-hold', () => ({
   customerHasActiveCollectionHoldChecked: jest.fn(async () => false),
   customerHasActiveMessagingHoldChecked: jest.fn(async () => false),
@@ -28,6 +40,10 @@ const Invoices = require('../routes/admin-invoices');
 const StripeService = require('../services/stripe');
 const CollectionHold = require('../services/collections/collection-hold');
 const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
+const LeadLink = require('../services/lead-estimate-link');
+const Followups = require('../services/invoice-followups');
+const Reviews = require('../services/review-request');
+const ReportHold = require('../services/project-report-hold');
 const tools = require('../services/intelligence-bar/invoice-action-tools');
 const { executeInvoiceActionTool, INVOICE_ACTION_TOOLS, cardLines, chargeLockGuard, chargedTodayCents } = tools;
 const gates = require('../services/intelligence-bar/write-gates');
@@ -43,6 +59,7 @@ const TODAY = etDateString();
 const ADMIN = { isAdmin: true, technicianId: 'staff-1', operationId: 'op-1' };
 
 let state;
+let txDepth = 0;
 function invoiceRow(overrides = {}) {
   return {
     id: INV, invoice_number: 'WPC-2099-0001', customer_id: 'cust-1', status: 'draft', total: '129.00', credit_applied: '0.00',
@@ -65,7 +82,8 @@ function freshState() {
     stripe_invoice_charge_attempts: [],
     stripe_orphan_charges: [],
     payments: [],
-    ib_pending_actions: [],
+    // The confirmed approval the tests run as (ADMIN.operationId): the run claim is taken on this row.
+    ib_pending_actions: [{ id: 'op-1', tool_name: 'charge_invoice', status: 'confirmed', params: { invoice_id: INV }, result: null, consumed_day: TODAY }],
     scheduled_services: [],
     service_records: [],
   };
@@ -105,9 +123,15 @@ function makeDb() {
           && p.metadata?.initiated_via === 'intelligence_bar' && p.payment_date === day && !['failed', 'canceled', 'cancelled'].includes(p.status));
         const n = state.ib_pending_actions.filter((a) => a.tool_name === 'charge_invoice' && a.status === 'confirmed'
           && claimed(a) && !paidAlready(a)
-          && a.consumed_day === day && (a.result == null || a.result.outcome_unknown === true)
+          && a.consumed_day === day && (a.result == null || a.result.outcome_unknown === true || a.result.claim === 'charge_running')
           && (!exclude || String(a.params?.invoice_id || '') !== exclude)).length;
         return { n: String(n) };
+      }
+      if (table === 'ib_pending_actions' && q.raws.some((r) => /id <> \?/.test(r.sql))) {
+        // The run-claim read: another bar charge's live claim (taken within the stale window).
+        const exclude = q.raws.find((r) => /id <> \?/.test(r.sql)).bindings[0];
+        return state.ib_pending_actions.find((a) => a.tool_name === 'charge_invoice' && String(a.id) !== String(exclude)
+          && a.result?.claim === 'charge_running' && Date.now() - new Date(a.result.since).getTime() < 10 * 60000);
       }
       const rows = (state[table] || []).filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
         && q.ins.every(([k, vals]) => vals.includes(row[k])) && q.nulls.every((k) => row[k] == null));
@@ -115,6 +139,7 @@ function makeDb() {
     };
     const b = new Proxy({}, {
       get(_t, prop) {
+        if (prop === '__resolve') return resolveRows;
         if (prop === 'then') return (res, rej) => Promise.resolve().then(resolveRows).then(res, rej);
         if (prop === 'where') return (arg) => { if (arg && typeof arg === 'object') q.wheres.push(arg); return b; };
         if (prop === 'whereIn') return (k, vals) => { q.ins.push([k, vals]); return b; };
@@ -124,6 +149,15 @@ function makeDb() {
         if (prop === 'sum') return () => { q.agg = 'sum'; return b; };
         if (prop === 'whereExists' || prop === 'whereNotExists') return () => b;
         if (prop === 'count') return () => { q.agg = 'count'; return b; };
+        if (prop === 'update' && table === 'ib_pending_actions') {
+          // The run claim and its release: patch the approval rows the where / whereNull / claim predicates match.
+          return (patch) => {
+            const rows = state.ib_pending_actions.filter((row) => q.wheres.every((w) => Object.entries(w).every(([k, v]) => String(row[k]) === String(v)))
+              && q.nulls.every((k) => row[k] == null) && (!q.raws.some((r) => /result->>'claim'/.test(r.sql)) || row.result?.claim === 'charge_running'));
+            for (const row of rows) row.result = patch.result === null ? null : JSON.parse(patch.result);
+            return Promise.resolve(rows.length);
+          };
+        }
         if (MUTATIONS.has(prop)) throw new Error(`unexpected ${String(prop)} on ${table}`);
         return () => b;
       },
@@ -145,24 +179,47 @@ beforeEach(() => {
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   state = freshState();
   db.mockImplementation(makeDb());
-  // db.transaction models pg_try_advisory_xact_lock: the key is held until the holding
-  // transaction's callback returns; a second try gets locked = false at once.
-  const heldKeys = new Set();
+  // db.transaction models the claim's short transaction: transactions run one at a time (the advisory lock),
+  // txDepth shows whether one is open, and trx reads / patches the same seeded rows.
+  let chain = Promise.resolve();
+  txDepth = 0;
   db.transaction = jest.fn(async (callback) => {
-    const mine = [];
-    const trx = { raw: jest.fn(async (sql, bindings) => {
-      if (!/pg_try_advisory_xact_lock/.test(sql)) return { rows: [] };
-      const key = bindings[0];
-      if (heldKeys.has(key)) return { rows: [{ locked: false }] };
-      heldKeys.add(key); mine.push(key);
-      return { rows: [{ locked: true }] };
-    }) };
-    try { return await callback(trx); } finally { mine.forEach((k) => heldKeys.delete(k)); }
+    const prev = chain;
+    let release;
+    chain = new Promise((resolve) => { release = resolve; });
+    await prev;
+    txDepth += 1;
+    const trx = Object.assign((table) => db(table), { raw: jest.fn(async () => ({ rows: [] })), fn: { now: () => 'now' } });
+    try { return await callback(trx); } finally { txDepth -= 1; release(); }
   });
+  // The daily totals are one WITH statement: answered from the three CTE builders, in one result row.
+  db.raw = (sql) => ({ sql });
+  db.fn = { now: () => 'now' };
+  db.with = (alias, qb) => {
+    const ctes = { [alias]: qb };
+    const chainable = {
+      with(next, nextQb) { ctes[next] = nextQb; return chainable; },
+      select() {
+        return {
+          then: (res, rej) => Promise.all([ctes.paid.__resolve(), ctes.uncertain.__resolve(), ctes.orphans.__resolve()])
+            .then(([paid, uncertain, orphans]) => [{ paid: paid.total, uncertain: uncertain.n, orphans: orphans.total }]).then(res, rej),
+        };
+      },
+    };
+    return chainable;
+  };
   Invoices.getInvoiceDeliveryRecipients.mockImplementation(async () => recipients());
   StripeService.quoteInvoiceSavedCardCharge.mockImplementation(async () => quote());
   issuedCloseoutTarget.mockReset();
   issuedCloseoutTarget.mockResolvedValue(null);
+  // The effects plan's sources start from "nothing else happens" in every test.
+  LeadLink.invoiceSentConversionTargets.mockReset().mockResolvedValue({ leadIds: [] });
+  Followups.planFollowupSequence.mockReset().mockResolvedValue({ arms: true, state: 'active', cadence: [3, 7, 14, 30] });
+  Followups.stopOnPaymentVerdict.mockReset().mockImplementation((seq) => (seq ? { stops: true, thankYou: false } : { stops: false, thankYou: false }));
+  Followups.activePaymentPlan.mockReset().mockResolvedValue(null);
+  Reviews.completionNotes.mockReset().mockResolvedValue({});
+  Reviews.paidInvoiceReviewSkip.mockReset().mockReturnValue('not_completion_invoice');
+  ReportHold.heldReportsForInvoice.mockReset().mockResolvedValue([]);
   CollectionHold.customerHasActiveCollectionHoldChecked.mockResolvedValue(false);
   CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValue(false);
   CollectionHold.assertNoCollectionHold.mockResolvedValue(undefined);
@@ -170,11 +227,16 @@ beforeEach(() => {
 afterAll(() => { delete process.env.GATE_IB_INVOICE_ACTIONS; });
 
 const preview = (tool, input) => executeInvoiceActionTool(tool, input, ADMIN);
-async function confirmWith(tool, input, versionKey) {
+async function confirmWith(tool, input, versionKey, ctx = ADMIN) {
   const card = await preview(tool, input);
   expect(card.preview).toBe(true);
-  return { card, run: () => executeInvoiceActionTool(tool, { ...input, confirmed: true, [versionKey]: card._version }, ADMIN) };
+  return { card, run: () => executeInvoiceActionTool(tool, { ...input, confirmed: true, [versionKey]: card._version }, ctx) };
 }
+// The card's effect sentences, and one effect by key.
+const effectTexts = (card) => (card.effects || []).map((e) => e.text);
+const effectText = (card, key) => (card.effects || []).find((e) => e.key === key)?.text;
+// A charge-transaction stand-in: the seeded rows, the CTE reader, and a raw() that records the SQL it was given.
+const makeTrx = (raw = jest.fn(async () => ({ rows: [] }))) => Object.assign(makeDb(), { raw, with: db.with });
 
 describe('registration', () => {
   test('both tools are two-step writes, never owner-direct, flagged side-effecting, uuid params typed', () => {
@@ -243,12 +305,13 @@ describe('send_invoice card', () => {
     expect(p).toMatchObject({
       preview: true, invoice_number: 'WPC-2099-0001', customer_name: 'Robin Sample', amount_due: '$129.00', total: '$129.00',
       lines: ['Quarterly Pest Control $99.00', 'Mosquito add-on $30.00'], channels: 'text and email', send_note: 'Not sent before.',
-      review_request: 'No review request is sent.',
     });
+    expect(effectTexts(p)).toEqual(expect.arrayContaining(['Not sent before.', 'No review request is sent.']));
     expect(p.text).toBe('Text to ***0100: the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link. Not sent if the customer opted out of texts.');
     expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link.');
     const lines = cardLines('send_invoice', p).map((l) => l.text);
     expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line 1 of 2: Quarterly Pest Control $99.00', p.text, p.email,
+      ...effectTexts(p),
       'No account credit is applied by this send. If the visit is cancelled before the send runs, nothing is sent and the invoice is held for review (never voided by the bar).']));
     expect(JSON.stringify(p)).not.toContain('9415550100');
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
@@ -322,7 +385,7 @@ describe('send_invoice commit', () => {
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
         expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' },
-        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/) },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), verifyEffects: expect.any(Function) },
       },
     });
     // The exact recipients ride only to the send, never into the result.
@@ -386,9 +449,10 @@ describe('send_invoice commit', () => {
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Quarterly Pest Control', date: '2099-01-02', resuming: false });
     const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
     expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), { trigger: 'sent' });
-    expect(card.visit_closeout).toBe('Sending this invoice also completes the linked visit (Quarterly Pest Control on 2099-01-02) and creates its service record; no completion text, report, review request or charge');
-    expect(cardLines('send_invoice', card).map((l) => l.text)).toContain(card.visit_closeout);
-    expect(card._version).toMatchObject({ closeout_visit: 'visit-1', closeout_resuming: false });
+    const closeoutSentence = 'Sending this invoice also completes the linked visit (Quarterly Pest Control on 2099-01-02) and creates its service record; no completion text, report, review request or charge';
+    expect(effectText(card, 'closeout')).toBe(closeoutSentence);
+    expect(cardLines('send_invoice', card).map((l) => l.text)).toContain(closeoutSentence);
+    expect(card._version.effects).toMatch(/^[0-9a-f]{32}$/);
     // The visit is gone (or another one is linked) by the time the card is confirmed.
     issuedCloseoutTarget.mockResolvedValue(null);
     await expect(run()).resolves.toMatchObject({ preview_changed: true });
@@ -397,13 +461,12 @@ describe('send_invoice commit', () => {
 
   test('a closeout already started is disclosed as a resume; a probe that cannot read refuses the send', async () => {
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Mosquito', date: '2099-01-02', resuming: true });
-    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ visit_closeout: expect.stringMatching(/^Sending this invoice also finishes a closeout already started/) });
+    expect(effectText(await preview('send_invoice', { invoice_id: INV }), 'closeout')).toMatch(/^Sending this invoice also finishes a closeout already started/);
     issuedCloseoutTarget.mockRejectedValue(new Error('profile read failed'));
-    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'closeout_check_failed' });
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'effects_check_failed' });
     issuedCloseoutTarget.mockResolvedValue(null);
     const card = await preview('send_invoice', { invoice_id: INV });
-    expect(card.visit_closeout).toBeUndefined();
-    expect(card._version).toMatchObject({ closeout_visit: null });
+    expect(effectText(card, 'closeout')).toBeUndefined();
   });
 
   test('an invoice sent before is a resend: no first-delivery flag', async () => {
@@ -473,7 +536,7 @@ describe('charge_invoice card', () => {
       card: 'Visa •••• 4242 (exp 12/32)', balance: '$129.00', surcharge: '$3.87 card surcharge (3.00%)', total_charged: '$132.87',
       limits: 'At most $500.00 per charge and $1500.00 a day from the bar.', _charged_today: '$0.00 charged from the bar today',
     });
-    expect(p.receipt).toMatch(/payment receipt/);
+    expect(effectText(p, 'receipt')).toMatch(/payment receipt/);
     expect(p._version).toMatchObject({ payment_method_id: CARD, base_cents: 12900, surcharge_cents: 387, charge_cents: 13287 });
     expect(cardLines('charge_invoice', p).map((l) => l.text)).toEqual(expect.arrayContaining([
       'Card: Visa •••• 4242 (exp 12/32)', 'Invoice balance: $129.00', 'Surcharge: $3.87 card surcharge (3.00%)', 'TOTAL CHARGED: $132.87',
@@ -502,7 +565,8 @@ describe('charge_invoice card', () => {
   test('account credit applied first is named; a debit card shows no surcharge', async () => {
     StripeService.quoteInvoiceSavedCardCharge.mockResolvedValue(quote({ base: 104, surcharge: 0, total: 104, rateBps: 0, funding: 'debit', projectedCreditApplied: 25 }));
     const p = await preview('charge_invoice', { invoice_id: INV });
-    expect(p).toMatchObject({ account_credit: '$25.00 of account credit is applied first', surcharge: 'No card surcharge', total_charged: '$104.00' });
+    expect(p).toMatchObject({ surcharge: 'No card surcharge', total_charged: '$104.00' });
+    expect(effectText(p, 'credit')).toBe('$25.00 of account credit is applied first');
   });
 
   test('the tool does no surcharge math of its own (computeChargeAmount stays the one path)', () => {
@@ -605,8 +669,7 @@ describe('charge caps', () => {
   });
 
   test('the guard takes the advisory lock, then rechecks both caps and the dispute hold on the charge transaction', async () => {
-    const trx = makeDb();
-    trx.raw = jest.fn(async () => {});
+    const trx = makeTrx();
     const guard = chargeLockGuard({ invoiceId: INV, customerId: 'cust-1' });
     await expect(guard(trx, { totalCents: 13287 })).resolves.toBeUndefined();
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['ib-invoice-charge-daily-cap']);
@@ -616,43 +679,35 @@ describe('charge caps', () => {
     await expect(guard(trx, { totalCents: 5001 })).rejects.toThrow(/daily limit/);
   });
 
-  test('two cards confirmed at once: the in-transaction recheck lets one charge and refuses the other', async () => {
-    // $1,000 already charged from the bar today; two $400 cards for two invoices both pass their preview.
+  test('two charge transactions at once: the in-transaction recheck lets one charge and refuses the other', async () => {
+    // $1,000 already charged from the bar today; two $400 charges for two invoices both passed their preview.
     state.payments = [{ amount: '1000.00', payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' } }];
-    StripeService.quoteInvoiceSavedCardCharge.mockResolvedValue(quote({ base: 388.35, surcharge: 11.65, total: 400 }));
-    const a = await confirmWith('charge_invoice', { invoice_id: INV }, '_verified_invoice_charge_version');
-    const b = await confirmWith('charge_invoice', { invoice_id: INV2 }, '_verified_invoice_charge_version');
-    // This test is about the inner recheck alone: let both runs through the outer confirm lock.
-    db.transaction.mockImplementation(async (callback) => callback({ raw: jest.fn(async () => ({ rows: [{ locked: true }] })) }));
     // The charge path, simulated: one transaction per charge; pg_advisory_xact_lock
     // serializes them until the transaction (with its stamped payments insert) commits.
     let held = Promise.resolve();
-    Invoices.chargeInvoiceFromBar.mockImplementation(async ({ invoiceId, body, chargeGuard }) => {
+    const charge = async (invoiceId) => {
       let release;
-      const trx = makeDb();
-      trx.raw = jest.fn((sql) => {
-        if (!/pg_advisory_xact_lock/.test(sql)) return Promise.resolve();
+      const trx = makeTrx(jest.fn((sql) => {
+        if (!/pg_advisory_xact_lock/.test(sql)) return Promise.resolve({ rows: [] });
         const prior = held;
         held = new Promise((r) => { release = r; });
         return prior;
-      });
+      }));
       try {
-        await chargeGuard(trx, { totalCents: Math.round(body.expectedTotal * 100) });
+        await chargeLockGuard({ invoiceId, customerId: 'cust-1' })(trx, { totalCents: 40000 });
         await new Promise((r) => setImmediate(r)); // the Stripe call, lock held
-        state.payments.push({ amount: String(body.expectedTotal), payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' }, invoice_id: invoiceId });
-        return { status: 200, json: { success: true, paymentId: `pay-${invoiceId}`, status: 'paid', amount: body.expectedTotal, brand: 'Visa', last4: '4242' } };
+        state.payments.push({ amount: '400', payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' }, invoice_id: invoiceId });
+        return { charged: true };
       } catch (err) {
-        return { status: 400, json: { error: err.message } };
+        return { refused: err.message };
       } finally {
         release?.();
       }
-    });
-    const [ra, rb] = await Promise.all([a.run(), b.run()]);
-    const results = [ra, rb];
-    expect(results.filter((r) => r.success === true)).toHaveLength(1);
-    expect(results.filter((r) => r.code === 'charge_limit' && r.blocked === true)).toHaveLength(1);
-    expect(results.find((r) => r.code === 'charge_limit').error).toMatch(/^Nothing was charged: Bar charge limit: the bar has charged \$1400\.00 today/);
-    expect(state.payments.filter((p) => p.payment_date === TODAY).reduce((s, p) => s + Number(p.amount), 0)).toBe(1400);
+    };
+    const results = await Promise.all([charge(INV), charge(INV2)]);
+    expect(results.filter((r) => r.charged)).toHaveLength(1);
+    expect(results.find((r) => r.refused).refused).toMatch(/^Bar charge limit: the bar has charged \$1400\.00 today/);
+    expect(state.payments.filter((p) => p.payment_date === TODAY).reduce((sum, p) => sum + Number(p.amount), 0)).toBe(1400);
   });
 });
 
@@ -696,9 +751,11 @@ describe('charge_invoice commit', () => {
     // $1,000 committed; two $500 cards. Each approval is already consumed (result not yet recorded).
     state.payments = [{ amount: '1000.00', payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' } }];
     StripeService.quoteInvoiceSavedCardCharge.mockResolvedValue(quote({ base: 485.44, surcharge: 14.56, total: 500 }));
-    const a = await confirmWith('charge_invoice', { invoice_id: INV }, '_verified_invoice_charge_version');
-    const b = await confirmWith('charge_invoice', { invoice_id: INV2 }, '_verified_invoice_charge_version');
-    state.ib_pending_actions = [INV, INV2].map((id) => ({ tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: null, params: { invoice_id: id } }));
+    const ctxA = { ...ADMIN, operationId: 'op-a' };
+    const ctxB = { ...ADMIN, operationId: 'op-b' };
+    state.ib_pending_actions = [['op-a', INV], ['op-b', INV2]].map(([id, inv]) => ({ id, tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: null, params: { invoice_id: inv } }));
+    const a = await confirmWith('charge_invoice', { invoice_id: INV }, '_verified_invoice_charge_version', ctxA);
+    const b = await confirmWith('charge_invoice', { invoice_id: INV2 }, '_verified_invoice_charge_version', ctxB);
     const order = [];
     Invoices.chargeInvoiceFromBar.mockImplementation(async ({ invoiceId, body, chargeGuard }) => {
       order.push(invoiceId);
@@ -706,7 +763,7 @@ describe('charge_invoice commit', () => {
       const attempt = { invoice_id: invoiceId, status: 'claimed', resolved_at: null };
       state.stripe_invoice_charge_attempts.push(attempt);
       try {
-        await chargeGuard(Object.assign(makeDb(), { raw: jest.fn(async () => {}) }), { totalCents: Math.round(body.expectedTotal * 100) });
+        await chargeGuard(makeTrx(), { totalCents: Math.round(body.expectedTotal * 100), invoice: state.invoices.find((row) => row.id === invoiceId) });
         await new Promise((r) => setImmediate(r)); // the Stripe call
         state.payments.push({ amount: String(body.expectedTotal), payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' }, invoice_id: invoiceId });
         return { status: 200, json: { success: true, paymentId: `pay-${invoiceId}`, status: 'paid', amount: body.expectedTotal, brand: 'Visa', last4: '4242' } };
@@ -721,21 +778,41 @@ describe('charge_invoice commit', () => {
     expect(ra.success).toBe(true);
     expect(rb).toMatchObject({ code: 'charge_busy', error: 'Another bar charge is running, so nothing was charged. Ask again in a moment.' });
     expect(order).toEqual([INV]);
+    // The winner's claim is given back once its charge ended; the loser claimed nothing.
+    expect(state.ib_pending_actions.map((row) => row.result)).toEqual([null, null]);
     // Asked again, the second card sees the winner's COMMITTED $1,500, not a $500 reservation on top of it.
     await expect(b.run()).resolves.toMatchObject({ code: 'charge_limit', blocked: true, error: expect.stringMatching(/the bar has charged \$1500\.00 today/) });
     // Refused by the preflight, so the charge path was never entered for it.
     expect(order).toEqual([INV]);
   });
 
-  test('the confirm lock is a try-lock: a busy lock charges nothing, claims nothing, and never waits', async () => {
+  test('the run claim is a durable row claim, not a held connection: another live claim turns the card away, a stale one does not, and no transaction wraps the charge', async () => {
     const { run } = await confirmWith('charge_invoice', { invoice_id: INV }, '_verified_invoice_charge_version');
-    const raws = [];
-    db.transaction.mockImplementationOnce(async (callback) => callback({ raw: jest.fn(async (sql) => { raws.push(sql); return { rows: [{ locked: false }] }; }) }));
+    // Another approval's claim, taken just now: this card is turned away, claims nothing, charges nothing.
+    state.ib_pending_actions.push({ id: 'op-other', tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, params: { invoice_id: INV2 }, result: { claim: 'charge_running', since: new Date().toISOString() } });
     await expect(run()).resolves.toMatchObject({ code: 'charge_busy' });
-    expect(raws).toEqual(['SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked']);
+    expect(state.ib_pending_actions[0].result).toBeNull();
     expect(Invoices.chargeInvoiceFromBar).not.toHaveBeenCalled();
+    // A claim older than the stale window is a charge that died: it no longer blocks.
+    state.ib_pending_actions[1].result.since = new Date(Date.now() - 11 * 60000).toISOString();
+    let seenDuringCharge;
+    Invoices.chargeInvoiceFromBar.mockImplementation(async () => {
+      seenDuringCharge = { depth: txDepth, claim: state.ib_pending_actions[0].result };
+      return { status: 200, json: { success: true, paymentId: 'pay-1', status: 'paid', amount: 132.87, brand: 'Visa', last4: '4242' } };
+    });
+    await expect(run()).resolves.toMatchObject({ success: true });
+    expect(seenDuringCharge.depth).toBe(0);
+    expect(seenDuringCharge.claim).toMatchObject({ claim: 'charge_running' });
+    // Given back afterwards, so the confirm route records the real result on an empty row.
+    expect(state.ib_pending_actions[0].result).toBeNull();
+    // An approval with no row to claim (no operation id) charges nothing.
+    await expect(executeInvoiceActionTool('charge_invoice', { invoice_id: INV, confirmed: true, _verified_invoice_charge_version: (await preview('charge_invoice', { invoice_id: INV }))._version }, { isAdmin: true }))
+      .resolves.toMatchObject({ code: 'charge_busy' });
+    // Source contract: the charge is not inside db.transaction, and the claim is not the old try-lock.
     const src = fs.readFileSync(require.resolve('../services/intelligence-bar/invoice-action-tools'), 'utf8');
-    expect(src).not.toMatch(/lock_timeout|SELECT pg_advisory_xact_lock\(hashtext\(\?\)\)', \[CONFIRM_LOCK_KEY\]/);
+    expect(src).not.toMatch(/pg_try_advisory_xact_lock|lock_timeout/);
+    const commit = src.slice(src.indexOf('async function commitCharge('), src.indexOf('async function runCharge('));
+    expect(commit).not.toMatch(/db\.transaction/);
   });
 
   test.each([
@@ -788,12 +865,11 @@ describe('round 3: real-schema SQL, orphans, closeout on the charge card, lines'
 
   test('the daily-total SQL reads payments through metadata->>\'invoice_id\' (payments has no invoice_id column) and only names real columns', () => {
     const day = '2099-01-01';
-    const sqls = [
-      paidSql(day),
-      tools.uncertainApprovalsQuery(knex, { excludeInvoiceId: INV, day }).toSQL().sql,
-      tools.orphanChargesTodayQuery(knex, day).toSQL().sql,
-    ];
-    const all = sqls.join('\n');
+    // The three reads are ONE statement (one snapshot): three CTEs and a single select.
+    const totalsSql = tools.dailyTotalsQuery(knex, { excludeInvoiceId: INV, day }).toSQL().sql;
+    expect(totalsSql).toMatch(/^with "paid" as \(.*\), "uncertain" as \(.*\), "orphans" as \(.*\) select \(SELECT total FROM paid\) AS paid, \(SELECT n FROM uncertain\) AS uncertain, \(SELECT total FROM orphans\) AS orphans$/s);
+    expect(totalsSql.match(/\bselect\b/gi).length).toBeGreaterThan(3);
+    const all = [paidSql(day), totalsSql].join('\n');
     expect(all).toContain("p.metadata->>'invoice_id' = ib_pending_actions.params->>'invoice_id'");
     expect(all).not.toMatch(/\bp\.invoice_id\b|payments\.invoice_id/);
     // The migration that indexes that expression is the schema's own statement of it.
@@ -827,14 +903,15 @@ describe('round 3: real-schema SQL, orphans, closeout on the charge card, lines'
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Quarterly Pest Control', date: '2099-01-02', resuming: false });
     const { card, run } = await confirmWith('charge_invoice', { invoice_id: INV }, '_verified_invoice_charge_version');
     expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), { trigger: 'paid' });
-    expect(card.visit_closeout).toBe('Once the charge is paid, the payment also completes the linked visit (Quarterly Pest Control on 2099-01-02) and creates its service record; no completion text, report, review request or charge');
-    expect(cardLines('charge_invoice', card).map((l) => l.text)).toContain(card.visit_closeout);
-    expect(card._version).toMatchObject({ closeout_visit: 'visit-1', closeout_resuming: false });
+    const sentence = 'Once the charge is paid, the payment also completes the linked visit (Quarterly Pest Control on 2099-01-02) and creates its service record; no completion text, report, review request or charge';
+    expect(effectText(card, 'closeout')).toBe(sentence);
+    expect(cardLines('charge_invoice', card).map((l) => l.text)).toContain(sentence);
+    expect(card._version.effects).toMatch(/^[0-9a-f]{32}$/);
     issuedCloseoutTarget.mockResolvedValue(null);
     await expect(run()).resolves.toMatchObject({ preview_changed: true });
     expect(Invoices.chargeInvoiceFromBar).not.toHaveBeenCalled();
     issuedCloseoutTarget.mockRejectedValue(new Error('profile read failed'));
-    await expect(preview('charge_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'closeout_check_failed' });
+    await expect(preview('charge_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'effects_check_failed' });
     // The send card uses the same helper with the sent trigger.
     issuedCloseoutTarget.mockResolvedValue(null);
     await preview('send_invoice', { invoice_id: INV });
@@ -858,5 +935,84 @@ describe('round 3: real-schema SQL, orphans, closeout on the charge card, lines'
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
     state.invoices[0].line_items = JSON.stringify(items.map((it, i) => (i === 6 ? { ...it, description: 'Other work' } : it)));
     await expect(run()).resolves.toMatchObject({ preview_changed: true });
+  });
+});
+
+describe('round 4: one effects plan, one snapshot, durable run claim', () => {
+  const claimedOnce = async (tool, versionKey) => {
+    const { card, run } = await confirmWith(tool, { invoice_id: INV }, versionKey);
+    return { card, run };
+  };
+
+  test('the paid, uncertain and orphan totals are read in ONE statement, so they share one snapshot', async () => {
+    const withSpy = jest.spyOn(db, 'with');
+    state.payments = [{ amount: '100.00', payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' } }];
+    await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(10000);
+    expect(withSpy).toHaveBeenCalledTimes(1);
+    withSpy.mockRestore();
+  });
+
+  test('send: the card lists every post-delivery effect from the plan, pinned by one digest', async () => {
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: ['aaaaaaaa-0000-4000-8000-000000000001'] });
+    Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'autopay_hold', cadence: [3, 7, 14, 30] });
+    const card = await preview('send_invoice', { invoice_id: INV });
+    expect(card.effects.map((e) => e.key)).toEqual(['delivery', 'lead_conversion', 'followups', 'review', 'credit']);
+    const lines = cardLines('send_invoice', card).map((l) => l.text);
+    expect(lines).toEqual(expect.arrayContaining([
+      'Sending this invoice also marks lead aaaaaaaa won',
+      'Sending this invoice also arms billing reminders on Day 3, 7, 14, 30 unless Auto Pay or a payment plan suppresses them (currently: held: the customer is on Auto Pay)',
+      'No review request is sent.',
+    ]));
+    expect(JSON.stringify(card)).not.toContain('aaaaaaaa-0000-4000-8000-000000000001');
+    expect(card._version.effects).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  test.each([
+    ['a lead appears', () => LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: ['aaaaaaaa-0000-4000-8000-000000000001'] })],
+    ['the customer goes on Auto Pay', () => Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'autopay_hold', cadence: [3, 7, 14, 30] })],
+    ['a payment plan starts', () => Followups.planFollowupSequence.mockResolvedValue({ arms: false, state: 'payment_plan', cadence: [3, 7, 14, 30] })],
+  ])('send: when %s after the card, Confirm refuses as preview_changed and sends nothing', async (_label, mutate) => {
+    const { run } = await claimedOnce('send_invoice', '_verified_invoice_send_version');
+    mutate();
+    await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('send: the claim\'s effects check recomputes the list on the claimed row and compares it with the card\'s digest', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+    const { run } = await claimedOnce('send_invoice', '_verified_invoice_send_version');
+    await run();
+    const { verifyEffects } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+    const claimed = { ...state.invoices[0], status: 'draft' };
+    await expect(verifyEffects(claimed, db)).resolves.toBe(true);
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: ['aaaaaaaa-0000-4000-8000-000000000001'] });
+    await expect(verifyEffects(claimed, db)).resolves.toBe(false);
+  });
+
+  test.each([
+    ['the visit is closed out some other way', () => issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-9', serviceType: 'Pest', date: '2099-01-02', resuming: false })],
+    ['the customer opts out of review outreach', () => Reviews.paidInvoiceReviewSkip.mockReturnValue('completion_opted_out')],
+    ['a held report is attached to the invoice', () => ReportHold.heldReportsForInvoice.mockResolvedValue(['bbbbbbbb-0000-4000-8000-000000000001'])],
+    ['a payment plan starts', () => Followups.activePaymentPlan.mockResolvedValue({ id: 'plan-1' })],
+  ])('charge: when %s after the card, Confirm refuses as preview_changed and charges nothing', async (_label, mutate) => {
+    Reviews.paidInvoiceReviewSkip.mockReturnValue(null);
+    state.invoices[0].service_record_id = 'rec-1';
+    const { card, run } = await claimedOnce('charge_invoice', '_verified_invoice_charge_version');
+    expect(effectText(card, 'review')).toMatch(/also enrolls the customer in review outreach/);
+    mutate();
+    await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    expect(Invoices.chargeInvoiceFromBar).not.toHaveBeenCalled();
+    // The claim is given back on a refusal too.
+    expect(state.ib_pending_actions[0].result).toBeNull();
+  });
+
+  test('charge: the guard recomputes the effects on the locked row and refuses before Stripe on any difference', async () => {
+    const card = await preview('charge_invoice', { invoice_id: INV });
+    const effects = { digest: card._version.effects, creditCents: 0 };
+    const trx = makeTrx();
+    const guard = chargeLockGuard({ invoiceId: INV, customerId: 'cust-1', effects });
+    await expect(guard(trx, { totalCents: 13287, invoice: state.invoices[0] })).resolves.toBeUndefined();
+    ReportHold.heldReportsForInvoice.mockResolvedValue(['bbbbbbbb-0000-4000-8000-000000000001']);
+    await expect(guard(trx, { totalCents: 13287, invoice: state.invoices[0] })).rejects.toMatchObject({ code: 'approved_version_changed' });
   });
 });

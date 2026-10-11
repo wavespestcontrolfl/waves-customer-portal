@@ -42,10 +42,19 @@
  *   - unresolved stripe_orphan_charges rows created today for an invoice the bar
  *     has charged (Stripe took the money, the payment write failed): each counts at
  *     its amount.
- * Inside the charge transaction the check runs again after a transaction-scoped
- * advisory lock (one key for every bar charge), so two cards confirmed at once
- * are serialized: the second sees the first's payment row, or its in-flight
- * approval, before Stripe is called.
+ * The three reads are ONE statement (three CTEs), so they share one snapshot. Inside the charge
+ * transaction the check runs again after a transaction-scoped advisory lock (one key for every
+ * bar charge), so two charges that reach their transactions at once are serialized: the second
+ * sees the first's payment row, or its in-flight approval, before Stripe is called.
+ *
+ * One bar charge runs at a time: the confirmed run takes a durable claim on its approval row (a
+ * short transaction that ends before the charge starts; see claimChargeRun) and gives it back
+ * when the charge ends. No connection is held across the charge.
+ *
+ * Effects: everything the send or the payment also does (lead conversion, billing reminders, the
+ * visit closeout, review outreach, the receipt ...) is ONE list from invoice-action-effects.js,
+ * built from the handlers' own predicates. The card shows each effect, `_version.effects` pins the
+ * list's digest, and the send claim / charge lock recompute it and refuse on any difference.
  *
  * Results carry ids, states and reasons; recipients stay masked.
  */
@@ -53,20 +62,26 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
-const { etDateString, formatETTime } = require('../../utils/datetime-et');
+const { etDateString } = require('../../utils/datetime-et');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest } = require('../invoice-helpers');
 const { isCardMethodType } = require('../stripe-pricing');
+const { planSendEffects, planChargeEffects } = require('./invoice-action-effects');
 
 const PER_CHARGE_CAP_CENTS = 50000;
 const CARD_LINES_SHOWN = 4;
 const DAILY_CAP_CENTS = 150000;
 const CAP_LOCK_KEY = 'ib-invoice-charge-daily-cap';
-// One bar charge runs at a time, from before its cap preflight until its charge returns.
-// A second confirmed card is turned away here BEFORE it claims anything (a try-lock, never a
-// wait: a blocked waiter holds a pooled connection the running charge may need), so the first
-// charge never counts it as a reservation and a later card sees the first's committed payment.
+// One bar charge runs at a time, from before its cap preflight until its charge returns. The turn is a DURABLE
+// CLAIM on the approval row (its `result` holds { claim: 'charge_running', since }), taken in a short transaction
+// that ends before the charge starts: a connection held across the charge could starve the charge's own writes
+// (the pool is two connections). A second confirmed card is turned away at the claim BEFORE it claims anything,
+// so the first charge never counts it as a reservation and a later card sees the first's committed payment.
+// A claim older than RUN_CLAIM_STALE_MINUTES is a charge that died: it no longer blocks (and still counts as an
+// uncertain $500 until its invoice's attempt claim is resolved).
 const CONFIRM_LOCK_KEY = 'ib-invoice-charge-confirm';
+const RUN_CLAIM = 'charge_running';
+const RUN_CLAIM_STALE_MINUTES = 10;
 // Refusals the charge guard throws inside the charge transaction start with this,
 // so the commit can tell them from the route's own 400s (the route returns only the message).
 const CAP_REFUSAL_PREFIX = 'Bar charge limit:';
@@ -114,10 +129,6 @@ const toCents = (value) => Math.round((Number(value) || 0) * 100);
 const msOf = (value) => (value ? new Date(value).getTime() : null);
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
 const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
-const etStamp = (value) => {
-  const at = new Date(value);
-  return `${etDateString(at)} ${formatETTime(at)} ET`;
-};
 
 // The invoice the call names: exactly one of id / number.
 async function resolveInvoice(input) {
@@ -164,6 +175,18 @@ async function messagingHold(customerId) {
   return require('../collections/collection-hold').customerHasActiveMessagingHoldChecked(customerId);
 }
 
+// The effects plan, or the refusal when its reads fail (fail closed: an unchecked effect is never shown as absent).
+async function planEffectsOrRefuse(run, invoice, whatFailed) {
+  try {
+    return await run();
+  } catch {
+    return refusal(`This invoice cannot be ${whatFailed} from the bar right now: what it would also do could not be checked.`, 'effects_check_failed', { invoice_id: invoice.id });
+  }
+}
+
+// The plan's effects as card lines (the card shows each one; effects with nothing to say are pinned only).
+const cardEffects = (effects) => effects.filter((e) => e.line).map(({ key, line, kind }) => ({ key, text: line, kind }));
+
 // ── send_invoice ────────────────────────────────────────────────
 
 const TEXT_MESSAGE = 'the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link';
@@ -196,35 +219,6 @@ async function sendRefusal(invoice, dueCents) {
 // The same recipients the Invoices page shows before Send (GET /:id/recipients):
 // the text goes to the customer's phone, the email to the billing recipient; a
 // payer-billed invoice goes to the payer's billing inbox and is never texted.
-function sendNote(invoice, delivered) {
-  if (invoice.sent_at) return `Already sent on ${etStamp(invoice.sent_at)}. This sends it again.`;
-  if (delivered) return `Already delivered (invoice status ${invoice.status}). This sends it again.`;
-  return 'Not sent before.';
-}
-
-// GATE_INVOICE_ISSUED_CLOSES_VISIT: an invoice sent or paid quietly completes the open visit it
-// bills. One probe for both cards, with the closeout's own function and the trigger the handler
-// runs ('sent' for the Send handler, 'paid' for the payment_intent.succeeded handler). A probe
-// that cannot read fails closed with the refusal to return.
-async function probeIssuedCloseout(invoice, trigger, whatFailed) {
-  try {
-    return { closeout: await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger }) };
-  } catch {
-    return { error: refusal(`This invoice cannot be ${whatFailed} from the bar right now: the linked visit's closeout could not be checked.`, 'closeout_check_failed', { invoice_id: invoice.id }) };
-  }
-}
-
-// What the action also does when the closeout gate is on (disclosed on the card, pinned in _version).
-function closeoutLine(closeout, lead) {
-  const visit = `${closeout.serviceType || 'visit'} on ${closeout.date}`;
-  return closeout.resuming
-    ? `${lead} also finishes a closeout already started for the linked visit (${visit}): completes its remaining steps; no completion text, report, review request or charge`
-    : `${lead} also completes the linked visit (${visit}) and creates its service record; no completion text, report, review request or charge`;
-}
-
-// The closeout fields of a _version (null = no linked visit).
-const closeoutPin = (closeout) => ({ closeout_visit: closeout?.visitId || null, closeout_resuming: closeout?.resuming === true });
-
 function sendLegs(who, invoice, dueCents) {
   const phone = who.payerBilled ? null : (who.primaryContact?.phone || null);
   const email = who.emailRecipient?.email ? String(who.emailRecipient.email).trim().toLowerCase() : null;
@@ -253,15 +247,10 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   const legs = sendLegs(who, invoice, dueCents);
   if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
   const totalCents = toCents(invoice.total);
-  // The claim path's own delivered test (invoice.js alreadyDeliveredForFirstSend: any delivery
-  // stamp, or a sent / viewed / overdue / paid / prepaid status): not delivered means this send is
-  // a FIRST delivery, so the route's first-delivery semantics make a send that loses a race with
-  // another delivery a no-op. Delivered means a resend, and the card says so.
-  const delivered = require('../invoice').alreadyDeliveredForFirstSend(invoice);
-  const firstDelivery = !delivered;
-  const probe = await probeIssuedCloseout(invoice, 'sent', 'sent');
-  if (probe.error) return probe.error;
-  const { closeout } = probe;
+  // Everything the send also does after it delivers: one list, from the handler's own predicates.
+  const customer = await db('customers').where({ id: invoice.customer_id }).first();
+  const planned = await planEffectsOrRefuse(() => planSendEffects(invoice, customer, { requestReview: false }), invoice, 'sent');
+  if (planned.error) return planned;
   const recipients = { phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email };
   return {
     ...(forSend ? { sendRecipients: recipients } : {}),
@@ -278,11 +267,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     channels: [legs.phone && 'text', legs.email && 'email'].filter(Boolean).join(' and '),
     text: legs.text,
     email: legs.emailLine,
-    send_note: sendNote(invoice, delivered),
-    ...(closeout ? { visit_closeout: closeoutLine(closeout, 'Sending this invoice') } : {}),
-    review_request: 'No review request is sent.',
-    // The Send handler's own effects the card must name (the bar skips the credit step).
-    effects_note: 'No account credit is applied by this send. If the visit is cancelled before the send runs, nothing is sent and the invoice is held for review (never voided by the bar).',
+    effects: cardEffects(planned.effects),
+    // The delivery effect's sentence, for the confirmation card's summary.
+    send_note: planned.effects.find((e) => e.key === 'delivery').line,
     _version: {
       invoice_id: invoice.id,
       status: invoice.status,
@@ -292,9 +279,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       // Amount due, credit and lines: the claim refuses a row that no longer matches.
       version_digest: approvedInvoiceVersionDigest(invoice),
       sent: msOf(invoice.sent_at),
-      first_delivery: firstDelivery,
-      // The linked visit the delivery would complete (null = none): a change is drift.
-      ...closeoutPin(closeout),
+      first_delivery: planned.effects.find((e) => e.key === 'delivery').state === 'first',
+      // Every post-delivery effect (closeout, lead, reminders, review ...): a change is drift.
+      effects: planned.digest,
       payer_id: invoice.payer_id || null,
       recipients: digest(recipients),
     },
@@ -333,42 +320,45 @@ const IN_PROGRESS_SEND_MESSAGE = 'Another send of this invoice is in progress, s
 // A send reply the route answered without delivering anything new (status 200).
 const NOOP_SEND_KEYS = ['already_delivered', 'queued_delivery', 'covered_by_credit', 'settled_zero_due'];
 
-// The Send handler's reply, in the tool's words.
+// The Send handler's reply, in the tool's words: the first matching rule answers. Each rule is [applies, answer]
+// over c = { base, status, json, text, email, unknown, sent }.
+const SEND_OUTCOME_RULES = [
+  // The route's own pre-delivery refusals (nothing claimed, nothing sent): a fresh card is fine.
+  [(c) => c.status === 409 && DEFINITIVE_SEND_CONFLICT_CODES.has(c.json.code),
+    (c) => ({ ...c.base, error: `Nothing was sent: ${c.json.error || 'the invoice is busy'}`, code: c.json.code, preview_changed: true })],
+  // Any other conflict means another request owns the live send claim: that delivery may still finish.
+  // Uncertain and not retryable, no fresh card (a retry could send it twice).
+  [(c) => c.status === 409 || c.json.in_progress,
+    (c) => ({ ...c.base, outcome_unknown: true, code: (c.status === 409 && c.json.code) || 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE })],
+  [(c) => c.unknown && !c.sent,
+    (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code || 'delivery_uncertain', text: c.text, email: c.email,
+      error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' })],
+  // Both channels failed (or the route refused before sending). The invoice changed after the card was
+  // shown (nothing claimed or sent): a fresh card is right.
+  [(c) => c.status !== 200,
+    (c) => ({ ...c.base, error: `The invoice was not sent: ${c.json.error || 'send failed'}`, code: c.json.code || 'send_failed', failed: true,
+      ...(['approved_version_changed', 'total_changed'].includes(c.json.code) ? { preview_changed: true } : {}), text: c.text, email: c.email })],
+  [(c) => NOOP_SEND_KEYS.some((key) => c.json[key]),
+    (c) => ({ ...c.base, success: true, text: c.text, email: c.email,
+      note: c.json.covered_by_credit ? 'Nothing was sent: account credit now covers this invoice.' : 'Nothing new was sent: the invoice was already delivered or is being delivered.' })],
+  [(c) => c.requested.every((leg) => leg.status === 'sent'),
+    (c) => ({ ...c.base, success: true, text: c.text, email: c.email, note: 'The invoice was sent.' })],
+  [() => true,
+    (c) => ({ ...c.base, partial: true, text: c.text, email: c.email,
+      note: c.unknown ? 'Part of the invoice was sent; delivery of the rest could not be confirmed — check before sending again.' : 'Part of the invoice send did not go out — see text and email.' })],
+];
+
 function sendOutcome(plan, status, json = {}) {
-  const base = { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number };
-  if (status === 409) {
-    // The route's own pre-delivery refusals (nothing claimed, nothing sent): a fresh card is fine.
-    if (DEFINITIVE_SEND_CONFLICT_CODES.has(json.code)) {
-      return { ...base, error: `Nothing was sent: ${json.error || 'the invoice is busy'}`, code: json.code, preview_changed: true };
-    }
-    // Any other conflict means another request owns the live send claim: that delivery may
-    // still finish. Uncertain and not retryable, no fresh card (a retry could send it twice).
-    return { ...base, outcome_unknown: true, code: json.code || 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE };
-  }
-  if (json.in_progress) return { ...base, outcome_unknown: true, code: 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE };
   const text = channelResult(json.sms);
   const email = channelResult(json.email);
-  const unknown = UNCERTAIN_SEND_CODES.has(json.code) || [text, email].some((leg) => leg.status === 'unknown');
-  if (unknown && ![text, email].some((leg) => leg.status === 'sent')) {
-    return { ...base, outcome_unknown: true, code: json.code || 'delivery_uncertain', text, email,
-      error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' };
-  }
-  // Both channels failed (or the route refused before sending).
-  if (status !== 200) {
-    // The invoice changed after the card was shown (nothing claimed or sent): a fresh card is right.
-    const changed = json.code === 'approved_version_changed' || json.code === 'total_changed';
-    return { ...base, error: `The invoice was not sent: ${json.error || 'send failed'}`, code: json.code || 'send_failed', failed: true, ...(changed ? { preview_changed: true } : {}), text, email };
-  }
-  if (NOOP_SEND_KEYS.some((key) => json[key])) {
-    const note = json.covered_by_credit ? 'Nothing was sent: account credit now covers this invoice.' : 'Nothing new was sent: the invoice was already delivered or is being delivered.';
-    return { ...base, success: true, text, email, note };
-  }
-  const requested = [plan.text.startsWith('Text to') && text, plan.email.startsWith('Email to') && email].filter(Boolean);
-  const allSent = requested.every((leg) => leg.status === 'sent');
-  let note = 'Part of the invoice send did not go out — see text and email.';
-  if (allSent) note = 'The invoice was sent.';
-  else if (unknown) note = 'Part of the invoice was sent; delivery of the rest could not be confirmed — check before sending again.';
-  return { ...base, ...(allSent ? { success: true } : { partial: true }), text, email, note };
+  const c = {
+    base: { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number },
+    status, json, text, email,
+    unknown: UNCERTAIN_SEND_CODES.has(json.code) || [text, email].some((leg) => leg.status === 'unknown'),
+    sent: [text, email].some((leg) => leg.status === 'sent'),
+    requested: [plan.text.startsWith('Text to') && text, plan.email.startsWith('Email to') && email].filter(Boolean),
+  };
+  return SEND_OUTCOME_RULES.find(([applies]) => applies(c))[1](c);
 }
 
 async function commitSend(input, actionContext) {
@@ -389,7 +379,12 @@ async function commitSend(input, actionContext) {
     approvedSend: {
       expectedTotal: pinned.total_cents / 100,
       recipients: plan.sendRecipients,
-      version: { updatedAtMs: pinned.invoice_version, digest: pinned.version_digest },
+      version: {
+        updatedAtMs: pinned.invoice_version,
+        digest: pinned.version_digest,
+        // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
+        verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,
+      },
     },
   });
   const result = sendOutcome(plan, status, json || {});
@@ -422,7 +417,8 @@ function uncertainApprovalsQuery(database, { excludeInvoiceId = null, day }) {
   const uncertain = database('ib_pending_actions')
     .where({ tool_name: 'charge_invoice', status: 'confirmed' })
     .whereRaw("(consumed_at AT TIME ZONE 'America/New_York')::date = ?::date", [day])
-    .where((b) => b.whereNull('result').orWhereRaw("result->>'outcome_unknown' = 'true'"))
+    // No result yet, an unknown one, or the run claim of a charge that never recorded (running, or died).
+    .where((b) => b.whereNull('result').orWhereRaw("result->>'outcome_unknown' = 'true'").orWhereRaw(`result->>'claim' = '${RUN_CLAIM}'`))
     // The charge path's own durable claim: money may be moving or may have moved.
     .whereExists(function claimed() {
       this.select(database.raw('1')).from('stripe_invoice_charge_attempts as a')
@@ -456,11 +452,23 @@ function orphanChargesTodayQuery(database, day) {
     .sum({ total: 'o.amount' });
 }
 
+// The three reads as ONE statement (three CTEs, one result row): they run in a single snapshot, so a charge
+// that commits while the total is read cannot be missed by one read and counted by another (or both).
+function dailyTotalsQuery(database, { excludeInvoiceId = null, day }) {
+  return database
+    .with('paid', paidTodayQuery(database, day))
+    .with('uncertain', uncertainApprovalsQuery(database, { excludeInvoiceId, day }))
+    .with('orphans', orphanChargesTodayQuery(database, day))
+    .select(
+      database.raw('(SELECT total FROM paid) AS paid'),
+      database.raw('(SELECT n FROM uncertain) AS uncertain'),
+      database.raw('(SELECT total FROM orphans) AS orphans'),
+    );
+}
+
 async function chargedTodayCents(database = db, { excludeInvoiceId = null, day = etDateString() } = {}) {
-  const paid = await paidTodayQuery(database, day).first();
-  const row = await uncertainApprovalsQuery(database, { excludeInvoiceId, day }).first();
-  const orphans = await orphanChargesTodayQuery(database, day).first();
-  return toCents(paid?.total) + toCents(orphans?.total) + (Number(row?.n) || 0) * PER_CHARGE_CAP_CENTS;
+  const [row] = await dailyTotalsQuery(database, { excludeInvoiceId, day });
+  return toCents(row?.paid) + toCents(row?.orphans) + (Number(row?.uncertain) || 0) * PER_CHARGE_CAP_CENTS;
 }
 
 // The cap refusal for a charge of totalCents with usedCents already charged today, or null.
@@ -478,14 +486,24 @@ function capRefusal(totalCents, usedCents) {
 // transaction (stripe.js assertUnderChargeLock) with the final total. The
 // advisory lock is transaction-scoped: it is held until that transaction
 // (and its payments insert) commits or rolls back.
-function chargeLockGuard({ invoiceId, customerId }) {
-  return async (trx, { totalCents }) => {
+function chargeLockGuard({ invoiceId, customerId, effects = null }) {
+  return async (trx, { totalCents, invoice }) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAP_LOCK_KEY]);
     const message = capRefusal(totalCents, await chargedTodayCents(trx, { excludeInvoiceId: invoiceId }));
     if (message) throw Object.assign(new Error(message), { code: 'IB_CHARGE_CAP' });
     // The route runs this charge with operatorOverride off (the bar never overrides a
     // dispute hold), so a held customer is already refused before this; the check stays as a backstop.
     await require('../collections/collection-hold').assertNoCollectionHold(customerId, trx);
+    // What the payment also does (closeout, review, reminders, receipt ...), recomputed on the locked row:
+    // any difference from the card refuses before Stripe is called. The credit is the card's own number
+    // (the version digest and the exact-total check already guard it).
+    if (effects) {
+      const customer = await trx('customers').where({ id: customerId }).first();
+      const again = await planChargeEffects(invoice, customer, { database: trx, creditCents: effects.creditCents });
+      if (again.digest !== effects.digest) {
+        throw Object.assign(new Error('What this payment would also do changed after the card was shown. Nothing was charged.'), { code: 'approved_version_changed' });
+      }
+    }
   };
 }
 
@@ -531,24 +549,29 @@ async function resolveCard(invoice, input) {
   return { card: picked };
 }
 
+// The charge refusals checked in order before a card is read, each the Invoices page's own text (or null).
+const CHARGE_PRECHECKS = [
+  async (invoice) => collectibleRefusal(invoice),
+  async (invoice) => (invoice.payer_id
+    ? refusal('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account', 'payer_billed', { invoice_id: invoice.id })
+    : null),
+  // A saved-card charge already claimed or awaiting reconciliation (the charge path's own fence).
+  async (invoice) => ((await db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
+    .whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').first('id'))
+    ? refusal('A saved-card charge is already in progress or awaiting reconciliation. DO NOT charge again until an admin verifies it.', 'charge_in_progress', { invoice_id: invoice.id })
+    : null),
+  async (invoice) => ((await disputeHold(invoice.customer_id))
+    ? refusal('Collection is on hold for this customer (billing dispute). Review before charging. The bar never overrides it; use the Invoices page.', 'collection_hold', { invoice_id: invoice.id })
+    : null),
+];
+
 async function buildChargePlan(input) {
   const target = await resolveInvoice(input);
   if (target.error) return target;
   const { invoice } = target;
-  const notCollectible = collectibleRefusal(invoice);
-  if (notCollectible) return notCollectible;
-  if (invoice.payer_id) {
-    return refusal('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account', 'payer_billed', { invoice_id: invoice.id });
-  }
-  // A saved-card charge already claimed or awaiting reconciliation (the charge
-  // path's own fence) — the route's 409 text.
-  const inFlight = await db('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id })
-    .whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').first('id');
-  if (inFlight) {
-    return refusal('A saved-card charge is already in progress or awaiting reconciliation. DO NOT charge again until an admin verifies it.', 'charge_in_progress', { invoice_id: invoice.id });
-  }
-  if (await disputeHold(invoice.customer_id)) {
-    return refusal('Collection is on hold for this customer (billing dispute). Review before charging. The bar never overrides it; use the Invoices page.', 'collection_hold', { invoice_id: invoice.id });
+  for (const check of CHARGE_PRECHECKS) {
+    const refused = await check(invoice);
+    if (refused) return refused;
   }
   const picked = await resolveCard(invoice, input);
   if (picked.error) return { ...picked, invoice_id: invoice.id };
@@ -565,18 +588,18 @@ async function buildChargePlan(input) {
   if (quote.coveredByCredit || totalCents <= 0) {
     return refusal('Account credit covers this invoice, so nothing would be charged to the card. Apply the credit from the Invoices page.', 'covered_by_credit', { invoice_id: invoice.id });
   }
-  // A paid invoice quietly completes the open visit it bills (payment_intent.succeeded runs the
-  // 'paid' closeout): the same shared probe as the send card, disclosed and pinned.
-  const probe = await probeIssuedCloseout(invoice, 'paid', 'charged');
-  if (probe.error) return probe.error;
-  const { closeout } = probe;
-  const usedCents = await chargedTodayCents(db, { excludeInvoiceId: invoice.id });
-  const capMessage = capRefusal(totalCents, usedCents);
-  if (capMessage) return refusal(capMessage, 'charge_limit', { invoice_id: invoice.id });
   const baseCents = toCents(quote.base);
   const surchargeCents = toCents(quote.surcharge);
   const creditNowCents = toCents(invoice.credit_applied);
   const creditAfterCents = toCents(quote.projectedCreditApplied);
+  // Everything a paid invoice also does (the payment_intent.succeeded handler's list), from its own predicates.
+  const customer = await db('customers').where({ id: invoice.customer_id }).first();
+  const planned = await planEffectsOrRefuse(
+    () => planChargeEffects(invoice, customer, { creditCents: Math.max(0, creditAfterCents - creditNowCents) }), invoice, 'charged');
+  if (planned.error) return planned;
+  const usedCents = await chargedTodayCents(db, { excludeInvoiceId: invoice.id });
+  const capMessage = capRefusal(totalCents, usedCents);
+  if (capMessage) return refusal(capMessage, 'charge_limit', { invoice_id: invoice.id });
   return {
     preview: true,
     tool: 'charge_invoice',
@@ -588,14 +611,14 @@ async function buildChargePlan(input) {
     payment_method_id: card.id,
     card: cardLabel(card),
     balance: money(baseCents),
-    ...(creditAfterCents > creditNowCents ? { account_credit: `${money(creditAfterCents - creditNowCents)} of account credit is applied first` } : {}),
     surcharge: surchargeCents > 0
       ? `${money(surchargeCents)} card surcharge (${(Number(quote.rateBps) / 100).toFixed(2)}%)`
       : 'No card surcharge',
     total_charged: money(totalCents),
-    receipt: 'After the charge succeeds, the customer gets the payment receipt by email and/or text per their receipt settings; a text waits for 8 AM–8 PM ET.',
     limits: `At most ${money(PER_CHARGE_CAP_CENTS)} per charge and ${money(DAILY_CAP_CENTS)} a day from the bar.`,
-    ...(closeout ? { visit_closeout: closeoutLine(closeout, 'Once the charge is paid, the payment') } : {}),
+    effects: cardEffects(planned.effects),
+    // The credit the effects plan used (not pinned itself: the version digest and the exact total guard it).
+    _credit_cents: Math.max(0, creditAfterCents - creditNowCents),
     // Shown on the card, kept out of the approval fingerprint (`_` key): another
     // bar charge landing before Confirm changes it without changing this charge.
     _charged_today: `${money(usedCents)} charged from the bar today`,
@@ -608,7 +631,8 @@ async function buildChargePlan(input) {
       invoice_version: msOf(invoice.updated_at),
       // Amount due, credit and lines: the charge compares this with the locked row before Stripe.
       version_digest: approvedInvoiceVersionDigest(invoice),
-      ...closeoutPin(closeout),
+      // Every effect of the payment (closeout, review, reminders, receipt ...): the charge recomputes it under its lock.
+      effects: planned.digest,
       payment_method_id: card.id,
       card: digest({
         pm: card.stripe_payment_method_id, brand: card.card_brand || null, last4: card.last_four || null,
@@ -653,20 +677,47 @@ function chargeOutcome(plan, status, json = {}) {
   return { ...base, error: `Nothing was charged: ${message}`, code: json.code || 'charge_refused', preview_changed: json.code === 'approved_version_changed' || /changed|Review the updated total/i.test(message) };
 }
 
+// Takes the run claim on this approval: false when another bar charge holds a live claim (or this approval has
+// no row to claim). The transaction serializes claimants for the length of two statements and holds no
+// connection afterwards.
+async function claimChargeRun(approvalId) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CONFIRM_LOCK_KEY]);
+    const live = await trx('ib_pending_actions').where({ tool_name: 'charge_invoice' })
+      .whereRaw('id <> ?', [approvalId])
+      .whereRaw(`result->>'claim' = '${RUN_CLAIM}'`)
+      .whereRaw(`(result->>'since')::timestamptz > now() - interval '${RUN_CLAIM_STALE_MINUTES} minutes'`)
+      .first('id');
+    if (live) return false;
+    const claimed = await trx('ib_pending_actions').where({ id: approvalId, status: 'confirmed' }).whereNull('result')
+      .update({ result: JSON.stringify({ claim: RUN_CLAIM, since: new Date().toISOString() }), updated_at: trx.fn.now() });
+    return claimed === 1;
+  });
+}
+
+// Gives the claim back once the run ended (the confirm route records the result right after; a claim that is
+// never given back goes stale on its own).
+async function releaseChargeRun(approvalId) {
+  try {
+    await db('ib_pending_actions').where({ id: approvalId }).whereRaw(`result->>'claim' = '${RUN_CLAIM}'`).update({ result: null, updated_at: db.fn.now() });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:invoice-actions] charge claim release failed for ${approvalId} (${err.code || 'error'})`);
+  }
+}
+
 async function commitCharge(input, actionContext) {
   const pinned = input._verified_invoice_charge_version;
   if (!pinned) return { error: 'Use the confirmation card to approve this charge.', code: 'approval_required' };
-  // Held for the whole confirmed run (a transaction-scoped advisory lock on its own connection).
-  // A card turned away here has claimed nothing, so it is never counted as a reservation.
-  const lockWait = await db.transaction(async (gate) => {
-    const lock = await gate.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked', [CONFIRM_LOCK_KEY]);
-    if (!lock?.rows?.[0]?.locked) return { busy: true };
-    return { run: await runCharge(input, pinned, actionContext) };
-  });
-  if (lockWait.busy) {
+  const approvalId = actionContext?.operationId;
+  if (!approvalId || !(await claimChargeRun(approvalId))) {
     return refusal('Another bar charge is running, so nothing was charged. Ask again in a moment.', 'charge_busy');
   }
-  return lockWait.run;
+  // No transaction wraps the charge: the claim above is already committed.
+  try {
+    return await runCharge(input, pinned, actionContext);
+  } finally {
+    await releaseChargeRun(approvalId);
+  }
 }
 
 async function runCharge(input, pinned, actionContext) {
@@ -678,7 +729,7 @@ async function runCharge(input, pinned, actionContext) {
     // operator saw (the charge refuses any other total under its invoice lock).
     body: { paymentMethodId: pinned.payment_method_id, expectedTotal: pinned.charge_cents / 100 },
     actor: { technicianId: actionContext?.technicianId || null },
-    chargeGuard: chargeLockGuard({ invoiceId: plan.invoice_id, customerId: plan.customer_id }),
+    chargeGuard: chargeLockGuard({ invoiceId: plan.invoice_id, customerId: plan.customer_id, effects: { digest: pinned.effects, creditCents: plan._credit_cents } }),
     // The invoice row the card showed (edit time + amount due / lines digest): checked under the
     // charge's own invoice lock, before any Stripe call.
     version: { updatedAtMs: pinned.invoice_version, digest: pinned.version_digest },
@@ -693,6 +744,8 @@ async function runCharge(input, pinned, actionContext) {
 function cardLines(toolName, preview) {
   if (!preview || preview.preview !== true) return [];
   const head = { kind: 'customer', text: `Invoice ${preview.invoice_number} — ${preview.customer_name || preview.customer_id}` };
+  // Every planned effect is a card line (invoice-action-effects.js), after the headline lines.
+  const effects = (preview.effects || []).map(({ kind, text }) => ({ kind, text }));
   if (toolName === 'send_invoice') {
     return [
       head,
@@ -702,10 +755,7 @@ function cardLines(toolName, preview) {
       ...(preview.lines.length > CARD_LINES_SHOWN ? [{ kind: 'billing', text: `All ${preview.lines.length} invoice lines are listed; lines ${CARD_LINES_SHOWN + 1} on are under "Show more"` }] : []),
       { kind: 'comms', text: preview.text },
       { kind: 'comms', text: preview.email },
-      { kind: 'operational', text: preview.send_note },
-      ...(preview.visit_closeout ? [{ kind: 'operational', text: preview.visit_closeout }] : []),
-      { kind: 'operational', text: preview.review_request },
-      { kind: 'billing', text: preview.effects_note },
+      ...effects,
     ];
   }
   if (toolName === 'charge_invoice') {
@@ -713,12 +763,10 @@ function cardLines(toolName, preview) {
       head,
       { kind: 'billing', text: `Card: ${preview.card}` },
       { kind: 'billing', text: `Invoice balance: ${preview.balance}` },
-      ...(preview.account_credit ? [{ kind: 'billing', text: preview.account_credit }] : []),
       { kind: 'billing', text: `Surcharge: ${preview.surcharge}` },
       { kind: 'billing', text: `TOTAL CHARGED: ${preview.total_charged}` },
       { kind: 'billing', text: preview.limits },
-      { kind: 'comms', text: preview.receipt },
-      ...(preview.visit_closeout ? [{ kind: 'operational', text: preview.visit_closeout }] : []),
+      ...effects,
     ];
   }
   return [];
@@ -754,6 +802,7 @@ module.exports = {
   paidTodayQuery,
   uncertainApprovalsQuery,
   orphanChargesTodayQuery,
+  dailyTotalsQuery,
   chargedTodayCents,
   chargeLockGuard,
   capRefusal,

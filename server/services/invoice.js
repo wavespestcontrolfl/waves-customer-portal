@@ -4650,6 +4650,16 @@ async function claimInvoiceForSend(invoiceId, {
     await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
     throw approvedVersionChangedError(invoice);
   }
+  if (expectedVersion?.verifyEffects) {
+    // The Intelligence Bar's card also listed what the send does after it delivers (lead, reminders,
+    // closeout, review ...): recompute that list on the claimed row, with its pre-claim status. Fail closed.
+    let sameEffects = false;
+    try { sameEffects = await expectedVersion.verifyEffects({ ...invoice, status: current.status }, database); } catch { sameEffects = false; }
+    if (!sameEffects) {
+      await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+      throw approvedVersionChangedError(invoice);
+    }
+  }
   // A first send that waited for the visit summary's handoff (which holds this invoice through the
   // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
   // that release, so the summary's own record is read: a link text that started or was accepted
@@ -5047,13 +5057,26 @@ const FIRST_SEND_STATUSES = ["draft", "scheduled", "sending"];
 // sendViaSMSAndEmail / markDeliverySent, not sendViaSMS) are still covered.
 // Best-effort + idempotent; the resolver only matches open, never-converted
 // leads and never throws.
+// Whether a send converts the lead at all (convertLeadOnInvoiceSent's own test, shared with the
+// Intelligence Bar's effects plan). priorDelivered: the invoice carried delivery stamps (sent_at /
+// sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
+// with its historical stamps retained, so priorStatus alone would read
+// its resend as a first delivery and the contact fallback could mark an
+// unrelated newer lead won (Codex #3493 r7).
+function leadConversionApplies({ customerId, priorStatus, priorDelivered = false }) {
+  return Boolean(customerId) && !priorDelivered && FIRST_SEND_STATUSES.includes(priorStatus);
+}
+
+// The delivery stamps that mean "delivered before this send" for the lead conversion.
+// The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
+function priorDeliveredForLeadConversion(invoice) {
+  return Boolean(invoice.sent_at
+    || (invoice.sms_sent_at && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+      && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR)));
+}
+
 async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false }) {
-  // priorDelivered: the invoice carried delivery stamps (sent_at /
-  // sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
-  // with its historical stamps retained, so priorStatus alone would read
-  // its resend as a first delivery and the contact fallback could mark an
-  // unrelated newer lead won (Codex #3493 r7).
-  if (!customerId || priorDelivered || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
+  if (!leadConversionApplies({ customerId, priorStatus, priorDelivered })) return;
   try {
     const { convertLeadFromEvent } = require("./lead-estimate-link");
     await convertLeadFromEvent({ source: "invoice_sent", customerId });
@@ -8565,10 +8588,7 @@ const InvoiceService = {
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
-            // The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
-            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
-              && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: priorDeliveredForLeadConversion(claim.invoice) });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -13609,6 +13629,8 @@ module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
 module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
+module.exports.leadConversionApplies = leadConversionApplies;
+module.exports.priorDeliveredForLeadConversion = priorDeliveredForLeadConversion;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim

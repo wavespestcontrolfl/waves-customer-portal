@@ -100,6 +100,23 @@ function isSchedulableInvoice(invoice) {
   return !NON_SCHEDULABLE_INVOICE_STATUSES.includes(normalizedStatus(invoice));
 }
 
+// scheduleForInvoice's own never-arm verdicts for an invoice row (it applies them before and again
+// under the invoice lock; the Intelligence Bar's effects plan applies them to the post-send row).
+// A payer-billed or withdrawn invoice is never dunned to the homeowner. Returns the reason, or null.
+function followupArmBlock(invoice) {
+  if (!isSchedulableInvoice(invoice)) return 'not_schedulable';
+  if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return 'payer_billed';
+  return null;
+}
+
+// An active payment plan owns collection: no ordinary dunning is armed or re-armed under it.
+function activePaymentPlan(database, invoiceId) {
+  return database('payment_plans').where({ invoice_id: invoiceId, status: 'active' }).first('id');
+}
+
+// The system stops a void leaves on a sequence; the resend re-arms them (scheduleForInvoice).
+const VOID_STOP_STAMPS = ['invoice_voided', 'invoice_voided:prev=paused', 'invoice_terminal_status:void'];
+
 // Collections policy consult lives in the SHARED rail guard (codex
 // 2026-08-14: one implementation, not three that drift) — gate-off
 // byte-identical, per-channel verdicts, invoice-membership required.
@@ -440,7 +457,6 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
   // under the lock below, so a status change racing this read is caught there.
   const preview = await db('invoices').where({ id: invoiceId }).first();
   if (!preview) return null;
-  if (!isSchedulableInvoice(preview)) return null;
   // Third-party Bill-To: the follow-up/dunning sequence emails and texts the
   // homeowner with the pay link, but a payer-billed invoice's AR rolls to the
   // payer's AP inbox — never chase the homeowner for it. Phase 1 has no payer
@@ -450,7 +466,7 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
   // homeowner already held its pay link keeps `payer_id` NULL and a
   // collectible status, so a payer_id-only guard would arm dunning that
   // chases the homeowner for debt the payer now owes.
-  if (preview.payer_id || invoiceWithdrawnFromCustomer(preview)) return null;
+  if (followupArmBlock(preview)) return null;
 
   // OWNERSHIP IS DERIVED UNDER THE INVOICE LOCK (r19 P1).
   //
@@ -476,8 +492,7 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
     if (!invoice) return null;
     // Re-verify post-lock: an edit or payment that committed while we waited
     // can have made this invoice non-schedulable or payer-billed.
-    if (!isSchedulableInvoice(invoice)) return null;
-    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return null;
+    if (followupArmBlock(invoice)) return null;
 
     // Existing-row check moved under the lock too: it and the INSERT must be
     // one atomic decision, or two concurrent arms race the unique(invoice_id).
@@ -513,7 +528,7 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
       // (Codex #3493 r12 P0).
       const voidStopStamp = String(existing.stopped_reason || '');
       const isSystemVoidStop = existing.status === 'stopped'
-        && ['invoice_voided', 'invoice_voided:prev=paused', 'invoice_terminal_status:void'].includes(voidStopStamp)
+        && VOID_STOP_STAMPS.includes(voidStopStamp)
         && !existing.stopped_by_admin_id;
       if (isSystemVoidStop) {
         // Never re-arm under an ACTIVE payment plan (Codex #3493 r6): plan
@@ -523,9 +538,7 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
         // plan owns collection, and reviving ordinary dunning here would dun
         // a customer who is already paying. Same check as the INSERT path
         // below, under the same invoice lock.
-        const planActive = await trx('payment_plans')
-          .where({ invoice_id: invoiceId, status: 'active' })
-          .first('id');
+        const planActive = await activePaymentPlan(trx, invoiceId);
         if (planActive) return existing;
         // A pre-void ADMIN PAUSE survives the void stop as the retained
         // paused_* fields (stopSequence never clears them) or, for
@@ -612,9 +625,7 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
     // this check runs under the SAME lock, so whichever writer commits first
     // the invariant holds (plan first → we refuse here; we commit first → the
     // plan's stop catches the fresh row).
-    const activePlan = await trx('payment_plans')
-      .where({ invoice_id: invoiceId, status: 'active' })
-      .first('id');
+    const activePlan = await activePaymentPlan(trx, invoiceId);
     if (activePlan) return null;
 
     const customer = await trx('customers').where({ id: invoice.customer_id }).first();
@@ -671,6 +682,30 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
     }).returning('*');
     return row;
   });
+}
+
+// What scheduleForInvoice would do for this invoice row once the send lands, read-only (the
+// Intelligence Bar's effects plan shows it on the send card). It applies scheduleForInvoice's own
+// predicates: followupArmBlock, an existing row (and the void re-arm), activePaymentPlan, and
+// customerOnAutopay for the Auto Pay hold. state is one of: active, autopay_hold, payment_plan,
+// not_schedulable, payer_billed, rearm, existing:<status>, autopay_unreadable, no_invoice.
+async function planFollowupSequence(invoice, database = db, knownCustomer = null) {
+  const cadence = followupSteps().map((step) => step.daysAfterSend);
+  const block = invoice ? followupArmBlock(invoice) : 'no_invoice';
+  if (block) return { arms: false, state: block, cadence };
+  const existing = await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first('status', 'stopped_reason', 'stopped_by_admin_id');
+  if (existing) {
+    const rearm = existing.status === 'stopped' && VOID_STOP_STAMPS.includes(String(existing.stopped_reason || '')) && !existing.stopped_by_admin_id;
+    return { arms: rearm, state: rearm ? 'rearm' : `existing:${existing.status}`, cadence };
+  }
+  if (await activePaymentPlan(database, invoice.id)) return { arms: false, state: 'payment_plan', cadence };
+  try {
+    const customer = knownCustomer || await database('customers').where({ id: invoice.customer_id }).first();
+    const onAutopay = await customerOnAutopay(customer, { db: database, failClosed: true });
+    return { arms: true, state: onAutopay ? 'autopay_hold' : 'active', cadence };
+  } catch {
+    return { arms: true, state: 'autopay_unreadable', cadence };
+  }
 }
 
 // GATE_DUNNING_ADOPT_ORPHANS, read at call time (strict 'true'): an invoice
@@ -2359,10 +2394,16 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
  * Called from the Stripe webhook the instant an invoice is paid.
  * Marks the sequence completed and optionally sends a thank-you.
  */
+// What a payment does to a sequence row: it completes a live one, and thanks the customer by text when a
+// reminder was already sent. stopOnPayment's own test, shared with the Intelligence Bar's charge card.
+function stopOnPaymentVerdict(seq) {
+  if (!seq || seq.status === 'completed' || seq.status === 'stopped') return { stops: false, thankYou: false };
+  return { stops: true, thankYou: seq.touches_sent > 0 && Boolean(config.thankYou.enabled) };
+}
+
 async function stopOnPayment(invoiceId) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
-  if (!seq) return;
-  if (seq.status === 'completed' || seq.status === 'stopped') return;
+  if (!stopOnPaymentVerdict(seq).stops) return;
 
   const sentAReminder = seq.touches_sent > 0;
 
@@ -3110,8 +3151,12 @@ async function isDunningStopped(invoiceId, database = db) {
 }
 
 module.exports = {
+  stopOnPaymentVerdict,
+  activePaymentPlan,
   adoptOrphanInvoices,
   scheduleForInvoice,
+  planFollowupSequence,
+  followupArmBlock,
   runPending,
   // Used by the scheduled-SMS executor to suppress stale deferred
   // invoice/dunning replays (paid/void overnight).
