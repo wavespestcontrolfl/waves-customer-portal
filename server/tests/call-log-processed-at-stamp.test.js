@@ -14,6 +14,7 @@ const TERMINAL_WRITES = [
   "processing_status: extracted.is_spam ? 'spam' : 'voicemail',",    // spam / non-workable voicemail
   "processing_status: extracted.is_spam ? 'spam' : 'processed',",    // definitive rejection / veto verdict
   'processing_status: finalStatus,',                                 // main finalization
+  "processing_status: 'voicemail',",                                 // rejected implausible transcription (transcriptRejectionUpdate)
 ];
 
 describe('every terminal-verdict write stamps processed_at', () => {
@@ -24,6 +25,14 @@ describe('every terminal-verdict write stamps processed_at', () => {
       const window = src.slice(i, i + 6).join('\n');
       expect(window).toMatch(/processed_at: new Date\(\)/);
     }
+  });
+
+  test('both claim writes clear the previous verdict time', () => {
+    // A claim on a settled row (admin Reprocess) must not carry the old
+    // stamp into a pass that ends in no_transcription / extraction_failed.
+    const hits = src.map((l, i) => (l.trim() === 'processing_heartbeat_at: new Date(),' ? i : -1)).filter((i) => i >= 0);
+    expect(hits).toHaveLength(2);
+    for (const i of hits) expect(src.slice(i, i + 8).join('\n')).toMatch(/processed_at: null,/);
   });
 
   test('retry-lane statuses do not stamp', () => {

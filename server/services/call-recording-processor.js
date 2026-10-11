@@ -516,6 +516,7 @@ const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an imp
 function transcriptRejectionUpdate(rejectionMeta) {
   return {
     processing_status: 'voicemail',
+    processed_at: new Date(),
     answered_by: 'voicemail',
     call_outcome: 'voicemail',
     transcription: TRANSCRIPTION_REJECTED_SENTINEL,
@@ -9442,6 +9443,11 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // The verdict time belongs to the pass that lands it: a claim on a
+            // settled row (admin Reprocess) clears the old stamp, so a pass
+            // that ends in a retry lane never reports the previous verdict's
+            // time as its own (Codex #6269 r1).
+            processed_at: null,
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
             // already draining stamps itself IN the claim write, so the stamp
@@ -9511,6 +9517,11 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // The verdict time belongs to the pass that lands it: a claim on a
+            // settled row (admin Reprocess) clears the old stamp, so a pass
+            // that ends in a retry lane never reports the previous verdict's
+            // time as its own (Codex #6269 r1).
+            processed_at: null,
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
             // already draining stamps itself IN the claim write, so the stamp
