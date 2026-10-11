@@ -1196,6 +1196,8 @@ const SENSITIVE_CUSTOMER_FIELDS = Object.freeze([
   'service_contact3_name', 'service_contact3_phone', 'service_contact3_email',
   'service_contact_role', 'service_contact2_role', 'service_contact3_role',
   'payer_id', 'billing_mode', 'contact_role',
+  // Routes every inbound text from a shared phone (codex #6268 r1).
+  'sms_primary_for_shared_phone',
 ]);
 
 function isValidStage(stage) {

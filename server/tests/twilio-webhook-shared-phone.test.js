@@ -2,9 +2,8 @@
  * GATE_SMS_SHARED_PHONE_LINK (owner 2026-10-10, "link text").
  *
  * Two or more customer rows share the sender's phone. Gate off: the text stays
- * unlinked, as before. Gate on: it attaches to the account marked
- * sms_primary_for_shared_phone, else the account texted most recently, else the
- * most recently updated one; two marked accounts are ambiguous and stay unlinked.
+ * unlinked, as before. Gate on: it attaches to the ONE account marked
+ * sms_primary_for_shared_phone; no mark or two marks stay unlinked (no guessing).
  * All names and numbers here are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -16,11 +15,18 @@ jest.mock('../models/db', () => {
     const query = {};
     for (const method of ['whereNull', 'whereRaw', 'select', 'orderBy']) {
       query[method] = (...args) => {
-        if (method === 'select' && mockState.throwOnSelect) throw new Error('select failed');
+        // The gate-on query has no select(); its first builder call after the mark predicate is whereRaw.
+        if ((method === 'select' || (method === 'whereRaw' && query._markedOnly)) && mockState.throwOnSelect) throw new Error('lookup failed');
         return query;
       };
     }
-    query.limit = async (n) => { mockState.limits.push(n); return mockState.rows.slice(0, n); };
+    // The second (gate-on) query carries where({ sms_primary_for_shared_phone: true }).
+    query.where = (cond) => { if (cond && cond.sms_primary_for_shared_phone === true) query._markedOnly = true; return query; };
+    query.limit = async (n) => {
+      mockState.limits.push(n);
+      const rows = query._markedOnly ? mockState.rows.filter((r) => r.sms_primary_for_shared_phone === true) : mockState.rows;
+      return rows.slice(0, n);
+    };
     return query;
   };
   const db = jest.fn(() => build());
@@ -78,7 +84,7 @@ describe('findSingleCustomerByPhone with a shared phone', () => {
     expect(mockState.limits).toEqual([2]);
   });
 
-  test('gate on, one account marked: that account wins over a newer text', async () => {
+  test('gate on, one account marked: that account is linked', async () => {
     process.env[GATE] = 'true';
     mockState.rows = [
       row('a', { shared_phone_last_sms_at: '2026-10-09T12:00:00Z' }),
@@ -88,25 +94,15 @@ describe('findSingleCustomerByPhone with a shared phone', () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shared-phone: primary mark'));
   });
 
-  test('gate on, none marked: the account with the newest sms_log row wins', async () => {
+  test('gate on, none marked: stays unlinked, no guess from texts or updated_at', async () => {
     process.env[GATE] = 'true';
     mockState.rows = [
-      row('a', { updated_at: '2026-10-09T12:00:00Z', shared_phone_last_sms_at: '2026-09-01T12:00:00Z' }),
-      row('b', { updated_at: '2026-08-01T12:00:00Z', shared_phone_last_sms_at: '2026-10-05T12:00:00Z' }),
-      row('c'),
+      row('a', { updated_at: '2026-10-09T12:00:00Z', shared_phone_last_sms_at: '2026-10-05T12:00:00Z' }),
+      row('b', { updated_at: '2026-08-01T12:00:00Z' }),
     ];
-    expect((await findSingleCustomerByPhone(PHONE)).id).toBe('b');
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shared-phone: last texted'));
-  });
-
-  test('gate on, none marked and no sms rows: the newest updated_at wins', async () => {
-    process.env[GATE] = 'true';
-    mockState.rows = [
-      row('a', { updated_at: '2026-08-01T12:00:00Z' }),
-      row('b', { updated_at: '2026-10-02T12:00:00Z' }),
-      row('c', { updated_at: '2026-09-01T12:00:00Z' }),
-    ];
-    expect((await findSingleCustomerByPhone(PHONE)).id).toBe('b');
+    expect(await findSingleCustomerByPhone(PHONE)).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no primary mark'));
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
   test('gate on, two accounts marked: ambiguous, stays unlinked with a warning', async () => {
