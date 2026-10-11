@@ -151,13 +151,14 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(preview.preview).toBe(true);
     const lines = labels(card(preview));
     expect(lines).toEqual(expect.arrayContaining([
-      'Accepts estimate addonquo for Lena Synthetic: $90.00 a month',
-      expect.stringMatching(/^Starts Pest control \(Quarterly Pest Control\): 4 visits a year, \$49\.00 a month$/),
-      expect.stringMatching(/^Starts Mosquito \(Mosquito Barrier\): 17 visits a year, \$41\.00 a month$/),
-      'Bill line Lawn care: $55.00 → $55.00 a month',
-      'Bill line Pest control: $0.00 → $49.00 a month',
-      'Bill line Mosquito: $0.00 → $41.00 a month',
-      'Bill total: $55.00 → $145.00 a month (added to the existing plan)',
+      // Per application (round 22): the ledger's monthly figures are equivalents of the per-visit charges, never a monthly bill.
+      'Accepts estimate addonquo for Lena Synthetic: $90.00 a month equivalent',
+      expect.stringMatching(/^Starts Pest control \(Quarterly Pest Control\): 4 visits a year, \$49\.00 a month equivalent$/),
+      expect.stringMatching(/^Starts Mosquito \(Mosquito Barrier\): 17 visits a year, \$41\.00 a month equivalent$/),
+      'Bill line Lawn care: $55.00 → $55.00 a month equivalent',
+      'Bill line Pest control: $0.00 → $49.00 a month equivalent',
+      'Bill line Mosquito: $0.00 → $41.00 a month equivalent',
+      'Monthly equivalent of the per-application charges: $55.00 → $145.00 a month equivalent (added to the existing plan)',
       'Billing lane: billed per application (each visit) → billed per application (each visit) (unchanged)',
       'Tier: Bronze → Gold',
       'Bills each service per application at its own visit price (no single account fee)',

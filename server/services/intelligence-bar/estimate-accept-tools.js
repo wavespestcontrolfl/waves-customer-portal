@@ -466,22 +466,27 @@ async function dryRunAccept(estimate, actionContext) {
 // ── Card lines (authorization-contract.js pushes them as they are) ──
 function serviceAndBillLines(preview) {
   const lines = [];
+  // Per application, the ledger's monthly figures are equivalents of the
+  // per-visit charge, not a bill collected each month.
+  const perApp = preview.per_application_lane === true;
+  const aMonth = perApp ? ' a month equivalent' : ' a month';
+  const totalLabel = perApp ? 'Monthly equivalent of the per-application charges' : 'Bill total';
   if (!preview.converts) {
     lines.push({ kind: 'billing', label: 'Bill: unchanged — a one-time estimate only changes status here. Schedule and invoice the work by hand' });
   }
   for (const s of preview.services) {
     const visits = s.visits_per_year ? `${s.visits_per_year} visits a year` : 'visits a year not stated';
-    const price = s.monthly != null ? `, ${money(s.monthly)} a month` : '';
+    const price = s.monthly != null ? `, ${money(s.monthly)}${aMonth}` : '';
     lines.push({ kind: 'billing', label: `Starts ${s.service} (${s.names.join(', ')}): ${visits}${price}` });
   }
   const bill = preview.bill;
   if (!bill) return lines;
   for (const l of bill.lines) {
     const drops = l.after === 0 && l.before > 0 ? ' (drops off the bill)' : '';
-    lines.push({ kind: 'billing', label: `Bill line ${l.label}: ${money(l.before)} → ${money(l.after)} a month${drops}`, before: money(l.before), after: money(l.after) });
+    lines.push({ kind: 'billing', label: `Bill line ${l.label}: ${money(l.before)} → ${money(l.after)}${aMonth}${drops}`, before: money(l.before), after: money(l.after) });
   }
   const addOn = bill.add_on ? ' (added to the existing plan)' : '';
-  lines.push({ kind: 'billing', label: `Bill total: ${money(bill.total_before)} → ${money(bill.total_after)} a month${addOn}`, before: money(bill.total_before), after: money(bill.total_after) });
+  lines.push({ kind: 'billing', label: `${totalLabel}: ${money(bill.total_before)} → ${money(bill.total_after)}${aMonth}${addOn}`, before: money(bill.total_before), after: money(bill.total_after) });
   if (!bill.split_by_service) lines.push({ kind: 'billing', label: 'Bill note: this accept is not split by service (grouped or other-property estimate)' });
   if (preview.per_application) lines.push({ kind: 'billing', label: preview.per_application });
   return lines;
@@ -491,7 +496,11 @@ function serviceAndBillLines(preview) {
 // about it. A manual accept books and invoices none of them.
 // What the card says for each one-time line, by what the accept does with it.
 const ONE_TIME_LINE_LABELS = {
-  schedule_and_invoice_by_hand: (l) => `One-time ${l.name} (${money(l.amount)}): this accept does not schedule or invoice it — schedule it and invoice it by hand`,
+  schedule_and_invoice_by_hand: (l) => {
+    const work = l.visits > 1 ? `schedule all ${l.visits} of its visits` : 'schedule it';
+    const scope = Array.isArray(l.includes) && l.includes.length ? ` — sold as: ${l.includes.join('; ')}` : '';
+    return `One-time ${l.name} (${money(l.amount)}${l.visits > 1 ? `, ${l.visits} visits` : ''}): this accept does not schedule or invoice it — ${work} and invoice it by hand${scope}`;
+  },
   // A fee is not work: nothing to schedule, only an invoice line.
   invoice_by_hand: (l) => `${l.name} (${money(l.amount)}): this accept does not invoice it — add it to the first invoice by hand; there is no visit to schedule`,
   subtract_when_invoicing: (l) => `${l.name}: ${money(-l.amount)} off — the one-time service lines on this card are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`,
@@ -512,7 +521,7 @@ function cardLines(preview) {
   const e = preview.estimate;
   const oneTime = e.one_time_total > 0 ? `, ${money(e.one_time_total)} one-time` : '';
   return [
-    { kind: 'customer', label: `Accepts ${e.label} for ${preview.customer_name || preview.customer_id}: ${money(e.monthly_total)} a month${oneTime}` },
+    { kind: 'customer', label: `Accepts ${e.label} for ${preview.customer_name || preview.customer_id}: ${money(e.monthly_total)}${preview.per_application_lane ? ' a month equivalent' : ' a month'}${oneTime}` },
     ...serviceAndBillLines(preview),
     ...(preview.lawn_profile ? [{ kind: 'customer', label: preview.lawn_profile }] : []),
     ...oneTimeLines(preview),
@@ -591,7 +600,8 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     services: converts ? startedServices(estimateData, PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate })) : [],
     bill: converts ? billFromEffects(effects) : null,
     lawn_profile: lawnLine(effects),
-    one_time_lines: effectsOfKind(effects, 'one_time_line').map((l) => ({ name: l.name, amount: l.amount, consequence: l.consequence })),
+    one_time_lines: effectsOfKind(effects, 'one_time_line').map((l) => ({ name: l.name, amount: l.amount, consequence: l.consequence, ...(l.visits ? { visits: l.visits } : {}), ...(l.includes ? { includes: l.includes } : {}) })),
+    per_application_lane: converts && laneAfter === 'per_application',
     billing_lane: { before: laneBefore && laneLabel(laneBefore), after: laneAfter && laneLabel(laneAfter) },
     tier: { before: before.waveguard_tier ?? null, after: after.waveguard_tier ?? null },
     property_type: { before: before.property_type ?? null, after: after.property_type ?? null },

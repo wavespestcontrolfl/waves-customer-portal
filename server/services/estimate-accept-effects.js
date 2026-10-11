@@ -59,8 +59,9 @@ function effectsFingerprint(effects) {
 }
 
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+// Money compares in integer cents: a one-cent gap is a real mismatch.
+const cents = (v) => Math.round(Number(v || 0) * 100);
 const money = (n) => `$${round2(n).toFixed(2)}`;
-const UNITEMIZED_TOLERANCE = 0.01;
 const orNull = (v) => (v == null ? null : v);
 
 // ── State snapshots: what the conversion changes, read inside the accept ──
@@ -231,7 +232,17 @@ function canonicalOneTimeLines(estimate, data) {
   const { deriveCorrectiveWork } = require('./estimate-proposal-generate');
   const { correctiveWork, warning } = deriveCorrectiveWork(data, { ...estimate, onetime_total: null }, null);
   if (warning) return { lines: [], refusal: unrepresentableRefusal(warning) };
-  const lines = (correctiveWork || []).map((w) => ({ kind: 'one_time_line', name: String(w.label || 'One-time service').trim(), amount: round2(w.amount), consequence: lineConsequence(w.amount) }));
+  // The package visit count and the sold scope travel with the line: the
+  // accept books nothing, so the card is the office's instruction for the
+  // whole package, not one visit of it.
+  const lines = (correctiveWork || []).map((w) => ({
+    kind: 'one_time_line',
+    name: String(w.label || 'One-time service').trim(),
+    amount: round2(w.amount),
+    consequence: lineConsequence(w.amount),
+    ...(w.visits > 1 ? { visits: w.visits } : {}),
+    ...(Array.isArray(w.includes) && w.includes.length ? { includes: w.includes.slice() } : {}),
+  }));
   return { lines, refusal: null };
 }
 // The extractor drops a row whose amount resolves to zero or below without a
@@ -274,7 +285,7 @@ function pooledDiscountLine(estimate, lines) {
   if (total == null || !lines.length) return null;
   const listed = round2(lines.reduce((sum, line) => sum + Number(line.amount || 0), 0));
   const pooled = round2(listed - total);
-  if (pooled <= UNITEMIZED_TOLERANCE) return null;
+  if (cents(pooled) <= 0) return null;
   return { kind: 'one_time_line', name: 'Discount applied to the one-time total', amount: -pooled, consequence: 'subtract_when_invoicing' };
 }
 
@@ -313,7 +324,7 @@ function unitemizedOneTimeRefusal(estimate, lines) {
   if (total == null) return null;
   const listed = round2(lines.filter((line) => line.kind === 'one_time_line').reduce((sum, line) => sum + Number(line.amount || 0), 0));
   const missing = round2(total - listed);
-  if (Math.abs(missing) <= UNITEMIZED_TOLERANCE) return null;
+  if (cents(missing) === 0) return null;
   if (missing < 0) {
     return { message: `This estimate's listed one-time services add up to ${money(listed)} but its one-time total is ${money(total)}, so the bar cannot say what to invoice. Accept it from the estimate page.`, statusCode: 409, code: 'one_time_unitemized', total, listed, missing };
   }

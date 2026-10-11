@@ -410,6 +410,47 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['German Roach Cleanout', 80]]);
   });
+  test('round 22: a multi-visit one-time package carries its visit count and sold scope onto the line', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: '300.00',
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [{ service: 'flea', name: 'Flea Package', price: 300, visits: 3, detail: '3 visits, 2 weeks apart' }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
+      { kind: 'one_time_line', name: 'Flea Package', amount: 300, consequence: 'schedule_and_invoice_by_hand', visits: 3, includes: ['3 visits, 2 weeks apart'] },
+    ]);
+  });
+  test('round 22: a one-cent gap between the lines and the total is a mismatch, not a rounding tolerance', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: '99.99',
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 100 }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([
+      ['German Roach Cleanout', 100], ['Discount applied to the one-time total', -0.01],
+    ]);
+    const short = makeWorld({
+      estimateOverrides: {
+        onetime_total: '100.01',
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 100 }] } },
+        }),
+      },
+    });
+    await expect(markEstimateManuallyAccepted(base(short, fakeConverter(short), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unitemized', message: expect.stringContaining('$0.01 is not itemized') });
+  });
   test('round 20: a $0 (comped) row refuses as one_time_unrepresentable instead of being dropped from the card', async () => {
     const world = makeWorld({
       estimateOverrides: {
