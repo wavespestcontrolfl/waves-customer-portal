@@ -1,6 +1,6 @@
 /**
  * Billing type + per-application fee edits from the Intelligence Bar
- * (owner ruling D5, 2026-10-06: "switch Garcia to per-application at $147").
+ * (owner ruling D5, 2026-10-06: "switch the customer to per-application at $147").
  *
  * A small extension of update_customer, dark behind GATE_IB_BILLING_MODE_EDIT
  * (strict 'true'). Off, billing_mode and per_application_fee stay refused as
