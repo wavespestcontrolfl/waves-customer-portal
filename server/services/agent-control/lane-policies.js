@@ -202,6 +202,10 @@ const LANE_RUNTIME = {
   // report_ask: a public, token-scoped customer Q&A; the answer reaches the customer with no human step (a miss answers with the fixed-rule text), screened by the report copy guards.
   report_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3', expected_duration_ms: 8_000, heartbeat_interval_ms: 4_000, stall_after_ms: 16_000, hard_timeout_ms: 20_000, no_progress_after_ms: 16_000 },
   sms_scheduling_decide: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
+  // Auto-dispatch move proofreader (owner 2026-10-09): reads the customer
+  // record and answers allow / hold / unknown on one planned move. It writes
+  // nothing and moves nothing; today only the replay script calls it.
+  auto_dispatch_proofreader: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', maturity: 'M0' },
   // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
   // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
   typed_decisions: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },

@@ -7,9 +7,11 @@ const {
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
-  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
+const { areaAddOnKnobsFor } = require('./area-addon-config');
 const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } = require('./lawn-cost-plus-knobs');
 const {
   resolveMosquitoTreatableArea,
@@ -8523,6 +8525,343 @@ function priceDethatching(lawnSqFt, options = {}) {
 }
 
 // ============================================================
+// AREA ADD-ON TREATMENTS (cost-plus, tiered by treated area)
+// ============================================================
+const AREA_ADDON_VISIT_CONTEXTS = ['standalone', 'sameTripAddOn'];
+
+// What a line says about its visit. One own visit carries ONE drive allowance
+// for every add-on on it (priceAreaAddOnList): the line that carries it says
+// "Own visit", the others say they ride on that same visit.
+function areaAddOnVisitDetail(visitContext, carriesDrive) {
+  if (visitContext === 'sameTripAddOn') return 'Same visit as a booked service';
+  return carriesDrive ? 'Own visit' : 'Own visit, shared with the other add-ons';
+}
+
+// Gate enforcement lives here, the deepest chokepoint, like
+// GATE_BERMUDA_SUPPRESSION in priceLawnCare: the estimate engine, persisted
+// engineInputs replays and direct callers all hit the same wall. Read at call
+// time so a gate flip takes effect without a restart. failClosed rides the
+// persistence rethrow rail, never CLIENT_FALLBACK.
+function assertAreaAddOnsEnabled() {
+  if (require('../../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return;
+  const err = new Error('Area add-on treatments are not enabled on this environment (GATE_AREA_ADDONS) - remove the add-on or flip the gate.');
+  err.statusCode = 400;
+  err.code = 'AREA_ADDONS_GATED';
+  err.failClosed = true;
+  throw err;
+}
+
+// Round UP to the next price ending in 9 ($95.40 -> $99, $99 stays $99).
+function roundUpToNine(value) {
+  return Math.ceil((value - 9) / 10) * 10 + 9;
+}
+
+// Plain data only: a class instance, array, Date or null is not an add-on
+// entry or options bag.
+function isPlainAreaAddOnObject(value) {
+  if (Object.prototype.toString.call(value) !== '[object Object]') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+// The ONE validator for an add-on request. priceAreaAddOn (direct callers) and
+// the estimate engine's services.areaAddOns block both call it, so the rules
+// cannot drift between the two doors: known key (exact, case-sensitive),
+// visitContext and a positive area for tiered keys. An area above the largest
+// tier is VALID input (it prices as a custom quote), not an error. Version 1
+// sells one application per estimate, so there is no count to validate. It
+// does not check the gate and prices nothing.
+function normalizeAreaAddOnInput(addOnKey, options = {}) {
+  assertEnum(addOnKey, Object.keys(AREA_ADDONS.items), 'addOnKey');
+  if (!isPlainAreaAddOnObject(options)) {
+    throw buildPricingError('Area add-on options must be an object', { field: 'areaAddOns', addOnKey });
+  }
+  const cfg = AREA_ADDONS.items[addOnKey];
+  // The tiers this line is judged against: the live row, or the ones a stored estimate was priced with (replay).
+  const tiers = areaAddOnKnobsFor(addOnKey, options.pricingKnobs).tiers;
+  // Not silently priced as one: a caller asking for several applications
+  // would be quoted a single visit.
+  if (options.applications !== undefined) {
+    throw buildPricingError('applications is not supported: each area add-on is one application per estimate, and a second application is a new estimate', { field: 'applications', addOnKey });
+  }
+  const visitContext = options.visitContext ?? 'standalone';
+  assertEnum(visitContext, AREA_ADDON_VISIT_CONTEXTS, 'visitContext');
+  let areaSqFt = null;
+  let tierSqFt = null;
+  if (tiers) {
+    // Only a number or a numeric string is an area: Number(true) is 1 and
+    // Number([1200]) is 1200, which would quote malformed input.
+    const rawArea = options.areaSqFt;
+    const scalarArea = typeof rawArea === 'number'
+      || (typeof rawArea === 'string' && rawArea.trim() !== '');
+    areaSqFt = scalarArea ? Number(rawArea) : NaN;
+    if (!Number.isFinite(areaSqFt) || areaSqFt <= 0) {
+      throw buildPricingError(`areaSqFt is required for ${addOnKey} (the ${cfg.areaLabel} area in sq ft)`, { field: 'areaSqFt', value: options.areaSqFt });
+    }
+    tierSqFt = tiers.find((top) => areaSqFt <= top) ?? null;
+  }
+  // Alias match only: an unknown or missing grass is null, never a default.
+  const grassTrack = matchGrassTrack(options.grassType ?? options.track);
+  return { addOnKey, cfg, visitContext, areaSqFt, tierSqFt, grassTrack };
+}
+
+// One-time add-on treatment priced from AREA_ADDONS (see constants.js for
+// the formula and the owner rulings). `areaSqFt` is the TREATED area; the
+// line prices at the top of the tier that holds it. An area above the
+// largest tier returns an unpriced custom-quote line instead of extrapolating.
+// One application per estimate (owner ruling 2026-10-08): the price is for one
+// visit and bills once; a second application is a new estimate.
+//
+// visitContext 'sameTripAddOn' drops the drive minutes, so it is only true
+// when a host visit exists. This function cannot see the rest of the
+// estimate: generateEstimate checks that a priced host line is on the same
+// estimate (services.areaAddOns block), and a direct caller owns that check.
+// Selling a same-visit add-on to an EXISTING customer against an already
+// booked visit is not supported yet (it needs scheduling evidence).
+// `carriesDrive: false` prices an own-visit add-on that rides the drive of
+// another add-on on the same visit (the visit is chosen once for the whole
+// group, see priceAreaAddOnList).
+function priceAreaAddOn(addOnKey, options = {}) {
+  assertAreaAddOnsEnabled();
+  const {
+    cfg, visitContext, areaSqFt, tierSqFt, grassTrack,
+  } = normalizeAreaAddOnInput(addOnKey, options);
+  // The visit's one drive allowance. A direct caller prices a group of one, so
+  // it carries the drive; priceAreaAddOnList hands it to the first PRICED
+  // add-on only (a custom quote never carries it).
+  const carriesDrive = options.carriesDrive !== false;
+  // The visit's one booking-and-invoicing charge (adminPerJob): the same rule,
+  // and the same first priced line, as the drive. A direct caller carries it.
+  const carriesAdmin = options.carriesAdmin !== false;
+
+  const base = {
+    service: 'area_addon',
+    addOnKey,
+    name: cfg.name,
+    visitContext,
+    carriesVisitDrive: false,
+    carriesJobAdmin: false,
+    // The add-on's own catalog identity and family travel on the line so
+    // nothing downstream guesses a service from the display name.
+    catalogServiceKey: cfg.serviceKey,
+    addOnCategory: cfg.category,
+    // No recurring-customer perk and no WaveGuard percentage on add-ons.
+    discountable: false,
+  };
+  const customQuote = (reason, extra = {}) => ({
+    ...base,
+    ...extra,
+    price: null,
+    requiresManualReview: true,
+    manualReviewReasons: [reason],
+    quoteRequired: true,
+    requiresCustomQuote: true,
+    customQuoteReason: reason,
+  });
+
+  // The yearly limit (area-addon-limits.js): an add-on whose product is at its limit at this property, or
+  // whose history could not be read, is a custom quote with a staff-readable detail. No history given
+  // (no known customer) means no limit applies. The engine only reads the injected summary.
+  const limitVerdict = areaAddOnLimitVerdict(addOnKey, options.history);
+  if (limitVerdict) {
+    return customQuote(limitVerdict.reason, {
+      areaSqFt, tierSqFt, grassType: grassTrack, detail: limitVerdict.detail,
+      ...(limitVerdict.nextAllowedOn ? { limit: { count: limitVerdict.count, max: limitVerdict.max, lastAppliedOn: limitVerdict.lastAppliedOn, nextAllowedOn: limitVerdict.nextAllowedOn } } : {}),
+    });
+  }
+  // A label-bound row (the Arena 2(ee) rate is St. Augustine only) prices
+  // only for that verified grass; another or unknown grass is a custom quote.
+  if (cfg.requiresGrassTrack && grassTrack !== cfg.requiresGrassTrack) {
+    return customQuote('area_addon_grass_not_covered_by_label_rate', { areaSqFt, tierSqFt, grassTrack });
+  }
+  if (cfg.tiers && tierSqFt === null) {
+    return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
+  }
+
+  // The knobs this price is made of: the live pricing_config row, or, on a replay of a stored estimate, the ones it was
+  // priced with. Stamped on the line (pricingKnobs) so a later edit never re-prices a sent quote.
+  const knobs = areaAddOnKnobsFor(addOnKey, options.pricingKnobs);
+  const tierK = (tierSqFt || 0) / 1000;
+  const materialCost = tierK * knobs.materialPer1000;
+  const onSiteMin = knobs.setupMin + knobs.minPer1000 * tierK;
+  const driveMin = visitContext === 'standalone' && carriesDrive ? knobs.driveMinutes : 0;
+  const laborCost = (onSiteMin + driveMin) * knobs.laborRate / 60;
+  const adminCost = carriesAdmin ? knobs.adminPerJob : 0;
+  const cost = materialCost + laborCost + adminCost;
+  const price = roundUpToNine(cost / (1 - knobs.targetMargin));
+
+  const detailParts = [];
+  if (tierSqFt) detailParts.push(`Up to ${tierSqFt.toLocaleString()} sq ft ${cfg.areaLabel} area`);
+  detailParts.push(areaAddOnVisitDetail(visitContext, driveMin > 0));
+
+  return {
+    ...base,
+    carriesVisitDrive: driveMin > 0,
+    carriesJobAdmin: carriesAdmin,
+    price,
+    areaSqFt,
+    tierSqFt,
+    // The grass that authorized a grass-bound rate (the Arena 2(ee) rate is St. Augustine only):
+    // the booked visit carries it so the technician sees the evidence, not only the price.
+    ...(cfg.requiresGrassTrack ? { grassType: grassTrack } : {}),
+    manualReviewReasons: [],
+    pricingKnobs: knobs,
+    detail: detailParts.join(' | '),
+    costs: {
+      material: roundMoney(materialCost),
+      labor: roundMoney(laborCost),
+      admin: adminCost,
+      onSiteMin: roundMoney(onSiteMin),
+      driveMin,
+      total: roundMoney(cost),
+    },
+    margin: Math.round((price - cost) / price * 1000) / 1000,
+  };
+}
+
+// The estimate's grass for an entry that does not carry one. An explicit null
+// on the entry (or its `track` alias) means "the rep has not chosen a grass":
+// it prices exactly like the client's 'unknown' (a label-bound add-on quotes as
+// custom). Only an ABSENT field falls back to the estimate's grass, which is
+// the engine-door convenience for callers that never send one.
+function areaAddOnEntryGrass(entry, estimateGrass) {
+  for (const field of ['grassType', 'track']) {
+    if (entry[field] === null) return 'unknown';
+    if (entry[field] !== undefined) return entry[field];
+  }
+  return estimateGrass;
+}
+
+// The visit is a property of the add-on GROUP: a per-entry visitContext would
+// let an old client double-charge the drive, so it is refused, not honored.
+function assertGroupVisitOnly(entry, index) {
+  if (entry.visitContext === undefined) return;
+  throw buildPricingError('visitContext is set once for all area add-ons (services.areaAddOnVisit), not on each add-on - update the estimator and send areaAddOnVisit', { field: 'visitContext', index, reason: 'AREA_ADDON_VISIT_PER_ENTRY' });
+}
+
+// The group's visit: 'standalone' (default, the add-ons are their own visit)
+// or 'sameTripAddOn' (they ride a priced ONE-TIME service on the same estimate).
+function normalizeAreaAddOnVisit(visit) {
+  const value = visit ?? 'standalone';
+  assertEnum(value, AREA_ADDON_VISIT_CONTEXTS, 'areaAddOnVisit');
+  return value;
+}
+
+// Prices a whole services.areaAddOns list for the estimate engine: every
+// entry is validated in full FIRST (so a commercial property cannot turn an
+// unknown key or a bad value into a manual-quote line), a key may appear once
+// (version 1 sells one application per estimate; a second application is a new estimate),
+// then each entry is priced unless `isCommercialManualQuote(entry, family)`
+// claims it (web sweep = pest control family, the rest = lawn care).
+// `grassSources` name the estimate's grass for entries that do not carry one.
+//
+// ONE visit for the group (owner ruling 2026-10-08): `visit` ('standalone' |
+// 'sameTripAddOn') applies to every add-on. On their own visit the add-ons
+// share ONE drive allowance, carried by the FIRST listed add-on that is
+// actually priced (a custom quote or a commercial manual quote never carries
+// it); every other add-on prices with no drive. On a same visit no add-on
+// carries a drive. The visit's one adminPerJob (booking + invoicing) rides on
+// the first priced add-on the same way, on either visit: a second add-on does
+// not cost a second booking.
+// Returns the priced lines, the normalized requests and the visit (for the host check).
+function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote, visit, history, pricingKnobs } = {}) {
+  // The estimate's grass: the first source (lawn service, request, property)
+  // that names one, by `track` then `grassType`.
+  const grassType = grassSources
+    .flatMap((source) => [source?.track, source?.grassType])
+    .find((value) => value !== undefined && value !== null && value !== '');
+  if (entries === undefined) return { lines: [], requests: [], visit: 'standalone' };
+  const visitContext = normalizeAreaAddOnVisit(visit);
+  if (!Array.isArray(entries)) {
+    throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt }', { field: 'areaAddOns' });
+  }
+  if (entries.length > 0) assertAreaAddOnsEnabled();
+  const seenKeys = new Set();
+  const requests = entries.map((entry, index) => {
+    if (!isPlainAreaAddOnObject(entry)) {
+      throw buildPricingError('Each services.areaAddOns entry must be an object', { field: 'areaAddOns', index });
+    }
+    assertGroupVisitOnly(entry, index);
+    // pricingKnobs is the server's replay signal for the whole list, never an entry's own field.
+    const options = { ...entry, grassType: areaAddOnEntryGrass(entry, grassType), visitContext, pricingKnobs };
+    const normalized = normalizeAreaAddOnInput(entry.key, options);
+    if (seenKeys.has(normalized.addOnKey)) {
+      throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - each add-on is sold once per estimate (a second application is a new estimate)`, { field: 'areaAddOns', index, key: normalized.addOnKey });
+    }
+    seenKeys.add(normalized.addOnKey);
+    return { entry, options, normalized };
+  });
+  let driveCarried = false;
+  let adminCarried = false;
+  const lines = requests
+    .filter(({ entry, normalized }) => !isCommercialManualQuote?.(entry, normalized.addOnKey === 'web_sweep' ? 'pest_control' : 'lawn_care'))
+    .map(({ options, normalized }) => {
+      const line = priceAreaAddOn(normalized.addOnKey, { ...options, history, carriesDrive: !driveCarried, carriesAdmin: !adminCarried });
+      driveCarried = driveCarried || line.carriesVisitDrive === true;
+      adminCarried = adminCarried || line.carriesJobAdmin === true;
+      return line;
+    });
+  return { lines, requests, visit: visitContext };
+}
+
+// The estimator screen's add-on catalog, built from AREA_ADDONS so the screen
+// never hardcodes the table. maxPerYear / minDaysApart / limitText state the
+// yearly limit (area-addon-limits.js reads the same table) for the screen.
+function areaAddOnCatalog() {
+  return Object.entries(AREA_ADDONS.items).map(([key, cfg]) => ({
+    key,
+    name: cfg.name,
+    category: cfg.category,
+    areaLabel: cfg.areaLabel,
+    tiers: cfg.tiers ? [...cfg.tiers] : null,
+    maxPerYear: cfg.maxPerYear,
+    minDaysApart: cfg.minDaysApart || null,
+    limitText: limitText(cfg),
+    requiresGrassTrack: cfg.requiresGrassTrack || null,
+  }));
+}
+
+// Same-visit area add-ons ride a host visit: the price drops the drive
+// minutes, which is only true when the accepted visit is a priced SERVICE that
+// shares the estimate. The host is priced FIELD WORK on a ONE-TIME line (it
+// survives the one-time acceptance profile, oneTimeProfileServices, and is
+// booked as a visit): the add-ons are booked by the ONE-TIME acceptance (a
+// recurring accept is refused when the estimate carries an add-on,
+// AREA_ADDONS_ONE_TIME_ACCEPT_ONLY), so a recurring service cannot host them
+// until a recurring-host booking path exists. Never a host: a recurring line, a
+// fee, bond, rental, rider or surcharge that rides another line, a setup fee, a
+// discount row, an unpriced line (custom quote, commercial manual quote), an
+// add-on (it never hosts add-ons), and the roach fee that rides a recurring pest
+// plan. The STANDALONE Cockroach Treatment is priced field work booked as its own
+// visit, so it hosts. A pest estimate that only OFFERS a one-time choice has no
+// one-time line here and is refused too, so the customer's choice can never change
+// which price applies. Call it on the FINAL line list.
+const AREA_ADDON_NON_HOST_SERVICES = new Set([
+  'area_addon', 'waveguard_setup', 'manual_discount', 'rodent_bundle_discount', 'rodent_guarantee',
+  // Fees, riders and agreements that ride another line (no visit of their own).
+  'rodent_bait_setup', 'rodent_trapping_emergency_surcharge', 'termite_bond', 'termite_station_rental',
+  'trap_only_retainer', 'trap_only_setup', 'trap_only_extra_callback',
+]);
+// pest_initial_roach is one service key for two lines: the first-visit fee the engine adds to a recurring pest plan
+// (`standalone: false`, no visit of its own) and the sold-alone Cockroach Treatment (`standalone: true`, a booked visit).
+const isRecurringPlanRoachFee = (line) => line.service === 'pest_initial_roach' && line.standalone !== true;
+const AREA_ADDON_HOST_MISSING_MESSAGE = 'Same visit needs a one-time service on this estimate. Sell the add-on on its own visit, or on its own estimate.';
+function assertAreaAddOnHostVisit({ visit, requests }, lineItems) {
+  if (visit !== 'sameTripAddOn' || requests.length === 0) return;
+  const { RECURRING_SERVICES } = require('./v1-legacy-mapper');
+  const isHost = (line) => !!line
+    && !AREA_ADDON_NON_HOST_SERVICES.has(line.service)
+    && !isRecurringPlanRoachFee(line)
+    && !RECURRING_SERVICES.has(line.service)
+    && line.quoteRequired !== true
+    && line.requiresCustomQuote !== true
+    && [line.price, line.total].some((amount) => Number(amount) > 0);
+  if (!lineItems.some(isHost)) {
+    throw buildPricingError(AREA_ADDON_HOST_MISSING_MESSAGE, { field: 'areaAddOnVisit', visitContext: 'sameTripAddOn', reason: 'AREA_ADDON_HOST_MISSING' });
+  }
+}
+
+// ============================================================
 // PLUGGING (sod plug install by spacing)
 // ============================================================
 // Urgency handling matches v2 applyOT (urgency multiplier only — rc discount
@@ -9476,6 +9815,15 @@ module.exports = {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
+  priceAreaAddOn,
+  priceAreaAddOnList,
+  areaAddOnCatalog,
+  assertAreaAddOnHostVisit,
+  AREA_ADDON_NON_HOST_SERVICES,
+  normalizeAreaAddOnInput,
+  isPlainAreaAddOnObject,
+  assertAreaAddOnsEnabled,
+  buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,

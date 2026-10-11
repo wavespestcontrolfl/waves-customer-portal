@@ -461,6 +461,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   // and the memory write. /ask builds the report in mode 'live' purely for
   // context and must not trigger either. Applied for mode === 'live' only.
   lawnRainfastWatch = false,
+  // OPT-IN on the same terms (GATE_LAWN_WATER_IN_RAIN): only the /data render and the PDF render print the
+  // lawn watering banner, so only they pay for the rain lookup. /ask and /map.svg never do.
+  lawnWaterInRain = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -482,6 +485,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnLighting,
     lawnPhotoFindings,
     lawnRainfastWatch,
+    lawnWaterInRain,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2231,6 +2235,7 @@ router.get('/:token', async (req, res, next) => {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
             lawnPhotoFindings: true,
+            lawnWaterInRain: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           apRenderedSignature = applicatorRenderedPdfSignature(data);
@@ -2548,6 +2553,7 @@ router.get('/:token/data', async (req, res, next) => {
         lawnLighting: true,
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
+        lawnWaterInRain: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

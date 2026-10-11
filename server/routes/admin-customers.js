@@ -15,6 +15,7 @@ const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
 const { validateSodLaidOn, resolveSodRecord, NEW_SOD_COLUMNS, SOD_AREA_MAX } = require('../services/lawn-sod-holds');
 const { buildNewSodSummary } = require('../services/lawn-sod-form-summary');
+const { lastPreEmergentBlock } = require('../services/lawn-last-pre-emergent');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
@@ -467,7 +468,21 @@ function indexServicesForSchedule(rows = []) {
   return { byKey, byName, rows };
 }
 
+// An area add-on line names its catalog row by the key frozen on the estimate
+// (area_addon_<key>), never by its display name: the name is admin-editable,
+// one engine key serves six rows, and "Fire Ant Yard Treatment" reads as the
+// generic fire ant or lawn service to a name matcher. No row for the key
+// means unmatched, not a guess (the visit then carries no add-on identity
+// and the job card withholds its governed rate). Every other line goes to the
+// name and key matcher below.
 function serviceCatalogMatch(line, serviceIndex) {
+  if (normalizeServiceKey(line?.service || '') === 'area_addon') {
+    return serviceIndex.byKey.get(normalizeServiceKey(line?.catalogServiceKey || '')) || null;
+  }
+  return lineServiceCatalogMatch(line, serviceIndex);
+}
+
+function lineServiceCatalogMatch(line, serviceIndex) {
   // The explicit serviceKey is its own candidate, tried FIRST (codex r17
   // P2): an accepted seasonal selection is restamped as { service:
   // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
@@ -5020,6 +5035,11 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 // GET /api/admin/customers/:id/new-sod — the read-only hold lines beside the
 // new-sod fields in Customer 360 (office only; no write, no message to anyone):
 //   holdLines  the plain hold lines for the saved sod record ([] when none)
+//   lastPreEmergent  [{ line, warning, note }] | null: one entry for each pre-emergent product Waves put on
+//              this home's lawn on the newest day it applied one. `warning` states that product's own label
+//              wait (only for a registration the app holds, and only inside the wait, counted to the sod
+//              date, or to today when no sod date is saved); `note` says to read the label when the app
+//              holds no wait for it. Both are null once the sod is confirmed rooted. null = none, or unproven
 // The form's render stamp for confirmedAsOf is the irrigation_home_changed_at
 // that GET /:id already returns on `preferences`.
 router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
@@ -5028,7 +5048,9 @@ router.get('/:id/new-sod', requireAdmin, async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const prefsRow = await db('property_preferences').where({ customer_id: customerId }).first();
-    res.json({ newSod: buildNewSodSummary({ prefsRow: prefsRow || null, todayEt: etDateString() }) });
+    const todayEt = etDateString();
+    const lastPreEmergent = await lastPreEmergentBlock({ knex: db, customerId, sodLaidOn: prefsRow?.sod_laid_on ?? null, sodRootedOn: prefsRow?.sod_rooted_on ?? null, todayEt });
+    res.json({ newSod: { ...buildNewSodSummary({ prefsRow: prefsRow || null, todayEt }), lastPreEmergent } });
   } catch (err) { next(err); }
 });
 

@@ -8,7 +8,9 @@ const {
   calculateProductAmount,
   effectiveAreaFactor,
   matchCatalogProduct,
-  parseVisitNutrientTargets,
+  visitNutrientTargets,
+  sheetReadsPlansStep,
+  fungusNitrogenNotes,
   parseProtocolLines,
   resolveProtocolItems,
   summarizeMaterialCost,
@@ -1056,7 +1058,11 @@ router.get('/lawn-mix', async (req, res, next) => {
     // property and date decide the application limits. With no visit (the reference tab)
     // the sheet keeps the 12x step, warns, and checks no limits.
     const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
-    const { visit, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
+    const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
+    // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated, so the
+    // line text, the objective and the amount agree. Only a visit the planner would also plan on v13, and only for the month of the
+    // window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
+    const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1076,7 +1082,6 @@ router.get('/lawn-mix', async (req, res, next) => {
     });
     const conditionalLines = [...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
     const allLines = [...baseLines, ...conditionalLines];
-    const nutrientTargets = parseVisitNutrientTargets(visit.notes);
 
     const matchedLines = resolveProtocolItems(allLines, products, {
       selectedConditionalProductIds: req.query.selectedConditionalProductIds,
@@ -1158,7 +1163,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, fungusNitrogenNotes(plannedMix, nitrogenCut)) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render

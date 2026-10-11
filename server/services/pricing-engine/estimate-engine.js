@@ -101,7 +101,7 @@ const {
   pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
-  priceTopDressing, priceDethatching,
+  priceTopDressing, priceDethatching, priceAreaAddOnList, assertAreaAddOnHostVisit,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
@@ -1701,6 +1701,25 @@ function generateEstimate(input) {
     // is not an exact measurement (codex P1: negative was truthy-exempt).
     lineItems.push(stampTurfReview(result, !(Number(dethatchingOptions.lawnSqFt) > 0)));
   }
+  // Area add-on treatments (GATE_AREA_ADDONS): one-time lines sold next to a
+  // base program. priceAreaAddOnList owns validation, the one-row-per-key
+  // rule, the gate and the commercial hand-off. Add-ons are discountable:false
+  // and never reach activeServiceKeys, so they neither earn a discount nor
+  // count toward the WaveGuard tier. The host-visit rule for a same-trip
+  // add-on is checked below, once the final line list exists.
+  const areaAddOns = priceAreaAddOnList(services.areaAddOns, {
+    grassSources: [services.lawn, input, property],
+    isCommercialManualQuote: useCommercialManualQuote,
+    visit: services.areaAddOnVisit,
+    // Injected by the route from the database (services/area-addon-limits.js); the engine never queries.
+    history: services.areaAddOnHistory,
+    // A stored estimate replays the price knobs it was priced with (server-derived, estimate-area-addon-knob-replay).
+    pricingKnobs: input.areaAddOnPricingKnobs,
+  });
+  areaAddOns.lines.forEach((line) => {
+    line.manualReviewReasons.forEach(addManualReviewReason);
+    lineItems.push(line);
+  });
   if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
     const result = pricePlugging(
       services.plugging.area || property.lawnSqFt,
@@ -2062,6 +2081,10 @@ function generateEstimate(input) {
       }
     }
   }
+
+  // Prior services the customer already holds are not a host: that case
+  // needs scheduling evidence and is not supported yet.
+  assertAreaAddOnHostVisit(areaAddOns, lineItems);
 
   assertFinitePriceFields(lineItems);
 

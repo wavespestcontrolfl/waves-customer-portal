@@ -373,79 +373,30 @@ describe('generate and read', () => {
     expect(onFullForm).toHaveBeenCalledTimes(1);
   });
 
-  // Where product went down decides the indoor re-entry wait on the
-  // customer's report: nothing is sent until the note has told where.
-  test('a note the facts could not be read from holds the send until written again', async () => {
+  // A read that failed shows no heard line and never holds the send (owner
+  // 2026-10-10: no rewriting the note); Write again still retries the read.
+  test('a note the facts could not be read from sends anyway, and Write again retries the read', async () => {
     const request = makeRequest({ facts: { available: true, status: 'failed', areas: [], pests: [] } });
     await openSheet(request);
     await generate();
-    // The footer says why; the report card shows no heard line.
-    expect(screen.getByText('Couldn’t read where you treated from your note. Write it again to retry.')).toBeTruthy();
-    // A read that failed is not the tech's to fix: the header offers the full form.
-    expect((await screen.findByRole('button', { name: 'Full form' })).disabled).toBe(false);
     expect(screen.queryByTestId('fast-complete-heard')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Write again' }));
     await waitFor(() => expect(request.bodies('/voice-facts')).toHaveLength(2));
   });
 
-  test('a note that never says where holds the send until it does', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: [], pests: ['ants'] } }));
+  test.each([
+    ['never says where', { areas: [], pests: ['ants'] }, 'Heard from you: where you treated: not heard · for ants'],
+    ['denies a place heard', { areas: ['Outside'], unclearAreas: ['Inside'], pests: [] }, 'Heard from you: treated outside · not clear: inside'],
+    ['treats for a pest not heard', { areas: ['Outside'], unclearAreas: [], pests: ['ants'], unclearPests: ['roaches'], spray: 'spot', unclearSpray: false }, 'Heard from you: treated outside · spot spraying · for ants · not clear: whether for roaches'],
+    ['leaves how it sprayed unclear', { areas: ['Outside'], unclearAreas: [], pests: ['ants'], spray: null, unclearSpray: true }, 'Heard from you: treated outside · not clear: how you sprayed · for ants'],
+    ['says no spraying while a spray is on the visit', { areas: ['Inside'], unclearAreas: [], pests: ['ants'], spray: null, noSpray: true }, 'Heard from you: treated inside · no spraying · for ants'],
+  ])('a note that %s shows what was heard and never holds the send (owner 2026-10-10: no rewriting the note)', async (_label, facts, heard) => {
+    await openSheet(makeRequest({ facts: { available: true, status: 'read', ...facts } }));
     await generate();
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: where you treated: not heard · for ants');
-    expect(screen.getByText('Say where you treated (inside, outside or garage) in your note, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
-  test('a place heard but denied in the note holds the send until it is said plainly', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: ['Inside'], pests: [] } }));
-    await generate();
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · not clear: inside');
-    expect(screen.getByText('It isn’t clear whether you treated inside. Say plainly where you treated, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
-  test('a pest the note treats for that was not heard holds the send (GitHub Codex on #5538)', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: ['ants'], unclearPests: ['roaches'], spray: 'spot', unclearSpray: false } }));
-    await generate();
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · spot spraying · for ants · not clear: whether for roaches');
-    expect(screen.getByText('It isn’t clear whether you treated for roaches. Say plainly which pests you treated for, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
-  test('a perimeter heard but not held up by the note holds the send, never a spot treatment (GitHub Codex P1)', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [], spray: null, unclearSpray: true } }));
-    await generate();
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated outside · not clear: how you sprayed');
-    expect(screen.getByText('It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
-  test('a note that says no spraying holds the send while a spray is still on the visit (GitHub Codex P1)', async () => {
-    const request = makeRequest({ facts: { available: true, status: 'read', areas: ['Inside'], unclearAreas: [], pests: ['ants'], spray: null, noSpray: true } });
-    await openSheet(request);
-    await generate({ note: "Didn't spray today; placed bait inside along the counter for ants." });
-    expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside · no spraying · for ants');
-    expect(screen.getByText('Your note says you didn’t spray, but Taurus SC is a spray. Remove it or change how it went down, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
-  test('"didn\'t spray" also holds a product whose own method is another spray, such as a foliar spray (codex local r17)', async () => {
-    const products = [...CATALOG, { id: 'tritek', name: 'TriTek', category: 'Insecticide', application_method: 'foliar_spray' }];
-    const cleanout = { ...REGULAR, serviceType: 'Pest Initial Cleanout', serviceKey: 'pest_initial_cleanout' };
-    const request = makeRequest({
-      service: cleanout,
-      products,
-      facts: { available: true, status: 'read', areas: ['Inside'], unclearAreas: [], pests: ['ants'], spray: null, noSpray: true },
-    });
-    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Initial Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /^TriTek\b/ }));
-    fireEvent.change(within(screen.getByRole('group', { name: 'TriTek' })).getByLabelText('How much?'), { target: { value: '1' } });
-    await generate({ note: "Didn't spray today; placed bait inside along the counter for ants." });
-    expect(screen.getByText('Your note says you didn’t spray, but TriTek is a spray. Remove it or change how it went down, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByTestId('fast-complete-heard').textContent).toBe(heard);
+    expect(screen.queryByText(/write it again/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
   test('the report waits for the promise list to answer, so a mark is never left out (Codex #5538)', async () => {
@@ -457,21 +408,24 @@ describe('generate and read', () => {
     expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(true);
   });
 
-  test('a note that names no pest holds the send: every product would go on the record for nothing (Codex #5538)', async () => {
-    await openSheet(makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [] } }));
+  test('a note that names no pest sends with no targets on the record (owner 2026-10-10)', async () => {
+    const request = makeRequest({ facts: { available: true, status: 'read', areas: ['Outside'], unclearAreas: [], pests: [] } });
+    await openSheet(request);
     await generate({ note: 'Sprayed spots outside.' });
-    expect(screen.getByText('Say what pest you treated for (ants, roaches, spiders…) in your note, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].products.every((product) => product.targets.length === 0)).toBe(true);
   });
 
-  test('a note too long to read holds the send and says to shorten it', async () => {
+  test('a note too long to read sends anyway', async () => {
     await openSheet(makeRequest({ facts: { available: true, status: 'too_long', areas: [], pests: [] } }));
     await generate();
-    expect(screen.getByText('Your note is too long to read where you treated. Shorten it, then write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.queryByText(/write it again/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
-  test('a voice-facts outage holds the send too', async () => {
+  test('a voice-facts outage does not hold the send', async () => {
     const request = makeRequest();
     request.mockImplementation(async (path, options) => {
       request.calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
@@ -485,7 +439,7 @@ describe('generate and read', () => {
     });
     await openSheet(request);
     await generate();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
   test('a change to the visit after the report makes it stale until it is written again (fresh)', async () => {
@@ -1064,46 +1018,19 @@ describe('complete and send', () => {
     });
   });
 
-  test('a spot visit has no trace step, and a trace already saved holds the send (the report would show a sprayed perimeter)', async () => {
-    const request = makeRequest({ trace: { enabled: true, treatmentZone: { linear_ft: 140.4, capture_mode: 'perimeter' } } });
+  test.each([
+    ['a perimeter trace', { linear_ft: 140.4, capture_mode: 'perimeter' }],
+    ['a trace with no length', { linear_ft: 0, capture_mode: 'perimeter' }],
+    ['a yard outline', { linear_ft: null, capture_mode: 'yard' }],
+  ])('a spot visit has no trace step, and %s already saved never holds the send (owner 2026-10-10)', async (_label, zone) => {
+    const request = makeRequest({ trace: { enabled: true, treatmentZone: zone } });
     await openSheet(request);
     await generate();
     expect(screen.queryByText('Perimeter traced · 140 ft')).toBeNull();
     expect(screen.queryByText('With the trace.')).toBeNull();
-    expect(screen.getByText('Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-    expect(request.bodies('/complete')).toEqual([]);
-  });
-
-  test.each([
-    ['a trace with no length', { linear_ft: 0, capture_mode: 'perimeter' }],
-    ['a yard outline', { linear_ft: null, capture_mode: 'yard' }],
-  ])('%s on a visit the note sprays no perimeter for still holds the send, with Remove the trace (Codex #5538)', async (_label, zone) => {
-    const request = makeRequest({ trace: { enabled: true, treatmentZone: zone } });
-    await openSheet(request);
-    await generate();
-    expect(screen.getByText('Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
-  test('Remove the trace takes a trace the note no longer backs off, bound to the loaded property, and the send goes (codex local r12)', async () => {
-    let zone = { linear_ft: 140.4, capture_mode: 'perimeter' };
-    const request = makeRequest({
-      trace: (path, options) => {
-        if (options?.method === 'DELETE') { zone = null; return { removed: true }; }
-        return { enabled: true, treatmentZone: zone };
-      },
-    });
-    await openSheet(request);
-    await generate();
-    fireEvent.click(screen.getByRole('button', { name: 'Remove the trace' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false));
-    expect(request.calls.filter((call) => call.options?.method === 'DELETE').map((call) => call.path))
-      .toEqual(['/tech/services/svc-1/treatment-zone?expectedPropertyId=prop-1']);
+    expect(screen.queryByText(/Remove the trace/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove the trace' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
-    await screen.findByTestId('fast-complete-sent');
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
   test('the completion carries the trace the report was judged against, for the server to re-check (Codex #5538)', async () => {
@@ -1174,21 +1101,6 @@ describe('complete and send', () => {
     expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
   });
 
-  test('a refused removal shows why and keeps the hold', async () => {
-    const request = makeRequest({
-      trace: (path, options) => {
-        if (options?.method === 'DELETE') throw conflict('visit_property_changed', 'This visit moved to another property. Close it and reopen it from the schedule.');
-        return { enabled: true, treatmentZone: { linear_ft: 140.4, capture_mode: 'perimeter' } };
-      },
-    });
-    await openSheet(request);
-    await generate();
-    fireEvent.click(screen.getByRole('button', { name: 'Remove the trace' }));
-    expect(await screen.findByText('This visit moved to another property. Close it and reopen it from the schedule.')).toBeTruthy();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy());
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
-  });
-
   test('a product set to Perimeter spray by hand gets the trace step even when the note says spots', async () => {
     const products = [...CATALOG, { id: 'gentrol', name: 'Gentrol IGR', category: 'Insecticide' }];
     await openSheet(makeRequest({ products }));
@@ -1242,16 +1154,16 @@ describe('complete and send', () => {
     expect(body.products.find((product) => product.productId === 'taurus')).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 150 });
   });
 
-  test('an "Interior spray too" trace holds the send until the note says inside was treated (pre-push P1)', async () => {
+  test('an "Interior spray too" trace never holds the send when the note says nothing about inside (owner 2026-10-10)', async () => {
     const request = makeRequest({
       facts: { ...FACTS, areas: ['Outside'], spray: 'perimeter' },
       trace: { enabled: true, treatmentZone: { linear_ft: 150, capture_mode: 'interior' } },
     });
     await openSheet(request);
     await generate();
-    expect(screen.getByText('Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Remove the trace' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    expect(screen.queryByText(/sprayed inside too/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove the trace' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
   });
 
   test('a spot visit with no trace saved completes with spot treatments and no trace step', async () => {

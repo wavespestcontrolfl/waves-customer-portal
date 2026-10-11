@@ -1654,10 +1654,11 @@ class SmartRebooker {
     // (customer self-serve, SMS replies, rain-out/auto flows): the option
     // being confirmed may have been generated before the owner blocked the
     // date. Admin-initiated moves stay unblocked BY DESIGN — the owner can
-    // knowingly book his own day off from dispatch. Fail-open helper.
+    // knowingly book his own day off from dispatch. Fail-open helper, except
+    // for the nightly auto-dispatch move: it blocks when the list is unreadable.
     if (initiatedBy !== 'admin') {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(newDateStr)) {
+      if (await isBlackoutDate(newDateStr, undefined, { strict: initiatedBy === 'auto_dispatch' })) {
         throw Object.assign(new Error('That day is no longer available'), {
           statusCode: 409,
           isOperational: true,
@@ -2239,6 +2240,12 @@ class SmartRebooker {
           statusCode: 409,
         });
       }
+
+      // A visit that carries a limited area add-on keeps no verdict from its old day: the add-on's yearly limit is judged on the NEW
+      // day at the place, with this row's CAS write holding it locked (a limit reached rolls the whole move back; a time-only move,
+      // a same-day move and a visit with no limited add-on cost nothing). Staff get the dates; a customer, SMS, voice or automatic
+      // caller gets the office hand-off (area-addon-limits.js assertMovedVisitLimitsOpen).
+      await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: serviceId, visit: service, scheduledDate: newDateStr, staff: initiatedBy === 'admin' });
 
       // Apply the certified order now that the row's own CAS write landed —
       // persistArrivalOrder re-numbers every stop in the verified order,
@@ -3569,6 +3576,12 @@ class SmartRebooker {
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
+          // A carried partner that lands on another day and carries a limited area add-on is judged for that day, as the
+          // single-row move is (area-addon-limits assertMovedVisitLimitsOpen; the row is read there, so every key it needs
+          // is present). A partner with no limited add-on costs one row read and one add-on row read.
+          if (partnerDateChanges) {
+            await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: partner.id, scheduledDate: dateStr, staff: initiatedBy === 'admin' });
+          }
           const updatedPartnerRows = await writePartnerCas(trx, partner, pUpdate);
           if (awaitingPlacement && partner.window_start) {
             await require('./appointment-reminders').precloseWindowlessReminderInTx(trx, partner.id);

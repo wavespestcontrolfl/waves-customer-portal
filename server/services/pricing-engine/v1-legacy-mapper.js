@@ -12,7 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { authoritativeEstimateResult, proposalIsAuthoritative } = require('../estimate-result-container');
+const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -28,6 +28,8 @@ const RECURRING_SERVICES = new Set([
 const ONE_TIME_SERVICES = new Set([
   'one_time_pest', 'one_time_lawn', 'one_time_mosquito',
   'top_dressing', 'dethatching', 'plugging', 'trenching',
+  // GATE_AREA_ADDONS: one row per add-on line (several can share an estimate).
+  'area_addon',
   // Legacy explicit German roach initial from older direct engine callers.
   'german_roach_initial',
   // Auto-fired by estimate-engine when recurring pest carries roachType !== 'none'.
@@ -194,7 +196,41 @@ function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
 // information-loss rule the pest_initial_roach comment below records.
 // Deliberately an allowlist: a blanket `li.name` fallback would rewrite
 // persisted labels for every other one-time service.
-const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer']);
+// area_addon: one service key, several add-ons (bed pre-emergent, web sweep...),
+// so the row name must come from the line's own `name`.
+const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer', 'area_addon']);
+
+// Identity of an area add-on row (which add-on, which tier, which catalog
+// service) so a stored row can be told apart from its siblings and nothing
+// downstream guesses from the display name. One application per estimate, so
+// `price` is the whole charge. Empty for any other service.
+const AREA_ADDON_PRICE_UNIT = 'application';
+function areaAddOnFields(li = {}) {
+  if (li.service !== 'area_addon') return {};
+  return {
+    addOnKey: li.addOnKey,
+    catalogServiceKey: li.catalogServiceKey ?? null,
+    addOnCategory: li.addOnCategory ?? null,
+    areaSqFt: li.areaSqFt ?? null,
+    tierSqFt: li.tierSqFt ?? null,
+    // Only a grass-bound add-on (the Arena 2(ee) rate) carries its grass.
+    ...(li.grassType ? { grassType: li.grassType } : {}),
+    visitContext: li.visitContext,
+    // Billing-unit marker: the row's whole price is one application. Every customer
+    // estimate surface that shows this price reads "$X per application" (AGENTS.md).
+    priceUnit: AREA_ADDON_PRICE_UNIT,
+    // True on the ONE line of an own visit that carries the visit's drive allowance.
+    carriesVisitDrive: li.carriesVisitDrive === true,
+    // True on the ONE priced line that carries the visit's single booking-and-invoicing charge.
+    carriesJobAdmin: li.carriesJobAdmin === true,
+    // Engine on-site minutes (no drive): the booked visit's duration floor.
+    onSiteMinutes: li.costs?.onSiteMin ?? null,
+    // The price knobs this row was priced with (pricing_config area_addon_pricing at quote time): the replay of a stored
+    // estimate reads them back, so a later edit of the row never re-prices a sent quote.
+    ...(li.pricingKnobs ? { pricingKnobs: li.pricingKnobs } : {}),
+    discountable: false,
+  };
+}
 
 function planLabelFor(li = {}) {
   return PLAN_LABELED_SERVICES.has(li.service) && li.name ? li.name : null;
@@ -1068,6 +1104,7 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!li.requiresCustomQuote,
           customQuoteReason: li.customQuoteReason || null,
           requiresMeasurement: !!li.requiresMeasurement,
+          ...areaAddOnFields(li),
           ...measurementMetadataFields(li),
           ...termiticideMetadataFields(li),
           ...commercialManualQuoteFields(li),
@@ -1082,6 +1119,7 @@ function mapV1ToLegacyShape(v1Result) {
         name,
         price,
         detail: mappedDetail,
+        ...areaAddOnFields(li),
         ...measurementMetadataFields(li),
         ...termiticideMetadataFields(li),
         // Commercial identity (isCommercial / commercialPricingMode / tax
@@ -1236,7 +1274,7 @@ function mapV1ToLegacyShape(v1Result) {
     .filter(li => li && (li.quoteRequired === true || li.requiresCustomQuote === true))
     .map(li => ({
       service: li.service,
-      name: li.display?.name || li.label || labelFor(li.service),
+      name: li.display?.name || li.label || planLabelFor(li) || labelFor(li.service),
       reason: li.reason || li.customQuoteReason || null,
       ...measurementMetadataFields(li),
       ...termiticideMetadataFields(li),
@@ -1433,6 +1471,7 @@ function mapV1ToLegacyShape(v1Result) {
             ? { priceAfterDiscount: Number(s.priceAfterDiscount) } : {}),
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
+          ...areaAddOnFields(s),
           ...measurementMetadataFields(s),
           ...termiticideMetadataFields(s),
         })),
@@ -1541,4 +1580,126 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAutho
     || (Array.isArray(line.tiers) && line.tiers.some((tier) => positive(tier?.bermudaSuppressionPerApp)))));
 }
 
-module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression, estimateResultCarriesBermudaSuppression, treeShrubLegacyTierRows };
+
+// Does a persisted estimate carry an area add-on treatment (GATE_AREA_ADDONS)?
+// Same job as the Bermuda detector above and the same reason: a quote saved
+// gate-on serves its stored rows at send / accept / pay / schedule without
+// re-entering priceAreaAddOn, so the kill switch must be checked on the stored
+// shape. Two kinds of evidence, read differently on purpose:
+//   - replayable inputs (fail closed, like estimateDataCarriesBermudaSuppression's
+//     request options): engineInputs / engineInput / inputs `.services.areaAddOns`
+//     and engineRequest.options (`.services.areaAddOns` or `.areaAddOns`). A
+//     recompute or an input-only replay would price the add-on again;
+//   - stored rows: the add-on rows of the AUTHORITATIVE container only
+//     (storedAreaAddOnRows, estimate-result-container.js; the pick
+//     estimateResultCarriesBermudaSuppression uses), so the stale `engineResult`
+//     a revision leaves behind never keeps a clean revision gated.
+// Any non-empty areaAddOns input counts, even a malformed one: failing closed
+// beats reading a shape the engine would reject anyway. `pricingAuthority` is the
+// row's `pricing_authority` (a SERVER reprice makes `result` the authority even
+// when it prices nothing).
+function proposalCarriesAreaAddOn(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => building?.lineItems || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  // `priceUnit: 'application'` is the marker a proposal line built from an add-on row keeps (estimate-proposal normalizeLineItem).
+  return lines.some((line) => typeof line?.addOnKey === 'string' || line?.service === 'area_addon' || line?.priceUnit === AREA_ADDON_PRICE_UNIT);
+}
+
+function estimateDataCarriesAreaAddOns(estimateDataRaw, { pricingAuthority = null } = {}) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  // An enabled authored proposal (itemized: the Bermuda detector's own test above) is the customer's quote. Engine inputs and
+  // rows retained from the estimate it was built from are not: only a proposal line that explicitly carries an add-on counts
+  // (no authoring path sets one today), so a clean proposal is neither gated nor limit-checked for an add-on it does not sell.
+  if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) return proposalCarriesAreaAddOn(d.proposal);
+  const listed = (value) => value !== undefined && value !== null
+    && !(Array.isArray(value) && value.length === 0);
+  const inputShapes = [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options];
+  if (inputShapes.some((shape) => shape && typeof shape === 'object'
+    && (listed(shape.services?.areaAddOns) || (shape === d.engineRequest?.options && listed(shape.areaAddOns))))) {
+    return true;
+  }
+  return storedAreaAddOnRows(d, { pricingAuthority }).length > 0;
+}
+
+// The persisted-boundary guard for area add-ons, shared by every route and
+// service that already guards the Bermuda add-on: true when the stored estimate
+// carries an add-on AND GATE_AREA_ADDONS is off (read at call time; unset =
+// kill). The caller fails closed with AREA_ADDONS_GATED in the status family
+// its Bermuda guard uses at that boundary.
+const AREA_ADDONS_GATED_CODE = 'AREA_ADDONS_GATED';
+function estimateAreaAddOnsGated(estimateDataRaw, options) {
+  return estimateDataCarriesAreaAddOns(estimateDataRaw, options)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS');
+}
+// Staff-facing message ("sending", "accepting", "booking from it"...).
+function areaAddOnsGatedStaffMessage(action) {
+  return `This estimate includes an area add-on treatment, which is currently disabled (GATE_AREA_ADDONS). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`;
+}
+// The staff-facing refusal for a stored estimate whose gated add-on is switched off: the
+// bermudagrass-suppression add-on first, then an area add-on. { code, message } or null; `action`
+// completes "...before <action>." ("sending", "accepting", "booking from it").
+function gatedAddOnStaffRefusal(estimateDataRaw, action, options) {
+  if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+    return {
+      code: 'BERMUDA_SUPPRESSION_GATED',
+      message: `This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`,
+    };
+  }
+  return estimateAreaAddOnsGated(estimateDataRaw, options)
+    ? { code: AREA_ADDONS_GATED_CODE, message: areaAddOnsGatedStaffMessage(action) } : null;
+}
+// Why a stored estimate is never suggested for annual prepay because of the add-ons it carries
+// ('estimate carries a gated add-on' | 'estimate carries an area add-on'), or null.
+function annualPrepayBlockingAddOnReason(estimateDataRaw, options) {
+  if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return 'estimate carries a gated add-on';
+  return estimateDataCarriesAreaAddOns(estimateDataRaw, options) ? 'estimate carries an area add-on' : null;
+}
+// Customer-facing message (same wording the Bermuda refusal uses).
+const AREA_ADDONS_GATED_CUSTOMER_MESSAGE = 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.';
+// The customer-facing refusal for a stored estimate whose gated add-on is switched off:
+// { error, code } (the 409 body) or null. The bermudagrass-suppression add-on first, then an area add-on.
+function gatedAddOnCustomerRefusal(estimateDataRaw, options) {
+  if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+    return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: 'BERMUDA_SUPPRESSION_GATED' };
+  }
+  return estimateAreaAddOnsGated(estimateDataRaw, options)
+    ? { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE } : null;
+}
+
+// Accepted area add-ons are scheduled and invoiced by the one-time accept
+// (one appointment carrying the service mix, the one-time total as its price).
+// A recurring-mode accept converts the recurring plan only and has no step that
+// books a sold one-time add-on, so it is refused instead of taking the plan and
+// dropping the add-on (owner ruling 2026-10-08: one application per estimate;
+// recurring add-ons are a later PR). Staff-facing text lives in the log line of
+// the refusing route; the customer sees the office hand-off.
+const AREA_ADDONS_ONE_TIME_ONLY_CODE = 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY';
+const AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE = 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.';
+
+module.exports = {
+  mapV1ToLegacyShape,
+  RECURRING_SERVICES,
+  estimateDataCarriesBermudaSuppression,
+  estimateResultCarriesBermudaSuppression,
+  estimateDataCarriesAreaAddOns,
+  estimateAreaAddOnsGated,
+  areaAddOnsGatedStaffMessage,
+  gatedAddOnStaffRefusal,
+  gatedAddOnCustomerRefusal,
+  annualPrepayBlockingAddOnReason,
+  AREA_ADDONS_GATED_CODE,
+  AREA_ADDONS_GATED_CUSTOMER_MESSAGE,
+  AREA_ADDONS_ONE_TIME_ONLY_CODE,
+  AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE,
+  AREA_ADDON_PRICE_UNIT,
+  treeShrubLegacyTierRows,
+};
