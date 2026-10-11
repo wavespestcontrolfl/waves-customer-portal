@@ -454,6 +454,16 @@ function leadSetDigest(ids) {
   return crypto.createHash('md5').update([...ids].map(String).sort().join(',')).digest('hex');
 }
 
+// The text of an invoice SMS as the Intelligence Bar pins it: the template that rendered and its body with the pay link replaced
+// by a fixed token (the real short link is minted at send, so it cannot be known on the card). One function for the card, the
+// claim and the text leg's handoff, so all three compare the same thing.
+const INVOICE_SMS_PAY_LINK_TOKEN = '[pay link]';
+function invoiceSmsDigest(rendered, payUrl) {
+  if (!rendered || !rendered.body) return 'none';
+  const normalized = payUrl ? String(rendered.body).split(String(payUrl)).join(INVOICE_SMS_PAY_LINK_TOKEN) : String(rendered.body);
+  return crypto.createHash('sha256').update(`${rendered.renderedTemplateKey || ''}\n${normalized}`).digest('hex').slice(0, 32);
+}
+
 // ── attachment upload reservations (Intelligence Bar send fence) ──
 // An upload writes to storage BEFORE it takes the invoice row lock to insert, so a send can claim, deliver and finalize in
 // between. The upload therefore writes a durable reservation (an audit row on the invoice, no new column) before its first
@@ -542,6 +552,8 @@ module.exports = {
   attachmentsFingerprintDigest,
   digestOfFingerprint,
   leadSetDigest,
+  INVOICE_SMS_PAY_LINK_TOKEN,
+  invoiceSmsDigest,
   invoiceDeliveryEpoch,
   reserveAttachmentUpload,
   releaseAttachmentUpload,

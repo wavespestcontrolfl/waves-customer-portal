@@ -43,6 +43,7 @@ const INV = '00000000-0000-4000-8000-0000000000a1';
 const INV2 = '00000000-0000-4000-8000-0000000000a2';
 const ADMIN = { isAdmin: true, technicianId: 'staff-1', operationId: 'op-1' };
 
+const SMS_RENDERED = { body: 'Hi Robin, your invoice WPC-2099-0001 is ready: [pay link]', renderedTemplateKey: 'invoice_sent' };
 let state;
 function invoiceRow(overrides = {}) {
   return {
@@ -108,6 +109,8 @@ beforeEach(() => {
   Followups.planFollowupSequence.mockReset().mockResolvedValue({ arms: true, state: 'active', cadence: [3, 7, 14, 30] });
   Followups.activePaymentPlan.mockReset().mockResolvedValue(null);
   CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValue(false);
+  // The invoice text as sendViaSMS renders it (the real renderer needs the template tables; its own tests cover it).
+  jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue(SMS_RENDERED);
 });
 afterAll(() => { delete process.env.GATE_IB_INVOICE_ACTIONS; });
 
@@ -192,7 +195,9 @@ describe('send_invoice card', () => {
       lines: ['Quarterly Pest Control $99.00', 'Mosquito add-on $30.00'], channels: 'text and email', send_note: 'Not sent before.',
     });
     expect(effectTexts(p)).toEqual(expect.arrayContaining(['Not sent before.', 'No review request is sent.']));
-    expect(p.text).toBe('Text to ***0100: the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link. Not sent if the customer opted out of texts.');
+    // The exact text the customer gets, from the same renderer the send uses (the pay link is minted at send).
+    expect(p.text).toBe('Text to ***0100: "Hi Robin, your invoice WPC-2099-0001 is ready: [pay link]" Not sent if the customer opted out of texts.');
+    expect(require('../services/invoice').renderInvoiceSmsBody).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), expect.objectContaining({ id: 'cust-1' }), '[pay link]', { noVariants: true, audit: false });
     expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).');
     const lines = cardLines('send_invoice', p).map((l) => l.text);
     expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line 1 of 2: Quarterly Pest Control $99.00', p.text, p.email,
@@ -287,7 +292,7 @@ describe('send_invoice commit', () => {
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
         expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' },
-        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), smsDigest: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
       },
     });
     // The exact recipients ride only to the send, never into the result.
@@ -326,6 +331,39 @@ describe('send_invoice commit', () => {
       jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockRestore();
     }
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  describe('the text (round 10): the card shows the rendered text and the handoff re-checks it', () => {
+    const { invoiceSmsDigest } = require('../services/invoice-helpers');
+    const renderer = () => require('../services/invoice').renderInvoiceSmsBody;
+
+    test('the pin is the digest of the rendered text, and it goes to the send as the text leg\'s expected digest', async () => {
+      Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+      const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      expect(card._version.sms_text).toBe(invoiceSmsDigest(SMS_RENDERED, '[pay link]'));
+      await run();
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version.smsDigest).toBe(card._version.sms_text);
+    });
+
+    test('a template edited after the card refuses the confirm as preview_changed and sends nothing', async () => {
+      const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      renderer().mockResolvedValue({ ...SMS_RENDERED, body: 'Hello Robin, pay now: [pay link]' });
+      await expect(run()).resolves.toMatchObject({ preview_changed: true });
+      expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+    });
+
+    test('a switched-off text template is stated on the card, pinned as none, and a card with no phone passes no text digest', async () => {
+      renderer().mockResolvedValue({ body: null, renderedTemplateKey: null });
+      const off = await preview('send_invoice', { invoice_id: INV });
+      expect(off.text).toMatch(/^No text: the invoice text template is switched off/);
+      expect(off._version.sms_text).toBe('none');
+      renderer().mockResolvedValue(SMS_RENDERED);
+      Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ primaryContact: { phone: null } }));
+      Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, email: { ok: true } } });
+      const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      await run();
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version).not.toHaveProperty('smsDigest');
+    });
   });
 
   test('the card pins the approved version, and a claim that finds it changed reports preview_changed with nothing sent', async () => {

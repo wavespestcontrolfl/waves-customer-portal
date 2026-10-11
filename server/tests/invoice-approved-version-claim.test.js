@@ -309,7 +309,7 @@ describe('claimInvoiceForSend with an approved version', () => {
   test('round 8 (source contract): the confirming admin rides the version into the claim\'s pin, and the delivery row is written before the send\'s own closeout', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
     expect(source).toMatch(/if \(expectedVersion && actorTechnicianId && expectedVersion\.actorTechnicianId === undefined\) \{\s*expectedVersion = \{ \.\.\.expectedVersion, actorTechnicianId \};/);
-    expect(source).toMatch(/claimToken: freshClaimToken, actorTechnicianId: expectedVersion\.actorTechnicianId \|\| null/);
+    expect(source).toMatch(/claimToken: token, actorTechnicianId: expectedVersion\.actorTechnicianId \|\| null/);
     const delivery = source.indexOf('recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token');
     const closeout = source.indexOf('issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent"');
     expect(delivery).toBeGreaterThan(0);
@@ -321,4 +321,130 @@ describe('claimInvoiceForSend with an approved version', () => {
     makeDb({ ...row, updated_at: new Date('2099-02-02T00:00:00Z'), credit_applied: '25.00' });
     await expect(claimInvoiceForSend(INVOICE_ID, {})).resolves.toMatchObject({ claimed: true });
   });
+});
+
+// Round 10 (PR #6117): the approved-version checks are separate decisions, and the closeout pin is the claim's last write.
+describe('the approved-version claim checks, one decision each', () => {
+  const checks = InvoiceService._approvedClaimChecks;
+  const helpers = require('../services/invoice-helpers');
+  const row = baseRow();
+  const base = (expectedVersion, extra = {}) => ({ invoiceId: INVOICE_ID, invoice: { ...row, status: 'sending' }, current: row, expectedVersion, database: db, token: 'claim-1', ...extra });
+  beforeEach(() => jest.clearAllMocks());
+  afterEach(() => jest.restoreAllMocks());
+
+  test('digest: null with no digest or a matching one; a changed amount due is approved_version_changed', () => {
+    expect(checks.approvedDigestRefusal(base({}))).toBeNull();
+    expect(checks.approvedDigestRefusal(base({ digest: approvedInvoiceVersionDigest(row) }))).toBeNull();
+    expect(checks.approvedDigestRefusal(base({ digest: approvedInvoiceVersionDigest({ ...row, credit_applied: '5.00' }) }))).toMatchObject({ code: 'approved_version_changed' });
+  });
+
+  test('effects: null when absent or unchanged; a changed list, a false answer or a throw is approved_version_changed (fail closed)', async () => {
+    await expect(checks.approvedEffectsRefusal(base({}))).resolves.toBeNull();
+    await expect(checks.approvedEffectsRefusal(base({ verifyEffects: async () => true }))).resolves.toBeNull();
+    await expect(checks.approvedEffectsRefusal(base({ verifyEffects: async () => false }))).resolves.toMatchObject({ code: 'approved_version_changed' });
+    await expect(checks.approvedEffectsRefusal(base({ verifyEffects: async () => { throw new Error('x'); } }))).resolves.toMatchObject({ code: 'approved_version_changed' });
+  });
+
+  test('owner: null when absent or the verifier is satisfied; its text, or the fail-closed text when it throws, is the refusal', async () => {
+    await expect(checks.approvedOwnerRefusal(base({}))).resolves.toBeNull();
+    await expect(checks.approvedOwnerRefusal(base({ verifyOwner: async () => null }))).resolves.toBeNull();
+    await expect(checks.approvedOwnerRefusal(base({ verifyOwner: async () => 'billed to a payer' }))).resolves.toMatchObject({ message: expect.stringContaining('billed to a payer') });
+    await expect(checks.approvedOwnerRefusal(base({ verifyOwner: async () => { throw new Error('x'); } }))).resolves.toMatchObject({ message: expect.stringContaining('could not verify who owes') });
+  });
+
+  test('attachments: null when the card did not pin them or no upload is in flight; an upload in flight (or an unreadable answer) refuses', async () => {
+    await expect(checks.approvedAttachmentRefusal(base({}))).resolves.toBeNull();
+    const spy = jest.spyOn(helpers, 'attachmentUploadInFlight');
+    spy.mockResolvedValue(false);
+    await expect(checks.approvedAttachmentRefusal(base({ attachments: 'none' }))).resolves.toBeNull();
+    spy.mockResolvedValue(true);
+    await expect(checks.approvedAttachmentRefusal(base({ attachments: 'none' }))).resolves.toMatchObject({ message: expect.stringContaining('attachment upload is still in progress') });
+    spy.mockRejectedValue(new Error('x'));
+    await expect(checks.approvedAttachmentRefusal(base({ attachments: 'none' }))).resolves.toMatchObject({ message: expect.stringContaining('attachment upload') });
+  });
+
+  test('pin: nothing to write for no target; a writer that throws refuses; the first refusal of the ordered checks wins', async () => {
+    await expect(checks.recordApprovedPinOrRefusal(base({}))).resolves.toBeNull();
+    await expect(checks.recordApprovedPinOrRefusal(base({ closeoutTarget: 'none' }))).resolves.toBeNull();
+    expect(recordApprovedCloseoutTarget).toHaveBeenCalledWith(INVOICE_ID, 'none', { conn: db, claimToken: 'claim-1', actorTechnicianId: null });
+    recordApprovedCloseoutTarget.mockRejectedValueOnce(new Error('audit down'));
+    await expect(checks.recordApprovedPinOrRefusal(base({ closeoutTarget: 'none' }))).resolves.toMatchObject({ message: expect.stringContaining('could not be recorded') });
+    const order = [];
+    const refusal = await checks.runApprovedClaimChecks(base({
+      digest: approvedInvoiceVersionDigest({ ...row, credit_applied: '5.00' }),
+      verifyEffects: async () => { order.push('effects'); return true; },
+    }));
+    expect(refusal).toMatchObject({ code: 'approved_version_changed' });
+    expect(order).toEqual([]);
+  });
+});
+
+describe('the closeout pin is the claim\'s last write (a refused claim leaves no pin)', () => {
+  beforeEach(() => jest.clearAllMocks());
+  afterEach(() => jest.restoreAllMocks());
+  const version = (row) => ({ ...approved(row), closeoutTarget: 'visit-1' });
+
+  test('a pin is written once, after every check, for a claim that succeeds', async () => {
+    const row = baseRow();
+    makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: version(row) })).resolves.toMatchObject({ claimed: true });
+    expect(recordApprovedCloseoutTarget).toHaveBeenCalledTimes(1);
+    expect(recordApprovedCloseoutTarget.mock.calls[0][2]).toMatchObject({ claimToken: expect.any(String) });
+  });
+
+  test('a first send the visit summary already texted is refused before the pin', async () => {
+    const row = baseRow({ status: 'draft', sent_at: null, visit_completion_packet_id: 'packet-1' });
+    makeDb(row);
+    jest.spyOn(require('../services/visit-completion-summary'), 'summaryLinkTextStarted').mockResolvedValue(true);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: version(row), firstDeliveryOnly: true })).rejects.toBeTruthy();
+    expect(recordApprovedCloseoutTarget).not.toHaveBeenCalled();
+  });
+
+  test('a refusal by the claim-time visit re-check or the queue reconciliation is before the pin as well', async () => {
+    const row = baseRow();
+    makeDb(row);
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+    const body = source.slice(source.indexOf('async function claimInvoiceForSend('), source.indexOf('// A combined-visit invoice minted self-pay is re-checked'));
+    const pin = body.indexOf('recordApprovedPinOrRefusal(ctx)');
+    expect(pin).toBeGreaterThan(body.indexOf('reverifyClaimedVisitInvoice('));
+    expect(pin).toBeGreaterThan(body.indexOf('reconcileQueuedSendUnderClaim('));
+    expect(pin).toBeGreaterThan(body.indexOf('runApprovedClaimChecks(ctx)'));
+    expect(pin).toBeGreaterThan(body.indexOf('summaryLinkTextStarted('));
+    // Exactly one place writes the pin.
+    expect(source.match(/recordApprovedCloseoutTarget\(/g)).toHaveLength(1);
+  });
+
+  test('a pin that cannot be written gives back the claim and refuses', async () => {
+    const row = baseRow();
+    const { currentRow } = makeDb(row);
+    recordApprovedCloseoutTarget.mockRejectedValueOnce(new Error('audit down'));
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: version(row) })).rejects.toMatchObject({ message: expect.stringContaining('could not be recorded') });
+    expect(currentRow().status).toBe('sent');
+    expect(currentRow().send_claim_token).toBeNull();
+  });
+});
+
+describe('claimInvoiceForSend stays within the complexity of the function it grew from', () => {
+  test('claimInvoiceForSend is at or below 26, and each helper that owns a decision at or below 20 (ESLint complexity rule)', async () => {
+    const { Linter } = require('eslint');
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+    const messages = new Linter({ configType: 'flat' }).verify(source, [{
+      languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs' },
+      rules: { complexity: ['warn', 1] },
+    }]);
+    const report = { messages };
+    const complexityOf = (name) => {
+      const hit = report.messages.find((m) => m.ruleId === 'complexity' && m.message.includes(`'${name}'`));
+      const match = hit && /complexity of (\d+)/.exec(hit.message);
+      return match ? Number(match[1]) : null;
+    };
+    expect(complexityOf('claimInvoiceForSend')).toEqual(expect.any(Number));
+    expect(complexityOf('claimInvoiceForSend')).toBeLessThanOrEqual(26);
+    for (const name of ['approvedDigestRefusal', 'approvedEffectsRefusal', 'approvedOwnerRefusal', 'approvedAttachmentRefusal', 'recordApprovedPinOrRefusal',
+      'runApprovedClaimChecks', 'claimNeedsOwnerFence', 'claimAlreadyHeld', 'buildClaimFlip', 'refuseFailedClaim']) {
+      // A function below the rule's floor of 2 has no message; every one of these has branches, so a miss means a rename.
+      expect([name, complexityOf(name)]).toEqual([name, expect.any(Number)]);
+      expect(complexityOf(name)).toBeLessThanOrEqual(20);
+    }
+  }, 120000);
 });

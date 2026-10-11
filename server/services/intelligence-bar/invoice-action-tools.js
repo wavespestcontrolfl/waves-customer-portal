@@ -38,7 +38,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint } = require('../invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint, invoiceSmsDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../invoice-helpers');
 const { planSendEffects, approvedCloseoutTarget, approvedLeadTargets } = require('./invoice-action-effects');
 
 const CARD_LINES_SHOWN = 4;
@@ -141,7 +141,6 @@ function customerCopy(invoice) {
   return { lines: lines.length ? lines : ['No personal message. No notes.'] };
 }
 
-const TEXT_MESSAGE = 'the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link';
 
 // Who owes the invoice RIGHT NOW. invoices.payer_id / payer_statement_id are a snapshot from when the invoice was
 // minted: a payer assigned afterwards (the scheduled service, or the customer's default payer) leaves both empty. The
@@ -204,17 +203,24 @@ async function sendRefusal(invoice, dueCents) {
 
 // The same recipients the Invoices page shows before Send (GET /:id/recipients):
 // the text goes to the customer's phone, the email to the billing recipient.
-function sendLegs(who, invoice, dueCents) {
+function sendLegs(who, invoice, dueCents, rendered) {
   const phone = who.primaryContact?.phone || null;
   const email = who.emailRecipient?.email ? String(who.emailRecipient.email).trim().toLowerCase() : null;
-  const text = phone
-    ? `Text to ${maskPhone(phone)}: ${TEXT_MESSAGE}. Not sent if the customer opted out of texts.`
-    : 'No text: no phone on file.';
+  // The exact text, from the renderer sendViaSMS sends with; the pay link is minted at send and shown as a token.
+  const text = !phone ? 'No text: no phone on file.'
+    : rendered.body
+      ? `Text to ${maskPhone(phone)}: "${rendered.body}" Not sent if the customer opted out of texts.`
+      : `No text: the invoice text template is switched off, so only the email can go out. Text to ${maskPhone(phone)} was not offered.`;
   const subject = `Invoice ${invoice.invoice_number} — ${money(dueCents)}`;
   const emailLine = email
     ? `Email to ${maskEmail(email)}: the invoice email (template invoice.sent), subject "${subject}", with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).`
     : 'No email: no billing email on file.';
   return { phone, email, text, emailLine };
+}
+
+// The text exactly as sendViaSMS renders it (invoice.js renderInvoiceSmsBody, base template row, pay link as a token).
+async function smsRender(invoice, customer) {
+  return require('../invoice').renderInvoiceSmsBody(invoice, customer || {}, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true, audit: false });
 }
 
 function emailContentGates() {
@@ -233,13 +239,15 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   if (refused) return refused;
   const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
   if (!who) return refusal('Invoice not found', 'invoice_not_found');
-  const legs = sendLegs(who, invoice, dueCents);
+  // The customer row is read once: the text renders for it, and the effects plan uses it.
+  const customer = await db('customers').where({ id: invoice.customer_id }).first();
+  const rendered = await smsRender(invoice, customer);
+  const legs = sendLegs(who, invoice, dueCents, rendered);
   if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
   const copy = customerCopy(invoice);
   if (copy.error) return copy;
   const totalCents = toCents(invoice.total);
   // Everything the send also does after it delivers: one list, from the handler's own predicates.
-  const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const planned = await planEffectsOrRefuse(() => planSendEffects(invoice, customer, { requestReview: false }), invoice, 'sent');
   if (planned.error) return planned;
   const recipients = { phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email };
@@ -285,6 +293,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       // The two gates that add live content to the page's email (other-balance note; service, address and payment-method
       // details). The bar's email omits both, so a flip changes nothing it sends; it is pinned so the card never goes stale on it.
       email_content_gates: emailContentGates(),
+      // The text the card shows (template that renders + body, pay link as a token). The text leg re-checks the body it is
+      // about to hand the provider against this, so a template edited after the card is not sent.
+      sms_text: invoiceSmsDigest(rendered, INVOICE_SMS_PAY_LINK_TOKEN),
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -390,6 +401,8 @@ async function commitSend(input, actionContext) {
         digest: pinned.version_digest,
         // The approved attachment list: the email leg checks it once more right before the provider call.
         attachments: pinned.attachments,
+        // The text the card showed; the text leg refuses a different body at its provider handoff (omitted when no text goes).
+        ...(plan.sendRecipients.phone ? { smsDigest: pinned.sms_text } : {}),
         // The visit the card said would close (or none): handed to the send's closeout, and written on the invoice
         // by the claim so the retry sweep keeps to it.
         closeoutTarget: plan._closeout_target,

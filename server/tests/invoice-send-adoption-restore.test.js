@@ -1195,3 +1195,54 @@ describe('the bar send records its delivery in the finalizing transaction', () =
     expect(closeout.recordApprovedCloseoutDelivery).not.toHaveBeenCalled();
   });
 });
+
+// Round 10 (PR #6117): the Intelligence Bar pins the text its card showed. The card and the text leg render through the one
+// renderer, and the leg refuses a body that differs at its provider handoff.
+describe('the approved invoice text at the text leg', () => {
+  const { invoiceSmsDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../services/invoice-helpers');
+  const templates = require('../routes/admin-sms-templates');
+  let invoices;
+  const base = { id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null, token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null };
+  const echo = (body) => templates.getTemplate.mockImplementation(async (_key, vars) => body.replace('{first}', vars.first_name).replace('{pay}', vars.pay_url));
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    invoices = makeInvoicesTable({ ...base });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return makeSmsLogTable([]).query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: '+19415550100' });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    echo('Hi {first}, your invoice is ready: {pay}');
+  });
+
+  test('the text the card renders is the text the leg hands the provider (pay link aside)', async () => {
+    const card = await InvoiceService.renderInvoiceSmsBody({ ...base }, { id: 'cust-1', first_name: 'Pat' }, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true, audit: false });
+    expect(card).toEqual({ body: 'Hi Pat, your invoice is ready: [pay link]', renderedTemplateKey: 'invoice_sent' });
+    expect(templates.getTemplate).toHaveBeenLastCalledWith('invoice_sent', expect.any(Object), expect.any(Object), { noVariants: true, audit: false });
+    const result = await InvoiceService.sendViaSMS('inv-1', { expectedSmsDigest: invoiceSmsDigest(card, INVOICE_SMS_PAY_LINK_TOKEN) });
+    expect(result).toMatchObject({ sent: true });
+    const sent = sendCustomerMessage.mock.calls[0][0];
+    expect(sent.body).toBe(`Hi Pat, your invoice is ready: ${result.payUrl}`);
+    expect(invoiceSmsDigest({ body: sent.body, renderedTemplateKey: 'invoice_sent' }, result.payUrl)).toBe(invoiceSmsDigest(card, INVOICE_SMS_PAY_LINK_TOKEN));
+  });
+
+  test('a template edited after the card is not sent: the claim goes back and the provider is never reached', async () => {
+    const card = await InvoiceService.renderInvoiceSmsBody({ ...base }, { id: 'cust-1', first_name: 'Pat' }, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true });
+    echo('Hello {first}! Pay here {pay}');
+    await expect(InvoiceService.sendViaSMS('inv-1', { expectedSmsDigest: invoiceSmsDigest(card, INVOICE_SMS_PAY_LINK_TOKEN) }))
+      .rejects.toMatchObject({ code: 'sms_text_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test('a page send (no approved digest) renders as before, with variants allowed', async () => {
+    await InvoiceService.sendViaSMS('inv-1');
+    expect(templates.getTemplate).toHaveBeenLastCalledWith('invoice_sent', expect.any(Object), expect.any(Object), {});
+  });
+});
