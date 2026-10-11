@@ -583,7 +583,10 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     estimate_id: String(estimate.id),
     customer_id: customerId,
     customer_name: customerName(customer),
-    estimate: { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: round2(estimate.onetime_total) },
+    // The same aggregate the effect collector validates against: the row's
+    // onetime_total, else the engine's oneTime.total (a legacy row can carry
+    // the charge only there), so the header and the lines agree.
+    estimate: { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: AcceptEffects.oneTimeAggregateTotal(estimate) ?? 0 },
     converts,
     services: converts ? startedServices(estimateData, PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate })) : [],
     bill: converts ? billFromEffects(effects) : null,

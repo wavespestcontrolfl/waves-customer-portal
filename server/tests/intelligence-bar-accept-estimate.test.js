@@ -722,6 +722,17 @@ describe('Confirm', () => {
     expect(executionOutcome(clean)).toBe('completed');
   });
 
+  test('round 14: a legacy row with onetime_total null reads its one-time total from the engine aggregate, so the header matches the lines', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { total: 350, items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      postCommit([]),
+    ];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(labels(card(preview))).toContain('Accepts estimate addonquo for Lena Synthetic: $0.00 a month, $350.00 one-time');
+  });
+
   test('round 12: the membership fee line tells staff to invoice it, not to schedule a visit', async () => {
     dryEffects = () => [
       { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
