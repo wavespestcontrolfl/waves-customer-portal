@@ -1147,8 +1147,11 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // call_log_callback_verdict_parent_updated_at_index for a stamped parent):
   // the stamped and dismissed sets grow forever, the recent slice does not.
   const RECONCILE_WINDOW_DAYS = 30;
-  const recentCb = (q) => q.whereRaw(`cb.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
-  const recentParent = (q) => q.whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
+  // Each carries its partial index's own predicate (outbound; inbound + stamp),
+  // so the planner can use it.
+  const recentCb = (q) => q.where('cb.direction', 'like', 'outbound%').whereRaw(`cb.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
+  const recentParent = (q) => q.where('p.direction', 'inbound').whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
   const settledNonSpam = (q) => q.modify(recentCb).whereRaw(settledNonSpamCallbackSql('cb')).whereNot('cb.processing_status', 'spam');
   const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
@@ -1159,14 +1162,17 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // longer applies (callbackReachedSolicitor refuses it), so the stamp, the
   // cards and the dismissal it holds are retired through the same correction
   // (standingSpamCallbacks is empty for a non-voicemail parent).
-  const notVoicemail = (q) => q.modify(recentParent).where('cb.processing_status', 'spam').whereNull('cb.processing_token')
+  const notVoicemail = (q) => q.where('cb.processing_status', 'spam').whereNull('cb.processing_token')
     // NULL-safe (adoption clears the markers to NULL): isVoicemailParent's twin.
     .whereRaw("p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail'")
     .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(settledParentSql('p'));
   const obsoleteStamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
-    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(notVoicemail).limit(limit).select('cb.*');
+    .modify(recentParent).modify(notVoicemail).limit(limit).select('cb.*');
+  // Driven by the dismissed set (its partial index); the parent, stamped or
+  // not, is read by primary key and bounded by its own change time.
   const obsoleteDismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'")).join('call_log as p', 'p.id', 'cc.call_log_id')
-    .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(notVoicemail).limit(limit).select('cb.*');
+    .where({ 'cc.status': 'dismissed', 'p.direction': 'inbound' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'")
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`).modify(notVoicemail).limit(limit).select('cb.*');
   // Cards the nightly sweep closed on callback-spam evidence carry no stamp:
   // start from the card (resolved callback_spam, no live row for its reason,
   // parent unstamped) and every settled non-spam office callback linked to

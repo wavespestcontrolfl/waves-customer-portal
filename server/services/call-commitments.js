@@ -3103,7 +3103,9 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           AND cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
           AND (cc.fulfillment ->> 'kind') = 'outbound_call'
         WHERE ev.direction LIKE 'outbound%' AND ev.updated_at > ?
-          AND NOT ${settledNonSpamCallbackSql("ev")}`,
+          -- IS NOT TRUE, not NOT: a status NULL row with a recording waiting
+          -- (adoption) makes the predicate NULL, and that row is unsettled too.
+          AND (${settledNonSpamCallbackSql("ev")}) IS NOT TRUE`,
       [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000)],
     );
     for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
