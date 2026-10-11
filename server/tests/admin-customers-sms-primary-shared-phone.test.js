@@ -133,6 +133,15 @@ describe('PUT /admin/customers/:id smsPrimaryForSharedPhone', () => {
     expect(mockState.patches[0]).not.toHaveProperty('sms_primary_for_shared_phone');
   });
 
+  test('a mark-only save is refused when the phone changed under it', async () => {
+    mockState.initial = { ...mockState.initial, phone: '+19415550100', sms_primary_for_shared_phone: false };
+    mockState.locked = { ...mockState.locked, phone: '+19415550199', sms_primary_for_shared_phone: false };
+    const result = await saveCustomer({ smsPrimaryForSharedPhone: true }).catch((err) => ({ status: err.statusCode, body: { code: err.code } }));
+    expect(result.status).toBe(409);
+    expect(result.body.code).toBe('phone_changed_since_read');
+    expect(mockState.patches).toHaveLength(0);
+  });
+
   test('the same number in another format keeps the mark', async () => {
     mockState.initial.sms_primary_for_shared_phone = true;
     mockState.locked.sms_primary_for_shared_phone = true;

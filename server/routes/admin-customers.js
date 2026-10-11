@@ -4286,6 +4286,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // value is dropped — a mark this request sets explicitly stands.
           if (req.body.smsPrimaryForSharedPhone === undefined) delete updates.sms_primary_for_shared_phone;
           require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, lockedBefore);
+          // An explicit mark is a choice for the number the operator SAW. If a
+          // concurrent save changed this row's phone identity before the lock
+          // and this request does not set the phone itself, the mark would
+          // bind to a number nobody chose it for (codex #6268 r13): refuse,
+          // the operator re-reads and marks again.
+          if (updates.sms_primary_for_shared_phone === true && updates.phone === undefined
+            && phoneLast10(lockedBefore.phone) !== phoneLast10(before.phone)) {
+            throw Object.assign(new Error('This customer\'s phone number changed while you were editing. Reload the record, then set the texting mark again.'), {
+              statusCode: 409, isOperational: true, code: 'phone_changed_since_read',
+            });
+          }
           contactAuditAt = new Date();
           // ADMIN-BUG-R10 (round 3): on EVERY write of pipeline_stage=
           // 'churned' — including a re-save on an already-churned row, so a

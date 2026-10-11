@@ -2063,6 +2063,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
+  // Receipt for the shared-phone mark clear the card disclosed (codex #6268
+  // r13): rows marked primary whose number identity this write changes.
+  let perRowSharedPhoneMarksCleared = 0;
   const perRowLaneStampIds = [];
   let churnWoundDownCount = 0;
   // Codex #4715 r4 P2: rows where churnGuardOrRepair only repaired the
@@ -2152,6 +2155,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
         await trx('customers').where('id', customerId).update(
           rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
         );
+        if (clean.phone !== undefined && lockedBefore.sms_primary_for_shared_phone === true
+          && String(lockedBefore.phone || '').replace(/\D/g, '').slice(-10) !== String(clean.phone || '').replace(/\D/g, '').slice(-10)) {
+          perRowSharedPhoneMarksCleared += 1;
+        }
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
             !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -2253,6 +2260,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     updated_count: count,
     fields_updated: Object.keys(updates),
     ...bulkLaneStampResult(perRowLaneStampIds),
+    ...(perRowSharedPhoneMarksCleared ? { shared_phone_marks_cleared: perRowSharedPhoneMarksCleared, shared_phone_mark_note: `${perRowSharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
     ...(errors.length ? {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never
