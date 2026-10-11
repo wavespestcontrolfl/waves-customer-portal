@@ -94,7 +94,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -453,6 +453,8 @@ function makeRecordingDb(seed = {}) {
   const db = (table) => makeBuilder(table);
   db.raw = (...args) => ({ __raw: args });
   db.schema = { hasTable: async () => false };
+  // A WITH statement (the bar charge's one-snapshot daily total) chains like any builder and reads no rows.
+  db.with = () => makeBuilder('__with');
   db.transaction = async (cb) => cb((table) => makeBuilder(table));
   return { db, mutations };
 }
@@ -845,6 +847,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
+    dbMock.with = db.with;
 
     // The two route optimizers refuse BEFORE their confirmation gate while
     // drive-time calibration is off — they may not certify an arrival window
@@ -876,6 +879,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveMessagingHoldChecked').mockResolvedValue(false),
         jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
           .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
+        // The effects plan's own reads (invoice-action-effects.js) answer "nothing else happens" on this generic stand-in.
+        jest.spyOn(require('../services/project-report-hold'), 'heldReportsForInvoice').mockResolvedValue([]),
+        jest.spyOn(require('../services/invoice-followups'), 'activePaymentPlan').mockResolvedValue(null),
+        jest.spyOn(require('../services/invoice-followups'), 'planFollowupSequence').mockResolvedValue({ arms: false, state: 'not_schedulable', cadence: [3, 7, 14, 30] }),
+        jest.spyOn(require('../services/lead-estimate-link'), 'invoiceSentConversionTargets').mockResolvedValue({ leadIds: [] }),
         jest.spyOn(require('../services/stripe'), 'quoteInvoiceSavedCardCharge')
           .mockResolvedValue({ base: 129, surcharge: 3.87, total: 132.87, rateBps: 300, funding: 'credit', projectedCreditApplied: 0, coveredByCredit: false }),
       ] : [];
@@ -990,6 +998,7 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
+    dbMock.with = db.with;
 
     // The two route optimizers refuse BEFORE their confirmation gate while
     // drive-time calibration is off — they may not certify an arrival window
