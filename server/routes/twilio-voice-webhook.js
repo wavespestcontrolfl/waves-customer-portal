@@ -2686,8 +2686,15 @@ router.post('/recording-status', async (req, res) => {
             .where({ call_log_id: baseline.id })
             .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
             .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
-            .whereIn('status', ['open', 'in_progress'])
-            .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
+            .where(function supersedable() {
+              // ...open rows, and rows the callback-spam sweep auto-resolved on
+              // the OLD audio: the sweep reads the parent unlocked, so one that
+              // committed just before this swap closed a card about audio this
+              // call no longer has; marking it superseded here (rule cleared)
+              // keeps a later correction from reopening it (codex #6271 r46).
+              this.whereIn('status', ['open', 'in_progress']).orWhere({ status: 'resolved', resolution_rule: 'callback_spam' });
+            })
+            .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}`, resolution_rule: null });
           // The review flag follows the cards (Codex #3736 r14 P2): with the
           // old audio's cards retired and nothing else open, a row that was
           // review-open (a V2-vetoed spam row, say) must not stay counted.

@@ -844,8 +844,15 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
           .where({ call_log_id: call.id })
           .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
           .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
-          .whereIn('status', ['open', 'in_progress'])
-          .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote });
+          .where(function supersedable() {
+            // ...open rows, and rows the callback-spam sweep auto-resolved on
+            // the OLD audio: the sweep reads the parent unlocked, so one that
+            // committed just before this swap closed a card about audio this
+            // call no longer has; marking it superseded here (rule cleared)
+            // keeps a later correction from reopening it (codex #6271 r46).
+            this.whereIn('status', ['open', 'in_progress']).orWhere({ status: 'resolved', resolution_rule: 'callback_spam' });
+          })
+          .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote, resolution_rule: null });
       }
       return n;
     });
