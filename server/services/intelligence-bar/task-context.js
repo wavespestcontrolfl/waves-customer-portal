@@ -671,9 +671,9 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
   if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
-  // resend_receipt may name its invoice by number: bind it as the invoice record so a
-  // customer-scoped task proves the invoice is its own customer's.
-  if (toolName === 'resend_receipt' && params.invoice_number && !params.invoice_id) {
+  // resend_receipt (and send_invoice) may name the invoice by number: bind it as
+  // the invoice record so a customer-scoped task proves the invoice is its own customer's.
+  if (['resend_receipt', 'send_invoice'].includes(toolName) && params.invoice_number && !params.invoice_id) {
     const invoice = await db('invoices').where({ invoice_number: String(params.invoice_number).trim().toUpperCase() }).first('id');
     if (!invoice) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
     references.invoice_id = invoice.id;

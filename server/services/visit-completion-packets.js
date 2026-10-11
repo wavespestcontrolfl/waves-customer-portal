@@ -1031,6 +1031,21 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
         .select('packet_id')));
   }
   if (await query.first('id')) return true;
+  // A STANDALONE invoice (no packet, not a renewal) whose send claim is live is the same window (Codex #6117 r8 P1): the
+  // Intelligence Bar's claim judges who owes the invoice and holds the customer row only until the claim commits, so from
+  // then until the delivery finalizes the claim row itself is the fence. A stale claim (10 minutes without a write) is not
+  // in flight, so a stuck row never blocks a Bill-To change for good.
+  const standalone = database('invoices').whereNull('payer_id').whereNull('visit_completion_packet_id')
+    .where({ status: 'sending' }).where('updated_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+    .whereNotExists(database('annual_prepay_terms as renewal').whereRaw('renewal.prepay_invoice_id = invoices.id'));
+  if (customerId) standalone.where({ customer_id: customerId });
+  if (scheduledServiceId) standalone.where({ scheduled_service_id: scheduledServiceId });
+  if (payerId) {
+    standalone.where((q) => q
+      .whereIn('customer_id', database('customers').where({ payer_id: payerId }).select('id'))
+      .orWhereIn('scheduled_service_id', database('scheduled_services').where({ payer_id: payerId }).select('id')));
+  }
+  if (await standalone.first('id')) return true;
   // Invoices with no packet that ride a visit (a service-record or direct visit link) are the
   // same window: the shared Bill-To transition would hand a debt to AP under a send or charge.
   return require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId }, { pending });

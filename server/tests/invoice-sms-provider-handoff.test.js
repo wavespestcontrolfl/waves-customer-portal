@@ -167,6 +167,51 @@ describe('invoice SMS provider handoff', () => {
     });
   });
 
+  test('expectedSmsPhone (the bar\'s approved text recipient): a different phone, or a text the card never showed, is refused before the provider', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM123' });
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550199' }))
+      .rejects.toMatchObject({ code: 'recipient_changed', message: "The customer's phone is not the one the approval showed; the text was not sent" });
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: null }))
+      .rejects.toMatchObject({ code: 'recipient_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    invoiceReads = [invoice, invoice, invoice];
+    await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101' });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550101' }));
+  });
+
+  test('round 13: the phone is read AGAIN inside the final locked provider handoff; a number changed after the early check is not texted', async () => {
+    let phoneNow = '+19415550101';
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+      if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: phoneNow } });
+      if (table === 'activity_log') return query();
+      if (table === 'sms_log') return query({ returning: [] });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }));
+    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+    // The customer edit lands after the early recipient check and before the handoff (it does not take the invoice lock).
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => { phoneNow = '+19415550199'; return withProviderHandoff(dispatch); });
+    invoiceReads = [invoice, invoice, invoice, invoice];
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101' }))
+      .rejects.toMatchObject({ code: 'recipient_changed', deliveryOutcome: 'not_sent' });
+    expect(dispatch).not.toHaveBeenCalled();
+
+    // Unchanged phone: the provider is called. A phone-less approval (null) and an unreadable customer row refuse too.
+    phoneNow = '+19415550101';
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+    invoiceReads = [invoice, invoice, invoice, invoice];
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101' })).resolves.toMatchObject({ sent: true });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const precondition = InvoiceService._checkInvoiceDeliveryPreconditions;
+    const base = { sendClaimToken: 'claim-1', sendInvoice: invoice };
+    const unreadable = () => { throw new Error('db down'); };
+    await expect(precondition(unreadable, invoice, { ...base, expectedSmsPhone: '19415550101' })).resolves.toMatchObject({ blocked: true, code: 'recipient_changed' });
+    await expect(precondition(db, invoice, { ...base, expectedSmsPhone: null })).resolves.toMatchObject({ blocked: true, code: 'recipient_changed' });
+    // No approved phone (every other sender): not checked.
+    await expect(precondition(unreadable, invoice, base)).resolves.toEqual({ ok: true });
+  });
+
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
     const invoiceQueries = [];
     db.mockImplementation((table) => {
@@ -635,6 +680,34 @@ describe('invoice SMS provider handoff', () => {
       expect(deliveryStamp).toEqual(expect.objectContaining({ email_sent_at: expect.any(Date) }));
       expect(deliveryStamp).not.toHaveProperty('sms_sent_at');
       expect(activityInserts[0]?.description).toMatch(/^Invoice WPC-2026-1234 sent via Email:/);
+    });
+
+    test('round 9: the Intelligence Bar\'s no-replay posture queues nothing for a leg that did not send and reports it on the result', async () => {
+      const partial = {
+        sent: false, blocked: false, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+        },
+      };
+      sendCustomerMessage.mockImplementation(async () => partial);
+      const run = async (options) => {
+        const smsLogInserts = [];
+        db.mockImplementation(invoiceQueryDb({ smsLogInserts }).mock);
+        const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', ...options });
+        return { result, smsLogInserts };
+      };
+      // The page send queues the replay (a later text with a refreshed phone), as before.
+      const page = await run({});
+      expect(page.result.pendingChannelQueued).toBe(true);
+      expect(page.smsLogInserts).toHaveLength(1);
+      expect(JSON.parse(page.smsLogInserts[0].metadata)).toMatchObject({ entry_point: 'invoice_send_deferred', refresh_customer_phone: true });
+      // The bar's send queues nothing; the leg that did not send is a warning on the result.
+      const bar = await run({ noReplay: true });
+      expect(bar.result).toMatchObject({ sent: true, replayWarning: 'The sms leg did not send (twilio unavailable); send it by hand' });
+      expect(bar.result.pendingChannelQueued).not.toBe(true);
+      expect(bar.smsLogInserts).toEqual([]);
     });
 
     test('an accepted Email leg is finalized and never restores the claim when the Text leg returns a deferred replay hold (deferred + nextAllowedAt preserved)', async () => {

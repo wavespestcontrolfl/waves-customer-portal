@@ -216,7 +216,7 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { requestReview: true });
 
     expect(result.ok).toBe(true);
-    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'sent', actorTechnicianId: null });
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'sent', actorTechnicianId: null, approvedTarget: null });
     expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 

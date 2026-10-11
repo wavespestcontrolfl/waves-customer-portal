@@ -297,7 +297,12 @@ jest.mock('../services/customer-credit', () => ({
   reverseAppliedCredit: jest.fn(async () => {}),
 }));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: jest.fn(async () => null) }));
-jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
+jest.mock('../services/invoice-issued-closeout', () => ({
+  closeOutVisitForIssuedInvoice: jest.fn(async () => null),
+  recordApprovedCloseoutTarget: jest.fn(async () => undefined),
+  recordApprovedCloseoutDelivery: jest.fn(async () => undefined),
+  recordApprovedCloseoutRetired: jest.fn(async () => undefined),
+}));
 jest.mock('../services/invoice-email', () => ({ sendInvoiceEmail: jest.fn() }));
 
 const db = require('../models/db');
@@ -312,6 +317,7 @@ const InvoiceService = require('../services/invoice');
 function customerQuery(customer) {
   const q = {};
   q.where = jest.fn(() => q);
+  q.forShare = jest.fn(() => q);
   q.first = jest.fn(async () => customer);
   return q;
 }
@@ -1102,5 +1108,289 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
         sent: false, ok: true, covered_by_credit: true, queueResolutionError: expect.stringContaining('injected'),
       });
     });
+  });
+});
+
+// Round 9 (PR #6117): the Intelligence Bar's send writes the delivery marker that binds its closeout pin in the SAME
+// transaction that finalizes the invoice as sent. A marker that cannot be written rolls the finalization back.
+describe('the bar send records its delivery in the finalizing transaction', () => {
+  const closeout = require('../services/invoice-issued-closeout');
+  const { approvedInvoiceVersionDigest } = require('../services/invoice-helpers');
+  let invoices;
+  const base = {
+    id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null,
+    token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null, line_items: [{ description: 'Service', amount: 100 }],
+  };
+  const bar = () => ({
+    expectedVersion: {
+      updatedAtMs: null, digest: approvedInvoiceVersionDigest(base), closeoutTarget: 'none', leadTargets: 'none',
+      verifyOwner: async () => null, actorTechnicianId: undefined,
+    },
+    refusalOnly: true,
+    actorTechnicianId: 'admin-1',
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    invoices = makeInvoicesTable({ ...base });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return makeSmsLogTable([]).query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: null });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendInvoiceEmail.mockResolvedValue({ ok: true });
+    // A transaction that rolls the one invoice row back when its callback throws.
+    db.transaction.mockImplementation(async (callback) => {
+      const snapshot = { ...invoices.state() };
+      try { return await callback(db); } catch (err) { invoices.reset(snapshot); throw err; }
+    });
+  });
+
+  test('the marker is written inside the transaction that finalizes, with the claim token and the confirming admin', async () => {
+    let depth = 0;
+    db.transaction.mockImplementation(async (callback) => { depth += 1; try { return await callback(db); } finally { depth -= 1; } });
+    const seen = [];
+    closeout.recordApprovedCloseoutDelivery.mockImplementationOnce(async () => { seen.push({ depth, status: invoices.state().status }); });
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', bar());
+    expect(result).toMatchObject({ ok: true, email: { ok: true } });
+    expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+    expect(closeout.recordApprovedCloseoutDelivery).toHaveBeenCalledTimes(1);
+    expect(closeout.recordApprovedCloseoutDelivery).toHaveBeenCalledWith('inv-1', expect.any(String), { conn: db, actorTechnicianId: 'admin-1' });
+    // Written after the finalizing UPDATE and before the transaction ends: the invoice is 'sent' when the marker is written.
+    expect(seen).toEqual([{ depth: 1, status: 'sent' }]);
+    // The pin was written under the same claim token the marker carries.
+    expect(closeout.recordApprovedCloseoutTarget.mock.calls[0][2].claimToken).toBe(closeout.recordApprovedCloseoutDelivery.mock.calls[0][1]);
+  });
+
+  test('a marker that cannot be written rolls the finalization back: the claim is held, nothing downstream runs, and the send reports it by hand', async () => {
+    closeout.recordApprovedCloseoutDelivery.mockRejectedValueOnce(new Error('audit insert failed'));
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', bar());
+    expect(result).toMatchObject({
+      ok: false, code: 'INVOICE_DELIVERY_RECORD_FAILED', deliveryHeld: true,
+      error: expect.stringMatching(/Check the invoice by hand and do not send it again/),
+      email: { ok: true },
+    });
+    expect(invoices.state()).toMatchObject({ status: 'sending' });
+    expect(invoices.state().send_claim_token).toEqual(expect.any(String));
+    expect(closeout.closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
+    expect(require('../services/invoice-followups').scheduleForInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a page send (no approved version) writes no marker', async () => {
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1');
+    expect(result).toMatchObject({ ok: true });
+    expect(closeout.recordApprovedCloseoutDelivery).not.toHaveBeenCalled();
+  });
+
+  test('a bar claim handed back without a delivery retires its pin', async () => {
+    sendInvoiceEmail.mockResolvedValue({ ok: false, error: 'SMTP rejected' });
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', bar());
+    expect(result.ok).toBe(false);
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+    expect(closeout.recordApprovedCloseoutRetired).toHaveBeenCalledWith('inv-1', closeout.recordApprovedCloseoutTarget.mock.calls[0][2].claimToken);
+    expect(closeout.recordApprovedCloseoutDelivery).not.toHaveBeenCalled();
+  });
+});
+
+// Round 10 (PR #6117): the Intelligence Bar pins the text its card showed. The card and the text leg render through the one
+// renderer, and the leg refuses a body that differs at its provider handoff.
+describe('the approved invoice text at the text leg', () => {
+  const { invoiceSmsDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../services/invoice-helpers');
+  const templates = require('../routes/admin-sms-templates');
+  let invoices;
+  const base = { id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null, token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null };
+  const echo = (body) => templates.getTemplate.mockImplementation(async (_key, vars) => body.replace('{first}', vars.first_name).replace('{pay}', vars.pay_url));
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    invoices = makeInvoicesTable({ ...base });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return makeSmsLogTable([]).query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: '+19415550100' });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    echo('Hi {first}, your invoice is ready: {pay}');
+  });
+
+  test('the text the card renders is the text the leg hands the provider (pay link aside)', async () => {
+    const card = await InvoiceService.renderInvoiceSmsBody({ ...base }, { id: 'cust-1', first_name: 'Pat' }, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true, audit: false });
+    expect(card).toEqual({ body: 'Hi Pat, your invoice is ready: [pay link]', renderedTemplateKey: 'invoice_sent' });
+    expect(templates.getTemplate).toHaveBeenLastCalledWith('invoice_sent', expect.any(Object), expect.any(Object), { noVariants: true, audit: false });
+    const result = await InvoiceService.sendViaSMS('inv-1', { expectedSmsDigest: invoiceSmsDigest(card, INVOICE_SMS_PAY_LINK_TOKEN) });
+    expect(result).toMatchObject({ sent: true });
+    const sent = sendCustomerMessage.mock.calls[0][0];
+    expect(sent.body).toBe(`Hi Pat, your invoice is ready: ${result.payUrl}`);
+    expect(invoiceSmsDigest({ body: sent.body, renderedTemplateKey: 'invoice_sent' }, result.payUrl)).toBe(invoiceSmsDigest(card, INVOICE_SMS_PAY_LINK_TOKEN));
+  });
+
+  test('a template edited after the card is not sent: the claim goes back and the provider is never reached', async () => {
+    const card = await InvoiceService.renderInvoiceSmsBody({ ...base }, { id: 'cust-1', first_name: 'Pat' }, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true });
+    echo('Hello {first}! Pay here {pay}');
+    await expect(InvoiceService.sendViaSMS('inv-1', { expectedSmsDigest: invoiceSmsDigest(card, INVOICE_SMS_PAY_LINK_TOKEN) }))
+      .rejects.toMatchObject({ code: 'sms_text_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test('a page send (no approved digest) renders as before, with variants allowed', async () => {
+    await InvoiceService.sendViaSMS('inv-1');
+    expect(templates.getTemplate).toHaveBeenLastCalledWith('invoice_sent', expect.any(Object), expect.any(Object), {});
+  });
+});
+
+// Round 13 (PR #6117): the bar sends ONE text. `channels: ['sms']` never starts the email leg, and `adoptsQueuedInvoiceSend: false`
+// refuses a queued pay-link text instead of adopting (cancelling) it.
+describe('a text-only bar send (round 13)', () => {
+  const templates = require('../routes/admin-sms-templates');
+  let invoices;
+  let smsLog;
+  const base = { id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null, token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null };
+  const queuedRow = { id: 'sms-q1', status: 'scheduled', scheduled_for: new Date('2099-01-02T13:00:00Z'), metadata: { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1' } };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    invoices = makeInvoicesTable({ ...base });
+    smsLog = makeSmsLogTable([]);
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return smsLog.query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: '+19415550100' });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    templates.getTemplate.mockImplementation(async (_key, vars) => `Hi ${vars.first_name}, your invoice is ready: ${vars.pay_url}`);
+    sendInvoiceEmail.mockResolvedValue({ ok: true });
+  });
+
+  test('the text goes, the email leg is never started, and the invoice is finalized as sent', async () => {
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false });
+    expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: false, skipped: true, code: 'email_not_requested' } });
+    expect(sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+  });
+
+  test('a text that fails is handed back, never rescued by an email', async () => {
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(async () => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'PROVIDER_REJECTED', reason: 'number opted out' })));
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false });
+    expect(result).toMatchObject({ ok: false, sms: { ok: false } });
+    expect(sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test('without the option (the Invoices page) both legs still run', async () => {
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+    expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+    expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('a queued pay-link text refuses the bar send (queued_pay_link) and is left exactly as it was; the page send adopts it', async () => {
+    smsLog = makeSmsLogTable([{ ...queuedRow }]);
+    await expect(InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false }))
+      .rejects.toMatchObject({ code: 'queued_pay_link' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+    expect(smsLog.rows ? smsLog.rows()[0].status : 'scheduled').toBe('scheduled');
+    // The page's default keeps adopting its own queued leg.
+    const page = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+    expect(page).toMatchObject({ ok: true });
+  });
+});
+
+// Round 11 (PR #6117): the template CHOICE is a pure function of the invoice, the customer and the facts; the renderer asks for
+// the next choice while a row renders nothing.
+describe('chooseInvoiceSmsTemplate', () => {
+  const choose = InvoiceService.chooseInvoiceSmsTemplate;
+  const invoice = { service_type: 'Quarterly Pest Control' };
+  const customer = { first_name: 'Pat' };
+  const ctx = (extra = {}) => ({
+    prepayActive: false, invoiceSmsActive: true, preServiceCopy: false, coverage: null, serviceDateIsTodayET: false,
+    formattedDate: 'Friday, January 2, 2099', payUrl: 'https://waves.test/l/x', ...extra,
+  });
+  const chain = (c) => { const keys = []; for (let n = choose(invoice, customer, c, keys); n; n = choose(invoice, customer, c, keys)) keys.push(n.key); return keys; };
+
+  test('an ordinary invoice gets the standard copy, with the service date', () => {
+    expect(choose(invoice, customer, ctx())).toEqual({
+      key: 'invoice_sent',
+      vars: { first_name: 'Pat', service_type: 'Quarterly Pest Control', service_date: 'Friday, January 2, 2099', pay_url: 'https://waves.test/l/x' },
+    });
+    expect(choose(invoice, customer, ctx({ formattedDate: '' })).vars.service_date).toBe('today');
+  });
+
+  test('a pre-service invoice prefers the upfront variant and falls back to the standard copy', () => {
+    expect(chain(ctx({ preServiceCopy: true }))).toEqual(['invoice_sent_upfront', 'invoice_sent']);
+    expect(choose(invoice, customer, ctx({ preServiceCopy: true })).vars).toEqual({ first_name: 'Pat', service_type: 'Quarterly Pest Control', pay_url: 'https://waves.test/l/x' });
+  });
+
+  test('an active annual prepay comes first, with the coverage summary; the first-visit clause only on the service day', () => {
+    const coverage = { coverageSummary: '4 visits this year', coverageCount: 4 };
+    expect(chain(ctx({ prepayActive: true, coverage, preServiceCopy: true }))).toEqual(['invoice_sent_annual_prepay', 'invoice_sent_upfront', 'invoice_sent']);
+    expect(choose(invoice, customer, ctx({ prepayActive: true, coverage })).vars).toMatchObject({ coverage_summary: '4 visits this year', first_visit_clause: '' });
+    expect(choose(invoice, customer, ctx({ prepayActive: true, coverage, serviceDateIsTodayET: true })).vars.first_visit_clause).toBe(" Today's visit is the first of 4.");
+    expect(choose(invoice, customer, ctx({ prepayActive: true })).vars.coverage_summary).toBe('your annual service plan');
+  });
+
+  test('a disabled base switch drops both variants; a missing first name stays empty for the renderer; nothing left is null', () => {
+    expect(chain(ctx({ prepayActive: true, preServiceCopy: true, invoiceSmsActive: false }))).toEqual(['invoice_sent']);
+    expect(choose(invoice, {}, ctx()).vars.first_name).toBe('');
+    expect(choose(invoice, customer, ctx(), ['invoice_sent'])).toBeNull();
+  });
+
+  test('the renderer falls through a variant whose row renders nothing to the next choice', async () => {
+    const templates = require('../routes/admin-sms-templates');
+    templates.getTemplate.mockReset();
+    templates.getTemplate.mockImplementation(async (key) => (key === 'invoice_sent' ? 'standard text' : null));
+    const db2 = require('../models/db');
+    db2.mockImplementation((table) => { if (table === 'scheduled_services') return customerQuery({ status: 'pending' }); throw new Error(table); });
+    const out = await InvoiceService.renderInvoiceSmsBody({ id: 'inv-9', service_date: '2099-01-02', scheduled_service_id: 'svc-1' }, { first_name: 'Pat' }, 'https://x');
+    expect(out).toEqual({ body: 'standard text', renderedTemplateKey: 'invoice_sent' });
+    expect(templates.getTemplate.mock.calls.map((c) => c[0])).toEqual(['invoice_sent_upfront', 'invoice_sent']);
+  });
+});
+
+// Round 11: the retirement of a handed-back claim's closeout pin is a critical write, and its failure reaches the result.
+describe('a handed-back bar claim whose pin cannot be retired', () => {
+  const closeout = require('../services/invoice-issued-closeout');
+  const { approvedInvoiceVersionDigest } = require('../services/invoice-helpers');
+  const base = { id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null, token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null, line_items: [{ description: 'Service', amount: 100 }] };
+  test('the send reports it and the bar words it as "close the visit by hand"', async () => {
+    const invoices = makeInvoicesTable({ ...base });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return makeSmsLogTable([]).query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: null });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(table);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendInvoiceEmail.mockResolvedValue({ ok: false, error: 'SMTP rejected' });
+    closeout.recordApprovedCloseoutRetired.mockRejectedValueOnce(new Error('audit down'));
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+      expectedVersion: { updatedAtMs: null, digest: approvedInvoiceVersionDigest(base), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: async () => null },
+      refusalOnly: true,
+    });
+    expect(result).toMatchObject({ ok: false, code: 'INVOICE_CLOSEOUT_PIN_RETIRE_FAILED', closeoutPinRetireFailed: true, error: expect.stringMatching(/close it by hand/) });
+    // The claim itself was handed back.
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test('the retirement is written critical, so a failed insert throws', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice-issued-closeout.js'), 'utf8');
+    const fn = source.slice(source.indexOf('async function recordApprovedCloseoutRetired'), source.indexOf('// A pin with no delivery and no retirement'));
+    expect(fn).toMatch(/critical: true/);
   });
 });

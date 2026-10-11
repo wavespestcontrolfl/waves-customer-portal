@@ -75,9 +75,12 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
+  process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
@@ -93,7 +96,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -160,6 +163,7 @@ const WRITE_TWO_STEP = [
   'resend_receipt',
   'remove_saved_payment_method',
   'correct_invoice_address',
+  'send_invoice',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
@@ -680,6 +684,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }],
     }],
+    // send_invoice reads the invoice, the hold, the payer ownership and the recipients (the route helpers
+    // are spied below — their own paths are covered by intelligence-bar-invoice-actions.test.js). It writes nothing.
+    ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -867,6 +877,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    const invoiceActionSpies = toolName === 'send_invoice'
+      ? [
+        jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveMessagingHoldChecked').mockResolvedValue(false),
+        jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
+          .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
+        // The invoice text as sendViaSMS renders it (the real renderer needs the template tables).
+        jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue({ body: 'Hi Pat, your invoice is ready: [pay link]', renderedTemplateKey: 'invoice_sent' }),
+        // The effects plan's own reads (invoice-action-effects.js) answer "nothing else happens" on this generic stand-in.
+        jest.spyOn(require('../services/invoice-payer-ownership'), 'invoicePayerOwnership').mockResolvedValue(null),
+        jest.spyOn(require('../services/invoice-followups'), 'planFollowupSequence').mockResolvedValue({ arms: false, state: 'not_schedulable', cadence: [3, 7, 14, 30] }),
+        jest.spyOn(require('../services/lead-estimate-link'), 'invoiceSentConversionTargets').mockResolvedValue({ leadIds: [] }),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     const receiptResolvers = toolName === 'resend_receipt'
@@ -914,6 +936,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      invoiceActionSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -1058,6 +1081,7 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // explicitly opts out of live smoke; its preview is exercised above. So does
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt']);
+    // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'send_invoice']);
   });
 });

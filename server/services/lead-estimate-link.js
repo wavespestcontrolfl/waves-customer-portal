@@ -1573,6 +1573,9 @@ async function convertLeadFromEvent({
   booking = null,
   database = db,
   leadAttributionService = leadAttribution,
+  // Intelligence Bar send_invoice: leadSetDigest() of the leads its card named. The leads this event resolves must be
+  // exactly those; any other set converts nothing ({ reason: 'approved_leads_changed' }).
+  expectedLeadSet = null,
 }) {
   try {
     const assessmentEvent = !!booking
@@ -1646,79 +1649,17 @@ async function convertLeadFromEvent({
       return { converted: false, reason: 'assessment_not_a_win', contactedIds };
     }
 
-    // Resolve the originating lead, most-authoritative first:
-    //  1. estimate link (`leads.estimate_id`) — authoritative, convert all.
-    //  2. customer-link — an open lead tied to the EXACT customer of this event,
-    //     gated to the customer's FIRST close + a single open lead.
-    //  3. contact fallback — an open, never-linked lead matched by phone/email.
-    let candidates = [];
-    let resolution = null; // 'estimate' | 'customer_link' | 'contact'
-    if (estimateId) {
-      candidates = await database('leads').where({ estimate_id: estimateId });
-      if (candidates.length) resolution = 'estimate';
+    const resolved = await resolveConversionLeads(database, {
+      source, estimateId, customerId: resolvedCustomerId, phone: resolvedPhone, email: resolvedEmail,
+      excludeCallbackRequests, enforceOriginating,
+    });
+    if (resolved.reason) return { converted: false, reason: resolved.reason };
+    const { open, resolution } = resolved;
+    if (expectedLeadSet !== null && require('./invoice-helpers').leadSetDigest(open.map((lead) => lead.id)) !== String(expectedLeadSet)) {
+      return { converted: false, reason: 'approved_leads_changed' };
     }
-    if (!candidates.length) {
-      if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
-        const customer = await database('customers').where({ id: resolvedCustomerId }).first();
-        resolvedPhone = customer?.phone || null;
-        resolvedEmail = customer?.email || null;
-      }
-
-      // Tier 2 — customer-link (resolveCustomerLinkCandidates): the
-      // customer's open leads plus their auto-filed wizard repeats resolved
-      // through duplicate ancestry, gated to the customer's FIRST close.
-      if (resolvedCustomerId) {
-        const tier2 = await resolveCustomerLinkCandidates(database, {
-          source, customerId: resolvedCustomerId, phone: resolvedPhone, email: resolvedEmail, estimateId, excludeCallbackRequests,
-        });
-        if (tier2.reason) return { converted: false, reason: tier2.reason };
-        if (tier2.candidates.length) {
-          candidates = tier2.candidates;
-          resolution = 'customer_link';
-        }
-      }
-
-      // Tier 3 — contact fallback (never-linked, customer_id IS NULL).
-      if (!candidates.length && (resolvedPhone || resolvedEmail)) {
-        candidates = await findUnconvertedLeadsByContact(database, resolvedPhone, resolvedEmail);
-        if (excludeCallbackRequests) candidates = candidates.filter((lead) => !isCallbackRequestLead(lead));
-        // enforceOriginating (backfill safety): the live triggers fire the moment
-        // the deal closes, so a contact-matched open lead is the originating deal.
-        // A backfill runs LATER, by which point the customer may have a newer,
-        // unrelated add-on inquiry sharing their phone/email — converting that
-        // would misattribute a closed deal to the wrong lead. Gate the fuzzy match
-        // to leads first contacted on/before the customer became a customer (the
-        // same originating-timing test Tier 2 already applies).
-        if (enforceOriginating && candidates.length && resolvedCustomerId) {
-          const originating = [];
-          for (const lead of candidates) {
-            if (await isOriginatingLead(database, resolvedCustomerId, lead)) originating.push(lead);
-          }
-          candidates = originating;
-        }
-        if (candidates.length) resolution = 'contact';
-      }
-    }
-
-    // deleted_at covers the tier-1 estimate-link candidates (queried without a
-    // guard so an all-deleted linkage still counts as "accounted for" and
-    // blocks the fuzzy tiers); tiers 2/3 come pre-filtered by their finders.
-    const open = (candidates || []).filter((lead) => lead && !lead.deleted_at
-      && (!CLOSED_LEAD_STATUSES.has(lead.status) || (resolution === 'customer_link' && lead.status === 'duplicate')));
-    if (!open.length) return { converted: false, reason: 'no_open_lead' };
-    // FK-linked leads are authoritatively tied to THIS estimate, so convert them
-    // all; tier 2 already enforced a single first-close lead. Only the fuzzy
-    // contact fallback needs the ambiguity guard — 2+ open leads on one
-    // phone/email can be distinct deals, and an event proves only ONE closed.
-    if (resolution === 'contact' && open.length > 1) {
-      logger.warn(`[lead-trigger] ${source} ambiguous contact match (${open.length} open leads) — skipping`, {
-        source,
-        estimateId,
-        customerId: resolvedCustomerId,
-        leadIds: open.map((lead) => lead.id),
-      });
-      return { converted: false, reason: 'ambiguous_contact' };
-    }
+    resolvedPhone = resolved.phone;
+    resolvedEmail = resolved.email;
 
     const convertedIds = [];
     for (const lead of open) {
@@ -1765,6 +1706,113 @@ async function convertLeadFromEvent({
   } catch (err) {
     logger.error(`[lead-trigger] convertLeadFromEvent failed (${source || 'unknown'}): ${err.message}`);
     return { converted: false, reason: 'error' };
+  }
+}
+
+// The leads an event converts, resolved without writing anything: convertLeadFromEvent runs this and
+// then converts what it returns, and the Intelligence Bar's invoice-send effects plan runs it to
+// name the lead a send would mark won. Returns { reason } (nothing converts) or
+// { open, resolution, phone, email } (phone / email as resolved from the customer when not given).
+// The three ways an event finds its originating lead, tried in order (most authoritative first). Each takes
+// the shared context and answers null (nothing found, try the next one), { reason } (stop: nothing converts)
+// or { candidates, resolution }. `ctx.phone` / `ctx.email` are filled from the customer by the wizard strategy
+// when the event gave neither; the contact strategy reads them after it.
+//  1. direct link - an estimate link (`leads.estimate_id`): authoritative, convert all.
+//  2. wizard lead - an open lead tied to the EXACT customer of this event plus their auto-filed wizard
+//     repeats (duplicate ancestry), gated to the customer's FIRST close and a single open lead.
+//  3. contact fallback - an open, never-linked lead matched by phone / email.
+async function directLinkStrategy(ctx) {
+  if (!ctx.estimateId) return null;
+  const candidates = await ctx.database('leads').where({ estimate_id: ctx.estimateId });
+  return candidates.length ? { candidates, resolution: 'estimate' } : null;
+}
+
+async function wizardLeadStrategy(ctx) {
+  if (!ctx.customerId) return null;
+  if (!ctx.phone && !ctx.email) {
+    const customer = await ctx.database('customers').where({ id: ctx.customerId }).first();
+    ctx.phone = customer?.phone || null;
+    ctx.email = customer?.email || null;
+  }
+  const tier2 = await resolveCustomerLinkCandidates(ctx.database, {
+    source: ctx.source, customerId: ctx.customerId, phone: ctx.phone, email: ctx.email, estimateId: ctx.estimateId, excludeCallbackRequests: ctx.excludeCallbackRequests,
+  });
+  if (tier2.reason) return { reason: tier2.reason };
+  return tier2.candidates.length ? { candidates: tier2.candidates, resolution: 'customer_link' } : null;
+}
+
+// enforceOriginating (backfill safety): the live triggers fire the moment the deal closes, so a
+// contact-matched open lead is the originating deal. A backfill runs LATER, by which point the customer
+// may have a newer, unrelated add-on inquiry sharing their phone/email - converting that would
+// misattribute a closed deal to the wrong lead. Gate the fuzzy match to leads first contacted on/before
+// the customer became a customer (the same originating-timing test the wizard strategy applies).
+async function originatingOnly(database, customerId, candidates) {
+  const originating = [];
+  for (const lead of candidates) {
+    if (await isOriginatingLead(database, customerId, lead)) originating.push(lead);
+  }
+  return originating;
+}
+
+async function contactFallbackStrategy(ctx) {
+  if (!ctx.phone && !ctx.email) return null;
+  let candidates = await findUnconvertedLeadsByContact(ctx.database, ctx.phone, ctx.email);
+  if (ctx.excludeCallbackRequests) candidates = candidates.filter((lead) => !isCallbackRequestLead(lead));
+  if (ctx.enforceOriginating && candidates.length && ctx.customerId) candidates = await originatingOnly(ctx.database, ctx.customerId, candidates);
+  return candidates.length ? { candidates, resolution: 'contact' } : null;
+}
+
+const CONVERSION_STRATEGIES = [directLinkStrategy, wizardLeadStrategy, contactFallbackStrategy];
+
+// The first strategy that finds anything, or an empty find.
+async function firstConversionFind(ctx) {
+  for (const strategy of CONVERSION_STRATEGIES) {
+    const found = await strategy(ctx);
+    if (found) return found;
+  }
+  return { candidates: [], resolution: null };
+}
+
+// deleted_at covers the estimate-link candidates (queried without a guard so an all-deleted linkage
+// still counts as "accounted for" and blocks the fuzzy strategies); the others come pre-filtered by their finders.
+const isOpenConversionLead = (lead, resolution) => Boolean(lead) && !lead.deleted_at
+  && (!CLOSED_LEAD_STATUSES.has(lead.status) || (resolution === 'customer_link' && lead.status === 'duplicate'));
+
+async function resolveConversionLeads(database, {
+  source, estimateId = null, customerId = null, phone = null, email = null,
+  excludeCallbackRequests = false, enforceOriginating = false,
+}) {
+  const ctx = { database, source, estimateId, customerId: customerId || null, phone: phone || null, email: email || null, excludeCallbackRequests, enforceOriginating };
+  const found = await firstConversionFind(ctx);
+  if (found.reason) return { reason: found.reason };
+  const { resolution } = found;
+  const open = found.candidates.filter((lead) => isOpenConversionLead(lead, resolution));
+  if (!open.length) return { reason: 'no_open_lead' };
+  // FK-linked leads are authoritatively tied to THIS estimate, so convert them all; the wizard strategy
+  // already enforced a single first-close lead. Only the fuzzy contact fallback needs the ambiguity guard:
+  // 2+ open leads on one phone/email can be distinct deals, and an event proves only ONE closed.
+  if (resolution === 'contact' && open.length > 1) {
+    logger.warn(`[lead-trigger] ${source} ambiguous contact match (${open.length} open leads) — skipping`, {
+      source,
+      estimateId,
+      customerId: ctx.customerId,
+      leadIds: open.map((lead) => lead.id),
+    });
+    return { reason: 'ambiguous_contact' };
+  }
+  return { open, resolution, phone: ctx.phone, email: ctx.email };
+}
+
+// The leads an invoice's first send marks won (convertLeadFromEvent source 'invoice_sent' for this
+// customer), resolved read-only by the same resolver. { leadIds } or { reason }.
+async function invoiceSentConversionTargets(customerId, database = db) {
+  if (!customerId) return { reason: 'no_customer', leadIds: [] };
+  try {
+    const resolved = await resolveConversionLeads(database, { source: 'invoice_sent', customerId });
+    if (resolved.reason) return { reason: resolved.reason, leadIds: [] };
+    return { leadIds: resolved.open.map((lead) => String(lead.id)).sort() };
+  } catch {
+    return { reason: 'error', leadIds: [] };
   }
 }
 
@@ -2180,6 +2228,9 @@ async function attributeSelfBooking({
 }
 
 module.exports = {
+  invoiceSentConversionTargets,
+  resolveConversionLeads,
+  CONVERSION_STRATEGIES,
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
   leadMatchesEstimateContact,

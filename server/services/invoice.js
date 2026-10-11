@@ -43,6 +43,7 @@ const {
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   invoiceDepositCreditCents,
+  invoiceSmsDigest,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -3041,6 +3042,35 @@ function alreadyDeliveredForFirstSend(invoice) {
       || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
 }
 
+// The Intelligence Bar's approved invoice version (updated_at + a digest of the
+// total, credit, amount due and lines) no longer matches the row at the claim:
+// an edit or a partial credit landed after the card was shown. Nothing was claimed.
+function approvedVersionChangedError(invoice) {
+  return Object.assign(
+    new Error(`Invoice ${invoice?.invoice_number || invoice?.id || ""} changed after it was approved (amount due, lines or edit time) — not sent`),
+    { code: "approved_version_changed" },
+  );
+}
+
+// expectedVersion: { updatedAtMs, digest } or null. The claim's updated_at
+// predicate is checked in the claim's own locked UPDATE; the digest is checked
+// on the row that UPDATE returned (a claimed invoice is edit-locked).
+function approvedVersionMatchesTime(row, expectedVersion) {
+  if (expectedVersion.updatedAtMs === null || expectedVersion.updatedAtMs === undefined) return !row.updated_at;
+  const at = row.updated_at ? new Date(row.updated_at).getTime() : null;
+  return at !== null && Math.floor(at) === Math.floor(expectedVersion.updatedAtMs);
+}
+
+// A refusal under the Intelligence Bar's approved claim with its own text; it takes the same code and result shape as a changed version.
+function approvedClaimRefusal(message) {
+  return Object.assign(new Error(message), { code: "approved_version_changed" });
+}
+
+// The send wrapper's refusal shape for approvedVersionChangedError (nothing was claimed or sent).
+function approvedVersionChangedResult(err) {
+  return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
+}
+
 function sendClaimLostError() {
   return Object.assign(
     new Error("Invoice send claim changed; delivery not attempted"),
@@ -3073,7 +3103,7 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // same on its transaction before its caller re-reads it and passes it in).
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
-async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null }) {
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null, verifyOwner = null, expectedSmsPhone = undefined }) {
   // `error` is the field withProviderHandoff's caller (this file) has always
   // read on a blocked outcome (byte-identical to the pre-refactor shape);
   // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
@@ -3109,6 +3139,33 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
     return { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: ownership.code, error: ownership.reason, reason: ownership.reason,
       validator: "check_invoice_ownership_boundary" };
+  }
+  // The Intelligence Bar's live owner check (who owes this invoice RIGHT NOW, Bill-To resolved), run on the locked handle
+  // immediately before the provider call. Fail closed: a verifier that throws refuses the send.
+  if (verifyOwner) {
+    let refusal = "The bar could not verify who owes this invoice, so it was not sent.";
+    try { refusal = await verifyOwner({ ...current }, database); } catch { /* keep the fail-closed text */ }
+    if (refusal) {
+      return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+        code: "approved_version_changed", error: refusal, reason: refusal,
+        validator: "check_invoice_ownership_boundary" };
+    }
+  }
+  // The Intelligence Bar's approved phone, read AGAIN on the locked handle right before the provider call: the customer edit
+  // route changes the phone without taking the invoice lock, so a number removed after the early check must not get the pay
+  // link. A read that fails refuses (fail closed).
+  if (expectedSmsPhone !== undefined) {
+    let freshDigits = null;
+    try {
+      const row = await database("customers").where({ id: current.customer_id }).first("phone");
+      freshDigits = String(row?.phone || "").replace(/\D/g, "");
+    } catch { /* keep the fail-closed null */ }
+    if (!expectedSmsPhone || freshDigits === null || freshDigits !== String(expectedSmsPhone)) {
+      const message = "The customer's phone is not the one the approval showed; the text was not sent";
+      return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+        code: "recipient_changed", error: message, reason: message,
+        validator: "check_invoice_recipient" };
+    }
   }
   // Collections DISPUTE hold, re-read at the actual provider boundary on the
   // locked handle (owner ruling 2026-09-30): a hold that committed after the
@@ -4053,23 +4110,24 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
 // genuinely collectible again, not stuck. Bounded to the one retry the
 // caller's own `_zeroDueRetried` guard allows; omit it (or leave the
 // guard already tripped) to map `not_zero_due` like any other outcome.
-async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null) {
+async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null, { refusalOnly = false } = {}) {
   if (err?.code !== "zero_due_detected") return null;
   const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
   if (outcome.kind === "not_zero_due" && retryOnceFn) return retryOnceFn();
-  return zeroDueWrapperOutcome(invoiceId, outcome);
+  return zeroDueWrapperOutcome(invoiceId, outcome, { refusalOnly });
 }
 
 // Wrapper result shape (sendViaSMSAndEmail): { ok, sms, email, payUrl }.
-async function zeroDueWrapperOutcome(invoiceId, outcome) {
+async function zeroDueWrapperOutcome(invoiceId, outcome, { refusalOnly = false } = {}) {
   if (outcome.kind === "settled") {
     return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
   if (outcome.kind === "terminal") {
     // Same round-6 audit P1 fix, mirrored here for the wrapper shape: a
     // safety-refused void must never be reported the same as a completed
-    // one.
-    const voided = await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    // one. A refusal-only caller (the Intelligence Bar's send_invoice) never
+    // voids: it gets the same held-for-review result as a refused void.
+    const voided = refusalOnly ? false : await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
     if (!voided) {
       logger.warn(`[invoice] ${invoiceId}: zero-due terminal-visit invoice could not be safely voided (a live PaymentIntent, money in flight, or an unverifiable lookup) — held for review, not reported handled`);
       const reason = `${ZERO_DUE_TERMINAL_ERROR}, but the invoice could not be safely voided yet — held for review`;
@@ -4499,120 +4557,218 @@ function collectionHoldRefusalFromClearance() {
   return require("./collections/collection-hold").holdDeferOutcome({ reason: "hold" });
 }
 
+// ── the Intelligence Bar's approved-version checks on a send claim ──────────────────────────────────────────────────────
+// Each owns ONE decision about the row the claim just took and returns the error to throw (or null). They run in order and the
+// first refusal hands the claim back (runApprovedClaimChecks); the visit closeout pin is written only after every check and
+// every other claim-time refusal has passed (recordApprovedPinOrRefusal), so a refused claim never leaves a pin behind.
+// ctx = { invoiceId, invoice (the claimed row), current (the row as read before the flip), expectedVersion, database, token }.
+
+// The amount due and lines of the claimed row are what the card showed (the row is edit-locked from the claim on).
+function approvedDigestRefusal({ invoice, expectedVersion }) {
+  if (!expectedVersion.digest) return null;
+  return require("./invoice-helpers").approvedInvoiceVersionDigest(invoice) === expectedVersion.digest ? null : approvedVersionChangedError(invoice);
+}
+
+// The post-delivery effects the card listed (lead, reminders, closeout, review ...), recomputed on the claimed row with its
+// pre-claim status. Fails closed.
+async function approvedEffectsRefusal({ invoice, current, expectedVersion, database }) {
+  if (!expectedVersion.verifyEffects) return null;
+  let same = false;
+  try { same = await expectedVersion.verifyEffects({ ...invoice, status: current.status }, database); } catch { same = false; }
+  return same ? null : approvedVersionChangedError(invoice);
+}
+
+// The bar sends only an invoice the customer owes, and not an annual-plan one. The payer columns are a snapshot from when the
+// invoice was minted, so the bar's live resolver is asked again here, on the claimed row. A payer, a plan, or an answer that
+// cannot be had refuses (fail closed).
+async function approvedOwnerRefusal({ invoice, current, expectedVersion, database }) {
+  if (!expectedVersion.verifyOwner) return null;
+  let text = "The bar could not verify who owes this invoice, so it was not sent.";
+  try { text = await expectedVersion.verifyOwner({ ...invoice, status: current.status }, database); } catch { /* keep the fail-closed text */ }
+  return text ? approvedClaimRefusal(text) : null;
+}
+
+// The card listed the invoice's attachments. An upload that reserved the invoice before this claim and has not inserted yet
+// would change that list after delivery: the send waits for it (the upload refuses once this claim holds the row).
+async function approvedAttachmentRefusal({ invoiceId, expectedVersion, database }) {
+  if (expectedVersion.attachments === undefined) return null;
+  let uploading = true;
+  try { uploading = await require("./invoice-helpers").attachmentUploadInFlight(database, invoiceId); } catch { uploading = true; }
+  return uploading ? approvedClaimRefusal("An attachment upload is still in progress on this invoice, so it was not sent. Try again when the upload finishes.") : null;
+}
+
+const APPROVED_CLAIM_CHECKS = [approvedDigestRefusal, approvedEffectsRefusal, approvedOwnerRefusal, approvedAttachmentRefusal];
+
+async function runApprovedClaimChecks(ctx) {
+  for (const check of APPROVED_CLAIM_CHECKS) {
+    const refusal = await check(ctx);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+// The visit the card said this send closes (or none), written on the invoice inside the claim: the send's own closeout is
+// handed it and the retry sweep reads it back. Written LAST in the claim; a pin that cannot be written refuses.
+async function recordApprovedPinOrRefusal({ invoiceId, expectedVersion, database, token }) {
+  if (!expectedVersion.closeoutTarget) return null;
+  try {
+    await require("./invoice-issued-closeout").recordApprovedCloseoutTarget(invoiceId, expectedVersion.closeoutTarget, {
+      conn: database, claimToken: token, actorTechnicianId: expectedVersion.actorTechnicianId || null,
+    });
+    return null;
+  } catch {
+    return approvedClaimRefusal("The approved visit closeout could not be recorded, so the invoice was not sent.");
+  }
+}
+
+// The Intelligence Bar's claim judges who owes the invoice (verifyOwner), so it holds the customer (and the linked visit) FOR
+// SHARE from before that judgment until the claim commits, exactly as the packet and renewal claims do: a payer assignment
+// (its writer takes these rows FOR UPDATE) either commits first and is seen by the verifier, or waits for the claim and then
+// finds the invoice 'sending' (packetInvoiceSendInFlight) and refuses. The lock ends at commit, before any provider call: the
+// claim row itself is the fence through the delivery. A refusal thrown inside rolls the whole claim back, pin included.
+function claimNeedsOwnerFence(expectedVersion, database, ownerFenced) {
+  return Boolean(expectedVersion?.verifyOwner) && !ownerFenced && !database.isTransaction && typeof database.transaction === "function";
+}
+
+function claimUnderOwnerFence(invoiceId, options, database) {
+  return database.transaction(async (trx) => {
+    const owner = await trx("invoices").where({ id: invoiceId }).first("customer_id", "scheduled_service_id");
+    if (owner?.customer_id) await trx("customers").where({ id: owner.customer_id }).forShare().first("id");
+    if (owner?.scheduled_service_id) await trx("scheduled_services").where({ id: owner.scheduled_service_id }).forShare().first("id");
+    return claimInvoiceForSend(invoiceId, { ...options, database: trx, _ownerFenced: true });
+  });
+}
+
+// A caller that already holds the claim (the scheduled-send worker flips 'scheduled' to 'sending' itself, then calls back in).
+async function claimAlreadyHeld(invoiceId, current, { claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database }) {
+  if (!claimToken || current.send_claim_token !== claimToken) throw sendClaimLostError();
+  if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
+  // Round-0 audit P1 (#4131): a preclaimed caller asking for a first delivery must not lose the already-delivered /
+  // stale-claim-review-hold guards the fresh-claim branch enforces — this row can reach here already fully delivered (a resumed
+  // worker preclaim racing a direct send) or still parked for operator review.
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  // Zero-due re-check for a PRECLAIMED row (#4131 slice 4): processScheduledSends' own settleZeroDueBeforeSend check runs
+  // BEFORE it claims, so this only fires on the rare race where a retotal to $0 lands between that read and this claim.
+  await refuseZeroDuePreclaimedInvoice(invoiceId, current, database);
+  // A preclaimed row still needs the queued-obligation check: an earlier DIRECT send that held its own pay-link text on the
+  // scheduled rail (invoice_send_deferred) is otherwise invisible here and would deliver the same frozen pay link a second
+  // time. previousStatus is current.status itself, so restoreSendClaim's guard never touches the invoice row on a refusal —
+  // only the preclaimer's own claim-token restore may move it; a consumed queue row is still restored.
+  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, claimToken, adoptsQueuedInvoiceSend, database);
+  return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
+}
+
+// The claim's own UPDATE. The guards evaluated before it saw a snapshot; the flip carries them as predicates too, so a
+// same-status ABA transition between the read and the flip (another worker claims, reaches an uncertain outcome, and stale-claim
+// recovery parks the row back to 'scheduled' with a delivery stamp) cannot pass a first delivery or an unauthorized reclaim.
+function buildClaimFlip(database, invoiceId, current, { firstDeliveryOnly, overridesReviewHold, expectedVersion }) {
+  const flip = database("invoices").where({ id: invoiceId, status: current.status });
+  if (firstDeliveryOnly) flip.whereNull("sent_at").whereNull("sms_sent_at").whereNull("email_sent_at");
+  if (!overridesReviewHold) {
+    // COALESCE keeps the predicate NULL-safe: a scheduled row with no error at all would otherwise make the LIKE, and so the
+    // whole NOT, evaluate to NULL and never match the flip.
+    flip.whereRaw(
+      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
+      [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
+    );
+  }
+  if (!expectedVersion) return flip;
+  // The approved edit time, in the claim's own locked UPDATE: an edit after the card was shown stamps updated_at.
+  const atMs = expectedVersion.updatedAtMs;
+  if (atMs === null || atMs === undefined) return flip.whereNull("updated_at");
+  return flip.where("updated_at", ">=", new Date(atMs)).where("updated_at", "<", new Date(Number(atMs) + 1));
+}
+
+// The flip matched no row: say which guard the latest row trips (round-6 P1 #4131), always by throwing.
+async function refuseFailedClaim(invoiceId, current, database, { firstDeliveryOnly, overridesReviewHold, expectedVersion }) {
+  const latest = await database("invoices").where({ id: invoiceId }).first();
+  // Review hold first, then delivered for a first delivery, rather than a generic "not sendable".
+  refuseFirstDeliveryHold(latest, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  // Pre-push audit P1 (PR #4633): neither guard tripped, but the row is 'sending' under SOME claim token — a concurrent first
+  // delivery won this exact race. Distinct from "not sendable": the customer's pay link IS on its way, just not from this request.
+  if (firstDeliveryOnly && latest?.status === "sending" && latest.send_claim_token) throw firstDeliveryInProgressError(latest);
+  // A row that is still claimable but no longer the approved version: report that, not "not sendable". A live claim (status
+  // 'sending') keeps the in-progress error below so a concurrent delivery is never read as a changed invoice.
+  if (expectedVersion && latest && latest.status === current.status && !approvedVersionMatchesTime(latest, expectedVersion)) {
+    throw approvedVersionChangedError(latest);
+  }
+  throw invoiceNotSendableError(latest);
+}
+
+// The refusals a claim makes BEFORE it writes anything (each throws; none returns). Split out of claimInvoiceForSend so that
+// function stays under the complexity cap.
+async function refuseUnclaimableInvoice(invoiceId, current, database, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend }) {
+  // A first delivery that finds the row already delivered (round-6 P1 #4131) is refused atomically here, before the
+  // claimable-statuses check: a delivered row can sit at a claimable status (sent/viewed/overdue) and a plain status check
+  // alone would let a first-delivery request re-claim it as an intentional resend. The stale-claim review hold (same call) is
+  // gated on ONE explicit switch — overridesReviewHold — never inferred from operatorInitiated or firstDeliveryOnly.
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
+  // Nothing due on a visit-linked invoice: detect it here (never settle — settleZeroDueBeforeSend is the ONE place that ever
+  // does) and refuse the claim so the caller resolves the real outcome through the chokepoint.
+  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
+  // A live deferred pay-link text (quiet-hours queue) already owns this invoice's delivery — refuse before claiming, unless
+  // this send is authorized to adopt (consume) its own earlier held leg.
+  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend, database });
+  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
+}
+
+// A first send that waited for the visit summary's handoff (which holds this invoice through the pay-link text) finds the
+// claim free only once the text is out. The invoice is stamped after that release, so the summary's own record is read: a link
+// text that started or was accepted means the customer has the link, and this first send is refused, not repeated. Returns the
+// refusal to give back the claim with, or null.
+async function firstSendAfterSummaryRefusal({ invoiceId, invoice, current, database }, firstDeliveryOnly) {
+  if (!firstDeliveryOnly || !current.visit_completion_packet_id) return null;
+  const started = await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link");
+  return started ? invoiceAlreadyDeliveredError(invoice) : null;
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
   firstDeliveryOnly = false,
   overridesReviewHold = false,
   adoptsQueuedInvoiceSend = false,
+  // Intelligence Bar send_invoice: the approved version the confirm card showed. Null = unchanged for every other caller.
+  expectedVersion = null,
   database = db,
+  // Internal-only: set by the owner-fence re-entry.
+  _ownerFenced = false,
 } = {}) {
   assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimInvoiceForSend");
+  const options = { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion };
+  if (claimNeedsOwnerFence(expectedVersion, database, _ownerFenced)) return claimUnderOwnerFence(invoiceId, options, database);
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
   await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
+  if (allowClaimed) return claimAlreadyHeld(invoiceId, current, { ...options, database });
 
-  if (allowClaimed) {
-    if (!claimToken || current.send_claim_token !== claimToken) throw sendClaimLostError();
-    if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
-    // Round-0 audit P1 (#4131): a preclaimed caller asking for a first
-    // delivery must not lose the already-delivered / stale-claim-review-
-    // hold guards the fresh-claim branch below already enforces — this
-    // row can reach here already fully delivered (a resumed worker
-    // preclaim racing a direct send) or still parked for operator review.
-    refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
-    // Zero-due re-check for a PRECLAIMED row (#4131 slice 4):
-    // processScheduledSends' own settleZeroDueBeforeSend check runs BEFORE
-    // it ever claims, so this only fires on the rare race where a retotal
-    // to $0 lands between that read and this claim.
-    await refuseZeroDuePreclaimedInvoice(invoiceId, current, database);
-    // A preclaimed row (the scheduled-send worker flips 'scheduled' →
-    // 'sending' itself, then calls back in with allowClaimed:true) still
-    // needs the queued-obligation check: an earlier DIRECT send that held
-    // its own pay-link text on the scheduled rail (invoice_send_deferred)
-    // is otherwise invisible to this branch and would deliver the same
-    // frozen pay link a second time. previousStatus here is current.status
-    // itself ('sending', the caller's own preclaim) so restoreSendClaim's
-    // guard never touches the invoice row on a refusal — only the
-    // preclaimer's own claim-token restore may move it; a consumed queue
-    // row is still restored.
-    const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, claimToken, adoptsQueuedInvoiceSend, database);
-    return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
-  }
+  await refuseUnclaimableInvoice(invoiceId, current, database, options);
 
-  // A first delivery that finds the row already delivered (round-6 P1
-  // #4131) is refused atomically here, before the claimable-statuses check
-  // below: a delivered row can sit at a claimable status (sent/viewed/
-  // overdue) and a plain status check alone would let a first-delivery
-  // request re-claim it as if it were an intentional resend. The
-  // stale-claim review hold (same call, see refuseFirstDeliveryHold) is
-  // gated on ONE explicit switch — overridesReviewHold — never inferred
-  // from operatorInitiated or firstDeliveryOnly (third audit P1 #4131).
-  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
-  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
-    throw invoiceNotSendableError(current);
-  }
-
-  // Nothing due on a visit-linked invoice: detect it here (never settle —
-  // settleZeroDueBeforeSend is the ONE place that ever does) and refuse
-  // the claim so the caller resolves the real outcome through the
-  // chokepoint. Never hand out a claim that would text a $0 pay link.
-  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
-
-  // A live deferred pay-link text (quiet-hours queue) already owns this
-  // invoice's delivery — refuse before claiming, unless this send is
-  // authorized to adopt (consume) its own earlier held leg.
-  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend, database });
-  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
-
-  const freshClaimToken = crypto.randomUUID();
-  // The two guards above evaluated a snapshot. The flip below carries them
-  // as predicates too, so a same-status ABA transition between the read and
-  // the flip (another worker claims, reaches an uncertain outcome, and
-  // stale-claim recovery parks the row back to 'scheduled' with a delivery
-  // stamp) cannot pass a first delivery or an unauthorized reclaim through.
-  const claimFlip = database("invoices").where({ id: invoiceId, status: current.status });
-  if (firstDeliveryOnly) {
-    claimFlip.whereNull("sent_at").whereNull("sms_sent_at").whereNull("email_sent_at");
-  }
-  if (!overridesReviewHold) {
-    // COALESCE keeps the predicate NULL-safe: a scheduled row with no error
-    // at all would otherwise make the LIKE, and so the whole NOT, evaluate
-    // to NULL and never match the flip.
-    claimFlip.whereRaw(
-      "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
-      [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
-    );
-  }
-  const [invoice] = await claimFlip
-    .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
+  const token = crypto.randomUUID();
+  const [invoice] = await buildClaimFlip(database, invoiceId, current, options)
+    .update({ status: "sending", send_claim_token: token, updated_at: new Date() })
     .returning("*");
-  if (!invoice) {
-    const latest = await database("invoices").where({ id: invoiceId }).first();
-    // The row moved between the read and the flip: report the guard the
-    // latest row trips (review hold first, then delivered for a first
-    // delivery) rather than a generic "not sendable" (round-6 P1 #4131).
-    refuseFirstDeliveryHold(latest, invoiceId, firstDeliveryOnly, overridesReviewHold);
-    // Pre-push audit P1 (PR #4633): neither guard above tripped, but the
-    // row is 'sending' under SOME claim token — a concurrent first
-    // delivery won this exact race. Distinct from "not sendable": the
-    // customer's pay link IS on its way, just not from this request.
-    if (firstDeliveryOnly && latest?.status === "sending" && latest.send_claim_token) {
-      throw firstDeliveryInProgressError(latest);
-    }
-    throw invoiceNotSendableError(latest);
-  }
-  invoice.send_claim_token = freshClaimToken;
-  // A first send that waited for the visit summary's handoff (which holds this invoice through the
-  // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
-  // that release, so the summary's own record is read: a link text that started or was accepted
-  // means the customer has the link, and this first send is refused, not repeated.
-  if (firstDeliveryOnly && current.visit_completion_packet_id && await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link")) {
-    await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
-    throw invoiceAlreadyDeliveredError(invoice);
-  }
+  if (!invoice) await refuseFailedClaim(invoiceId, current, database, options);
+  invoice.send_claim_token = token;
+  const giveBack = async (error) => {
+    await restoreSendClaim(invoiceId, current.status, true, [], database, token);
+    throw error;
+  };
+  const ctx = { invoiceId, invoice, current, expectedVersion, database, token };
+  const approvedRefusal = expectedVersion && await runApprovedClaimChecks(ctx);
+  if (approvedRefusal) await giveBack(approvedRefusal);
+  const summaryRefusal = await firstSendAfterSummaryRefusal(ctx, firstDeliveryOnly);
+  if (summaryRefusal) await giveBack(summaryRefusal);
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
-  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, freshClaimToken, adoptsQueuedInvoiceSend, database);
+  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, token, adoptsQueuedInvoiceSend, database);
+  // The closeout pin is the claim's LAST write: every refusal above (and the ones thrown by the two calls before it) leaves
+  // no pin behind. A pin that cannot be written gives back the claim AND any queued text this claim adopted.
+  const pinRefusal = expectedVersion && await recordApprovedPinOrRefusal(ctx);
+  if (pinRefusal) {
+    await restoreSendClaim(invoiceId, current.status, true, consumedQueuedSendRows, database, token);
+    throw pinRefusal;
+  }
   return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
 }
 
@@ -4645,6 +4801,8 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   // outright with queued_pay_link until the window, instead of adopting
   // (cancelling) that row the way the ordinary claim path already can.
   adoptsQueuedInvoiceSend = false,
+  // Intelligence Bar approved version (see claimInvoiceForSend); null = unchanged.
+  expectedVersion = null,
 } = {}) {
   // requireDue is the scheduled-send worker's claim: an automatic queue
   // send, never a first-delivery request, and never an operator override —
@@ -4685,7 +4843,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
       const invoice = await claimDueScheduledInvoiceForSend(trx, invoiceId);
       return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
-    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx }) };
   });
 }
 
@@ -4806,11 +4964,11 @@ async function releaseRefusedRenewalSend(invoiceId, verdict, { allowClaimed = fa
   });
 }
 
-async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
+async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false, expectedVersion = null } = {}) {
   return db.transaction(async (trx) => {
     const payerId = await customerDefaultPayerLocked(customerId, trx);
     if (!payerId) {
-      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx }) };
     }
     if (allowClaimed && claimToken) {
       await trx("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
@@ -4998,16 +5156,39 @@ const FIRST_SEND_STATUSES = ["draft", "scheduled", "sending"];
 // sendViaSMSAndEmail / markDeliverySent, not sendViaSMS) are still covered.
 // Best-effort + idempotent; the resolver only matches open, never-converted
 // leads and never throws.
-async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false }) {
-  // priorDelivered: the invoice carried delivery stamps (sent_at /
-  // sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
-  // with its historical stamps retained, so priorStatus alone would read
-  // its resend as a first delivery and the contact fallback could mark an
-  // unrelated newer lead won (Codex #3493 r7).
-  if (!customerId || priorDelivered || !FIRST_SEND_STATUSES.includes(priorStatus)) return;
+// Whether a send converts the lead at all (convertLeadOnInvoiceSent's own test, shared with the
+// Intelligence Bar's effects plan). priorDelivered: the invoice carried delivery stamps (sent_at /
+// sms_sent_at) BEFORE this send. An unvoided invoice returns to 'draft'
+// with its historical stamps retained, so priorStatus alone would read
+// its resend as a first delivery and the contact fallback could mark an
+// unrelated newer lead won (Codex #3493 r7).
+function leadConversionApplies({ customerId, priorStatus, priorDelivered = false }) {
+  return Boolean(customerId) && !priorDelivered && FIRST_SEND_STATUSES.includes(priorStatus);
+}
+
+// The delivery stamps that mean "delivered before this send" for the lead conversion.
+// The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
+function priorDeliveredForLeadConversion(invoice) {
+  return Boolean(invoice.sent_at
+    || (invoice.sms_sent_at && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+      && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR)));
+}
+
+async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false, approvedLeadSet = null }) {
+  if (!leadConversionApplies({ customerId, priorStatus, priorDelivered })) return;
+  // The Intelligence Bar's card named the leads this send marks won (or none). 'none': nothing is converted. Ids: only
+  // those leads, and a different set converts nothing and is audited.
+  if (approvedLeadSet === "none") return;
   try {
     const { convertLeadFromEvent } = require("./lead-estimate-link");
-    await convertLeadFromEvent({ source: "invoice_sent", customerId });
+    const result = await convertLeadFromEvent({ source: "invoice_sent", customerId, ...(approvedLeadSet ? { expectedLeadSet: approvedLeadSet } : {}) });
+    if (approvedLeadSet && result?.reason === "approved_leads_changed") {
+      logger.warn(`[invoice] lead conversion skipped for ${invoiceId}: the leads changed after the approval`);
+      await require("./audit-log").recordAuditEvent({
+        actor_type: "system", action: "invoice.send_lead_conversion_skipped", resource_type: "invoices", resource_id: invoiceId,
+        metadata: { invoiceId: String(invoiceId), approvedLeadSet, reason: "approved_leads_changed" },
+      });
+    }
   } catch (leadErr) {
     logger.warn(`[invoice] lead conversion on send failed (${invoiceId}): ${leadErr.message}`);
   }
@@ -5221,6 +5402,114 @@ function receiptHandoffCheck(beforeProviderHandoff, { to = null, amount = null }
         : { ok: false, code: "RECEIPT_HANDOFF_ABORTED", reason: "receipt handoff aborted by the caller" };
     },
   };
+}
+
+// ── the invoice text: facts, template choice, rendering ────────────────────────────────────────────────────────────────
+// The date framing of the text, all on the ET calendar day. Knex returns DATE as a UTC-midnight Date; etCalendarDayOf reads that
+// and a plain YYYY-MM-DD string as the same calendar day (etDateString would shift the Date to the previous ET day and wrongly
+// drop the "today" clause). An unparseable value falls back to undated copy.
+function invoiceSmsDateFacts(invoice, now = new Date()) {
+  let serviceYmd = "";
+  try {
+    serviceYmd = invoice.service_date ? etCalendarDayOf(invoice.service_date) : "";
+  } catch {
+    serviceYmd = "";
+  }
+  const formattedDate = serviceYmd
+    ? new Date(`${serviceYmd}T12:00:00`).toLocaleDateString("en-US", {
+      weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York",
+    })
+    : "";
+  const todayYmd = etDateString(now);
+  // The annual-prepay "Today's visit is the first of N" clause is gated on today: a resend from sent/viewed/overdue or a
+  // delayed/scheduled send can run on a day other than service_date. A service date still in the future (the setup +
+  // first-application invoice auto-sent at estimate acceptance is the common case) must not use the generic "...completed on
+  // {service_date}" copy. ISO YYYY-MM-DD compares lexicographically === chronologically.
+  return { formattedDate, serviceDateIsTodayET: serviceYmd === todayYmd, serviceDateIsFutureET: serviceYmd > todayYmd };
+}
+
+// Pre-service copy: a future service date, or a linked visit that has not completed. An overdue or same-day appointment can
+// still be open, so its completion state decides rather than its date; an unreadable status fails toward the pre-service copy.
+async function invoicePreServiceCopy(invoice, serviceDateIsFutureET) {
+  if (serviceDateIsFutureET || !invoice.scheduled_service_id) return serviceDateIsFutureET;
+  try {
+    const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
+    return visit?.status !== "completed";
+  } catch (err) {
+    logger.warn(`[invoice] Linked visit status lookup failed for ${invoice.id}: ${err.message}`);
+    return true;
+  }
+}
+
+// Which template row renders the text, and the variables it renders with (pure). Annual-prepay invoices use a dedicated,
+// coverage-aware template (the generic copy misframes a full year of prepaid visits as one completed service); an invoice billed
+// before its service uses the pre-service variant; everything else the standard invoice_sent. Both variants sit behind the base
+// `invoice` kill switch (a disabled invoice_sent skips them too, keeping the invoice retryable). A variant whose row is missing
+// or disabled renders nothing, so the caller asks again with `tried` and gets the next choice: the standard copy is last, so a
+// missing variant row never blocks the send. Returns null when every choice has been tried.
+function chooseInvoiceSmsTemplate(invoice, customer, ctx, tried = []) {
+  const firstName = customer?.first_name || "";
+  const serviceType = invoice.service_type || invoice.title || "your service";
+  const choices = [];
+  if (ctx.prepayActive && ctx.invoiceSmsActive) {
+    // A display-only prepay flag (no visit count) still gets the prepay framing, via a generic phrase.
+    const coverage = ctx.coverage;
+    choices.push({
+      key: "invoice_sent_annual_prepay",
+      vars: {
+        first_name: firstName,
+        coverage_summary: coverage?.coverageSummary || "your annual service plan",
+        first_visit_clause: coverage && ctx.serviceDateIsTodayET ? ` Today's visit is the first of ${coverage.coverageCount}.` : "",
+        pay_url: ctx.payUrl,
+      },
+    });
+  }
+  if (ctx.preServiceCopy && ctx.invoiceSmsActive) {
+    choices.push({ key: "invoice_sent_upfront", vars: { first_name: firstName, service_type: serviceType, pay_url: ctx.payUrl } });
+  }
+  choices.push({
+    key: "invoice_sent",
+    vars: { first_name: firstName, service_type: serviceType, service_date: ctx.formattedDate || "today", pay_url: ctx.payUrl },
+  });
+  return choices.find((choice) => !tried.includes(choice.key)) || null;
+}
+
+// The invoice text as it will be sent: which template row renders and its body, with the pay link given. The ONE renderer:
+// sendViaSMS sends what it returns, and the Intelligence Bar's card shows, pins and re-checks it. body is null when no row is
+// enabled (the send skips the text).
+async function renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants = false, audit = true } = {}) {
+  // noVariants: the Intelligence Bar's text is the base template row, the one body its card can show (a weighted variant is random).
+  // audit false: a preview writes nothing (getTemplate otherwise records a template defect in the audit log).
+  const renderOpts = { ...(noVariants ? { noVariants: true } : {}), ...(audit ? {} : { audit: false }) };
+  const dates = invoiceSmsDateFacts(invoice);
+  const preServiceCopy = await invoicePreServiceCopy(invoice, dates.serviceDateIsFutureET);
+  // Annual-prepay: the term is resolved up front; a cancelled/refunded term reverts to the standard copy. coverageActive is the
+  // descriptor's single source of truth for "is this term still covered" (a renewal lapse stays active through term_end).
+  const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
+  const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
+  try {
+    const templates = require("../routes/admin-sms-templates");
+    const tplOpts = { workflow: "invoice_send", entity_type: "invoice", entity_id: invoice.id };
+    // The annual-prepay variant is its own template row, so it would render even when ops disabled the base invoice_sent kill
+    // switch, and the provider would then swallow the send as a fake success. Honor the base switch for the variants.
+    const ctx = {
+      ...dates,
+      preServiceCopy,
+      prepayActive,
+      coverage: prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null,
+      invoiceSmsActive: await templates.isTemplateActive("invoice"),
+      payUrl,
+    };
+    const tried = [];
+    for (let choice = chooseInvoiceSmsTemplate(invoice, customer, ctx, tried); choice; choice = chooseInvoiceSmsTemplate(invoice, customer, ctx, tried)) {
+      const body = await templates.getTemplate(choice.key, choice.vars, tplOpts, renderOpts);
+      if (body) return { body, renderedTemplateKey: choice.key };
+      tried.push(choice.key);
+    }
+  } catch (err) {
+    logger.warn(`[invoice] Template lookup failed: ${err.message}`);
+  }
+  return { body: null, renderedTemplateKey: null };
 }
 
 const InvoiceService = {
@@ -7006,6 +7295,16 @@ const InvoiceService = {
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
     _zeroDueRetried = false,
+    // Intelligence Bar send_invoice only (via sendViaSMSAndEmail): the phone digits
+    // its card showed, or null when the card showed no text. Undefined = unchanged.
+    expectedSmsPhone = undefined,
+    // Intelligence Bar send_invoice only: the digest of the text its card showed (invoiceSmsDigest). Undefined = unchanged.
+    expectedSmsDigest = undefined,
+    // Intelligence Bar send_invoice only: its live owner check, run at this leg's provider boundary.
+    verifyOwner = null,
+    // Intelligence Bar send_invoice only: a leg that did not send is reported on the result and NEVER queued as a later
+    // replay (a replay would deliver outside the approval: its recipient, its total).
+    noReplay = false,
   } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
@@ -7066,7 +7365,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, expectedSmsDigest, verifyOwner, noReplay,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -7145,6 +7444,14 @@ const InvoiceService = {
       if (restored) await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
     }
+    // The bar's approved text recipient, checked on the row this leg sends to:
+    // a phone changed (or a text the card never showed) is not sent.
+    if (expectedSmsPhone !== undefined
+      && (!expectedSmsPhone || String(customer?.phone || "").replace(/\D/g, "") !== String(expectedSmsPhone))) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw Object.assign(new Error("The customer's phone is not the one the approval showed; the text was not sent"), { code: "recipient_changed" });
+    }
 
     const domain = publicPortalUrl();
     const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, payUrlParams);
@@ -7156,140 +7463,13 @@ const InvoiceService = {
       codePrefix: invoiceShortCodePrefix(invoice),
     });
 
-    const serviceType = invoice.service_type || invoice.title || "your service";
-
-    // Service-date framing, all on the ET calendar day. Knex returns DATE as a
-    // UTC-midnight Date; etCalendarDayOf reads that and a plain YYYY-MM-DD
-    // string as the same calendar day (etDateString would shift the Date to
-    // the previous ET day and wrongly drop the "today" clause). An unparseable
-    // value falls back to undated copy.
-    let serviceYmd = "";
-    try {
-      serviceYmd = invoice.service_date ? etCalendarDayOf(invoice.service_date) : "";
-    } catch {
-      serviceYmd = "";
-    }
-    const todayYmd = etDateString(new Date());
-    // The annual-prepay "Today's visit is the first of N" clause is gated on
-    // today: a resend from sent/viewed/overdue or a delayed/scheduled send can
-    // run on a day other than service_date, where a same-day claim would be false.
-    const serviceDateIsTodayET = serviceYmd === todayYmd;
-    // A service date still in the future — the setup + first-application
-    // invoice auto-sent at estimate acceptance is the common case — must not
-    // use the generic "...completed on {service_date}" copy. ISO YYYY-MM-DD
-    // compares lexicographically === chronologically.
-    const serviceDateIsFutureET = serviceYmd > todayYmd;
-    const formattedDate = serviceYmd
-      ? new Date(`${serviceYmd}T12:00:00`).toLocaleDateString("en-US", {
-        weekday: "long",
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-        timeZone: "America/New_York",
-      })
-      : "";
-
-    // Pre-service copy: a future service date, or a linked visit that has not
-    // completed. An overdue or same-day appointment can still be open, so its
-    // completion state decides rather than its date; an unreadable status
-    // fails toward the pre-service copy.
-    let preServiceCopy = serviceDateIsFutureET;
-    if (!preServiceCopy && invoice.scheduled_service_id) {
-      try {
-        const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
-        preServiceCopy = visit?.status !== "completed";
-      } catch (err) {
-        logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
-        preServiceCopy = true;
-      }
-    }
-
-    // Annual-prepay invoices use a dedicated, coverage-aware template — the
-    // generic invoice_sent copy ("...completed on {service_date}") misframes a
-    // full year of prepaid visits as a single completed service. Resolve the
-    // term up front; a cancelled/refunded term reverts to the standard copy.
-    const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
-    // coverageActive is the descriptor's single source of truth for "is this
-    // term still covered" — it keeps a renewal lapse (cancelled +
-    // renewal_decision='cancel', still covered through term_end) active while
-    // excluding true void/refund terms, matching the billing guard.
-    const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
-    const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
-
-    // Body comes from the editable invoice_sent template (or its annual-prepay
-    // variant). If the row is missing/disabled, we skip the SMS rather than
-    // falling back to inline copy.
-    let body = null;
-    // Tracks whichever of the three rows below actually rendered — never
-    // guessed, so a caught template-lookup error below (body stays null)
-    // leaves this null too.
-    let renderedTemplateKey = null;
-    try {
-      const templates = require("../routes/admin-sms-templates");
-      const tplOpts = {
-        workflow: "invoice_send",
-        entity_type: "invoice",
-        entity_id: invoiceId,
-      };
-      // The annual-prepay variant is its own template row, so it would render
-      // even when ops disabled the base invoice_sent kill switch — and the
-      // provider (messageType 'invoice' → invoice_sent) would then swallow the
-      // send as a fake success and mark the invoice sent without delivery,
-      // blocking retries. Honor the base kill switch here so a disabled
-      // invoice_sent skips the variant too and the invoice stays retryable
-      // (falls through to the null-body skip + restoreSendClaim path below).
-      const invoiceSmsActive = await templates.isTemplateActive("invoice");
-      const firstName = customer.first_name || "";
-      if (prepayActive && invoiceSmsActive) {
-        // Coverage summary is built when a visit count is configured; a
-        // display-only prepay flag (no count) still gets the prepay framing via
-        // a generic phrase instead of the misleading "completed on" copy.
-        const coverageSummary = coverage?.coverageSummary || "your annual service plan";
-        // Only claim "today" when the service date actually is today in ET —
-        // resends and delayed sends run on other days. Off-day sends drop the
-        // clause; the coverage summary still conveys the full-term framing.
-        const firstVisitClause = coverage && serviceDateIsTodayET
-          ? ` Today's visit is the first of ${coverage.coverageCount}.`
-          : "";
-        body = await templates.getTemplate("invoice_sent_annual_prepay", {
-          first_name: firstName,
-          coverage_summary: coverageSummary,
-          first_visit_clause: firstVisitClause,
-          pay_url: payUrl,
-        }, tplOpts);
-        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
-      }
-      // Upfront invoices — the setup + first-application invoice auto-sent at
-      // estimate acceptance, or any invoice billed before its service date —
-      // must not use the generic "...completed on {service_date}" copy, which
-      // asserts a not-yet-performed service AND prints a future date. A future
-      // service date or an uncompleted linked visit selects a pre-service
-      // variant with no completion claim and no date placeholder. Gated on the same base `invoice` kill
-      // switch as the prepay variant (a disabled invoice_sent skips this too,
-      // keeping the invoice retryable); a missing/disabled variant row falls
-      // through to the standard copy below so the send is never blocked.
-      if (!body && preServiceCopy && invoiceSmsActive) {
-        body = await templates.getTemplate("invoice_sent_upfront", {
-          first_name: firstName,
-          service_type: serviceType,
-          pay_url: payUrl,
-        }, tplOpts);
-        if (body) renderedTemplateKey = "invoice_sent_upfront";
-      }
-      if (!body) {
-        // Either an ordinary invoice, or the prepay template was missing/disabled
-        // — fall back to the standard invoice_sent copy so a missing variant row
-        // never blocks the send.
-        body = await templates.getTemplate("invoice_sent", {
-          first_name: firstName,
-          service_type: serviceType,
-          service_date: formattedDate || "today",
-          pay_url: payUrl,
-        }, tplOpts);
-        if (body) renderedTemplateKey = "invoice_sent";
-      }
-    } catch (err) {
-      logger.warn(`[invoice] Template lookup failed: ${err.message}`);
+    const { body, renderedTemplateKey } = await renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants: expectedSmsDigest !== undefined });
+    // The Intelligence Bar's approved text: the card showed (and the claim re-checked) this exact body. A template edited since
+    // is not sent.
+    if (expectedSmsDigest !== undefined && invoiceSmsDigest({ body, renderedTemplateKey }, payUrl) !== expectedSmsDigest) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw Object.assign(new Error("The invoice text is not the one the approval showed; the text was not sent"), { code: "sms_text_changed" });
     }
 
     if (!body) {
@@ -7324,6 +7504,8 @@ const InvoiceService = {
     // return for the pendingChannelQueued flag.
     let pendingChannelToQueue = null;
     let pendingChannelQueued = false;
+    // The Intelligence Bar's no-replay posture: the leg that did not send, reported on the result instead of queued.
+    let replayWarning = null;
     // Post-delivery finalize, extracted so the delivered-SMS recovery in the
     // catch below can retry it once after a transient DB failure. Wrapped in
     // its own transaction (Codex round-3 P1 #4963, pre-push audit): when
@@ -7493,13 +7675,13 @@ const InvoiceService = {
           }
           const current = await database("invoices").where({ id: invoiceId }).first();
           return checkInvoiceDeliveryPreconditions(database, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner,
           });
         },
         withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
           invoiceId,
           (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner, expectedSmsPhone,
           }),
           dispatch,
         ),
@@ -7615,6 +7797,8 @@ const InvoiceService = {
           for (const [uncertainChannel] of uncertainLegs) {
             logger.warn(`[invoice] payment-link ${uncertainChannel} leg for invoice ${invoiceId} outcome uncertain — not requeued (a whole-notice replay would retry it too, risking a double-send)`);
           }
+        } else if (retryableLegs.length && noReplay) {
+          replayWarning = `The ${retryableLegs[0][0]} leg did not send (${String(retryableLegs[0][1]?.reason || retryableLegs[0][1]?.code || "not sent").slice(0, 120)}); send it by hand`;
         } else if (retryableLegs.length) {
           const [, representativeRetryableLeg] = retryableLegs[0];
           const explicitNextAllowedAt = representativeRetryableLeg.nextAllowedAt ? new Date(representativeRetryableLeg.nextAllowedAt) : null;
@@ -7678,6 +7862,7 @@ const InvoiceService = {
 
       return {
         sent: true, payUrl, ...settledEvent, ...queueOutcome,
+        ...(replayWarning ? { replayWarning } : {}),
         ...(pendingChannel ? {
           pendingChannel: pendingChannel[0],
           pendingChannelCode: pendingChannel[1]?.code,
@@ -7829,11 +8014,36 @@ const InvoiceService = {
       // Internal-only: set by the renewal-gate re-entry below so the inner
       // call does not re-read the term link. Never set by a real caller.
       _underRenewalGate = false,
+      // Intelligence Bar send_invoice: { phone, email } its card showed (phone
+      // digits / lowercased email, null = that leg was not on the card). Each
+      // leg refuses a different recipient at its own send. Null = unchanged.
+      expectedRecipients = null,
+      // Intelligence Bar send_invoice: a refusal stays a refusal. A linked visit
+      // found terminal at send never voids the invoice here (held for review,
+      // INVOICE_VISIT_TERMINAL_UNVOIDED, exactly as a safety-refused void), and a
+      // hold refusal never requeues it for a later send outside the approval.
+      refusalOnly = false,
+      // Intelligence Bar send_invoice: { updatedAtMs, digest } of the invoice row its card
+      // showed. The claim refuses (approved_version_changed, nothing sent) when an edit or
+      // a partial credit changed the amount due or the lines after the card. Null = unchanged.
+      expectedVersion = null,
+      // Intelligence Bar send_invoice: ['sms'] = the text leg only (the email leg is never started, never refused into a
+      // retry). Null = both legs, as every other caller. The page never passes it.
+      channels = null,
+      // false = a queued pay-link text (invoice_send_deferred) is never adopted or cancelled by this send: the claim refuses
+      // it (queued_pay_link). The bar passes false; every other caller keeps the default.
+      adoptsQueuedInvoiceSend = true,
     } = {},
   ) {
+    const smsOnly = Array.isArray(channels) && channels.length === 1 && channels[0] === "sms";
+    // The confirming admin rides the version so the claim's closeout pin names them.
+    if (expectedVersion && actorTechnicianId && expectedVersion.actorTechnicianId === undefined) {
+      expectedVersion = { ...expectedVersion, actorTechnicianId };
+    }
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
+      expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
     });
 
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -7856,6 +8066,7 @@ const InvoiceService = {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
           emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
         }));
       }
     }
@@ -7874,9 +8085,10 @@ const InvoiceService = {
     // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
     try {
-      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt });
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, holdExempt, expectedVersion });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
+      if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
       // retryable refusal every unclaimed sender entry returns (nothing claimed, nothing sent).
@@ -7925,9 +8137,10 @@ const InvoiceService = {
     // credit is drawn down — nothing to reverse.
     let claim;
     try {
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
+      if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       throw err;
     }
@@ -8046,6 +8259,11 @@ const InvoiceService = {
           // restore/resolve) any queued pay-link SMS this send supersedes —
           // the nested claim must not adopt it a second time.
           adoptsQueuedInvoiceSend: false,
+          ...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),
+          ...(expectedVersion && expectedVersion.smsDigest !== undefined ? { expectedSmsDigest: expectedVersion.smsDigest } : {}),
+          ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
+          // The bar never leaves a replay behind (no later text or email outside its approval).
+          ...(refusalOnly ? { noReplay: true } : {}),
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.settled_zero_due) {
@@ -8148,6 +8366,7 @@ const InvoiceService = {
             sms.originalAt = billingLegContactTime(smsResult);
           }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
+          if (smsResult.replayWarning) sms.warning = smsResult.replayWarning;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
           if (smsResult?.code) sms.code = smsResult.code;
@@ -8182,7 +8401,10 @@ const InvoiceService = {
     // never receives it. The queued row replays the exact rendered body at
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
+    // A refusal-only send (the Intelligence Bar) never queues a later text:
+    // that replay would run outside its approval (recipient, total).
     if (!allowClaimed
+      && !refusalOnly
       && REPLAY_HOLD_CODES.includes(sms.code)
       && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
@@ -8274,6 +8496,10 @@ const InvoiceService = {
       email.error = "Linked visit is terminal; email delivery not attempted";
       email.code = "INVOICE_VISIT_TERMINAL";
       email.deliveryOutcome = "not_sent";
+    } else if (smsOnly) {
+      // A text-only send (the Intelligence Bar): the email leg is not part of it. Not an error and not a retry.
+      email.skipped = true;
+      email.code = "email_not_requested";
     } else if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
@@ -8429,6 +8655,9 @@ const InvoiceService = {
     const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
+    let deliveryRecordFailed = false;
+    // The handed-back claim's pin could not be retired (see the retire write below): the visit will not auto-close.
+    let pinRetireFailed = false;
     let queueOutcome = {};
     let adoptedQueueUnrestored = false;
     // Codex round-8 audit P1 (#4131 slice 4): defaults to voided=true for the
@@ -8461,8 +8690,8 @@ const InvoiceService = {
       }
       if (!adoptedQueueUnrestored) {
         const priorSettlement = previouslySettledBillingLegs([sms, email]);
-        const finalized = await whereSendClaimOwned(
-          db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+        const finalizeSent = (conn) => whereSendClaimOwned(
+          conn("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
           claim.invoice.send_claim_token,
         )
           .update({
@@ -8478,15 +8707,34 @@ const InvoiceService = {
             send_claim_token: null,
             updated_at: new Date(),
           });
+        let finalized;
+        if (expectedVersion?.closeoutTarget) {
+          // The Intelligence Bar's send: the delivery marker that binds its closeout pin to this delivery is written in the
+          // SAME transaction that finalizes the invoice as sent, and the write is mandatory. If it fails, the finalization
+          // rolls back (the claim stays held for review) and the send reports that the message went out but is unrecorded;
+          // the sweep can never see a sent invoice without its marker.
+          try {
+            finalized = await db.transaction(async (trx) => {
+              const count = await finalizeSent(trx);
+              if (count !== 0) {
+                await require("./invoice-issued-closeout").recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token, { conn: trx, actorTechnicianId });
+              }
+              return count;
+            });
+          } catch (markerErr) {
+            deliveryRecordFailed = true;
+            finalized = 0;
+            logger.error(`[invoice] delivery of ${claim.invoice.invoice_number} could not be recorded; finalization rolled back, claim held for review: ${markerErr.message}`);
+          }
+        } else {
+          finalized = await finalizeSent(db);
+        }
         ownedDeliveryFinalized = finalized !== 0;
         // First send finalized on SMS and/or email — convert the originating lead.
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
-            // The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
-            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
-              && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR))) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: priorDeliveredForLeadConversion(claim.invoice), approvedLeadSet: expectedVersion?.leadTargets ?? null });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -8504,7 +8752,12 @@ const InvoiceService = {
         }
       }
     } else if (terminalVisitRefused) {
-      if (claimed) {
+      if (claimed && refusalOnly) {
+        // Refusal-only caller: no void; the claim is retained for review, the
+        // same state as a safety-refused void below.
+        terminalVisitVoided = false;
+        logger.warn(`[invoice] Terminal-visit refusal for ${claim.invoice.invoice_number} on a refusal-only send — not voided, claim retained for review`);
+      } else if (claimed) {
         const scheduledServiceId = await linkedScheduledServiceId(claim.invoice);
         const voided = scheduledServiceId
           ? await InvoiceService.voidOpenInvoicesForCancelledService(scheduledServiceId, {
@@ -8552,6 +8805,16 @@ const InvoiceService = {
       // its claim (stale-claim recovery parks it for review) rather than
       // requeueing a second send over an unrestored text.
       adoptedQueueUnrestored = !restored && rowsToRestore.length > 0;
+      // The claim ended without a delivery: its closeout pin is finished business, not a delivery with a missing marker.
+      if (restored && expectedVersion?.closeoutTarget) {
+        try {
+          await require("./invoice-issued-closeout").recordApprovedCloseoutRetired(invoiceId, claim.invoice.send_claim_token);
+        } catch (retireErr) {
+          // The claim is handed back, but its pin stays unretired: the visit will not auto-close. Said on the result.
+          pinRetireFailed = true;
+          logger.error(`[invoice] closeout pin retire record failed for ${invoiceId}: ${retireErr.message}`);
+        }
+      }
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
@@ -8569,7 +8832,7 @@ const InvoiceService = {
       }
       // A collections dispute-hold refusal always leaves the invoice SCHEDULED, never a
       // draft nothing sends after the release (the sender holds it, then sends it).
-      if (restored && !allowClaimed && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
+      if (restored && !allowClaimed && !refusalOnly && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
         await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: claim.invoice.customer_id });
       }
     }
@@ -8580,7 +8843,8 @@ const InvoiceService = {
     let issuedCloseout = null;
     if (ownedDeliveryFinalized) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+      // The Intelligence Bar's card named the visit this send closes (or none): the closeout runs for that visit only.
+      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId, approvedTarget: expectedVersion?.closeoutTarget || null });
     }
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the
@@ -8600,14 +8864,26 @@ const InvoiceService = {
     const holdLegs = [sms, email].filter((leg) => leg?.code === "COLLECTION_HOLD_DEFER");
     const holdOnly = !ok && holdLegs.length > 0 && !sms.ok && !email.ok
       && !terminalVisitObserved && !deliveryOutcomeUncertain && !adoptedQueueUnrestored;
-    return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
+    return { ok: ok && !deliveryRecordFailed, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
+      ...(deliveryRecordFailed ? {
+        code: "INVOICE_DELIVERY_RECORD_FAILED", deliveryHeld: true,
+        error: "The invoice went out, but the app could not record it as sent. Check the invoice by hand and do not send it again.",
+      } : {}),
       ...(holdOnly ? {
         code: "COLLECTION_HOLD_DEFER", retryable: true, deferred: true, deliveryOutcome: "not_sent",
         error: holdLegs[0].error || "Customer has an active collections dispute hold; delivery deferred until it is released",
         ...(holdLegs.find((leg) => leg.nextAllowedAt) ? { nextAllowedAt: holdLegs.find((leg) => leg.nextAllowedAt).nextAllowedAt } : {}),
       } : {}),
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
+      ...(pinRetireFailed ? {
+        closeoutPinRetireFailed: true,
+        closeoutPinWarning: "The send did not go out and the invoice is back as it was, but the closeout pin could not be retired; the visit will not auto-close, close it by hand.",
+        ...(!deliveryRecordFailed && !adoptedQueueUnrestored ? {
+          code: "INVOICE_CLOSEOUT_PIN_RETIRE_FAILED",
+          error: "The send did not go out and the invoice is back as it was, but the closeout pin could not be retired; the visit will not auto-close, close it by hand.",
+        } : {}),
+      } : {}),
       ...(terminalVisitRefused
         ? (terminalVisitVoided
           ? { code: "INVOICE_VISIT_TERMINAL" }
@@ -13488,12 +13764,21 @@ InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderH
 InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
+module.exports.queuedPayLinkText = queuedPayLinkText;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
+module.exports._convertLeadOnInvoiceSent = convertLeadOnInvoiceSent;
+module.exports._checkInvoiceDeliveryPreconditions = checkInvoiceDeliveryPreconditions;
+module.exports.renderInvoiceSmsBody = renderInvoiceSmsBody;
+module.exports.chooseInvoiceSmsTemplate = chooseInvoiceSmsTemplate;
+// The approved-version claim checks, each one decision (tested on its own).
+module.exports._approvedClaimChecks = {
+  approvedDigestRefusal, approvedEffectsRefusal, approvedOwnerRefusal, approvedAttachmentRefusal, recordApprovedPinOrRefusal, runApprovedClaimChecks,
+};
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
@@ -13521,6 +13806,9 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
+module.exports.leadConversionApplies = leadConversionApplies;
+module.exports.priorDeliveredForLeadConversion = priorDeliveredForLeadConversion;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim

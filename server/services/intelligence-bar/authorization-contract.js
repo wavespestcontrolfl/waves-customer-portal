@@ -89,6 +89,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // The Stripe detach cannot be undone, and an Auto Pay-off the customer
   // is emailed about is only reversible by the customer's own consent.
   'remove_saved_payment_method',
+  // An invoice sent to the customer cannot be unsent.
+  'send_invoice',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -112,7 +114,13 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
   'resend_receipt',
+  // The invoice text (one text with the pay link; the bar sends no email).
+  'send_invoice',
 ]);
+
+// send_invoice: its card lines come from its own preview
+// (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
+CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -144,6 +152,7 @@ const BILLING_TOOL_NAMES = new Set([
   'create_pending_estimate',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
+  'send_invoice',
 ]);
 
 const ACTION_LABELS = {
@@ -174,6 +183,7 @@ const ACTION_LABELS = {
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
+  send_invoice: 'Send an invoice to the customer',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -789,6 +799,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (notes.hold_lookup_failed) push('billing', "Couldn't check whether this card holds an upcoming appointment");
     if (preview.autopay_note) push('billing', preview.autopay_note);
     if (preview.customer_emails?.summary) push('comms', String(preview.customer_emails.summary));
+  }
+  // send_invoice: invoice, money and who is contacted.
+  if (toolName === 'send_invoice' && preview?.preview === true) {
+    // Lines flagged `more` (every invoice line past the first few) ride in full under "Show more".
+    for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
   }
   // correct_invoice_address: what the rewrite does and does not touch.
   if (toolName === 'correct_invoice_address' && preview?.does) {

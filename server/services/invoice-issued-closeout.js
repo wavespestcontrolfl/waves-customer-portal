@@ -380,6 +380,112 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
+// The visit an Intelligence Bar send's card said would be closed (a visit id) or 'none', kept as audit rows on the
+// INVOICE (no new column). The send's own closeout is handed the target directly; these rows let the retry sweep, which
+// re-enters with no caller, enforce the same target. Two rows make a pin:
+//   - the PIN, written inside the send claim, carries the claim token and the target;
+//   - the DELIVERY row, written when that claim's delivery finalized, carries the same token and the newest delivery
+//     stamp the delivery left on the invoice.
+// The sweep honors a pin only when its delivery row exists and the invoice's newest delivery stamp is still the one the
+// delivery row recorded. A claim that ended without a delivery has no delivery row, and any later send (a page send, a
+// second bar send) moves the stamp or carries its own token, so the pin never reaches another send's episode.
+const CLOSEOUT_PIN_ACTION = 'invoice.send_closeout_target_approved';
+const CLOSEOUT_PIN_DELIVERED_ACTION = 'invoice.send_closeout_target_delivered';
+const CLOSEOUT_PIN_RETIRED_ACTION = 'invoice.send_closeout_target_retired';
+const newestDeliveryMs = (row) => {
+  const stamps = [row?.sent_at, row?.sms_sent_at, row?.email_sent_at].filter(Boolean).map((v) => new Date(v).getTime());
+  return stamps.length ? Math.max(...stamps) : null;
+};
+const parseMeta = (meta) => {
+  if (typeof meta !== 'string') return meta || {};
+  try { return JSON.parse(meta); } catch { return {}; }
+};
+async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = db, claimToken = null, actorTechnicianId = null } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  await recordAuditEvent({
+    actor_type: actorTechnicianId ? 'admin' : 'system',
+    actor_id: actorTechnicianId,
+    action: CLOSEOUT_PIN_ACTION,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+    metadata: { invoiceId: String(invoiceId), approvedTarget, claimToken: claimToken ? String(claimToken) : null },
+    critical: true,
+    trx: conn,
+  });
+}
+
+// The claim's delivery finalized: the pin written under this claim token is now the invoice's delivery episode.
+async function recordApprovedCloseoutDelivery(invoiceId, claimToken, { conn = db, actorTechnicianId = null } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  const stamps = await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at');
+  await recordAuditEvent({
+    actor_type: actorTechnicianId ? 'admin' : 'system',
+    actor_id: actorTechnicianId,
+    action: CLOSEOUT_PIN_DELIVERED_ACTION,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+    metadata: { invoiceId: String(invoiceId), claimToken: claimToken ? String(claimToken) : null, deliveredAtMs: newestDeliveryMs(stamps) },
+    critical: true,
+    trx: conn,
+  });
+}
+
+// A pin whose claim ended without a delivery (the claim was handed back): written by the sender, so the sweep can tell
+// that pin is finished business and not a delivery whose marker went missing.
+async function recordApprovedCloseoutRetired(invoiceId, claimToken, { conn = db } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  await recordAuditEvent({
+    actor_type: 'system',
+    action: CLOSEOUT_PIN_RETIRED_ACTION,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+    metadata: { invoiceId: String(invoiceId), claimToken: claimToken ? String(claimToken) : null },
+    // Critical: a retirement that did not land leaves an unbound pin, so the failure must reach the caller.
+    critical: true,
+    trx: conn,
+  });
+}
+
+// A pin with no delivery and no retirement that nothing holds any more: the claim token is not the invoice's live claim
+// (status 'sending' under that token) and the pin is older than the stale-claim window (invoice.js STALE_SENDING_SQL, 10 minutes).
+// Such a pin is finished business: a live claim would still hold the invoice, and a stale one is parked for review.
+const CLOSEOUT_PIN_STALE_MS = 10 * 60 * 1000;
+function pinNoLongerHeld(invoice, token, pinCreatedAt, now = Date.now()) {
+  const holds = invoice && invoice.status === 'sending' && invoice.send_claim_token && String(invoice.send_claim_token) === String(token);
+  const created = pinCreatedAt ? new Date(pinCreatedAt).getTime() : NaN;
+  return !holds && Number.isFinite(created) && now - created > CLOSEOUT_PIN_STALE_MS;
+}
+
+// What the sweep may do for an invoice's CURRENT delivery episode:
+//   { target }   the newest delivery row whose recorded stamp is still the invoice's newest stamp names the claim token
+//                that delivered it; the pin written under that token carries the target.
+//   { unbound }  the newest pin has no delivery row at all and was not retired: its claim may have delivered with no
+//                marker, so the sweep must not close anything the card did not approve (fail closed) - until nothing holds
+//                the pin any more (pinNoLongerHeld), when it counts as retired and the invoice is judged as any page send.
+//   null         no pin, a retired pin, or a pin whose episode a later send replaced (a page send is judged as always).
+// Throws on a failed read (the sweep skips the row and the next pass re-reads).
+async function approvedCloseoutTargetFor(conn, invoiceId) {
+  const current = newestDeliveryMs(await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at'));
+  if (current === null) return null;
+  const ofInvoice = (action) => conn('audit_log').where({ resource_type: 'invoices', resource_id: invoiceId, action });
+  const deliveries = await ofInvoice(CLOSEOUT_PIN_DELIVERED_ACTION).orderBy('created_at', 'desc').limit(5).select('metadata');
+  const episode = (deliveries || []).map((row) => parseMeta(row.metadata)).find((meta) => meta.claimToken && meta.deliveredAtMs === current);
+  if (episode) {
+    const pin = await ofInvoice(CLOSEOUT_PIN_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(episode.claimToken)])
+      .orderBy('created_at', 'desc').first('metadata');
+    const target = pin ? parseMeta(pin.metadata).approvedTarget : null;
+    return target ? { target } : null;
+  }
+  const newest = await ofInvoice(CLOSEOUT_PIN_ACTION).orderBy('created_at', 'desc').first('metadata', 'created_at');
+  const token = newest ? parseMeta(newest.metadata).claimToken : null;
+  if (!token) return null;
+  const finished = (await ofInvoice(CLOSEOUT_PIN_DELIVERED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'))
+    || (await ofInvoice(CLOSEOUT_PIN_RETIRED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'));
+  if (finished) return null;
+  const live = await conn('invoices').where({ id: invoiceId }).first('status', 'send_claim_token');
+  return pinNoLongerHeld(live, token, newest.created_at) ? null : { unbound: true };
+}
+
 // The sweeps' PREFILTER for the prepayment rule (issuedCloseoutVisitRefusal,
 // `visit_prepaid`): a visit nobody arrived at whose invoice / statement was
 // NOT settled or delivered on a later ET day than the visit. The closeout
@@ -464,6 +570,82 @@ const NEWEST_DELIVERY_SQL = 'GREATEST(i.sent_at, i.sms_sent_at, i.email_sent_at)
 const ISSUED_AT_SQL = `CASE WHEN i.status IN ('paid', 'prepaid') THEN COALESCE(i.paid_at, ${NEWEST_DELIVERY_SQL}) ELSE ${NEWEST_DELIVERY_SQL} END`;
 const ISSUED_AFTER_SERVICE_DAY_SQL = settledAfterServiceDaySql(ISSUED_AT_SQL);
 
+async function loadRetryCandidates(conn, today, sinceDays) {
+  return conn('invoices as i')
+    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .whereNull('i.payer_statement_id')
+    .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
+    .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
+    .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
+    .orderBy('i.id')
+    .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
+      conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
+}
+
+// Does the visit's own state say this candidate should not be retried? A parked attempt of this closeout is always resumed;
+// otherwise a prepaid-and-nobody-arrived visit is left to a person, and so is one whose latest audit row is a real refusal.
+// An audit lookup that fails skips the row (logged), as the sweep always did.
+async function skipByVisitState(conn, row) {
+  if (row.own_attempt_parked) return false;
+  if (prepaidAndNobodyArrived(row)) return true;
+  try {
+    const last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
+    return Boolean(last) && !refusedForTheMoment(last);
+  } catch (err) {
+    logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+    return true;
+  }
+}
+
+// What the invoice's closeout pin says the sweep may do. A bar send's card named the visit this closeout may close (or none):
+// the sweep keeps to it. The pin covers the send's closeout only, so a settled invoice (trigger 'paid') is retried as the
+// payment rails always do.
+//   { action: 'skip', reason }   close nothing (pin lookup failed, or a pin with no delivery marker and no retirement: the
+//                                sweep cannot tell what the card approved)
+//   { action: 'honor', target }  close only the visit the card named
+//   { action: 'unpinned' }       no pin: the ordinary retry
+async function pinDecisionFor(conn, row, trigger) {
+  if (trigger !== 'sent') return { action: 'unpinned' };
+  let pinned;
+  try {
+    pinned = await approvedCloseoutTargetFor(conn, row.invoice_id);
+  } catch (err) {
+    logger.error(`[invoice-issued-closeout] issued-invoice retry: pin lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+    return { action: 'skip', reason: 'pin_lookup_failed' };
+  }
+  if (pinned?.unbound) return { action: 'skip', reason: 'pin_unbound' };
+  return pinned?.target ? { action: 'honor', target: pinned.target } : { action: 'unpinned' };
+}
+
+// An unbound pin is audited once per sweep that meets it.
+async function recordUnboundPin(row) {
+  logger.warn(`[invoice-issued-closeout] issued-invoice retry: invoice ${row.invoice_id} has an approved closeout pin with no delivery marker; skipped`);
+  try {
+    await require('./audit-log').recordAuditEvent({
+      actor_type: 'system', action: 'invoice.closeout_pin_unbound', resource_type: 'invoices', resource_id: row.invoice_id,
+      metadata: { invoiceId: String(row.invoice_id), visitId: row.visit_id ? String(row.visit_id) : null },
+    });
+  } catch (auditErr) {
+    logger.error(`[invoice-issued-closeout] unbound pin audit failed for invoice ${row.invoice_id}: ${auditErr.message}`);
+  }
+}
+
+// One candidate: the visit-state skip, the pin decision, then the closeout. Returns { retried, closed } (zeros for a skip).
+async function retryOneIssuedInvoice(row, { conn, today }) {
+  const skipped = { retried: 0, closed: 0 };
+  if (await skipByVisitState(conn, row)) return skipped;
+  const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
+  const decision = await pinDecisionFor(conn, row, trigger);
+  if (decision.action === 'skip') {
+    if (decision.reason === 'pin_unbound') await recordUnboundPin(row);
+    return skipped;
+  }
+  const out = await closeOutVisitForIssuedInvoice({
+    invoiceId: row.invoice_id, trigger, conn, today, ...(decision.action === 'honor' ? { approvedTarget: decision.target } : {}),
+  });
+  return { retried: 1, closed: out?.closed ? 1 : 0 };
+}
+
 // THE durable retry for every invoice outside a statement (GitHub r1 P1 and
 // r3 P1 ×2 #5886). Every rail — the Stripe webhook, cash / check / reconcile,
 // the prepaid route, each send path — runs the closeout once, best-effort,
@@ -494,15 +676,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
   if (!isEnabled('invoiceIssuedClosesVisit')) return none;
   let rows = [];
   try {
-    rows = await conn('invoices as i')
-      .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
-      .whereNull('i.payer_statement_id')
-      .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
-      .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
-      .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
-      .orderBy('i.id')
-      .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
+    rows = await loadRetryCandidates(conn, today, sinceDays);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: candidate lookup failed: ${err.message}`);
     return none;
@@ -510,21 +684,9 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
   let retried = 0;
   let closed = 0;
   for (const row of rows) {
-    if (!row.own_attempt_parked) {
-      if (prepaidAndNobodyArrived(row)) continue;
-      let last;
-      try {
-        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
-      } catch (err) {
-        logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
-        continue;
-      }
-      if (last && !refusedForTheMoment(last)) continue;
-    }
-    retried += 1;
-    const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today });
-    if (out?.closed) closed += 1;
+    const out = await retryOneIssuedInvoice(row, { conn, today });
+    retried += out.retried;
+    closed += out.closed;
   }
   if (retried) logger.info(`[invoice-issued-closeout] issued-invoice retry: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
   return { candidates: rows.length, retried, closed };
@@ -616,6 +778,16 @@ async function resolveCloseoutTarget(run) {
   }
   // No linked visit: nothing to audit against, and nothing a sweep could close.
   return { closed: false, reason: resolved.reason, visitId: null };
+}
+
+// An approved target (the Intelligence Bar's send card: the visit id it said would be closed, or 'none'):
+// the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
+// the retry sweeps do not reconsider (a person decides). A send with no approved target is unchanged.
+async function refuseUnapprovedTarget(run) {
+  if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
+  logger.warn(`[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_target_mismatch' });
+  return { closed: false, reason: 'approved_target_mismatch', visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
 }
 
 // Phase 3 — the canonical completion in its quiet backfill posture: no
@@ -718,13 +890,13 @@ async function auditCloseoutFailure(run, err) {
 // auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
 // the quiet canonical completion.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
-    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run));
+    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run));
     return refused || await runQuietCloseout(run);
   } catch (err) {
     return auditCloseoutFailure(run, err);
@@ -736,6 +908,7 @@ module.exports = {
   closeOutVisitsForStatement,
   retrySettledStatementCloseouts,
   retryIssuedInvoiceCloseouts,
+  pinDecisionFor,
   visitJobTimerRunning,
   OPEN_VISIT_STATUSES,
   ARRIVED_VISIT_STATUSES,
@@ -748,4 +921,9 @@ module.exports = {
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,
   issuedCloseoutTarget,
+  recordApprovedCloseoutTarget,
+  recordApprovedCloseoutDelivery,
+  recordApprovedCloseoutRetired,
+  pinNoLongerHeld,
+  CLOSEOUT_PIN_STALE_MS,
 };
