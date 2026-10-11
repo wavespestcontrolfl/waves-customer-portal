@@ -46,76 +46,65 @@ function retryLaneState(status, call) {
   return { phase: retrying ? 'failed_retrying' : 'failed', retryable: retrying, detail };
 }
 
+// Fixed-text phases: the status alone decides. The others (queued, a held
+// claim, the two retry lanes) read the row, in phaseState below.
+const FIXED_PHASES = {
+  processed: ['complete', null],
+  voicemail: ['complete', 'Voicemail lane: no live conversation to extract from.'],
+  spam: ['complete', 'Classified as spam; no lead or customer was created.'],
+  customer_creation_failed: ['failed', 'The call named a real prospect but the customer record could not be saved — see the review card.'],
+  lead_creation_failed: ['failed', 'The lead this call needed could not be saved — see the review card.'],
+};
+const RETRY_LANES = new Set(['no_transcription', 'extraction_failed']);
+const orNull = (v) => v || null;
+
+function phaseState(status, call, beatAgeMin) {
+  const fixed = FIXED_PHASES[status];
+  if (fixed) return { phase: fixed[0], detail: fixed[1], retryable: false };
+  if (RETRY_LANES.has(status)) return retryLaneState(status, call);
+  if (status === 'processing') {
+    const detail = beatAgeMin == null
+      ? 'A pass holds the claim.'
+      : beatAgeMin > 10
+        ? `A pass claimed this call but its heartbeat stopped ${beatAgeMin} min ago — the sweep will reclaim it.`
+        : `A pass is working on it (last heartbeat ${beatAgeMin} min ago).`;
+    return { phase: 'processing', detail, retryable: false };
+  }
+  if (status == null || status === 'pending') {
+    const adopted = parseJson(call.metadata, {})?.adopted_recording;
+    if (!call.recording_url) return { phase: 'waiting_for_recording', detail: 'No recording has arrived for this call yet.', retryable: false };
+    return {
+      phase: 'queued',
+      detail: adopted
+        ? 'An adopted recording is waiting to be processed; the transcript and extraction shown are from the previous recording until it runs.'
+        : 'Recording received; the next sweep will process it.',
+      retryable: false,
+    };
+  }
+  return { phase: 'unknown', detail: `Unrecognized processing status "${status}".`, retryable: false };
+}
+
 // Honest processing state, in words an operator can act on.
 function describeProcessing(call) {
-  const status = call.processing_status || null;
-  const timings = parseJson(call.metadata, {})?.processing_timings || null;
+  const status = orNull(call.processing_status);
   const validationErrors = parseJson(call.ai_extraction_validation_errors, null);
   const heartbeat = call.processing_heartbeat_at ? new Date(call.processing_heartbeat_at) : null;
   const started = call.processing_started_at ? new Date(call.processing_started_at) : null;
   const beatAgeMin = heartbeat ? Math.round((Date.now() - heartbeat.getTime()) / 60000) : null;
-
-  let phase;
-  let detail = null;
-  let retryable = false;
-  const adopted = parseJson(call.metadata, {})?.adopted_recording || null;
-  switch (status) {
-    case null:
-    case 'pending':
-      phase = call.recording_url ? 'queued' : 'waiting_for_recording';
-      detail = call.recording_url ? 'Recording received; the next sweep will process it.' : 'No recording has arrived for this call yet.';
-      if (adopted && call.recording_url) {
-        detail = 'An adopted recording is waiting to be processed; the transcript and extraction shown are from the previous recording until it runs.';
-      }
-      break;
-    case 'processing':
-      phase = 'processing';
-      detail = beatAgeMin == null
-        ? 'A pass holds the claim.'
-        : beatAgeMin > 10
-          ? `A pass claimed this call but its heartbeat stopped ${beatAgeMin} min ago — the sweep will reclaim it.`
-          : `A pass is working on it (last heartbeat ${beatAgeMin} min ago).`;
-      break;
-    case 'processed':
-      phase = 'complete';
-      break;
-    case 'voicemail':
-    case 'spam':
-      phase = 'complete';
-      detail = status === 'spam' ? 'Classified as spam; no lead or customer was created.' : 'Voicemail lane: no live conversation to extract from.';
-      break;
-    case 'no_transcription':
-    case 'extraction_failed':
-      ({ phase, retryable, detail } = retryLaneState(status, call));
-      break;
-    case 'customer_creation_failed':
-      phase = 'failed';
-      detail = 'The call named a real prospect but the customer record could not be saved — see the review card.';
-      break;
-    case 'lead_creation_failed':
-      phase = 'failed';
-      detail = 'The lead this call needed could not be saved — see the review card.';
-      break;
-    default:
-      phase = 'unknown';
-      detail = `Unrecognized processing status "${status}".`;
-  }
   return {
     status,
-    phase,
-    detail,
-    retryable,
-    transcription_status: call.transcription_status || null,
-    transcription_provider: call.transcription_provider || null,
-    review_status: call.review_status || null,
-    v2_extraction_status: call.v2_extraction_status || null,
+    ...phaseState(status, call, beatAgeMin),
+    transcription_status: orNull(call.transcription_status),
+    transcription_provider: orNull(call.transcription_provider),
+    review_status: orNull(call.review_status),
+    v2_extraction_status: orNull(call.v2_extraction_status),
     extraction_attempts: Number(call.extraction_attempts || 0),
     generation: call.processing_generation == null ? null : Number(call.processing_generation),
-    prompt_version: call.ai_extraction_prompt_version || null,
-    model: call.ai_extraction_model || null,
+    prompt_version: orNull(call.ai_extraction_prompt_version),
+    model: orNull(call.ai_extraction_model),
     started_at: started ? started.toISOString() : null,
     heartbeat_at: heartbeat ? heartbeat.toISOString() : null,
-    timings,
+    timings: orNull(parseJson(call.metadata, {})?.processing_timings),
     validation_errors: Array.isArray(validationErrors) ? validationErrors.slice(0, 5) : null,
   };
 }
