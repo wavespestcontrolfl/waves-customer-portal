@@ -61,7 +61,7 @@ function recordedPartOfComposite(text) {
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts, sameDayWindowElapsed } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords, familiesIn } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, isExplicitlyNonOwner } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, isExplicitlyNonOwner } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -211,7 +211,7 @@ function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Vi
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
@@ -6496,14 +6496,23 @@ function hasPreSlabTermiteContext(text) {
 // "Waves Pest Control and lawn care was requested" keeps its lawn request.
 const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment\s+service\b)(?:\s*&\s*lawn\s*care\b)?/g;
 
+// Non-pre-treat termite cues, shared by canonicalWavesService (first match
+// wins there) and the unit-card pre-treat proof (any cue anywhere keeps the
+// card). One source of truth: do not copy these patterns.
+const TERMITE_WOOD_TREATMENT_CUE_RE = /\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/;
+const TERMITE_FOAM_DRILL_CUE_RE = /\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/;
+// Termidor is NOT in this one: it also names the pre-slab product.
+const TERMITE_LIQUID_PERIMETER_CUE_RE = /\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b/;
+const TERMITE_WDO_CUE_RE = /\bwdo\b|wood destroying organism/;
+
 function canonicalWavesService(value) {
   const text = String(value || '').toLowerCase().replace(OWN_BUSINESS_NAME_RE, ' ').trim();
   if (!text) return null;
   if (hasPreSlabTermiteContext(text)) return 'Pre-Slab Termidor';
-  if (/\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/.test(text)) return 'Termite Wood Treatment';
-  if (/\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/.test(text)) return 'Termite Foam Drill';
-  if (/\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b|\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
-  if (/\bwdo\b|wood destroying organism/.test(text)) return 'WDO Inspection';
+  if (TERMITE_WOOD_TREATMENT_CUE_RE.test(text)) return 'Termite Wood Treatment';
+  if (TERMITE_FOAM_DRILL_CUE_RE.test(text)) return 'Termite Foam Drill';
+  if (TERMITE_LIQUID_PERIMETER_CUE_RE.test(text) || /\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
+  if (TERMITE_WDO_CUE_RE.test(text)) return 'WDO Inspection';
   if (/\bbed\s*bugs?\b|\bbedbugs?\b/.test(text)) return 'Bed Bug Treatment';
   if (/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait stations?\b/.test(text)) return 'Rodent Control';
   if (/\bmosquito(?:es|s)?\b/.test(text)) return 'Mosquito Control';
@@ -7131,6 +7140,212 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   const out = results[results.length - 1].waived;
   out.wholeStructureUnitWaived.service = results[results.length - 1].service;
   return out;
+}
+
+// Unit-level language beyond condo/apartment: a commercial suite, bay or
+// multi-tenant center has a unit even for a whole-structure service, so its
+// unit card stays (same safeguard the business whole-building waiver keeps).
+const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
+
+const PRE_CONSTRUCTION_SERVICE_KEYS = new Set(['termite_slab_pretreat', 'termite_pretreatment']);
+// Existing-structure termite work: localized treatments (spot, foam, bait,
+// drill, station) and the treatments an existing building gets (trenching,
+// rodding, perimeter treatment, WDO or other inspection, retreat). Any of
+// these in the view's service words means the pre-treat is NOT the only
+// requested work, so the unit card stays. Soil treatment and barrier are not
+// listed alone: a pre-construction pre-treat is itself a soil barrier. The
+// bare words "liquid" and "existing" are not listed either: "liquid
+// termiticide before the slab pour" and "existing customer needs a slab
+// pre-treat" are plain pre-treat jobs. "Liquid" vetoes only through
+// existingStructureTermiteWork below.
+const EXISTING_STRUCTURE_TERMITE_WORK_RE = /\b(?:spot|foam\w*|bait\w*|drill\w*|stations?|sentricon|localized|fumigat\w*|tent(?:ing|ed)?|trench\w*|rodd?(?:ing|ed)?|rods?|perimeter|wdo|wood[- ]destroying|inspect\w*|re-?treat\w*)\b/i;
+const LIQUID_TERMITE_WORK_RE = /\bliquid\b/i;
+const LIQUID_EXISTING_CONTEXT_RE = /\b(?:perimeter|barrier|foundation|around (?:the )?(?:home|house|structure))\b/i;
+const LIQUID_NEW_CONSTRUCTION_RE = /\b(?:pour|before the slab|new construction)\b/i;
+function existingStructureTermiteWork(words) {
+  if (EXISTING_STRUCTURE_TERMITE_WORK_RE.test(words)) return true;
+  // Fail closed for a mixed call: liquid work tied to the building's
+  // perimeter or foundation, with no new-construction wording to explain it.
+  return LIQUID_TERMITE_WORK_RE.test(words) && LIQUID_EXISTING_CONTEXT_RE.test(words)
+    && !LIQUID_NEW_CONSTRUCTION_RE.test(words);
+}
+// The whole unit-card skip rule, in one place (Codex r11 to r14). The card is
+// dropped only when ALL of these hold for EVERY view of the call:
+//  1. Property: a known building-level type, no partial occupancy, no second
+//     requested service (propertyHasNoUnitToAsk).
+//  2. Intent: the V2 service_intent is not an existing-service intent
+//     (follow-up, complaint or callback, cancellation). A missing intent is
+//     allowed: the V2 schema requires the field, so only a bare test fixture
+//     lacks it, and callMakesNoServiceAsk treats a missing intent the same way.
+//  3. Catalog: the resolved row is a pre-construction pre-treat.
+//  4. Cues: NO fragment, and not the joined service words, carries a
+//     non-pre-treat cue (hasNonPretreatTermiteCue). Cue classes:
+//       a. treatment cues shared with canonicalWavesService: wood treatment /
+//          Bora-Care, foam drill, trench / rod / liquid perimeter, WDO;
+//       b. add-on wording: monitor*, bond, renewal, bait*, stations, and
+//          protection / warranty with plan or contract context;
+//       c. existing-structure work: spot, foam, drill, perimeter,
+//          inspection, retreat and the like (existingStructureTermiteWork);
+//       d. existing-structure CONTEXT, whatever the treatment word is:
+//          a building qualifier ("existing / current / occupied / around the
+//          / of the" + home, house, structure, building, property,
+//          foundation, residence) unless the same fragment says pour, before
+//          the slab, new construction, new build or pre-slab. A bare "soil
+//          treatment" is not context: a pre-treat is a soil treatment.
+//  5. Positive proof: every structured fragment (requested_service,
+//     matched_service, specific_service_name, each pain_points item, every
+//     one split on the conjunctions; a bare V2 category word is a placeholder
+//     and is skipped) is the
+//     pre-slab service or plain "pre-treat" wording; one that classifies as
+//     anything else, or as nothing, keeps the card. Narrative sentences
+//     (call_summary) may be anything that carries no cue and is not another
+//     termite service, and at least one fragment overall is the pre-treat.
+//  6. No unit, suite, bay or condo wording anywhere in the transcript.
+// Any doubt keeps the card. Do not add one regex per Codex round: add a cue
+// to the matching class above.
+const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
+// A pre-treat IS a soil treatment, so bare "soil treatment" is pre-treat wording
+// (existing-structure context still vetoes it when a building qualifier follows).
+const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b|\bsoil (?:treatment|poison)\b/i;
+const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|bond|renewal|bait\w*|stations?)\b/i;
+// "Protection" and "warranty" name ordinary pre-construction wording too
+// ("termite protection before the slab pour", a pre-treat's warranty), so they
+// count as add-on work only with plan/contract context and no new-slab wording
+// in the same fragment.
+const TERMITE_PROTECTION_WORDING_RE = /\b(?:protection|warranty)\b/i;
+const TERMITE_PROTECTION_ADDON_CONTEXT_RE = /\b(?:plan|program|renewal|annual|yearly|contract|bond|coverage|agreement|existing|current|ongoing)\b/i;
+const TERMITE_NEW_SLAB_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|pre[-\s]?treat(?:ment)?|slab)\b/i;
+function hasTermiteAddonWording(text) {
+  if (TERMITE_ADDON_WORDING_RE.test(text)) return true;
+  return TERMITE_PROTECTION_WORDING_RE.test(text) && TERMITE_PROTECTION_ADDON_CONTEXT_RE.test(text)
+    && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
+}
+const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b/i;
+const NEW_BUILD_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|new[-\s]build|pre[-\s]?slab)\b/i;
+function hasExistingStructureContext(text) {
+  return EXISTING_STRUCTURE_CONTEXT_RE.test(text) && !NEW_BUILD_WORDING_RE.test(text);
+}
+function hasNonPretreatTermiteCue(text) {
+  const value = String(text || '').toLowerCase();
+  return TERMITE_WOOD_TREATMENT_CUE_RE.test(value) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+    || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
+    || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
+}
+function splitFragments(text) {
+  return String(text || '').split(SERVICE_FRAGMENT_SPLIT_RE).map((f) => f.trim()).filter(Boolean);
+}
+// STRUCTURED fields name the service the caller asked for; the narrative
+// (call_summary) is free prose.
+// V2's required primary_service_category is a bare category word (enum value),
+// and flatView copies it into requested_service and maps it to a legacy label
+// in matched_service: placeholders, not a statement of the work. They are
+// neither proof nor veto; the precise fields and the catalog row decide.
+const V2_PRIMARY_CATEGORY_VALUES = new Set(
+  (require('../schemas/call-extraction.model-output.schema.json').properties?.service_request?.properties?.primary_service_category?.enum || [])
+    .map((v) => String(v).toLowerCase()),
+);
+function isV2CategoryPlaceholder(fragment, field, v2Extraction) {
+  const value = String(fragment || '').trim().toLowerCase();
+  if (V2_PRIMARY_CATEGORY_VALUES.has(value)) return true;
+  if (field !== 'matched_service') return false;
+  const category = v2Extraction?.service_request?.primary_service_category;
+  const legacy = category ? mapServiceCategoryToLegacy(category) : null;
+  return !!legacy && value === String(legacy).toLowerCase();
+}
+// Every structured field is split on the conjunctions, not only pain_points.
+function structuredFragmentsOf(view, v2Extraction) {
+  const out = [];
+  const add = (text, field) => {
+    for (const fragment of splitFragments(text)) {
+      if (!isV2CategoryPlaceholder(fragment, field, v2Extraction)) out.push(fragment);
+    }
+  };
+  add(view.requested_service, 'requested_service');
+  add(view.matched_service, 'matched_service');
+  add(view.specific_service_name, 'specific_service_name');
+  const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
+  for (const item of painPoints) add(item, 'pain_points');
+  return out;
+}
+function pretreatIsOnlyTermiteWork(view, v2Extraction = null) {
+  const structured = structuredFragmentsOf(view, v2Extraction);
+  const narrative = splitFragments(view.call_summary);
+  const fragments = [...structured, ...narrative];
+  if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
+  // Fail closed: a structured fragment that is not the pre-slab service (or
+  // plain pre-treat wording) keeps the card, including one nothing classifies.
+  const isPretreat = (fragment) => canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment);
+  if (!structured.every(isPretreat)) return false;
+  // Narrative sentences may be anything without a cue, but none may be some
+  // other termite service.
+  const narrativeOtherTermite = narrative.some((fragment) => {
+    const label = canonicalWavesService(fragment);
+    return label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
+      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment));
+  });
+  return !narrativeOtherTermite && fragments.some(isPretreat);
+}
+
+const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
+
+// Card-only companion to the waiver above (owner 2026-10-07), narrowed to
+// what the audit showed: true when EVERY view of the call's service resolves
+// to a PRE-CONSTRUCTION pre-treat row (slab pre-treat, pretreatment), the
+// property type is a known building-level one, and nothing on the call names a
+// unit, a suite or other work. Commercial jobs count — a new slab has no unit.
+// WDO, trenching and liquid treatments keep today's card. Used only to skip
+// the advisory missing_unit_number card; it never changes an address hold.
+// The PROPERTY half, positive evidence only (fails closed): a KNOWN
+// building-level property type (an unknown type cannot prove the work is not
+// unit-level), no partial occupancy on either occupancy field, and no second
+// requested service (a coarse category cannot prove that work is
+// building-level).
+function propertyHasNoUnitToAsk(v2Extraction) {
+  const property = v2Extraction?.property || {};
+  const secondary = v2Extraction?.service_request?.secondary_categories;
+  return CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())
+    && property.whole_building_occupancy !== false
+    && property.whole_building_occupancy_final !== false
+    && !(Array.isArray(secondary) && secondary.length);
+}
+
+function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+  // Same conservative views as wholeStructureUnitWaiverForCall: a call the
+  // unclear-service rule may book as a Waves Assessment is not whole-structure,
+  // and the V1 service as heard BEFORE V2-primary adoption must agree too.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return false;
+  if (!propertyHasNoUnitToAsk(v2Extraction)) return false;
+  // A revisit, complaint, callback or cancellation is not a new slab job.
+  if (EXISTING_SERVICE_INTENTS.has(String(v2Extraction?.service_request?.service_intent || ''))) return false;
+  const views = [preAdoptionExtracted, extracted, v2BookingServiceView(extracted, v2Extraction)].filter(Boolean);
+  return views.every((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    // The WHOLE transcript, either speaker, denials included: any mention of
+    // a suite, unit, bay or condo keeps the card (speaker labels and
+    // negations are not reliable enough to suppress on).
+    const text = [transcription, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
+    // Pre-construction pre-treats only (PRE_CONSTRUCTION_SERVICE_KEYS): a new
+    // slab has no unit. The rule is positive proof over canonicalized
+    // service fragments (pretreatIsOnlyTermiteWork): every termite fragment
+    // must be the pre-slab service and none may carry add-on wording. The
+    // view's service words must also name only the termite family and no
+    // existing-structure work (existingStructureTermiteWork backstop) —
+    // anything else heard on the call may target one unit.
+    // pain_points is the extractor's own list of what the caller wants fixed.
+    // The raw transcript is NOT family-scanned: on the audited slab calls a
+    // transcript-wide scan read stray words as another service family. It is
+    // scanned in full for unit/suite wording below.
+    const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
+    const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
+    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords)
+      && pretreatIsOnlyTermiteWork(view, v2Extraction);
+    return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
+      && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
+  });
 }
 
 // Business whole-building unit waiver for one call
@@ -11847,7 +12062,14 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, {
+            canonicalStreet: extracted?.address_line1,
+            preConstructionPretreat: finalFlags.includes('missing_unit_number')
+              && callIsPreConstructionPretreat({
+                extracted, preAdoptionExtracted, v2Extraction, transcription,
+                services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+              }),
+          }).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier
@@ -12259,6 +12481,15 @@ const CallRecordingProcessor = {
           v2Extraction: v2Result?.status === 'valid' ? v2Ext : null,
           addressRecovery,
         });
+        // Shadow posture gets the same whole-structure rule as the enforce
+        // card filter: no "which unit?" card or unit ask on a slab, trench or
+        // WDO job (owner 2026-10-07).
+        if (needsConfirmation.includes('missing_unit_number') && callIsPreConstructionPretreat({
+          extracted, preAdoptionExtracted, v2Extraction: v2Result?.status === 'valid' ? v2Ext : null, transcription,
+          services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+        })) {
+          needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);
+        }
         // Decoder-only email evidence: when the primary extraction captured
         // NO email (empty email + email_raw) the bridge's email review stays
         // silent, which would drop the decoder's candidates/question on the
@@ -23829,6 +24060,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
+  callIsPreConstructionPretreat,
   businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,

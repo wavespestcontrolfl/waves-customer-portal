@@ -828,7 +828,18 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
+// A pre-construction pre-treat (a new slab) has no unit to ask about,
+// commercial jobs included (owner 2026-10-07): the advisory "which unit?"
+// card is skipped. The caller decides preConstructionPretreat (every view of
+// the call's service resolves to the allowlist, no condo/apartment wording);
+// any address hold on the booking is unchanged. A named predicate keeps this
+// decision out of dropUnneededCallCards' complexity.
+function pretreatDroppedCards(preConstructionPretreat) {
+  return preConstructionPretreat ? ['missing_unit_number'] : [];
+}
+
+function dropUnneededCallCards(flags, extraction, options) {
+  const { canonicalStreet, preConstructionPretreat } = options || {};
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
@@ -860,6 +871,7 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
         || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {})))) {
     dropped.add('caller_not_authorized');
   }
+  pretreatDroppedCards(preConstructionPretreat).forEach((f) => dropped.add(f));
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
 }
@@ -3336,6 +3348,8 @@ module.exports = {
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,
+  UNIT_LEVEL_WORDING_RE,
+  EXISTING_SERVICE_INTENTS,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,
