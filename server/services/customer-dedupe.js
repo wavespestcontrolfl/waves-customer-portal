@@ -1219,6 +1219,21 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
   }
   const group = groups.find((g) => g.winner.id === winnerId);
   const candidate = group?.candidates.find((c) => c.loser.id === loserId);
+  return phoneCandidateVerdict(candidate);
+}
+
+// The verdict on ONE phone-queue candidate (null = the pair is not listed).
+// Shared by duplicatePairEligibility and duplicateWinnerFor so both read a
+// candidate the same way.
+// `requireSameIdentity` (the delete tool): a candidate whose reasons name an
+// identity conflict (a different name, or a phone group that holds more than
+// one identity) is a POSSIBLE match, not a confirmed duplicate, and is refused.
+// Address and loser-history reasons keep their own refusals (the address one
+// below; the history one is the delete tool's emptiness scan).
+const NON_IDENTITY_REASON_RE = /^(address_|loser_has_)/;
+const POSSIBLE_MATCH_REASON = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+
+function phoneCandidateVerdict(candidate, { requireSameIdentity = false } = {}) {
   if (!candidate) {
     return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
   }
@@ -1228,7 +1243,35 @@ async function duplicatePairEligibility(winnerId, loserId, database = db, { kind
   if (candidate.reasons.some((r) => r.startsWith('address_'))) {
     return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
   }
+  if (requireSameIdentity && candidate.reasons.some((r) => !NON_IDENTITY_REASON_RE.test(r))) {
+    return { eligible: false, code: 'possible_match_only', reason: POSSIBLE_MATCH_REASON, candidate };
+  }
   return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
+// The queue's own answer to "which live record is this one a duplicate of?",
+// from ONE queue build (a single findDuplicateGroups scan, however many
+// records share the phone). Returns { winnerId, ...verdict } for the group
+// that lists `loserId` as a candidate (an eligible one wins over a refused
+// one), or { winnerId: null, eligible: false, code: 'not_in_queue' } when no
+// group lists it. Same dismissal fail-closed rule as duplicatePairEligibility.
+async function duplicateWinnerFor(loserId, database = db, { requireSameIdentity = false } = {}) {
+  let groups;
+  try {
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] duplicateWinnerFor: dismissals unreadable, refusing: ${e.message}`);
+    return { winnerId: null, eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this record as a mergeable duplicate right now', candidate: null };
+  }
+  let refused = null;
+  for (const group of groups) {
+    const candidate = group.candidates.find((c) => c.loser.id === loserId);
+    if (!candidate) continue;
+    const verdict = { winnerId: group.winner.id, ...phoneCandidateVerdict(candidate, { requireSameIdentity }) };
+    if (verdict.eligible) return verdict;
+    refused = refused || verdict;
+  }
+  return refused || { winnerId: null, ...phoneCandidateVerdict(null) };
 }
 
 // The auto sweep's under-lock eligibility recheck, scoped to ONE pair: the
@@ -7167,6 +7210,12 @@ module.exports = {
   findSameNameGroups,
   SAME_NAME_KIND,
   duplicatePairEligibility,
+  duplicateWinnerFor,
+  // The "not a shell" blocker list and the tables previewMergeEffects never
+  // counts — customer-empty-loser.js (the delete_duplicate_customer
+  // emptiness scan) reads the same lists.
+  loserAutoBlockers,
+  REPOINT_EXCLUDED_TABLES,
   executeMerge,
   lockSeriesCreateForMerge,
   runAutoMergeSweep,

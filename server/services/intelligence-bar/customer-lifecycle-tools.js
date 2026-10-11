@@ -24,6 +24,13 @@
  * archive_customer (retire a record outright) was split out of this module:
  * it ships separately on a shared archive service with the DELETE
  * /api/admin/customers/:id route and cancellation-eligibility as a blocker.
+ *
+ * delete_duplicate_customer (owner ruling 2026-10-07): the narrow case —
+ * archive ONE record that is only an unknown-contact stub of a real customer,
+ * through the customer page's own DELETE handler (archive only: nothing is
+ * merged or moved, the other record is never written). The pair checks, the
+ * emptiness scan and the commit live in services/duplicate-customer-delete.js
+ * and customer-empty-loser.js; the tool, its gate and dispatch here.
  */
 
 const db = require('../../models/db');
@@ -381,6 +388,34 @@ async function mergeCustomers(input, actionContext = {}) {
   return commitMergeCustomers(winnerId, loserId, actionContext, approved, approvedEffects);
 }
 
+// ─── delete_duplicate_customer ──────────────────────────────────────────
+
+// Default-off capability gate (owner ruling 2026-10-07), strict 'true', read
+// at call time. Enforced in the same three places as merge_customers: the
+// legacy tool list, the platform registry, and the executor below.
+function deleteDuplicateCustomerEnabled() {
+  return require('../../config/feature-gates').ibDeleteCustomerLive();
+}
+
+async function deleteDuplicateCustomer(input, actionContext = {}) {
+  if (!deleteDuplicateCustomerEnabled()) {
+    return { error: 'Deleting a duplicate customer from the Intelligence Bar is not enabled (GATE_IB_DELETE_CUSTOMER) — use merge_customers or the customer page.', code: 'gate_off' };
+  }
+  const customerId = input.customer_id == null ? null : String(input.customer_id).trim().toLowerCase();
+  if (!customerId) return { error: 'customer_id is required' };
+  const { previewDeleteDuplicateCustomer, commitDeleteDuplicateCustomer } = require('../duplicate-customer-delete');
+  // Only the server-derived context confirms (never a model-supplied field).
+  if (actionContext.confirmed !== true) return previewDeleteDuplicateCustomer(customerId);
+  // The approved card's pins (route-owned, from the fingerprint-verified
+  // preview): this record's version and the other record's id and version,
+  // re-asserted inside the archive transaction under the row and pair locks.
+  const approvedVersion = typeof input._approved_version === 'string' && input._approved_version ? input._approved_version : null;
+  const k = input._approved_keeper;
+  const approvedKeeper = k && typeof k.id === 'string' && k.id && typeof k.version === 'string' && k.version
+    ? { id: k.id.toLowerCase(), version: k.version } : null;
+  return commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion, approvedKeeper);
+}
+
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────
 
 const CUSTOMER_LIFECYCLE_TOOLS = [
@@ -402,6 +437,20 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
     },
   },
   START_PROGRAM_TOOL,
+  {
+    name: 'delete_duplicate_customer',
+    description: `Delete ONE empty duplicate customer record: a stub, such as an "Unknown" record created from a call, that shares a real customer's phone. Only for a record that holds nothing: no visits, service records, invoices, payments, saved cards or Stripe profile, estimates, leads, calls, texts or emails, plan rates, monthly rate or plan, portal login, referral or credit balance, no notes, gate code or other field the stub creator does not write, and no saved property beyond one auto-created primary.
+Prefer merge_customers whenever the duplicate has ANY history or data — this tool refuses such a record and names what it found. It also refuses a record the duplicate queue does not list as a confirmed duplicate (a possible match, such as a different name, is for merge_customers), and a record linked to the real customer only by a shared email.
+The record is ARCHIVED ONLY (the customer page's delete): nothing is merged or moved and the real customer is not touched. An admin can restore it afterward from the customer record (restore route). The first call returns a PREVIEW card naming the record, the real customer it duplicates (unchanged), and each check. Nothing changes until the operator confirms. No customer message is sent.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string', format: 'uuid', description: 'The empty duplicate record to delete (never the real customer)' },
+      },
+      required: ['customer_id'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function executeCustomerLifecycleTool(toolName, input, actionContext = {}) {
@@ -409,6 +458,7 @@ async function executeCustomerLifecycleTool(toolName, input, actionContext = {})
     switch (toolName) {
       case 'merge_customers': return await mergeCustomers(input, actionContext);
       case 'start_program': return await startProgram(input, actionContext);
+      case 'delete_duplicate_customer': return await deleteDuplicateCustomer(input, actionContext);
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
@@ -422,6 +472,7 @@ module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   mergeCustomersEnabled,
   startProgramLive,
+  deleteDuplicateCustomerEnabled,
   executeCustomerLifecycleTool,
   // exported for tests
   _test: { customerName },

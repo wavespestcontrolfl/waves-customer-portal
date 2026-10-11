@@ -26,10 +26,38 @@ describe('nativeLinks', () => {
     expect(sameOriginUrl('https://evil.example.com/pay/tok', loc)).toBeNull();
     // Same registrable domain but different host is still a different origin.
     expect(sameOriginUrl('https://www.wavespestcontrol.com/app', loc)).toBeNull();
-    expect(sameOriginUrl('http://portal.wavespestcontrol.com/pay', loc)).toBeNull();
     expect(sameOriginUrl('not a url', loc)).toBeNull();
     expect(sameOriginUrl('', loc)).toBeNull();
     expect(sameOriginUrl(null, loc)).toBeNull();
+  });
+
+  it('upgrades plain http on our own host to https and still refuses every other http form', () => {
+    // Texted links carry no scheme (sms-link-policy strips https://); iOS opens
+    // them as http://portal... and routes that into the app as a universal link.
+    expect(sameOriginUrl('http://portal.wavespestcontrol.com/pay', loc).href)
+      .toBe('https://portal.wavespestcontrol.com/pay');
+    expect(customerAppUrl('http://portal.wavespestcontrol.com/l/abc123?src=sms#top', loc).href)
+      .toBe('https://portal.wavespestcontrol.com/l/abc123?src=sms#top');
+    expect(customerAppUrl('HTTP://PORTAL.wavespestcontrol.com/estimate/tok', loc).href)
+      .toBe('https://portal.wavespestcontrol.com/estimate/tok');
+
+    expect(sameOriginUrl('http://portal.wavespestcontrol.com:8080/pay', loc)).toBeNull();
+    expect(sameOriginUrl('http://www.wavespestcontrol.com/pay', loc)).toBeNull();
+    expect(sameOriginUrl('http://portal.wavespestcontrol.com.evil.example/pay', loc)).toBeNull();
+    expect(customerAppUrl('http://evil.example/pay/token', loc)).toBeNull();
+    expect(customerAppUrl('http://portal.wavespestcontrol.com//evil.example/login', loc)).toBeNull();
+    expect(customerAppUrl('http://portal.wavespestcontrol.com/admin/customers', loc)).toBeNull();
+    expect(customerAppUrl('ftp://portal.wavespestcontrol.com/pay', loc)).toBeNull();
+    // A plain-http portal origin never upgrades anything.
+    expect(sameOriginUrl('http://portal.wavespestcontrol.com/pay', { origin: 'http://portal.wavespestcontrol.com' }).href)
+      .toBe('http://portal.wavespestcontrol.com/pay');
+  });
+
+  it('navigates a plain-http own-host link to its https form', () => {
+    const assign = vi.fn();
+    const navigationLocation = { ...loc, pathname: '/', search: '', hash: '', assign };
+    expect(navigateToCustomerUrl('http://portal.wavespestcontrol.com/l/abc123', navigationLocation)).toBe(true);
+    expect(assign).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/l/abc123');
   });
 
   it('refuses protocol-relative smuggling via a same-origin double-slash path', () => {
