@@ -3964,88 +3964,22 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     // Shared by the explicit per-visit prerequisite AND the clear-to-NULL
     // path below: future pending/confirmed visits with no positive price,
-    // which complete unbilled in a per-visit lane (completionInvoiceAmount
-    // refuses the monthly-rate fallback there). Callbacks, always-free
-    // service types, and prepaid-stamped visits are exempt — they complete
-    // without an invoice by design in every lane. Errors return [] — fail
-    // OPEN (completion logging backstops) rather than hard-locking saves.
-    const unpricedFutureBillableVisits = async () => {
-      try {
-        const { etDateString } = require('../utils/datetime-et');
-        const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
-        const rows = await db('scheduled_services')
-          .where({ customer_id: req.params.id })
-          .whereIn('status', ['pending', 'confirmed'])
-          .where('scheduled_date', '>=', etDateString())
-          .where(function unpriced() {
-            this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
-          })
-          .where(function notPrepaid() {
-            this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
-          })
-          .select('id', 'service_type', 'is_callback', 'scheduled_date')
-          .orderBy('scheduled_date', 'asc')
-          .limit(100);
-        return rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
-      } catch { return []; }
-    };
+    // which complete unbilled in a per-visit lane. The query, its exemptions
+    // and its fail-open policy live in services/billing-mode-rules.js, shared
+    // with the Intelligence Bar's update_customer.
+    const BillingModeRules = require('../services/billing-mode-rules');
+    const unpricedFutureBillableVisits = (customerOverride) => BillingModeRules.unpricedFutureBillableVisits(db, req.params.id, { customerOverride });
     if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
-      const { BILLING_MODES } = require('../services/billing-lane');
-      const mode = req.body.billingMode;
-      if (!BILLING_MODES.includes(mode)) {
-        return res.status(400).json({ error: 'Invalid billing mode' });
-      }
-      // Lane prerequisites — a profile save must not move a customer into a
-      // lane whose visits then complete unbilled (Codex r1): membership
-      // needs a dues rate, per-application needs the acceptance fee, and
-      // annual prepay needs a live (paid or pending) coverage term.
-      const beforeRow = await db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee');
-      const effectiveRate = req.body.monthlyRate !== undefined
-        ? parseFloat(req.body.monthlyRate) || 0
-        : parseFloat(beforeRow?.monthly_rate) || 0;
-      if (mode === 'monthly_membership' && !(effectiveRate > 0)) {
-        return res.status(400).json({ error: 'Set a monthly rate before selecting Monthly membership — dues cannot collect at $0' });
-      }
-      if (mode === 'per_application' && !(parseFloat(beforeRow?.per_application_fee) > 0)) {
-        return res.status(400).json({ error: 'Set a per-application fee before selecting Per application — visits would complete unbilled' });
-      }
-      if (mode === 'annual_prepay') {
-        let liveTerm = null;
-        try {
-          // payment_pending deliberately does NOT qualify: the annual-prepay
-          // service only stamps this lane once the prepay invoice is PAID —
-          // pending-window visits must keep billing per application
-          // (Codex r2). The term must also COVER TODAY: an expired or
-          // future-dated term would park the customer in a lane the cron
-          // skips while completion coverage stays false — recurring visits
-          // would complete unbilled until someone noticed (Codex r8 P1).
-          const { etDateString } = require('../utils/datetime-et');
-          const todayEt = etDateString();
-          liveTerm = await db('annual_prepay_terms')
-            .where({ customer_id: req.params.id })
-            .whereIn('status', ['active', 'renewal_pending'])
-            .where('term_start', '<=', todayEt)
-            .where('term_end', '>=', todayEt)
-            .first('id');
-        } catch { /* table absent — treat as no live term */ }
-        if (!liveTerm) {
-          return res.status(400).json({ error: 'Annual prepay requires a PAID term covering today — the lane stamps automatically when the annual invoice is paid' });
-        }
-      }
-      if (mode === 'per_visit' || mode === 'one_time') {
-        // These lanes bill each visit's OWN price, so a future visit
-        // without a positive price completes uninvoiced with only a log
-        // line. Same "would complete unbilled" prerequisite as the other
-        // lanes (Codex r6) — see unpricedFutureBillableVisits above.
-        const billable = await unpricedFutureBillableVisits();
-        if (billable.length > 0) {
-          const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
-          const plural = billable.length !== 1;
-          return res.status(400).json({
-            error: `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`,
-          });
-        }
-      }
+      // Lane prerequisites (monthly rate, per-application fee, live annual
+      // term, priced upcoming visits) — one copy, services/billing-mode-rules.js,
+      // so the Intelligence Bar refuses exactly what this save refuses.
+      const refusal = await BillingModeRules.billingModeRefusal(req.body.billingMode, {
+        requestedMonthlyRate: req.body.monthlyRate,
+        loadRates: () => db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee'),
+        loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(db, req.params.id),
+        loadUnpricedFutureVisits: unpricedFutureBillableVisits,
+      });
+      if (refusal) return res.status(400).json({ error: refusal });
     } else if (req.body.billingMode !== undefined) {
       // Clearing the selector to "Not set" re-enters legacy inference — a
       // tier-less or sentinel-tier customer with a lingering rate RESOLVES
@@ -4062,7 +3996,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear,
       });
       if (resolvedOnClear.mode !== 'monthly_membership') {
-        const billable = await unpricedFutureBillableVisits();
+        const billable = await unpricedFutureBillableVisits({ billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear });
         if (billable.length > 0) {
           const plural = billable.length !== 1;
           return res.status(400).json({

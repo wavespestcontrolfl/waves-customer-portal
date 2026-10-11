@@ -221,6 +221,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
+Billing type and per-application fee (only when the office has turned this on; otherwise refused): updates.billing_mode (per_application, per_visit, one_time or monthly_membership) and updates.per_application_fee (dollars per visit, e.g. 147). Send them alone, with no other field; the card shows what the next visits are charged. Annual prepay and clearing the billing type are done elsewhere.
 monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. ${PRICE_NOTICE_DISCLOSURE}
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
@@ -419,7 +420,8 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
         Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
         input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
-        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null);
+        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null,
+        input._ib_billing_pin);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -1190,6 +1192,13 @@ const UPDATABLE_FIELDS = {
   monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
 
+// The columns update_customer reports in `changes`: the shared fields plus the
+// billing pair, which reach the write only through billing-mode-change.js
+// (gated and pinned; never through sanitizeUpdates or the bulk tool).
+const CHANGE_REPORT_COLUMNS = {
+  ...UPDATABLE_FIELDS, billing_mode: 'billing_mode', per_application_fee: 'per_application_fee',
+};
+
 function sanitizeUpdates(updates) {
   const clean = {};
   for (const [key, val] of Object.entries(updates)) {
@@ -1332,10 +1341,17 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null) {
-  const clean = sanitizeUpdates(updates);
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null, billingPin) {
+  // Billing type + per-application fee (GATE_IB_BILLING_MODE_EDIT, owner D5
+  // 2026-10-06): only from a card that pinned them (billing-mode-change.js).
+  const BillingModeChange = require('./billing-mode-change');
+  const billingEdit = BillingModeChange.executorBillingEdit(updates, billingPin);
+  if (billingEdit.error) return billingEdit;
+  const clean = { ...sanitizeUpdates(updates), ...billingEdit.fields };
   Object.assign(clean, normalizeContactRecord(clean));
-  if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
+  // updated_at alone (sanitizeUpdates always stamps it) is no edit; a card
+  // with one recognized field (e.g. billing_mode alone) is one.
+  if (!Object.keys(clean).some((k) => k !== 'updated_at')) return { error: 'No valid fields to update' };
 
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
@@ -1433,9 +1449,18 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customerId)],
       );
-      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+      // A billing type / fee edit joins it too (billing-mode-change.js): a
+      // Schedule booking INSERTs visits under this same lock, so taking it
+      // here, before the customer row lock (the order the booking and
+      // customer-comms-lock.js document), fences new visits out until this
+      // transaction ends.
+      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined
+        || Object.keys(billingEdit.fields).length > 0) {
         await lockCustomerComms(trx, customerId);
       }
+      // …then the per-customer annual-prepay lock every term writer takes
+      // (billing-mode-change.js; billing edits only), still before the row.
+      await BillingModeChange.lockAnnualPrepayBeforeRow(trx, customerId, billingEdit.fields);
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
@@ -1475,6 +1500,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.previewChanged = true;
         throw err;
       }
+      // The billing fields still read as the card showed, and the customer
+      // page's billing-type rules still hold (no-op without billing fields).
+      await BillingModeChange.assertBillingEditUnderLock(trx, customerId, lockedBefore, billingEdit.fields, billingPin);
       // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage=
       // 'churned' — including a re-save on an already-churned row — so a
       // pre-fix residue row self-heals. Refuses (naming what's still live)
@@ -1648,7 +1676,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
   const changes = {};
   for (const key of Object.keys(updates)) {
-    const dbCol = UPDATABLE_FIELDS[key];
+    const dbCol = CHANGE_REPORT_COLUMNS[key];
     if (dbCol && String(before[dbCol]) !== String(after[dbCol])) {
       changes[key] = { from: before[dbCol], to: after[dbCol] };
     }

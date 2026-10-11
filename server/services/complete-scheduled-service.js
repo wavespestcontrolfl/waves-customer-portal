@@ -69,7 +69,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -4959,7 +4959,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // the auto-charge block: an existing open invoice (pre-minted /
     // recovery) must not be auto-charged either when nothing was performed
     // (Codex round-9 P1).
-    const visitPerformed = visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined';
+    const visitPerformed = require('./visit-outcomes').visitWasPerformed(visitOutcome);
     // Billing-lane classification + the completion invoice amount — hoisted
     // from the invoice block below for the same one-derivation reason (fix
     // round 9): the commit-time posture must read the EXACT inputs the mint
@@ -6266,6 +6266,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
             });
           }
+          // Billing-lane drift (Codex round 7 on #6118), judged on the LOCKED rows of the
+          // transaction that commits the visit as completed: the customer row is held FOR
+          // SHARE and the visit FOR UPDATE from here to the commit, the locks the Intelligence
+          // Bar billing-type card's commit needs (customer row FOR UPDATE, then its live
+          // visits FOR UPDATE by id). Edit first: it committed before the customer lock above
+          // was granted, the lane read here is the new one, and the completion refuses with the
+          // retryable 409 BILLING_LANE_CHANGED (nothing written; the retry bills on the new
+          // lane). Completion first: the visit is completed when the card re-reads, no longer
+          // live, so the card's visit pin refuses (preview_changed). Either way no completion
+          // decides "no invoice" on a lane the customer has already left. Nothing but this
+          // read happens here: no text, email or bell.
+          await refuseBillingLaneDriftInTrx(trx, svc);
           // The add-on each application row belongs to was resolved BEFORE this lock. An Update Details save that removed or
           // replaced an add-on (or moved the visit's own service) in between would leave rows tagged to work the visit no
           // longer carries: resolved again on the LOCKED visit, and any difference rolls the record back as a changed visit
@@ -8645,6 +8657,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             error: 'This visit was reassigned to another technician while it was being completed. Reload and try again.',
             code: 'service_reassigned',
           } });
+        }
+        if (err && err.code === 'BILLING_LANE_CHANGED') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: { error: err.message, code: 'BILLING_LANE_CHANGED' } });
         }
         if (err && (err.code === 'lawn_bermuda_limit_reached' || err.code === 'lawn_bermuda_pair_required')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
@@ -11902,6 +11918,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         })
           ? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)
           : null;
+        // The mint's in-lock check: the covered-member guard, then the
+        // customer's billing lane re-read under the lock against the lane
+        // this completion decided the amount from (a lane edit committed
+        // since entry 409s retryably, never settles on the old lane).
+        const mintRecheckInTrx = async (trx) => {
+          if (coveredMemberMintGuard) await coveredMemberMintGuard(trx);
+          await refuseBillingLaneDriftInTrx(trx, svc);
+        };
         // An unpriced membership plan visit billed at monthly_rate IS that
         // month's dues: stamp the month on the invoice so the month's other
         // plan visits see it covered (monthlyDuesCollected). The month is the
@@ -11972,7 +11996,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
-          recheckInTrx: coveredMemberMintGuard,
+          recheckInTrx: mintRecheckInTrx,
           // Live replay mints prove the row price hasn't moved since this
           // completion derived its amount (codex #3344 r2) — a WaveGuard
           // reprice landing mid-completion 409s and the retry bills fresh
@@ -12091,7 +12115,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? svc
               : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
             allowPriceMovement: false,
-            recheckInTrx: coveredMemberMintGuard,
+            recheckInTrx: mintRecheckInTrx,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,
@@ -12485,6 +12509,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? 'This visit\'s setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The customer's billing type moved while the mint waited on its locks
+        // (refuseBillingLaneDriftInTrx): nothing was minted. Retryable on EVERY
+        // lane, never the non-blocking "bill by hand" finalize below — the retry
+        // decides and bills on the new lane.
+        if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: billing type changed during the mint — releasing for resume so the retry bills on the new lane`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 409, body: {
+            error: invErr.message,
+            code: 'BILLING_LANE_CHANGED',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
