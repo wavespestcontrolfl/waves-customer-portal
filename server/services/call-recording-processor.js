@@ -1087,18 +1087,23 @@ function callbackParentId(call) {
 // row must still carry the verdict this pass landed: `status`, the pass's
 // generation, no live token), then the parent (an inbound voicemail the
 // callback was dialed to, or its customer). Null = nothing to write.
-async function lockCallbackPair(trx, call, parentId, { status, procGeneration }) {
+async function lockCallbackPair(trx, call, parentId, { status, procGeneration, correction = false }) {
   await lockTriageCall(trx, parentId);
   const childQ = trx('call_log').where({ id: call.id, processing_status: status }).whereNull('processing_token');
   if (procGeneration != null) childQ.where('processing_generation', procGeneration);
   const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at', 'metadata');
   if (!child || child.source !== 'admin-callback') return { reason: 'verdict_superseded' };
-  // Admin provenance, stamped by the call route from the verified session: a
-  // technician's callback never settles a voicemail's admin review.
-  if (callMetadataObject(child).placed_by_role !== 'admin') return { reason: 'not_admin_placed' };
   const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
     .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'metadata', 'created_at', 'duration_seconds');
   if (!parent) return { reason: 'parent_not_found' };
+  // A CORRECTION retires whatever this callback settled, whether or not the
+  // parent still qualifies today (a replaced recording may have cleared its
+  // voicemail markers; a relink its number): the eligibility below is for
+  // settling, never for giving back. Nothing settled = no_verdict, no write.
+  if (correction) return { child, parent };
+  // Admin provenance, stamped by the call route from the verified session: a
+  // technician's callback never settles a voicemail's admin review.
+  if (callMetadataObject(child).placed_by_role !== 'admin') return { reason: 'not_admin_placed' };
   if (!isVoicemailParent(parent)) return { reason: 'parent_not_voicemail' };
   // The parent must have ended and settled: a reported duration (callEndOf)
   // and no pass still holding its token.
@@ -1120,7 +1125,7 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
 // commitments watchdog calls this every tick: it finds every such callback
 // from the data itself (the parent still stamped with it, a promise still
 // dismissed on it, or a card the sweep closed on it; partial indexes in
-// migrations 20261010280000 and 20261010290000) and runs
+// migrations 20261010280000, 20261010290000 and 20261010310000) and runs
 // the same correction. Converges: a correction clears the stamp and reopens
 // or re-points the dismissal, so the row leaves both scans.
 async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
@@ -1163,13 +1168,30 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     })
     .modify(settledNonSpam).limit(limit).distinct('cb.*');
   const callbacks = new Map([...stamped, ...dismissed, ...swept].map((cb) => [cb.id, cb]));
+  // The FORWARD half: a settlement whose promise refresh was lost (the cards
+  // closed and the stamp written, the callback still settled spam, a callback
+  // promise still open). Recent stamps only (7 days), judged again by
+  // refreshFulfillment under this gate alone, whatever the commitments gate.
+  const forward = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
+    .whereRaw("(p.metadata->'callback_verdict'->>'at')::timestamptz > now() - interval '7 days'")
+    .where({ 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
+    .whereExists(function openCallbackPromise() {
+      this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' });
+    })
+    .limit(limit).distinct('p.id');
+  const refreshed = [];
+  for (const { id } of forward) {
+    const r = await require('./call-commitments').refreshFulfillment(db, id).catch((err) => ({ error: err.message }));
+    refreshed.push({ callLogId: id, ...r });
+  }
   const results = [];
   for (const cb of callbacks.values()) {
     const result = await reopenParentOnCallbackCorrected(cb, { callSid: cb.twilio_call_sid, status: cb.processing_status });
     results.push({ callbackCallId: cb.id, ...result });
     if (result.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} reconciled after a lost correction: cards=${result.cards} promises=${result.promises}`);
   }
-  return { skipped: false, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results };
+  return { skipped: false, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results, refreshed };
 }
 // The callback promise is NOT written here. It belongs to call-commitments'
 // fulfillment lifecycle: resolveCallback reads the spam callback as a
@@ -1271,7 +1293,7 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
   if (!parentId) return { applied: false, reason: 'no_parent' };
   try {
     const undone = await db.transaction(async (trx) => {
-      const pair = await lockCallbackPair(trx, call, parentId, { status, procGeneration });
+      const pair = await lockCallbackPair(trx, call, parentId, { status, procGeneration, correction: true });
       if (!pair.parent) return { applied: false, reason: pair.reason };
       const now = new Date();
       const standing = await standingSpamCallbacks(trx, pair.parent, call.id);
@@ -1326,6 +1348,13 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
       return { applied: true, cards, promises, standing: false };
     });
     if (undone.applied) logger.info(`[call-proc] callback ${maskSid(callSid)} is not spam after all (${status}): parent voicemail ${undone.standing ? 'stays settled on another spam callback' : 'reopened'} (${undone.cards} card(s), ${undone.promises} promise(s))`);
+    // A promise owed again is judged at once: the corrected callback itself
+    // (a real conversation) may keep it, so it never waits for the next
+    // watchdog tick in Owed or on the pager. Fail-soft, like the settlement.
+    if (undone.applied && undone.promises > 0) {
+      await require('./call-commitments').refreshFulfillment(db, parentId)
+        .catch((err) => logger.warn(`[call-proc] callback ${maskSid(callSid)} corrected; the parent's promise refresh failed: ${err.message}`));
+    }
     return undone;
   } catch (err) {
     logger.warn(`[call-proc] callback ${maskSid(callSid)} corrected but the parent voicemail could not be reopened: ${err.message}`);

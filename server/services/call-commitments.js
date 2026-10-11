@@ -2116,10 +2116,30 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
 async function closeCallbackReminders(conn, commitmentId) {
   const notifications = require("./notification-service")._private;
   const now = new Date();
-  return conn("notifications").where({ recipient_type: "admin" })
-    .whereRaw("metadata->>'commitment_id' = ?", [String(commitmentId)])
+  const id = String(commitmentId);
+  const closed = await conn("notifications").where({ recipient_type: "admin" })
+    .whereRaw("metadata->>'commitment_id' = ?", [id])
     .modify((q) => notifications.openToCloser(q, "callback:spam"))
     .update(notifications.doneColumns({ by: "callback:spam", resolution: "Callback reached a solicitor; the voicemail was spam", at: now, keepExisting: true, conn }));
+  // The rolling missed-follow-up list (followup-sla-watcher) names its
+  // members in metadata.missed_commitment_ids: this promise leaves the list
+  // now (the watcher's next tick rewrites the text), and a list it emptied
+  // closes, as the watcher closes one whose every promise was followed up.
+  const { ROLLING_KEY } = require("./followup-sla-watcher");
+  const rolling = await conn("notifications").where({ recipient_type: "admin" }).whereNull("done_at")
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
+    // jsonb_exists, not the ? operator: knex reads ? as a binding.
+    .whereRaw("jsonb_exists(metadata->'missed_commitment_ids', ?)", [id])
+    .forUpdate().select("id", "metadata");
+  for (const row of rolling) {
+    const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata || {});
+    const rest = (meta.missed_commitment_ids || []).map(String).filter((v) => v !== id);
+    const patch = rest.length
+      ? { metadata: JSON.stringify({ ...meta, missed_commitment_ids: rest }) }
+      : { ...notifications.doneColumns({ by: "callback:spam", resolution: "Every listed promise was followed up or settled", at: now, keepExisting: true, conn }), metadata: JSON.stringify({ ...meta, missed_commitment_ids: [], emptied: true }) };
+    await conn("notifications").where({ id: row.id }).update(patch);
+  }
+  return closed;
 }
 // The rows a callback's spam verdict dismissed: the same scope the dismissal
 // could reach (refreshableVerdictSql lets this evidence close a callback card
@@ -3110,13 +3130,19 @@ async function listLapsedEvidenceClosedCallIds(conn) {
   // refreshFulfillment (keptOnCall) judges it again. Partial index
   // call_commitments_direct_call_proof_index (migration 20261010300000).
   if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) {
+    // Driven from the evidence side: outbound calls changed inside the scan
+    // window (a reprocess rewrites updated_at; call_log_outbound_updated_at_index)
+    // that are not settled non-spam, joined to the promises kept on them
+    // through the partial index's expression. Never a walk of every proof.
     const direct = await conn.raw(
       `SELECT DISTINCT cc.call_log_id
-         FROM call_commitments cc
-         JOIN call_log ev ON ev.id = (cc.fulfillment ->> 'record_id')::uuid
-        WHERE cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
+         FROM call_log ev
+         JOIN call_commitments cc ON (cc.fulfillment ->> 'record_id') = ev.id::text
+          AND cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
           AND (cc.fulfillment ->> 'kind') = 'outbound_call'
+        WHERE ev.direction LIKE 'outbound%' AND ev.updated_at > ?
           AND NOT ${settledNonSpamCallbackSql("ev")}`,
+      [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000)],
     );
     for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
   }
