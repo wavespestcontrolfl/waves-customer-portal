@@ -8,6 +8,11 @@
  *   - the text recipients: customer-contact getAppointmentContacts, as safeSendAppointment calls it;
  *   - the email recipients: appointment-email resolveRecipients;
  *   - the welcome goes to the account holder's own phone and email (new-recurring-welcome-sms reads the row).
+ *
+ * Two scopes, two keys. The CONFIRMATION is scoped to the property the visits are stamped with: the real sender passes
+ * the visit id, so a saved property's own toggles and "send these to me too" (property_notification_prefs, via
+ * property-notification-prefs resolvePropertyPrefs, the visit rule keyed by property id) decide who it reaches. The
+ * WELCOME is account-level: the holder's row and the account toggles. confirmationKey and welcomeKey hash them apart.
  * A read that cannot be completed is { unavailable: true }; callers refuse rather than guess.
  */
 const crypto = require('crypto');
@@ -25,40 +30,53 @@ function maskEmail(address) {
   return domain ? `${local.slice(0, 1)}***@${domain}` : null;
 }
 
-async function bookingContactState(customerId) {
+const toggleSet = (prefs) => ({
+  channel: prefs.confirmationChannel, confirmation: prefs.appointmentConfirmation,
+  sms: prefs.smsEnabled, email: prefs.emailEnabled,
+});
+
+// `propertyId`: the saved property the visits are stamped with (null = the customer row decides, as for a primary or
+// unstamped visit). `toggles`/`textTo`/`emailTo` are that property's; `accountToggles` and `holder` are the account's.
+async function bookingContactState(customerId, { propertyId = null } = {}) {
   try {
     const AppointmentReminders = require('./appointment-reminders');
     const AppointmentEmail = require('./appointment-email')._private;
     const { getAppointmentContacts } = require('./customer-contact');
-    const prefs = await AppointmentReminders.getReminderPrefs(customerId);
+    const accountPrefs = await AppointmentReminders.getReminderPrefs(customerId);
+    if (accountPrefs.unavailable) return { unavailable: true };
+    const prefs = propertyId ? await AppointmentReminders.getReminderPrefs(customerId, { propertyId }) : accountPrefs;
     if (prefs.unavailable) return { unavailable: true };
     const customer = await AppointmentEmail.loadCustomer(customerId);
     if (!customer) return { unavailable: true };
-    const emailRecipients = await AppointmentEmail.resolveRecipients(customer);
+    const emailRecipients = await AppointmentEmail.resolveRecipients(customer, { propertyId });
     return {
       unavailable: false,
       textTo: uniqueSorted(getAppointmentContacts(customer, prefs.raw).map((c) => digits10(c.phone))),
       emailTo: uniqueSorted(emailRecipients.map((r) => String(r.email || '').trim().toLowerCase())),
       holder: { phone: digits10(customer.phone), email: String(customer.email || '').trim().toLowerCase() || null },
-      toggles: {
-        channel: prefs.confirmationChannel, confirmation: prefs.appointmentConfirmation,
-        sms: prefs.smsEnabled, email: prefs.emailEnabled,
-      },
+      toggles: toggleSet(prefs),
+      accountToggles: toggleSet(accountPrefs),
     };
   } catch {
     return { unavailable: true };
   }
 }
 
-// The recipient key the card pins and the rail and the senders compare: a hash, so no address rides the version.
-function contactKey(state) {
-  return crypto.createHash('sha256').update(JSON.stringify([state.textTo, state.emailTo, state.holder, state.toggles])).digest('hex');
-}
+const sha = (parts) => crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 
-// Cheap helper for callers that only need the key (rail, post-commit check).
-async function currentContactKey(customerId) {
-  const state = await bookingContactState(customerId);
-  return state.unavailable ? null : contactKey(state);
+// The keys the card pins and the rail and the senders compare: hashes, so no address rides the version.
+// The confirmation key covers who the confirmation reaches and whether it is on (the property's scope);
+// the welcome key covers the account holder's own phone and email and the account toggles.
+const confirmationKey = (state) => sha([state.textTo, state.emailTo, state.toggles]);
+const welcomeKey = (state) => sha([state.holder, state.accountToggles || state.toggles]);
+const contactKey = confirmationKey;
+
+// Cheap helper for callers that only need one key (rail, post-commit check, send-time check).
+// kind 'confirmation' (default) is scoped to `propertyId`; kind 'welcome' is account-level.
+async function currentContactKey(customerId, { propertyId = null, kind = 'confirmation' } = {}) {
+  const state = await bookingContactState(customerId, kind === 'welcome' ? {} : { propertyId });
+  if (state.unavailable) return null;
+  return kind === 'welcome' ? welcomeKey(state) : confirmationKey(state);
 }
 
 // Why no leg is open: the first switched-off channel the customer's chosen channel needs, else nobody to reach.
@@ -81,8 +99,9 @@ function contactCardLines(state, { sendTexts, welcome }) {
     else lines.push(`No confirmation message: ${noConfirmationReason(t)}`);
   }
   if (welcome) {
-    const text = t.sms ? maskPhone(state.holder.phone) : null;
-    const email = t.email ? maskEmail(state.holder.email) : null;
+    const account = state.accountToggles || t;
+    const text = account.sms ? maskPhone(state.holder.phone) : null;
+    const email = account.email ? maskEmail(state.holder.email) : null;
     const legs = [text && `${text} by text`, email && `${email} by email`].filter(Boolean);
     lines.push(legs.length ? `Welcome goes to ${legs.join(' and ')}` : 'No welcome message: no phone or email to reach, or texts and email are off');
   }
@@ -94,4 +113,4 @@ function contactCardLines(state, { sendTexts, welcome }) {
 // send that happens later (the recovery sweep included) cannot reach recipients the card did not show.
 const CONTACT_PIN_ACTION = 'booking_contact_pin';
 
-module.exports = { CONTACT_PIN_ACTION, bookingContactState, contactKey, currentContactKey, contactCardLines, maskPhone, maskEmail };
+module.exports = { CONTACT_PIN_ACTION, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, contactCardLines, maskPhone, maskEmail };

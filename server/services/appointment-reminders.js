@@ -2096,12 +2096,14 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 // by getReminderPrefs and the direct reschedule / cancellation / no-show /
 // series-cancellation notices, whose recipient list (appointment_notify_
 // primary) must follow the property too (GitHub codex r0 P1).
-async function visitPrefsRow(customerId, scheduledServiceId = null) {
+async function visitPrefsRow(customerId, scheduledServiceId = null, propertyId = null) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
   // Sentinel read inline: partial test doubles of customer-contact carry
   // PREFS_UNAVAILABLE but not the prefsUnavailable() helper.
-  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !scheduledServiceId) return prefs;
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !(scheduledServiceId || propertyId)) return prefs;
   try {
+    // A visit not booked yet (a confirm card) resolves by the property the booking will stamp: the same rule.
+    if (!scheduledServiceId) return await require('./property-notification-prefs').prefsForProperty(prefs, customerId, propertyId);
     return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
   } catch (err) {
     logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
@@ -2109,8 +2111,8 @@ async function visitPrefsRow(customerId, scheduledServiceId = null) {
   }
 }
 
-async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
-  const prefs = await visitPrefsRow(customerId, scheduledServiceId);
+async function getReminderPrefs(customerId, { scheduledServiceId = null, propertyId = null } = {}) {
+  const prefs = await visitPrefsRow(customerId, scheduledServiceId, propertyId);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
@@ -2457,7 +2459,8 @@ async function contactPinBlocksConfirmation(record, scheduledServiceId) {
   if (!pin) return false;
   const meta = typeof pin.metadata === 'string' ? JSON.parse(pin.metadata) : (pin.metadata || {});
   if (typeof meta.contact_key !== 'string') return false;
-  const live = await currentContactKey(record.customer_id);
+  // The key was pinned for the property the visit is stamped with (null = the customer row).
+  const live = await currentContactKey(record.customer_id, { propertyId: meta.property_id || null });
   if (live === meta.contact_key) return false;
   if (live === null) {
     logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} held: the recipients could not be verified`);

@@ -91,8 +91,9 @@ function fakeDb() {
   db.transaction.mockImplementation(async (cb) => cb(trx));
 }
 
-// The phase marker rows (audit_log) are bookkeeping: tests about what the card changes look past them.
-const nonMarkerWrites = () => writes.filter((w) => w.table !== 'audit_log');
+// The phase rows (ib_action_phases) and their append-only audit events are bookkeeping: tests about what the card
+// changes look past them.
+const nonMarkerWrites = () => writes.filter((w) => w.table !== 'audit_log' && w.table !== 'ib_action_phases');
 
 function memberCustomer(overrides = {}) {
   return {
@@ -332,6 +333,30 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
     await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
     expect(createScheduleBooking.mock.calls[0][0].approvedContact).toBe(BookingContact.contactKey(contactStateFixture()));
+  });
+
+  test('the confirmation pin is scoped to the property the visits are stamped with; the welcome pin is the account\'s (round 11)', async () => {
+    const version = (await run(BASE_INPUT))._version;
+    expect(BookingContact.bookingContactState).toHaveBeenCalledWith(CUSTOMER_ID, { propertyId: 'prop-1' });
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
+    await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
+    const args = createScheduleBooking.mock.calls[0][0];
+    expect(args.approvedContact).toBe(BookingContact.confirmationKey(contactStateFixture()));
+    expect(args.approvedWelcomeContact).toBe(BookingContact.welcomeKey(contactStateFixture()));
+    expect(args.approvedLedgerPin).toBe('41.33|pest_control=41.33');
+    expect(args.approvedNotCommercial).toBe(true);
+  });
+
+  test('a property override that changes who the confirmation reaches changes the card version', async () => {
+    const before = (await run(BASE_INPUT))._version;
+    contactState = contactStateFixture({ emailTo: ['lee@example.com', 'tenant@example.com'] });
+    const after = (await run(BASE_INPUT))._version;
+    expect(after).not.toBe(before);
+    // An account-level welcome change alone moves the welcome key, not the confirmation key.
+    const base = contactStateFixture();
+    const accountOnly = contactStateFixture({ accountToggles: { channel: 'sms', confirmation: true, sms: false, email: true } });
+    expect(BookingContact.confirmationKey(accountOnly)).toBe(BookingContact.confirmationKey(base));
+    expect(BookingContact.welcomeKey(accountOnly)).not.toBe(BookingContact.welcomeKey(base));
   });
 
   test('a phone or email change after the card refuses with preview_changed', async () => {
@@ -586,7 +611,7 @@ describe('refusals', () => {
     expect(result.preview).toBeUndefined();
     Schedule.seasonalSafeShift.mockRestore();
     const src = require('fs').readFileSync(require.resolve('../services/intelligence-bar/start-program'), 'utf8');
-    expect(src).toContain('if (plan.visitDates.length !== ONGOING_PRESEED) return { ...unplannableDates(), preview_changed: true };');
+    expect(src).toContain('if (plan.visitDates.length !== ONGOING_PRESEED) return { refusal: { ...unplannableDates(), preview_changed: true } };');
   });
 
   test('a retired-for-sale service is refused at the card, before any approval (round 4)', async () => {
@@ -786,6 +811,25 @@ describe('commit', () => {
     ]);
   });
 
+  test('property_type flipped to business after the card refuses at the plan, and before the bill step (round 11)', async () => {
+    const version = await approvedVersion();
+    tables.customers = [memberCustomer({ property_type: 'business' })];
+    const refused = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(refused.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+    // Flipped between the booking commit and the bill transaction: the bill step re-checks the locked row.
+    tables.customers = [memberCustomer()];
+    createScheduleBooking.mockImplementation(async () => {
+      tables.customers = [memberCustomer({ waveguard_tier: 'Silver', property_type: 'business' })];
+      return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+    });
+    writes = [];
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.partial).toBe(true);
+    expect(JSON.stringify(result)).toMatch(/commercial or business account/);
+    expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+  });
+
   test('pin drift: a changed bill refuses with preview_changed and books nothing', async () => {
     const version = await approvedVersion();
     PlanRateLedger.loadComponents.mockResolvedValue([{ family_key: 'pest_control', monthly_rate: '45.00' }]);
@@ -891,67 +935,68 @@ describe('commit', () => {
     });
   });
 
-  describe('phase marker and resume (round 10)', () => {
-    const markerInserts = () => writes.filter((w) => w.table === 'audit_log' && w.op === 'insert');
-    const markerRow = (insert, phase = 'booked_pending_bill') => ({
-      id: insert.data.id, resource_id: CUSTOMER_ID, created_at: '2026-10-11T10:00:00Z',
-      metadata: JSON.stringify({ ...JSON.parse(insert.data.metadata), phase }),
+  describe('phase row and resume (rounds 10 and 11)', () => {
+    const rowInserts = () => writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'insert');
+    const rowUpdates = () => writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'update');
+    const auditPhases = () => writes.filter((w) => w.table === 'audit_log' && w.op === 'insert').map((w) => w.data.metadata.phase);
+    // The fake ignores where clauses, so a row only reaches the lookup when the test stages it as an OPEN row.
+    const phaseRow = (insert, phase = 'booked_pending_bill', createdAt = '2026-10-11T10:00:00Z') => ({
+      id: insert.data.id, tool: 'start_program', customer_id: CUSTOMER_ID, created_at: createdAt, phase, payload: insert.data.payload,
     });
-    // A first run whose bill step fails after the visits are booked: leaves the marker open.
+    // A first run whose bill step fails after the visits are booked: leaves the row open.
     async function interruptedFirstRun() {
       const version = await approvedVersion();
       bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
       PlanRateLedger.setLineForScalarWrite.mockRejectedValueOnce(Object.assign(new Error('connection lost'), { code: 'ECONNRESET' }));
       const first = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
       expect(first.partial).toBe(true);
-      return markerInserts()[0];
+      return rowInserts()[0];
     }
 
-    test('the marker is written before the booking is attempted', async () => {
+    test('the phase row is written before the booking is attempted, with an append-only audit event', async () => {
       const version = await approvedVersion();
       let insertsAtBooking = null;
       createScheduleBooking.mockImplementation(async () => {
-        insertsAtBooking = markerInserts().length;
+        insertsAtBooking = rowInserts().length;
         tables.customers = [memberCustomer({ waveguard_tier: 'Silver' })];
         return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
       });
       await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
       expect(insertsAtBooking).toBe(1);
-      const data = JSON.parse(markerInserts()[0].data.metadata);
-      expect(data.phase).toBe('booking');
-      expect(data.target).toMatchObject({ customerId: CUSTOMER_ID, tier: 'Silver', bill: { totalAfter: 102.66 } });
-      expect(markerInserts()[0].data).toMatchObject({ action: 'start_program.pending_bill', resource_type: 'customer', resource_id: CUSTOMER_ID });
+      const row = rowInserts()[0].data;
+      expect(row).toMatchObject({ tool: 'start_program', customer_id: CUSTOMER_ID, phase: 'booking' });
+      expect(row.action_key).toBe(`${JSON.parse(row.payload).target.version}:${row.id}`);
+      expect(JSON.parse(row.payload).target).toMatchObject({ customerId: CUSTOMER_ID, tier: 'Silver', bill: { totalAfter: 102.66 } });
+      expect(writes.some((w) => w.table === 'audit_log' && w.op === 'update')).toBe(false);
+      expect(writes.find((w) => w.table === 'audit_log').data).toMatchObject({ action: 'start_program.phase', resource_type: 'ib_action_phase', resource_id: row.id });
     });
 
-    test('the marker moves to booked_pending_bill after the booking, and to billed inside the bill transaction', async () => {
+    test('the row moves to booked_pending_bill after the booking and to billed inside the bill transaction', async () => {
       const version = await approvedVersion();
       bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
       await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
-      const updates = writes.filter((w) => w.table === 'audit_log' && w.op === 'update');
+      const updates = rowUpdates();
       expect(updates).toHaveLength(2);
-      expect(updates[0].data.metadata.bindings[0]).toContain('booked_pending_bill');
-      // The billed move is the second marker write and comes after the customer row and the ledger lines.
-      expect(updates[1].data.metadata.bindings[0]).toContain('"phase":"billed"');
+      expect(updates[0].data.phase).toBe('booked_pending_bill');
+      expect(updates[1].data.phase).toBe('billed');
       const order = writes.map((w) => `${w.table}:${w.op}`);
-      expect(order.lastIndexOf('customers:update')).toBeLessThan(order.lastIndexOf('audit_log:update'));
-      expect(PlanRateLedger.setLineForScalarWrite).toHaveBeenCalled();
+      expect(order.lastIndexOf('customers:update')).toBeLessThan(order.lastIndexOf('ib_action_phases:update'));
+      expect(auditPhases()).toEqual(['booking', 'booked_pending_bill', 'billed']);
     });
 
-    test('a refused booking abandons the marker; an unexpected booking error leaves it open', async () => {
+    test('a refused booking abandons the row; an unexpected booking error leaves it open', async () => {
       const version = await approvedVersion();
       createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Slot overlap', code: 'OVERLAP_CHANGED' } });
       await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
-      let updates = writes.filter((w) => w.table === 'audit_log' && w.op === 'update');
-      expect(updates).toHaveLength(1);
-      expect(updates[0].data.metadata.bindings[0]).toContain('abandoned');
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
       writes = [];
       createScheduleBooking.mockRejectedValue(new Error('socket hang up'));
       const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
       expect(result.outcome_unknown).toBe(true);
-      expect(writes.filter((w) => w.table === 'audit_log' && w.op === 'update')).toEqual([]);
+      expect(rowUpdates()).toEqual([]);
     });
 
-    test('a marker that cannot be written books nothing', async () => {
+    test('a phase row that cannot be written books nothing', async () => {
       const version = await approvedVersion();
       jest.spyOn(require('../services/intelligence-bar/start-program-marker'), 'writeMarker').mockRejectedValue(new Error('disk full'));
       const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
@@ -961,21 +1006,26 @@ describe('commit', () => {
 
     test('an interrupted bill step resumes on the next card instead of refusing because the series exists', async () => {
       const insert = await interruptedFirstRun();
-      // The next ask: the series exists (the planner would refuse), the marker is open.
+      // The next ask: the series exists (the planner would refuse), the row is open.
       createScheduleBooking.mockReset();
       writes = [];
-      tables.audit_log = [markerRow(insert)];
+      tables.ib_action_phases = [phaseRow(insert)];
       const preview = await run(BASE_INPUT);
       expect(preview).toMatchObject({ preview: true, resume: true, notifies_customer: false });
       expect(preview.tier).toEqual({ before: 'Bronze', after: 'Silver' });
       expect(preview.bill).toEqual({ total_before: 41.33, total_after: 102.66 });
       expect(typeof preview._version).toBe('string');
+      // The lookup ran under the customer row lock (the lock the booking takes), before it read the phase rows.
+      const lockAt = calls.findIndex((c) => c.table === 'customers' && c.method === 'forUpdate');
+      const readAt = calls.findIndex((c) => c.table === 'ib_action_phases' && c.method === 'whereIn');
+      expect(lockAt).toBeGreaterThan(-1);
+      expect(lockAt).toBeLessThan(readAt);
       // Confirmed with the resume card's version: the stored bill step runs, nothing is booked.
       const done = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
       expect(done).toMatchObject({ success: true, resumed: true, tier: { after: 'Silver' }, monthly_bill: { before: 41.33, after: 102.66 } });
       expect(createScheduleBooking).not.toHaveBeenCalled();
       expect(writes.find((w) => w.table === 'customers' && w.op === 'update').data).toMatchObject({ waveguard_tier: 'Silver', monthly_rate: 102.66 });
-      expect(writes.filter((w) => w.table === 'audit_log' && w.op === 'update')).toHaveLength(1);
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['billed']);
       expect(PlanRateLedger.setLineForScalarWrite).toHaveBeenLastCalledWith(expect.anything(), CUSTOMER_ID,
         { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 102.66 }, { source: 'ib_update' });
     });
@@ -983,7 +1033,7 @@ describe('commit', () => {
     test('resume refuses a stale card version, and an earlier landed commit is reported done without a second write', async () => {
       const insert = await interruptedFirstRun();
       writes = [];
-      tables.audit_log = [markerRow(insert)];
+      tables.ib_action_phases = [phaseRow(insert)];
       const stale = await run({ ...BASE_INPUT, _verified_program_version: 'old-card' }, { confirmed: true });
       expect(stale.preview_changed).toBe(true);
       expect(nonMarkerWrites()).toEqual([]);
@@ -997,45 +1047,75 @@ describe('commit', () => {
       expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
     });
 
-    test('a completed marker does not resume: the next card is the normal one', async () => {
-      const insert = await interruptedFirstRun();
-      tables.audit_log = [markerRow(insert, 'billed')];
+    test('a completed row is not open, so the next card is the normal one', async () => {
+      await interruptedFirstRun();
+      tables.ib_action_phases = []; // the lookup selects open phases only
       const preview = await run(BASE_INPUT);
       expect(preview.resume).toBeUndefined();
     });
 
-    test('a booking marker with no series behind it is abandoned and the normal card follows', async () => {
+    test('a booking row older than 30 minutes with no series is abandoned and the normal card follows', async () => {
       const insert = await interruptedFirstRun();
       writes = [];
-      tables.audit_log = [markerRow(insert, 'booking')];
+      tables.ib_action_phases = [phaseRow(insert, 'booking', new Date(Date.now() - 31 * 60 * 1000).toISOString())];
       tables.scheduled_services = [];
       const preview = await run(BASE_INPUT);
       expect(preview.resume).toBeUndefined();
-      expect(writes.find((w) => w.table === 'audit_log' && w.op === 'update').data.metadata.bindings[0]).toContain('no_series');
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
+      expect(auditPhases()).toEqual(['abandoned']);
     });
 
-    test('the stale-marker sweep raises one bell for a marker open past 10 minutes, then stamps it', async () => {
+    test('a booking row inside the 30 minute window stays pending: a concurrent request waits, never abandons it', async () => {
+      const insert = await interruptedFirstRun();
+      writes = [];
+      createScheduleBooking.mockReset();
+      tables.ib_action_phases = [phaseRow(insert, 'booking', new Date(Date.now() - 2 * 60 * 1000).toISOString())];
+      tables.scheduled_services = [];
+      const result = await run(BASE_INPUT);
+      expect(result).toMatchObject({ code: 'program_start_in_progress' });
+      expect(rowUpdates()).toEqual([]);
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+    });
+
+    test('a booking row whose series now exists becomes booked_pending_bill and resumes', async () => {
+      const insert = await interruptedFirstRun();
+      writes = [];
+      tables.ib_action_phases = [phaseRow(insert, 'booking', new Date(Date.now() - 2 * 60 * 1000).toISOString())];
+      tables.scheduled_services = [{ id: 'visit-1' }];
+      const preview = await run(BASE_INPUT);
+      expect(preview).toMatchObject({ resume: true });
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['booked_pending_bill']);
+    });
+
+    test('the stale-row sweep raises one bell for a row open past 10 minutes, then stamps alerted_at', async () => {
       const Marker = require('../services/intelligence-bar/start-program-marker');
       const AdminAlert = require('../services/admin-alert-compose');
       const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
       const insert = await interruptedFirstRun();
       writes = [];
-      tables.audit_log = [markerRow(insert)];
+      tables.ib_action_phases = [phaseRow(insert)];
       expect(await Marker.sweepStalePending()).toBe(1);
       expect(alert).toHaveBeenCalledWith('billing', expect.objectContaining({ severity: 'needs-you', subject: { type: 'customer', id: CUSTOMER_ID } }),
         expect.objectContaining({ dedupeKey: `start-program-pending-bill:${insert.data.id}`, bell: true }));
-      expect(writes.find((w) => w.table === 'audit_log' && w.op === 'update').data.metadata.bindings[0]).toContain('alerted_at');
-      const cutoff = calls.find((c) => c.table === 'audit_log' && c.method === 'where' && c.args[0] === 'created_at');
+      expect(rowUpdates()[0].data.alerted_at).toBeInstanceOf(Date);
+      expect(calls.some((c) => c.table === 'ib_action_phases' && c.method === 'whereNull' && c.args[0] === 'alerted_at')).toBe(true);
+      const cutoff = calls.find((c) => c.table === 'ib_action_phases' && c.method === 'where' && c.args[0] === 'created_at');
       expect(cutoff.args[1]).toBe('<');
-      expect(Date.now() - cutoff.args[2].getTime()).toBeGreaterThanOrEqual(Marker.STALE_MINUTES * 60 * 1000 - 1000);
+      expect(Date.now() - cutoff.args[2].getTime()).toBeGreaterThanOrEqual(Marker.ALERT_MINUTES * 60 * 1000 - 1000);
     });
 
-    test('the scheduler runs the stale-marker sweep every 10 minutes under an exclusive lock', () => {
+    test('the scheduler runs the stale-row sweep every 10 minutes under an exclusive lock', () => {
       const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
       const at = src.indexOf("runExclusive('start-program-pending-bill'");
       expect(at).toBeGreaterThan(-1);
       expect(src.slice(src.lastIndexOf('cron.schedule(', at), at)).toContain("'*/10 * * * *'");
       expect(src.slice(at, at + 300)).toContain('start-program-marker');
+    });
+
+    test('commitProgram is a phase table, not one long function', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/intelligence-bar/start-program'), 'utf8');
+      expect(src).toContain('const COMMIT_PHASES = {');
+      for (const phase of ['record', 'book', 'count', 'bill']) expect(src).toMatch(new RegExp(`async ${phase}\\(run\\)`));
     });
 
     test('the alert copy obeys the admin notification rules', () => {

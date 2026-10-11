@@ -8740,7 +8740,8 @@ async function pinBookingContact(trx, c) {
     customer_id: c.customerId,
     action: CONTACT_PIN_ACTION,
     description: `Visit ${a.id} was booked from a confirm card; its confirmation goes only to the recipients the card showed.`,
-    metadata: JSON.stringify({ scheduled_service_id: a.id, contact_key: c.req.approvedContact }),
+    // property_id: the confirmation key is scoped to the property the visit is stamped with; the send-time check reads it.
+    metadata: JSON.stringify({ scheduled_service_id: a.id, contact_key: c.req.approvedContact, property_id: c.req.approvedServiceAnchor?.propertyId || null }),
   }));
   if (rows.length) await trx('activity_log').insert(rows);
 }
@@ -9181,8 +9182,12 @@ async function queueTechVisitNotice(c) {
 async function bookingContactDrifted(c) {
   if (typeof c.req.approvedContact !== 'string') return false;
   if (c.contactDrifted === undefined) {
-    const key = await require('../services/booking-contact-state').currentContactKey(c.customerId);
-    c.contactDrifted = key !== c.req.approvedContact;
+    const Contact = require('../services/booking-contact-state');
+    // The confirmation key is scoped to the property the visits are stamped with; the welcome key is the account's.
+    const key = await Contact.currentContactKey(c.customerId, { propertyId: c.req.approvedServiceAnchor?.propertyId || null });
+    const welcome = typeof c.req.approvedWelcomeContact === 'string' ? await Contact.currentContactKey(c.customerId, { kind: 'welcome' }) : null;
+    c.contactDrifted = key !== c.req.approvedContact
+      || (typeof c.req.approvedWelcomeContact === 'string' && welcome !== c.req.approvedWelcomeContact);
     if (c.contactDrifted) await suppressConfirmationsOnContactDrift(c);
   }
   return c.contactDrifted;
@@ -9255,7 +9260,7 @@ async function sendRecurringWelcome(c) {
       entryPoint: 'admin_recurring_appointment_created',
       adminUserId: req.technicianId,
       // A card-approved booking queues the welcome with the recipient key the card pinned; delivery re-checks it.
-      ...(typeof req.approvedContact === 'string' ? { contactKey: req.approvedContact } : {}),
+      ...(typeof req.approvedWelcomeContact === 'string' ? { contactKey: req.approvedWelcomeContact } : {}),
     });
   } catch (e) {
     logger.error(`[schedule] new recurring welcome SMS failed (non-blocking): ${e.message}`);
@@ -9362,7 +9367,7 @@ try {
   // A contact change after the card withholds the pinned welcome (the tagger would otherwise queue it for the new recipients).
   const welcomeVerdict = (await bookingContactDrifted(c)) ? false : req.approvedWelcome;
   await AppointmentTagger.onServiceScheduled(svc.id, ...(typeof welcomeVerdict === 'boolean'
-    ? [{ approvedWelcome: welcomeVerdict, ...(typeof req.approvedContact === 'string' ? { approvedContact: req.approvedContact } : {}) }] : []));
+    ? [{ approvedWelcome: welcomeVerdict, ...(typeof req.approvedWelcomeContact === 'string' ? { approvedContact: req.approvedWelcomeContact } : {}) }] : []));
 } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 }
 
@@ -10579,10 +10584,13 @@ async function scheduleCreateHandler(req, res, next) {
 // instead of looking again (page bookings pass nothing and look as before). approvedConsultations: the
 // open consultation outcomes ("<id>:<outcome>") the card said the booking marks won; CONSULTATIONS_CHANGED on any difference.
 // approvedContact: the recipient key (booking-contact-state.js) the card pinned; CONTACT_CHANGED on any difference under the
-// lock, and the deferred confirmation and welcome re-check it before they send.
+// lock, and the deferred confirmation and welcome re-check it before they send. approvedWelcomeContact: the account-level welcome key
+// (the confirmation key is property-scoped). approvedNotCommercial: COMMERCIAL_CHANGED if the account became commercial.
+// approvedLedgerPin: LEDGER_CHANGED if the monthly bill lines moved.
 async function createScheduleBooking({
   body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling,
-  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome, approvedConsultations, approvedContact,
+  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome, approvedConsultations, approvedContact, approvedWelcomeContact,
+  approvedNotCommercial, approvedLedgerPin,
 }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
@@ -10594,6 +10602,9 @@ async function createScheduleBooking({
     ...(Array.isArray(approvedVisitDates) ? { approvedVisitDates } : {}),
     ...(Array.isArray(approvedConsultations) ? { approvedConsultations } : {}),
     ...(typeof approvedContact === 'string' ? { approvedContact } : {}),
+    ...(typeof approvedWelcomeContact === 'string' ? { approvedWelcomeContact } : {}),
+    ...(approvedNotCommercial === true ? { approvedNotCommercial: true } : {}),
+    ...(typeof approvedLedgerPin === 'string' ? { approvedLedgerPin } : {}),
     ...(approvedNoOpenEstimate === true ? { approvedNoOpenEstimate: true } : {}),
     ...(typeof approvedWelcome === 'boolean' ? { approvedWelcome } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),

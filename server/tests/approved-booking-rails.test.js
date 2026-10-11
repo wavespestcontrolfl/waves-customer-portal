@@ -55,7 +55,7 @@ const codeOf = async (promise) => { try { await promise; return null; } catch (e
 
 test('the table names every rail code once', () => {
   expect(RAILS.map((r) => r.code)).toEqual([
-    'BILLING_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
+    'BILLING_CHANGED', 'COMMERCIAL_CHANGED', 'LEDGER_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
   ]);
 });
 
@@ -70,6 +70,30 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     expect(await codeOf(run({ approvedBilling: BILLING }))).toBe('BILLING_CHANGED');
     billingRow = { ...BILLING };
     expect(await codeOf(run({ approvedBilling: BILLING }))).toBeNull();
+  });
+  test('COMMERCIAL_CHANGED (property_type flipped to business under the lock; the canonical predicate decides)', async () => {
+    expect(await codeOf(run({ approvedNotCommercial: true }))).toBeNull();
+    billingRow = { ...BILLING, property_type: 'business' };
+    expect(await codeOf(run({ approvedNotCommercial: true }))).toBe('COMMERCIAL_CHANGED');
+    billingRow = { ...BILLING, property_type: 'Commercial' };
+    expect(await codeOf(run({ approvedNotCommercial: true }))).toBe('COMMERCIAL_CHANGED');
+    billingRow = { ...BILLING, waveguard_tier: 'Commercial' };
+    expect(await codeOf(run({ approvedNotCommercial: true }))).toBe('COMMERCIAL_CHANGED');
+    // A booking that did not pin it (the Schedule page) reads nothing.
+    log = [];
+    billingRow = { ...BILLING, property_type: 'business' };
+    expect(await codeOf(run({}))).toBeNull();
+    expect(log).toEqual([]);
+  });
+  test('LEDGER_CHANGED (a monthly bill line moved under the lock)', async () => {
+    const PlanRateLedger = require('../services/plan-rate-ledger');
+    const loadComponents = jest.spyOn(PlanRateLedger, 'loadComponents').mockResolvedValue([{ family_key: 'pest_control', monthly_rate: '41.33' }]);
+    const RateChange = require('../services/intelligence-bar/rate-change');
+    const pin = RateChange.ledgerPin([{ family_key: 'pest_control', monthly_rate: '41.33' }], '41.33');
+    billingRow = { ...BILLING, monthly_rate: '41.33' };
+    expect(await codeOf(run({ approvedLedgerPin: pin }))).toBeNull();
+    loadComponents.mockResolvedValue([{ family_key: 'pest_control', monthly_rate: '45.00' }]);
+    expect(await codeOf(run({ approvedLedgerPin: pin }))).toBe('LEDGER_CHANGED');
   });
   test('ESTIMATE_OPENED (any open estimate, no service-family reading)', async () => {
     StartProgram.openEstimateForCustomer.mockResolvedValue({ id: 'est-1' });
@@ -128,6 +152,19 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     expect(await codeOf(run({}))).toBeNull();
     expect(spy).not.toHaveBeenCalled();
   });
+  test('CONTACT_CHANGED reads the confirmation key for the approved property and, when pinned, the account-level welcome key', async () => {
+    const Contact = require('../services/booking-contact-state');
+    const spy = jest.spyOn(Contact, 'currentContactKey').mockImplementation(async (_id, opts = {}) => (opts.kind === 'welcome' ? 'welcome-a' : `confirm-${opts.propertyId || 'none'}`));
+    const anchor = { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' };
+    const req = { approvedContact: 'confirm-prop-1', approvedWelcomeContact: 'welcome-a', approvedServiceAnchor: anchor };
+    expect(await codeOf(run(req))).toBeNull();
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, { propertyId: 'prop-1' });
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, { kind: 'welcome' });
+    // The welcome moved (the account holder's address), the confirmation did not.
+    expect(await codeOf(run({ ...req, approvedWelcomeContact: 'welcome-old' }))).toBe('CONTACT_CHANGED');
+    // The confirmation moved for that property alone.
+    expect(await codeOf(run({ ...req, approvedContact: 'confirm-other' }))).toBe('CONTACT_CHANGED');
+  });
   test('INSPECTION_CREDIT_CHANGED', async () => {
     InspectionCredit.projectRedeemableOfferAmount.mockResolvedValue({ amount: 25 });
     expect(await codeOf(run({ creditFreeCard: true }))).toBe('INSPECTION_CREDIT_CHANGED');
@@ -159,7 +196,9 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
 });
 
 test('every lock is taken before any read, and the estimate lock is the last lock', async () => {
+  jest.spyOn(require('../services/plan-rate-ledger'), 'loadComponents').mockResolvedValue([]);
   await run({
+    approvedNotCommercial: true, approvedLedgerPin: require('../services/intelligence-bar/rate-change').ledgerPin([], BILLING.monthly_rate),
     approvedBilling: BILLING, approvedNoOpenEstimate: true, creditFreeCard: true, approvedConsultations: [], approvedContact: 'key-a',
     approvedVisitDates: ['2099-03-03', '2099-04-07'],
     approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' }, approvedOverlapFacts: [],
@@ -167,8 +206,8 @@ test('every lock is taken before any read, and the estimate lock is the last loc
   const firstRead = log.findIndex((e) => e.startsWith('read:'));
   const lastLock = log.map((e) => e.startsWith('lock:')).lastIndexOf(true);
   expect(lastLock).toBeLessThan(firstRead);
-  // Both customer row locks (billing, consultations) come before the estimate lock, which is a leaf.
-  expect(log.slice(0, 4)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:estimates-advisory']);
+  // Every customer row lock (billing, commercial, ledger, consultations, contact) comes before the estimate lock, which is a leaf.
+  expect(log.slice(0, 6)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:estimates-advisory']);
   // The billing read comes after the customer row lock.
   expect(log.indexOf('lock:customers')).toBeLessThan(log.indexOf('read:customers'));
   expect(log.indexOf('lock:estimates-advisory')).toBeLessThan(log.indexOf('read:open-estimate'));

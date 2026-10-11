@@ -89,6 +89,19 @@ describe('sendConfirmation re-checks the card recipient key (round 10)', () => {
     expect(inserts).toEqual([]);
   });
 
+  test('the send-time check compares the PROPERTY-scoped confirmation key the pin stored (round 11)', async () => {
+    pinRow = { metadata: { scheduled_service_id: 'visit-1', contact_key: 'key-a', property_id: 'prop-2' } };
+    const spy = jest.spyOn(Contact, 'currentContactKey').mockImplementation(async (_id, opts = {}) => (opts.propertyId === 'prop-2' ? 'key-a' : 'key-account'));
+    await AppointmentReminders.sendConfirmation('visit-1');
+    expect(spy).toHaveBeenCalledWith('cust-1', { propertyId: 'prop-2' });
+    expect(deliveryStarted()).toBe(true);
+    // The property's own override moved: the account-level key would still match, the property-scoped one does not.
+    touched = []; inserts = [];
+    spy.mockImplementation(async (_id, opts = {}) => (opts.propertyId === 'prop-2' ? 'key-moved' : 'key-a'));
+    expect(await AppointmentReminders.sendConfirmation('visit-1')).toBe(false);
+    expect(deliveryStarted()).toBe(false);
+  });
+
   test('a visit with no pin sends as before and reads no recipient state', async () => {
     pinRow = undefined;
     const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-b');

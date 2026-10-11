@@ -453,7 +453,7 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
 // hand after checking the recipient); an unreadable state waits for the next try on the bounded attempt counter.
 async function contactDriftOutcome(row, meta, finish) {
   if (typeof meta.contact_key !== 'string') return null;
-  const live = await require('./booking-contact-state').currentContactKey(row.customer_id);
+  const live = await require('./booking-contact-state').currentContactKey(row.customer_id, { kind: 'welcome' });
   if (live === meta.contact_key) return null;
   if (live === null) {
     await db('sms_sequences').where({ id: row.id }).update({

@@ -82,6 +82,12 @@ jest.mock('../services/email/spam-blocker', () => ({
   normalizeAddress: (a) => String(a || '').toLowerCase(),
 }));
 jest.mock('../services/customer-stages', () => ({ whereLiveCustomer: (q) => q }));
+// The prospective-owner lookup the draft locks on (a failed lookup aborts the draft).
+const mockOwnerLookup = jest.fn();
+jest.mock('../services/recurring-card-on-file', () => ({
+  ...jest.requireActual('../services/recurring-card-on-file'),
+  resolveProspectiveAcceptCustomer: (...args) => mockOwnerLookup(...args),
+}));
 
 const {
   parseExtractedAddress,
@@ -107,6 +113,7 @@ beforeEach(() => {
     estimateData: { automation: { draftEstimateAutomation: { status: 'generated' } } },
   });
   mockDuplicate.mockResolvedValue(null);
+  mockOwnerLookup.mockResolvedValue({ customerId: null, lookupFailed: false });
 });
 
 describe('emailQuoteDraftsEnabled', () => {
@@ -182,6 +189,13 @@ describe('maybeDraftEstimateFromEmailLead', () => {
     });
     expect(result).toEqual({ created: false, skipped: 'no_usable_phone' });
     expect(mockReadiness).not.toHaveBeenCalled();
+    expect(mockState.inserts).toHaveLength(0);
+  });
+
+  test('a failed prospective-owner lookup aborts the draft instead of inserting unfenced (round 11)', async () => {
+    mockOwnerLookup.mockResolvedValueOnce({ customerId: null, lookupFailed: true });
+    await expect(maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD }))
+      .rejects.toMatchObject({ code: 'ESTIMATE_OWNER_UNVERIFIED' });
     expect(mockState.inserts).toHaveLength(0);
   });
 

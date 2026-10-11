@@ -7,6 +7,8 @@ jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: (key) => (key === 'sendRequiresServerPricing' ? mockGateState.sendRequiresServerPricing : actual.isEnabled(key)) };
 });
+// The FOR UPDATE row the extension reads inside its transaction (null = an empty-owner row).
+let mockLockedRow = null;
 jest.mock('../models/db', () => {
   const mockDeletes = [];
   const mockRaws = [];
@@ -15,7 +17,7 @@ jest.mock('../models/db', () => {
     for (const m of ['where', 'whereNull', 'whereNotNull', 'forUpdate']) b[m] = jest.fn(() => b);
     b.whereRaw = jest.fn((sql) => { b._whereRaw.push(sql); mockRaws.push({ table, sql }); return b; });
     b.whereIn = jest.fn((...args) => { b._whereIn = args; return b; });
-    b.first = jest.fn(async () => ({ estimate_data: {} }));
+    b.first = jest.fn(async () => mockLockedRow || { estimate_data: {} });
     b.update = jest.fn(() => Promise.resolve(1));
     b.del = jest.fn(() => {
       mockDeletes.push({ table: b._table, whereIn: b._whereIn });
@@ -42,6 +44,8 @@ jest.mock('../services/estimate-follow-up', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
 }));
+
+afterEach(() => { mockLockedRow = null; });
 
 const db = require('../models/db');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -147,7 +151,7 @@ describe('extendEstimate validation (pre-write throws)', () => {
     const anchor = { id: 'anchor', estimate_group_id: 'group', status: 'viewed', expires_at: PAST };
     const update = jest.fn();
     let locked = false;
-    const query = { update, select: jest.fn(async (...columns) => columns.includes('id')
+    const query = { update, select: jest.fn(async (...columns) => columns.includes('*')
       ? [anchor]
       : [{ estimate_data: { proposal: locked ? { validThrough: '2099-12-21' } : {} } }]) };
     for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'forUpdate']) query[method] = jest.fn(() => query);
@@ -178,7 +182,7 @@ describe('extendEstimate validation (pre-write throws)', () => {
   it('takes the per-customer estimate lock before reviving a row (a reactivation makes the estimate open again)', async () => {
     const estimate = { id: 'ordinary', customer_id: 'cust-1', status: 'expired', sent_at: PAST, expires_at: PAST, estimate_data: {} };
     const update = jest.fn(async () => 0);
-    const query = { update, first: jest.fn(async () => ({ estimate_data: {} })) };
+    const query = { update, first: jest.fn(async () => ({ customer_id: 'cust-1', estimate_data: {} })) };
     for (const method of ['where', 'whereNull', 'whereRaw', 'whereIn', 'forUpdate', 'modify']) query[method] = jest.fn(() => query);
     const trx = jest.fn(() => query);
     trx.raw = jest.fn(async () => ({}));
@@ -260,6 +264,27 @@ describe('extendEstimate post-write: engine expiring re-arm (codex 2736 r9)', ()
   });
 });
 
+describe('extendEstimate lock owner (round 11)', () => {
+  afterEach(() => { mockLockedRow = null; });
+
+  it('refuses 409 estimate_owner_changed when the locked row belongs to a different customer than the snapshot', async () => {
+    mockLockedRow = { id: 'est-11', customer_id: 'cust-new', estimate_data: {} };
+    db.raw.mockClear();
+    await expect(extendEstimate({
+      estimate: { id: 'est-11', customer_id: 'cust-old', status: 'viewed', archived_at: null, expires_at: FUTURE, viewed_at: PAST },
+      days: 7, silent: true, entryPoint: 'test', workflow: 'test',
+    })).rejects.toMatchObject({ statusCode: 409, code: 'estimate_owner_changed' });
+    expect(db.raw.mock.calls.some(([sql]) => String(sql).includes('hashtextextended'))).toBe(false);
+  });
+
+  it('derives the per-customer lock from the locked row, not the snapshot (source contract)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    expect(src).toContain('lockCustomerEstimatesForEstimate(trx, anchor)');
+    expect(src).not.toContain('lockCustomerEstimatesForEstimate(trx, estimate)');
+    expect(src).toContain("err.code = 'estimate_owner_changed'");
+  });
+});
+
 describe('extendEstimate zero-comms opt-out (#3391 round 9 in-hook audit)', () => {
   it('forces SILENT when estimate_data.noEngagementAutomation is true — a non-silent caller still sends nothing', async () => {
     // The public extension-request flow calls extendEstimate non-silently;
@@ -311,6 +336,7 @@ describe('extendEstimate post-write SMS: annual-offer delivery guard (delivery-g
     sendCustomerMessage.mockResolvedValueOnce({
       sent: false, blocked: true, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld',
     });
+    mockLockedRow = { customer_id: 'cust-1', estimate_data: {} };
     const getTemplateSpy = jest.spyOn(smsTemplatesRouter, 'getTemplate')
       .mockResolvedValueOnce('Your estimate was extended: {{estimate_url}}');
     try {
@@ -388,6 +414,7 @@ describe('extendEstimate post-write notifications: delivery claim (codex #4667 r
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     sendCustomerMessage.mockClear();
     db._raws.length = 0;
+    mockLockedRow = { customer_id: 'cust-1', estimate_data: {} };
     // First transaction = the extension write; second = the claim, whose
     // locked read finds the row off-surface (a county hold landed).
     const offSurface = { first: jest.fn(async () => null), update: jest.fn(async () => 1) };

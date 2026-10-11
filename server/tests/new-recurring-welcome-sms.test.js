@@ -298,7 +298,7 @@ describe('new recurring welcome SMS', () => {
       const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
       arrange({ contact_key: 'key-a' });
       const results = await service.processDueWelcomes();
-      expect(spy).toHaveBeenCalledWith('customer-1');
+      expect(spy).toHaveBeenCalledWith('customer-1', { kind: 'welcome' });
       expect(results.sent).toBe(1);
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     });

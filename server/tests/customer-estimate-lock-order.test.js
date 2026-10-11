@@ -17,7 +17,7 @@ const SITES = [
   ['public-quote refresh', '../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', /\.forUpdate\(\)/],
   ['admin unarchive', '../routes/admin-estimates', "const locked = await trx('estimates').where({ id: req.params.id }).forUpdate().first();", null],
   ['admin proposal revival', '../routes/admin-estimates', 'if (revivingBid) await require', /const locked = await trx\('estimates'\)\.where\(\{ id: estimate\.id \}\)\.forUpdate\(\)/],
-  ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, estimate)', /\.forUpdate\(\)/],
+  ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, anchor)', /\.forUpdate\(\)/],
 ];
 
 describe('customer estimate lock order (row lock first, then the leaf lock)', () => {
@@ -92,6 +92,16 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(body).toContain("code: 'estimate_owner_changed'");
   });
 
+  test('the reopen-site lock aborts, locking nothing, when the prospective owner lookup fails (round 11)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    const spy = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: null, lookupFailed: true });
+    const trx = { raw: jest.fn() };
+    await expect(require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { id: 'e1', customer_id: 'cust-1' }))
+      .rejects.toMatchObject({ code: 'ESTIMATE_OWNER_UNVERIFIED', statusCode: 503 });
+    expect(trx.raw).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   test('one-tap init takes the customer row before the estimate lock, as start_program does (round 8)', () => {
     const src = read('../services/one-tap-purchase');
     const row = src.indexOf("await trx('customers').where({ id: customerId }).forKeyShare().first('id');");
@@ -112,7 +122,7 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     const sites = [
       ['../routes/admin-estimates', "lockCustomerEstimatesForEstimate(trx, locked);", 'unarchive'],
       ['../routes/admin-estimates', 'lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked })', 'revival'],
-      ['../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, estimate)', 'extend'],
+      ['../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, anchor)', 'extend'],
       ['../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', 'refresh'],
     ];
     for (const [rel, anchor] of sites) expect(read(rel)).toContain(anchor);

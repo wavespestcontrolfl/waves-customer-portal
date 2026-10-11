@@ -1,70 +1,88 @@
 /**
- * start_program's phase marker (audit_log, no migration).
+ * start_program's phase row (ib_action_phases, one row per attempt).
  *
  * The card books the series and then sets the tier and the monthly bill in a second transaction. A crash between the
- * two commits leaves visits booked as bill-covered and a bill that never changed, and the approved action is already
- * consumed. The marker survives that: it is written BEFORE the booking, moved to 'booked_pending_bill' once the visits
+ * two commits leaves visits booked as bill-covered and a bill that never changed, and the confirmed action is already
+ * consumed. The phase row survives that: it is written BEFORE the booking, moved to 'booked_pending_bill' once the visits
  * exist, and moved to 'billed' inside the tier-and-bill transaction itself.
  *
  *   booking              written before the booking; the series may or may not exist yet
  *   booked_pending_bill  the visits exist, the bill step has not committed
- *   billed               done (written in the bill transaction)
- *   abandoned            nothing left to finish (the booking was refused, fewer visits, the bill drifted, set by hand)
+ *   billed               done (set in the bill transaction)
+ *   abandoned            nothing left to finish (booking refused, fewer visits, the bill drifted, changed by hand)
  *
- * An open marker (booking, booked_pending_bill) makes the next start_program for that customer offer to FINISH the
- * bill step from the stored target instead of refusing because the series exists. A marker still open after
- * STALE_MINUTES raises one admin alert (sweepStalePending, run by the scheduler every 10 minutes).
+ * The state is mutable, so it lives in its own table (migration 20261011020000); every transition also appends an
+ * audit_log event (recordAuditEvent), the immutable record.
+ *
+ * An open row makes the next start_program for that customer offer to FINISH the bill step from the stored target
+ * instead of refusing because the series exists. The lookup runs under the customer row lock (the lock the booking
+ * transaction takes), so a request that arrives while a booking is committing waits for it and then sees its rows. A
+ * 'booking' row younger than BOOKING_STALE_MINUTES with no series is a booking still in flight: it is never abandoned
+ * by a concurrent request. A row still open after ALERT_MINUTES raises one admin alert (sweepStalePending).
  */
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 
-const ACTION = 'start_program.pending_bill';
-const OPEN_PHASES_SQL = "metadata->>'phase' IN ('booking', 'booked_pending_bill')";
-const STALE_MINUTES = 10;
+const TOOL = 'start_program';
+const OPEN_PHASES = ['booking', 'booked_pending_bill'];
+const ALERT_MINUTES = 10;
+const BOOKING_STALE_MINUTES = 30;
 
 const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
+const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000);
 
 function readMarker(row) {
-  const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-  return { id: row.id, customerId: row.resource_id, createdAt: row.created_at, phase: meta.phase, target: meta.target || {}, meta };
+  const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {});
+  return { id: row.id, customerId: row.customer_id, createdAt: row.created_at, phase: row.phase, target: payload.target || {}, payload };
 }
 
-// Throws on a failed write: the caller books nothing without its marker.
-async function writeMarker({ customerId, actorId, target }) {
-  const id = crypto.randomUUID();
-  await db('audit_log').insert({
-    id,
-    actor_type: isUuid(actorId) ? 'technician' : 'system',
-    actor_id: isUuid(actorId) ? actorId : null,
-    action: ACTION,
-    resource_type: 'customer',
-    resource_id: customerId,
-    metadata: JSON.stringify({ phase: 'booking', target }),
-  });
-  return id;
-}
-
-// Merge fields into the marker (inside a transaction when `conn` is its trx).
-async function mergeMeta(id, fields, conn = db) {
-  await conn('audit_log').where({ id }).update({ metadata: conn.raw('metadata || ?::jsonb', [JSON.stringify(fields)]) });
-}
-
-const setPhase = (id, phase, extra = {}, conn = db) => mergeMeta(id, { phase, [`${phase}_at`]: new Date().toISOString(), ...extra }, conn);
-
-// Best-effort phase move: a failure is logged and never changes the receipt (the stale-marker alert covers it).
-async function settle(id, phase, extra) {
-  if (!id) return;
+// Append-only evidence of a transition. recordAuditEvent swallows its own failures (the phase row is the state).
+async function audit(id, phase, extra = {}) {
   try {
-    await setPhase(id, phase, extra);
+    const { recordAuditEvent } = require('../audit-log');
+    await recordAuditEvent({
+      actor_type: 'system', action: 'start_program.phase', resource_type: 'ib_action_phase', resource_id: id,
+      metadata: { phase, ...extra },
+    });
   } catch (err) {
-    logger.error(`[start-program-marker] could not move marker ${id} to ${phase}: ${err.message}`);
+    logger.warn(`[start-program-marker] audit event for ${id} (${phase}) not written: ${err.message}`);
   }
 }
 
-// The series the marker's booking would have made, for a marker still at 'booking'.
-async function seriesExistsSince(marker) {
-  const row = await db('scheduled_services')
+// Throws on a failed write: the caller books nothing without its phase row.
+async function writeMarker({ customerId, target, actorId = null }) {
+  const id = crypto.randomUUID();
+  await db('ib_action_phases').insert({
+    id, tool: TOOL, customer_id: customerId, action_key: `${target.version}:${id}`, phase: 'booking', payload: JSON.stringify({ target }),
+  });
+  await audit(id, 'booking', { customer_id: customerId, actor: actorId ? String(actorId) : null });
+  return id;
+}
+
+// Move the row (inside a transaction when `conn` is its trx; the audit event is written by the caller after the commit).
+async function setPhase(id, phase, extra = {}, conn = db) {
+  await conn('ib_action_phases').where({ id }).update({
+    phase,
+    payload: conn.raw('payload || ?::jsonb', [JSON.stringify({ [`${phase}_at`]: new Date().toISOString(), ...extra })]),
+    updated_at: new Date(),
+  });
+}
+
+// Best-effort phase move plus its audit event: a failure is logged and never changes the receipt (the alert covers it).
+async function settle(id, phase, extra = {}) {
+  if (!id) return;
+  try {
+    await setPhase(id, phase, extra);
+    await audit(id, phase, extra);
+  } catch (err) {
+    logger.error(`[start-program-marker] could not move ${id} to ${phase}: ${err.message}`);
+  }
+}
+
+// The series the attempt's booking would have made.
+async function seriesExistsSince(marker, conn = db) {
+  const row = await conn('scheduled_services')
     .where({ customer_id: marker.customerId, service_type: marker.target.catalogName, is_recurring: true })
     .where('created_at', '>=', marker.createdAt)
     .whereNotIn('status', ['cancelled', 'canceled'])
@@ -72,43 +90,60 @@ async function seriesExistsSince(marker) {
   return !!row;
 }
 
-// The customer's open marker whose visits exist (a 'booking' marker is checked against the schedule and settled), else null.
-async function findResumable(customerId) {
-  if (!isUuid(customerId)) return null;
-  const row = await db('audit_log')
-    .where({ action: ACTION, resource_type: 'customer', resource_id: customerId })
-    .whereRaw(OPEN_PHASES_SQL)
-    .orderBy('created_at', 'desc')
-    .first('id', 'resource_id', 'created_at', 'metadata');
-  if (!row) return null;
-  const marker = readMarker(row);
-  if (marker.phase === 'booked_pending_bill') return marker;
-  if (marker.phase !== 'booking') return null;
-  if (await seriesExistsSince(marker)) {
-    await setPhase(marker.id, 'booked_pending_bill', { found_by: 'schedule_check' });
-    return { ...marker, phase: 'booked_pending_bill' };
-  }
-  await setPhase(marker.id, 'abandoned', { reason: 'no_series' });
-  return null;
+// One decision per open row, in a table: what the lookup does with a row in each state.
+//   'resume'      the visits exist; offer to finish the bill
+//   'in_progress' a booking is still in flight; the caller waits
+//   'abandon'     nothing was booked and the booking window has passed
+async function decide(marker, conn) {
+  if (marker.phase === 'booked_pending_bill') return 'resume';
+  if (await seriesExistsSince(marker, conn)) return 'found_series';
+  return new Date(marker.createdAt) > minutesAgo(BOOKING_STALE_MINUTES) ? 'in_progress' : 'abandon';
 }
 
-// One needs-you alert per stale open marker. A 'booking' marker with no series behind it is settled quietly.
+const AFTER_DECISION = {
+  resume: async () => ({}),
+  found_series: async (marker, conn) => { await setPhase(marker.id, 'booked_pending_bill', { found_by: 'schedule_check' }, conn); return { audit: ['booked_pending_bill', { found_by: 'schedule_check' }] }; },
+  in_progress: async () => ({ inProgress: true }),
+  abandon: async (marker, conn) => { await setPhase(marker.id, 'abandoned', { reason: 'no_series' }, conn); return { audit: ['abandoned', { reason: 'no_series' }], gone: true }; },
+};
+
+/**
+ * The customer's open attempt, read under the customer row lock.
+ * Returns { marker } (visits exist: resume), { inProgress: true } (a booking is still running), or {} (nothing to do).
+ */
+async function findResumable(customerId) {
+  if (!isUuid(customerId)) return {};
+  let audited = null;
+  const found = await db.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    const row = await trx('ib_action_phases')
+      .where({ tool: TOOL, customer_id: customerId }).whereIn('phase', OPEN_PHASES)
+      .orderBy('created_at', 'desc').first();
+    if (!row) return {};
+    const marker = readMarker(row);
+    const decision = await decide(marker, trx);
+    const outcome = await AFTER_DECISION[decision](marker, trx);
+    audited = outcome.audit ? [marker.id, ...outcome.audit] : null;
+    if (outcome.inProgress) return { inProgress: true };
+    return outcome.gone ? {} : { marker: { ...marker, phase: 'booked_pending_bill' } };
+  });
+  if (audited) await audit(audited[0], audited[1], audited[2]);
+  return found;
+}
+
+// One needs-you alert per open row older than ALERT_MINUTES. A 'booking' row with no series behind it waits out the
+// booking window, then is abandoned quietly.
 async function sweepStalePending() {
-  const cutoff = new Date(Date.now() - STALE_MINUTES * 60 * 1000);
-  const rows = await db('audit_log')
-    .where({ action: ACTION })
-    .whereRaw(OPEN_PHASES_SQL)
-    .whereRaw("metadata->>'alerted_at' IS NULL")
-    .where('created_at', '<', cutoff)
-    .orderBy('created_at', 'asc')
-    .limit(25)
-    .select('id', 'resource_id', 'created_at', 'metadata');
+  const rows = await db('ib_action_phases')
+    .where({ tool: TOOL }).whereIn('phase', OPEN_PHASES).whereNull('alerted_at')
+    .where('created_at', '<', minutesAgo(ALERT_MINUTES))
+    .orderBy('created_at', 'asc').limit(25);
   let raised = 0;
   for (const row of rows) {
     const marker = readMarker(row);
     try {
       if (marker.phase === 'booking' && !(await seriesExistsSince(marker))) {
-        await setPhase(marker.id, 'abandoned', { reason: 'no_series' });
+        if (new Date(marker.createdAt) <= minutesAgo(BOOKING_STALE_MINUTES)) await settle(marker.id, 'abandoned', { reason: 'no_series' });
         continue;
       }
       const { raiseAdminAlert } = require('../admin-alert-compose');
@@ -127,13 +162,13 @@ async function sweepStalePending() {
         dedupeKey: `start-program-pending-bill:${marker.id}`,
         metadata: { markerId: marker.id },
       });
-      await mergeMeta(marker.id, { alerted_at: new Date().toISOString() });
+      await db('ib_action_phases').where({ id: marker.id }).update({ alerted_at: new Date(), updated_at: new Date() });
       raised += 1;
     } catch (err) {
-      logger.error(`[start-program-marker] stale marker ${marker.id} alert failed: ${err.message}`);
+      logger.error(`[start-program-marker] stale row ${marker.id} alert failed: ${err.message}`);
     }
   }
   return raised;
 }
 
-module.exports = { ACTION, STALE_MINUTES, writeMarker, setPhase, settle, findResumable, sweepStalePending, seriesExistsSince };
+module.exports = { TOOL, ALERT_MINUTES, BOOKING_STALE_MINUTES, writeMarker, setPhase, settle, audit, findResumable, sweepStalePending, seriesExistsSince };

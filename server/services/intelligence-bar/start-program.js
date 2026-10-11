@@ -584,13 +584,14 @@ async function openInspectionCredit(customerId) {
 // (booking-contact-state.js). The card names them masked and pins a hash; the CONTACT_CHANGED rail re-reads it after
 // the customer row lock, and the deferred sends check it again. A read that fails refuses: "could not look" must not
 // read as "same recipients".
-async function contactPin(customerId) {
+async function contactPin(customerId, propertyId) {
   const BookingContact = require('../booking-contact-state');
-  const state = await BookingContact.bookingContactState(customerId);
+  // The confirmation is scoped to the property the visits will be stamped with; the welcome is the account's.
+  const state = await BookingContact.bookingContactState(customerId, { propertyId });
   if (state.unavailable) {
     return refusal('Could not verify who the booking confirmation and welcome would reach. Try again in a moment. Nothing was proposed.', 'program_contact_unverified');
   }
-  return { state, key: BookingContact.contactKey(state) };
+  return { state, key: BookingContact.confirmationKey(state), welcomeKey: BookingContact.welcomeKey(state) };
 }
 
 // The booking's consultation-win hook (the Schedule handler's insertParentRow -> markWonForCustomer) flips an open
@@ -657,7 +658,7 @@ const PLAN_STEPS = [
   ['welcome', (o) => welcomeVerdict(o.args)],
   ['credit', (o) => openInspectionCredit(o.args.customerId)],
   ['consultations', (o) => consultationPins(o.args.customerId)],
-  ['contact', (o) => contactPin(o.args.customerId)],
+  ['contact', (o) => contactPin(o.args.customerId, o.loaded.propertyId)],
 ];
 
 async function runPlanSteps(steps, ...extra) {
@@ -716,7 +717,7 @@ async function buildProgramPlan(input, actionContext) {
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, catalogRow.name, catalogRow.updated_at || null, family, args.tier, args.cadence, args.firstDate,
         window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
-        overlap.map((o) => o.fact), planSync.updates, consultations, contact.key,
+        overlap.map((o) => o.fact), planSync.updates, consultations, contact.key, contact.welcomeKey,
       ])).digest('hex'),
     },
   };
@@ -894,6 +895,10 @@ async function applyTierAndBill(plan) {
     await lockCustomerComms(trx, plan.customerId);
     const locked = await trx('customers').where('id', plan.customerId).forUpdate().first();
     if (!locked || locked.deleted_at) throw Object.assign(new Error('The customer record is no longer live.'), { drift: true });
+    // The card refuses a commercial account; the bill step re-checks the canonical predicate on the locked row.
+    if (require('../self-booking-plan-sync').isCommercialAccount(locked)) {
+      throw Object.assign(new Error('The account became a commercial or business account after the card was shown.'), { drift: true, code: 'program_commercial_account' });
+    }
     // The booking itself legitimately touches the row (the WaveGuard plan
     // sync can raise the tier and mark the customer active), so the row
     // version is not compared here. The bill and how it is paid must still be
@@ -919,6 +924,8 @@ async function applyTierAndBill(plan) {
     // The phase marker moves to 'billed' in this same transaction: it can never say billed without the bill.
     if (plan.markerId) await Marker.setPhase(plan.markerId, 'billed', {}, trx);
   });
+  // The append-only event goes in after the commit (it never fails the step).
+  if (plan.markerId) await Marker.audit(plan.markerId, 'billed');
 }
 
 // After a failed or ambiguous tier-and-bill step (an acknowledgement lost after COMMIT looks like a failure),
@@ -1020,6 +1027,10 @@ async function bookSeries(plan, actionContext) {
       approvedConsultations: consultationPinKeys(plan.consultations),
       // Who the confirmation and welcome reach, as the card showed; re-read under the customer lock (CONTACT_CHANGED).
       approvedContact: plan.contact.key,
+      approvedWelcomeContact: plan.contact.welcomeKey,
+      // The account must still be residential, and the monthly bill lines must still be the ones the card showed (both under the customer lock).
+      approvedNotCommercial: true,
+      approvedLedgerPin: plan.ledgerPin,
       // Re-run the open-estimate check inside the booking transaction.
       approvedNoOpenEstimate: true,
       // The welcome verdict the card pinned: the handler and the appointment tagger use it, no second lookup.
@@ -1041,7 +1052,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'COMMERCIAL_CHANGED', 'LEDGER_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }
@@ -1060,80 +1071,113 @@ function receiptTexts(plan) {
   return `${confirmation}${welcome}`;
 }
 
-async function commitProgram(input, actionContext) {
+// The card is approved only when its version still matches a fresh plan. Returns { plan } or { refusal }.
+async function approvedPlan(input, actionContext) {
   const approved = typeof input._verified_program_version === 'string' ? input._verified_program_version : null;
   if (!approved) {
-    return { error: 'This program start has no approved card. Ask again for a fresh confirmation card.', preview_changed: true };
+    return { refusal: { error: 'This program start has no approved card. Ask again for a fresh confirmation card.', preview_changed: true } };
   }
   const built = await buildProgramPlan(input, actionContext);
-  if (built.error) return { ...built, preview_changed: true };
+  if (built.error) return { refusal: { ...built, preview_changed: true } };
   const { plan } = built;
   if (plan.version !== approved) {
-    return { error: 'What this program start would do changed after the card was shown (customer, bill, tier, technician, time or texts). Nothing was booked. Ask again for a fresh card.', preview_changed: true };
+    return { refusal: { error: 'What this program start would do changed after the card was shown (customer, bill, tier, technician, time or texts). Nothing was booked. Ask again for a fresh card.', preview_changed: true } };
   }
-
   // Defensive: the planner already refuses unless exactly the promised visits were planned.
-  if (plan.visitDates.length !== ONGOING_PRESEED) return { ...unplannableDates(), preview_changed: true };
+  if (plan.visitDates.length !== ONGOING_PRESEED) return { refusal: { ...unplannableDates(), preview_changed: true } };
+  return { plan };
+}
 
-  // The phase marker goes down BEFORE the booking: a crash between the booking commit and the bill commit leaves
-  // it open, and the next program start for this customer finishes the bill step from it (see start-program-marker.js).
-  try {
-    plan.markerId = await Marker.writeMarker({ customerId: plan.customerId, actorId: actionContext.technicianId || actionContext.actorId, target: markerTarget(plan) });
-  } catch (err) {
-    logger.error(`[intelligence-bar] start_program could not write its phase marker for customer ${plan.customerId}: ${err.message}`);
-    return { error: 'The start of this program could not be recorded, so nothing was booked. Try again in a moment.', code: 'program_marker_failed', nothing_changed: true };
-  }
+// The commit is a short state machine: each phase handler returns { next } to continue or { result } to stop with the
+// reply. The phase row (ib_action_phases) records the same states for a crash between the two commits.
+//   record  write the phase row BEFORE the booking, so a crash after the booking commit leaves it open
+//   book    the series, through the Schedule screen's own handler
+//   count   fewer visits than the card promised stop here (the bill stays as it is)
+//   bill    tier + monthly bill, one transaction (or a reconcile read when its acknowledgement was lost)
+const COMMIT_PHASES = {
+  async record(run) {
+    const { plan, actionContext } = run;
+    try {
+      plan.markerId = await Marker.writeMarker({ customerId: plan.customerId, actorId: actionContext.technicianId || actionContext.actorId, target: markerTarget(plan) });
+    } catch (err) {
+      logger.error(`[intelligence-bar] start_program could not write its phase row for customer ${plan.customerId}: ${err.message}`);
+      return { result: { error: 'The start of this program could not be recorded, so nothing was booked. Try again in a moment.', code: 'program_marker_failed', nothing_changed: true } };
+    }
+    return { next: 'book' };
+  },
 
-  // Step 1: the series, through the Schedule screen's own handler.
-  const booking = await bookSeries(plan, actionContext);
-  if (booking.result) {
-    // A refusal changed nothing; an unexpected error may have booked, so that marker stays for the schedule check.
-    if (booking.result.outcome_unknown !== true) await Marker.settle(plan.markerId, 'abandoned', { reason: 'booking_refused' });
-    return booking.result;
-  }
-  const created = booking.json || {};
-  await Marker.settle(plan.markerId, 'booked_pending_bill', { series_id: created.id || null });
-  const booked = {
-    series_id: created.id,
-    visits_booked: created.recurringCreated,
-    first_visit: plan.firstDate,
-    dates: (created.appointments || []).map((a) => a.date),
-  };
-  const warnings = Array.isArray(created.warnings) ? created.warnings : [];
+  async book(run) {
+    const { plan, actionContext } = run;
+    const booking = await bookSeries(plan, actionContext);
+    if (booking.result) {
+      // A refusal changed nothing; an unexpected error may have booked, so that row stays for the schedule check.
+      if (booking.result.outcome_unknown !== true) await Marker.settle(plan.markerId, 'abandoned', { reason: 'booking_refused' });
+      return { result: booking.result };
+    }
+    run.created = booking.json || {};
+    await Marker.settle(plan.markerId, 'booked_pending_bill', { series_id: run.created.id || null });
+    run.booked = {
+      series_id: run.created.id,
+      visits_booked: run.created.recurringCreated,
+      first_visit: plan.firstDate,
+      dates: (run.created.appointments || []).map((a) => a.date),
+    };
+    run.warnings = Array.isArray(run.created.warnings) ? run.created.warnings : [];
+    return { next: 'count' };
+  },
 
-  // Fewer visits than the card promised (blackout days, closed weekdays):
-  // the program is not what was approved, so the tier and bill stay as they
-  // are and the receipt names the shortfall.
-  const planned = ONGOING_PRESEED;
-  const createdCount = Number(created.recurringCreated) || 0;
-  if (createdCount < planned) {
+  // Fewer visits than the card promised (blackout days, closed weekdays): the program is not what was approved, so the
+  // tier and bill stay as they are and the receipt names the shortfall.
+  async count(run) {
+    const { plan, created, booked, warnings } = run;
+    const createdCount = Number(created.recurringCreated) || 0;
+    if (createdCount >= ONGOING_PRESEED) return { next: 'bill' };
     await Marker.settle(plan.markerId, 'abandoned', { reason: 'fewer_visits' });
     const state = await customerStateAfterBooking(plan.customerId);
-    return partialReceipt(plan, booked, state,
-      `the Schedule screen booked ${createdCount} of the ${planned} visits on the card${warnings.length ? ` (${warnings.join(' ')})` : ''}. Add the missing visits on the Schedule screen (check days off and blackout dates), then set the tier and bill with update_customer`);
-  }
+    return { result: partialReceipt(plan, booked, state,
+      `the Schedule screen booked ${createdCount} of the ${ONGOING_PRESEED} visits on the card${warnings.length ? ` (${warnings.join(' ')})` : ''}. Add the missing visits on the Schedule screen (check days off and blackout dates), then set the tier and bill with update_customer`) };
+  },
 
-  // Step 2: tier + bill, one transaction.
-  try {
-    await applyTierAndBill(plan);
-  } catch (err) {
-    logger.error(`[intelligence-bar] start_program tier/bill step failed for customer ${plan.customerId} after booking ${created.id}: ${err.message}`);
-    // An acknowledgement lost after COMMIT lands here too: read what the step writes before reporting.
-    // A drift refusal is thrown by this step before its first write: it never needs a reconcile read.
-    const landed = err.drift ? 'not_done' : await reconcileTierAndBill(plan);
-    if (landed === 'done') {
-      await Marker.settle(plan.markerId, 'billed', { via: 'reconcile' });
-      return programStartedReceipt(plan, created, booked, warnings);
+  async bill(run) {
+    const { plan, created, booked, warnings } = run;
+    try {
+      await applyTierAndBill(plan);
+    } catch (err) {
+      return { result: await billFailure(run, err) };
     }
-    if (landed !== 'not_done') return tierAndBillUnknown(plan, booked, err);
-    // A drift refusal is for the operator to settle by hand; any other failure leaves the marker open so the next program
-    // start for this customer finishes the bill step.
-    if (err.drift) await Marker.settle(plan.markerId, 'abandoned', { reason: 'bill_drift' });
-    const state = await customerStateAfterBooking(plan.customerId);
-    return partialReceipt(plan, booked, state,
-      `${err.drift ? err.message : `the update failed (${err.code || err.message}). Ask for a program start for this customer again, and it offers to finish the tier and bill.`} Set them with update_customer, or cancel the series on the Schedule screen`);
+    return { result: programStartedReceipt(plan, created, booked, warnings) };
+  },
+};
+
+// An acknowledgement lost after COMMIT lands here too: read what the step writes before reporting. A drift refusal is
+// thrown by the step before its first write, so it never needs a reconcile read.
+async function billFailure(run, err) {
+  const { plan, created, booked, warnings } = run;
+  logger.error(`[intelligence-bar] start_program tier/bill step failed for customer ${plan.customerId} after booking ${created.id}: ${err.message}`);
+  const landed = err.drift ? 'not_done' : await reconcileTierAndBill(plan);
+  if (landed === 'done') {
+    await Marker.settle(plan.markerId, 'billed', { via: 'reconcile' });
+    return programStartedReceipt(plan, created, booked, warnings);
   }
-  return programStartedReceipt(plan, created, booked, warnings);
+  if (landed !== 'not_done') return tierAndBillUnknown(plan, booked, err);
+  // A drift refusal is for the operator to settle by hand; any other failure leaves the row open so the next program
+  // start for this customer finishes the bill step.
+  if (err.drift) await Marker.settle(plan.markerId, 'abandoned', { reason: 'bill_drift' });
+  const state = await customerStateAfterBooking(plan.customerId);
+  return partialReceipt(plan, booked, state,
+    `${err.drift ? err.message : `the update failed (${err.code || err.message}). Ask for a program start for this customer again, and it offers to finish the tier and bill.`} Set them with update_customer, or cancel the series on the Schedule screen`);
+}
+
+async function commitProgram(input, actionContext) {
+  const gate = await approvedPlan(input, actionContext);
+  if (gate.refusal) return gate.refusal;
+  const run = { plan: gate.plan, actionContext, created: null, booked: null, warnings: [] };
+  for (let phase = 'record'; phase;) {
+    const step = await COMMIT_PHASES[phase](run);
+    if (step.result) return step.result;
+    phase = step.next;
+  }
+  return null;
 }
 
 function programStartedReceipt(plan, created, booked, warnings) {
@@ -1258,13 +1302,17 @@ async function startProgram(input, actionContext = {}) {
     return { error: 'Starting a program from the Intelligence Bar is not enabled (GATE_IB_START_PROGRAM). Use the Schedule screen and the customer profile.', code: 'gate_off' };
   }
   // An earlier start for this customer booked its visits but never finished the bill: finish that first.
-  let resumable = null;
+  let found = {};
   try {
-    resumable = await Marker.findResumable(input.customer_id);
+    found = await Marker.findResumable(input.customer_id);
   } catch (err) {
-    logger.warn(`[intelligence-bar] start_program marker lookup failed for customer ${input.customer_id}: ${err.message}`);
+    logger.warn(`[intelligence-bar] start_program phase lookup failed for customer ${input.customer_id}: ${err.message}`);
   }
-  if (resumable) return actionContext.confirmed === true ? commitResume(input, resumable) : resumePreview(resumable);
+  // The lookup waited on the customer row lock, so a booking in flight has committed or is still inside its window.
+  if (found.inProgress) {
+    return { error: 'Another program start for this customer is still booking. Wait a minute, then ask again. Nothing was changed.', code: 'program_start_in_progress', nothing_changed: true };
+  }
+  if (found.marker) return actionContext.confirmed === true ? commitResume(input, found.marker) : resumePreview(found.marker);
   // ONLY the server-derived context confirms (same rule as merge_customers).
   if (actionContext.confirmed !== true) {
     const built = await buildProgramPlan(input, actionContext);

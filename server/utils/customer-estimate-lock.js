@@ -41,18 +41,23 @@ async function lockCustomerEstimates(trx, customerId) {
  * accept resolves to (resolveProspectiveAcceptCustomer: the estimate group's owner, then the phone match),
  * so an unarchive or revival of a phone-matched row cannot race the booking's open-estimate check.
  * The resolver runs on a copy with customer_id cleared so it reports the prospective owner even for a
- * linked row. Both ids are locked in sorted order (one order everywhere); a failed lookup logs and locks
- * what is known. Same leaf rule as lockCustomerEstimates: take it after the row and other locks.
+ * linked row. Both ids are locked in sorted order (one order everywhere); a failed lookup throws (503) rather
+ * than lock only what is known. Same leaf rule as lockCustomerEstimates: take it after the row and other locks.
  */
 async function lockCustomerEstimatesForEstimate(trx, estimate) {
   const ids = new Set();
   if (estimate?.customer_id) ids.add(String(estimate.customer_id));
+  // A failed owner lookup aborts the caller's transaction: locking only what is known would leave the prospective
+  // owner's booking check unfenced.
+  const unverified = (cause) => Object.assign(new Error(`Could not verify the estimate owner${cause ? ` (${cause})` : ''}.`), { code: 'ESTIMATE_OWNER_UNVERIFIED', statusCode: 503 });
   try {
     const { resolveProspectiveAcceptCustomer } = require('../services/recurring-card-on-file');
-    const { customerId } = await resolveProspectiveAcceptCustomer({ ...estimate, customer_id: null }, trx, { authoritative: true });
+    const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer({ ...estimate, customer_id: null }, trx, { authoritative: true });
+    if (lookupFailed) throw unverified();
     if (customerId) ids.add(String(customerId));
   } catch (err) {
-    require('../services/logger').warn(`[customer-estimate-lock] prospective owner lookup failed: ${err.message}`);
+    if (err.code === 'ESTIMATE_OWNER_UNVERIFIED') throw err;
+    throw unverified(err.message);
   }
   for (const id of [...ids].sort()) await lockCustomerEstimates(trx, id);
 }

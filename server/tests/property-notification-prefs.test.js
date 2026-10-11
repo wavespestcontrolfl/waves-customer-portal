@@ -176,3 +176,38 @@ describe('resolveAppointmentPrefs', () => {
     expect(await Prefs.prefsForVisit(null, 'c1', null, 't')).toBeNull();
   });
 });
+
+describe('resolvePropertyPrefs (round 11: the visit rule keyed by property id, for a visit not booked yet)', () => {
+  test('scope gate OFF: customer row, no read', async () => {
+    setDb({ property: RENTAL });
+    const out = await Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'pr', prefs: CUSTOMER });
+    expect(out.prefs).toBe(CUSTOMER);
+    expect(db).not.toHaveBeenCalled();
+  });
+  test('texts ON: a rental property starts quiet and its own chosen toggle wins; the same overlay as the visit rule', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true'; process.env.GATE_APP_PROPERTY_TEXTS = 'true';
+    setDb({ property: RENTAL, row: null });
+    const quiet = await Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'pr', prefs: CUSTOMER });
+    expect(quiet.propertyDecided).toBe(true);
+    expect(quiet.prefs.appointment_confirmation).toBe(false);
+    setDb({ property: RENTAL, row: { appointment_confirmation: true } });
+    const chosen = await Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'pr', prefs: CUSTOMER });
+    expect(chosen.prefs.appointment_confirmation).toBe(true);
+  });
+  test('a primary or foreign property answers the customer row; writes no shadow-log row', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true'; process.env.GATE_APP_PROPERTY_TEXTS = 'true';
+    setDb({ property: PRIMARY });
+    expect((await Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'pa', prefs: CUSTOMER })).prefs).toBe(CUSTOMER);
+    setDb({ property: null });
+    expect((await Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'px', prefs: CUSTOMER })).prefs).toBe(CUSTOMER);
+    expect(inserts).toEqual([]);
+  });
+  test('a failed read: shadow answers the customer row, enforcement throws', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    setDb({ property: RENTAL, failOn: 'customer_properties' });
+    expect((await Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'pr', prefs: CUSTOMER })).prefs).toBe(CUSTOMER);
+    process.env.GATE_APP_PROPERTY_TEXTS = 'true';
+    setDb({ property: RENTAL, failOn: 'customer_properties' });
+    await expect(Prefs.resolvePropertyPrefs({ customerId: 'c1', propertyId: 'pr', prefs: CUSTOMER })).rejects.toThrow('down');
+  });
+});

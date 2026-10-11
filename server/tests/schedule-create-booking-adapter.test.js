@@ -243,6 +243,17 @@ describe('createScheduleBooking runs the POST / handler', () => {
       spy.mockRestore();
     });
 
+    test('the pin stores the stamped property, and the adapter threads the round 11 pins to the rails (round 11)', async () => {
+      const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+      expect(src).toContain('property_id: c.req.approvedServiceAnchor?.propertyId || null');
+      expect(src).toContain("...(typeof approvedWelcomeContact === 'string' ? { approvedWelcomeContact } : {})");
+      expect(src).toContain('...(approvedNotCommercial === true ? { approvedNotCommercial: true } : {})');
+      expect(src).toContain("...(typeof approvedLedgerPin === 'string' ? { approvedLedgerPin } : {})");
+      // The send-time check reads the confirmation key for the stamped property and the welcome key for the account.
+      expect(src).toContain("currentContactKey(c.customerId, { propertyId: c.req.approvedServiceAnchor?.propertyId || null })");
+      expect(src).toContain("currentContactKey(c.customerId, { kind: 'welcome' })");
+    });
+
     test('the booking transaction writes the recipient pin for each created visit; a page booking writes none (round 10)', async () => {
       const Contact = require('../services/booking-contact-state');
       const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
@@ -260,7 +271,7 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect((await createScheduleBooking({ body: oneOff, actor, approvedContact: 'key-a' })).status).toBe(201);
       expect(pins).toHaveLength(1);
       expect(pins[0]).toMatchObject({ customer_id: 'cust-1', action: 'booking_contact_pin' });
-      expect(JSON.parse(pins[0].metadata)).toEqual({ scheduled_service_id: 'new-1', contact_key: 'key-a' });
+      expect(JSON.parse(pins[0].metadata)).toEqual({ scheduled_service_id: 'new-1', contact_key: 'key-a', property_id: null });
       pins.length = 0;
       expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
       expect(pins).toEqual([]);
@@ -305,14 +316,15 @@ describe('createScheduleBooking runs the POST / handler', () => {
       const Welcome = require('../services/new-recurring-welcome-sms');
       const Tagger = require('../services/appointment-tagger');
       const { sendRecurringWelcome, tagScheduledService } = require('../routes/admin-schedule')._test;
-      jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+      jest.spyOn(Contact, 'currentContactKey').mockImplementation(async (_id, opts = {}) => (opts.kind === 'welcome' ? 'key-w' : 'key-a'));
       const welcomeSpy = jest.spyOn(Welcome, 'sendNewRecurringWelcome').mockResolvedValue({ queued: true });
       const tagSpy = jest.spyOn(Tagger, 'onServiceScheduled').mockResolvedValue(undefined);
-      const c = { customerId: 'cust-1', customer: { id: 'cust-1' }, svc: { id: 'visit-1' }, recurringPattern: 'monthly', createdAppointments: [], req: { approvedContact: 'key-a', approvedWelcome: true } };
+      const c = { customerId: 'cust-1', customer: { id: 'cust-1' }, svc: { id: 'visit-1' }, recurringPattern: 'monthly', createdAppointments: [], req: { approvedContact: 'key-a', approvedWelcomeContact: 'key-w', approvedWelcome: true } };
       await sendRecurringWelcome(c);
       await tagScheduledService(c);
-      expect(welcomeSpy).toHaveBeenCalledWith(expect.objectContaining({ contactKey: 'key-a' }));
-      expect(tagSpy).toHaveBeenCalledWith('visit-1', { approvedWelcome: true, approvedContact: 'key-a' });
+      // The welcome and the tagger carry the ACCOUNT-level welcome key; the confirmation key is property-scoped.
+      expect(welcomeSpy).toHaveBeenCalledWith(expect.objectContaining({ contactKey: 'key-w' }));
+      expect(tagSpy).toHaveBeenCalledWith('visit-1', { approvedWelcome: true, approvedContact: 'key-w' });
       welcomeSpy.mockClear();
       await sendRecurringWelcome({ ...c, contactDrifted: undefined, req: {} });
       expect(welcomeSpy.mock.calls[0][0]).not.toHaveProperty('contactKey');
@@ -412,7 +424,7 @@ describe('createScheduleBooking runs the POST / handler', () => {
       await newRecurringWelcomeVerdict({}, 'cust-1');
       expect(db.mock.calls.length).toBeGreaterThan(callsBefore);
       const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
-      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof welcomeVerdict === 'boolean'\s*\? \[\{ approvedWelcome: welcomeVerdict, \.\.\.\(typeof req\.approvedContact === 'string' \? \{ approvedContact: req\.approvedContact \} : \{\}\) \}\] : \[\]\)\)/);
+      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof welcomeVerdict === 'boolean'\s*\? \[\{ approvedWelcome: welcomeVerdict, \.\.\.\(typeof req\.approvedWelcomeContact === 'string' \? \{ approvedContact: req\.approvedWelcomeContact \} : \{\}\) \}\] : \[\]\)\)/);
       // The pinned verdict is withheld (false) when the customer's contact changed after the card.
       expect(src).toContain('const welcomeVerdict = (await bookingContactDrifted(c)) ? false : req.approvedWelcome;');
     });

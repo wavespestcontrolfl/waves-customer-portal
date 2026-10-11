@@ -61,6 +61,33 @@ const RAILS = [
     approved: (ctx) => billingString(ctx.req.approvedBilling),
   },
   {
+    // The account must still be residential. The card refuses a commercial or business account through the canonical
+    // isCommercialAccount predicate (the tier sentinel or the customer's property_type), which reads columns the billing
+    // fingerprint does not carry: a property_type flipped to business after the card, under the customer lock, refuses.
+    code: 'COMMERCIAL_CHANGED',
+    message: 'This is now a commercial or business account. The program card is for residential customers. Nothing was booked.',
+    applies: (ctx) => ctx.req.approvedNotCommercial === true,
+    lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
+    read: async (trx, ctx) => require('../self-booking-plan-sync').isCommercialAccount(
+      await trx('customers').where({ id: ctx.customerId }).first('waveguard_tier', 'property_type'),
+    ),
+    approved: () => false,
+  },
+  {
+    // The monthly bill lines the card was built on: the ledger pin (rate and every plan-rate line). The billing
+    // fingerprint carries the scalar rate only; a ledger line moved under the customer lock must refuse too.
+    code: 'LEDGER_CHANGED',
+    message: 'The customer\'s monthly bill lines changed since the card was shown. Nothing was booked.',
+    applies: (ctx) => typeof ctx.req.approvedLedgerPin === 'string',
+    lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
+    read: async (trx, ctx) => {
+      const row = await trx('customers').where({ id: ctx.customerId }).first('monthly_rate');
+      const components = await require('../plan-rate-ledger').loadComponents(trx, ctx.customerId);
+      return require('../intelligence-bar/rate-change').ledgerPin(components, row?.monthly_rate);
+    },
+    approved: (ctx) => ctx.req.approvedLedgerPin,
+  },
+  {
     // The consultations the booking marks won (the handler's markWonForCustomer hook): the card listed
     // them by id and outcome. The read is the hook's own selection (openConsultationCandidates), taken
     // under the customer row lock every consultation writer also takes, so a consultation recorded
@@ -87,8 +114,17 @@ const RAILS = [
     message: 'The customer\'s phone, email or notification settings changed since the card was shown. Nothing was booked.',
     applies: (ctx) => typeof ctx.req.approvedContact === 'string',
     lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
-    read: async (_trx, ctx) => require('../booking-contact-state').currentContactKey(ctx.customerId),
-    approved: (ctx) => ctx.req.approvedContact,
+    // Two keys, as the senders split them: the confirmation for the property the visits are stamped with
+    // (property-level toggles and recipient overrides), and the account-level welcome.
+    read: async (_trx, ctx) => {
+      const Contact = require('../booking-contact-state');
+      return {
+        confirmation: await Contact.currentContactKey(ctx.customerId, { propertyId: ctx.req.approvedServiceAnchor?.propertyId || null }),
+        welcome: typeof ctx.req.approvedWelcomeContact === 'string' ? await Contact.currentContactKey(ctx.customerId, { kind: 'welcome' }) : null,
+      };
+    },
+    approved: (ctx) => ({ confirmation: ctx.req.approvedContact, welcome: typeof ctx.req.approvedWelcomeContact === 'string' ? ctx.req.approvedWelcomeContact : null }),
+    matches: (read, approved) => read.confirmation === approved.confirmation && read.welcome === approved.welcome,
   },
   {
     // The card's open-estimate check: the SAME any-open condition the card's own check uses
