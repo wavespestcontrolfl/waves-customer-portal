@@ -932,7 +932,10 @@ describe('booking route wiring (source contracts)', () => {
     // self-booked rows (activation-owned, stamped with explicit ids).
     const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
     expect(linkageSrc).toMatch(/const excludeSelfBooked = sourceRow\?\.source === 'quote_wizard'\s*\n\s*&& !\(Array\.isArray\(onlyServiceIds\) && onlyServiceIds\.length\);/);
-    expect(linkageSrc).toMatch(/else if \(excludeSelfBooked\) qb\.whereNull\('self_booking_id'\);/);
+    // The scope lives in activationScope (#6113): the self-booked exclusion is
+    // the fallback after the card's approved set and the caller's id scope.
+    expect(linkageSrc).toMatch(/if \(excludeSelfBooked\) return \(qb\) => qb\.whereNull\('self_booking_id'\);/);
+    expect(linkageSrc).toMatch(/const scopeToActivation = activationScope\(\{ approvedServiceIds, onlyServiceIds, excludeSelfBooked \}\);/);
   });
 
   test('skipped / no-show stranded first visits are UNBILLED: strip + convert the FULL program (r14)', async () => {
