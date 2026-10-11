@@ -1,17 +1,23 @@
 // A callback that reaches a solicitor settles its parent voicemail
-// (GATE_CALLBACK_SPAM_CLOSES_PARENT): the parent's open Needs Review cards
-// that a return call would have answered resolve, its open callback promise is
-// dismissed, review_status syncs, and metadata.callback_verdict is stamped.
+// (GATE_CALLBACK_SPAM_CLOSES_PARENT). Two writers, one lifecycle each:
+//  - cards: closeParentOnCallbackSpam resolves the parent's open asks a return
+//    call would have answered (CALLBACK_SPAM_MOOT_CODES), syncs review_status
+//    and stamps metadata.callback_verdict; the nightly triage auto-resolve
+//    sweep re-closes a card a later reprocess filed again (rule callback_spam);
+//  - the callback promise: call-commitments' own fulfillment lifecycle reads
+//    the spam callback as a callback_spam proof and dismisses it
+//    (refreshFulfillment), asked for right after the cards settle.
+// A callback later reprocessed into a real conversation gives everything back
+// (reopenParentOnCallbackCorrected + reopenCallbackSpamDismissals).
 // Cards that judge on-file data stay. The parent's processing_status, lead
 // and customer are not touched. Nothing is sent.
 //
-// Eligibility (codex #6271 r1): the child is an admin callback (source
+// Eligibility (codex #6271): the child is an admin callback (source
 // 'admin-callback') to the parent's own number or customer; the parent is an
-// inbound voicemail; the child's spam verdict is still the one on the row
-// (same generation, no live token). The shared triage lock is taken first.
+// inbound voicemail; the child's verdict is still the one on the row (same
+// generation, no live token). The shared triage lock is taken first.
 //
-// Unit cases need no database (the gate, direction, source and parent-id
-// checks return before any query). The behavior suite runs on real rows
+// Unit cases need no database. The behavior suite runs on real rows
 // (DATABASE_URL only, same convention as call-processor-shutdown-release.test.js).
 // Fixtures are fictitious: 555-01xx numbers, fake SIDs, no transcript text.
 const SKIP = !process.env.DATABASE_URL;
@@ -28,6 +34,11 @@ const KEPT_CHILD_SID = sid('c3');
 const PLAIN_PARENT_SID = sid('p4');
 const PLAIN_CHILD_SID = sid('c4');
 const FAR_CHILD_SID = sid('c5');
+const ORPHAN_CHILD_SID = sid('c6');
+const FIXED_PARENT_SID = sid('p7');
+const FIXED_CHILD_SID = sid('c7');
+const SWEPT_PARENT_SID = sid('p8');
+const SWEPT_CHILD_SID = sid('c8');
 const UUID = '11111111-1111-4111-8111-111111111111';
 
 describe('closeParentOnCallbackSpam without a database', () => {
@@ -39,6 +50,7 @@ describe('closeParentOnCallbackSpam without a database', () => {
     });
     const r = await processor.closeParentOnCallbackSpam({ id: UUID, direction: 'outbound', source: 'admin-callback', metadata: { relatedCallId: UUID } });
     expect(r).toEqual({ applied: false, reason: 'gated_off' });
+    expect(await processor.reopenParentOnCallbackCorrected({ id: UUID, direction: 'outbound', source: 'admin-callback', metadata: { relatedCallId: UUID } })).toEqual({ applied: false, reason: 'no_parent' });
   });
 
   test('gate on: an inbound call, a non-admin outbound call, or a callback with no parent is left alone before any query', async () => {
@@ -58,31 +70,29 @@ describe('closeParentOnCallbackSpam without a database', () => {
     expect(await close({ id: UUID, direction: 'outbound-api', source: 'admin-callback', metadata: 'not json' })).toEqual({ applied: false, reason: 'no_parent' });
   });
 
-  test('a reprocess of the parent reads the stamped verdict (gate on only)', () => {
-    let on; let off;
-    jest.isolateModules(() => { process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT = 'true'; on = require('../services/call-recording-processor'); });
-    jest.isolateModules(() => { delete process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT; off = require('../services/call-recording-processor'); });
-    const stamped = { metadata: JSON.stringify({ callback_verdict: { spam: true, callback_call_log_id: UUID } }) };
-    expect(on.callbackVerdictSpam(stamped)).toBe(true);
-    expect(on.callbackVerdictSpam({ metadata: { callback_verdict: { spam: false } } })).toBe(false);
-    expect(on.callbackVerdictSpam({ metadata: {} })).toBe(false);
-    expect(off.callbackVerdictSpam(stamped)).toBe(false);
-  });
-
   test('the moot set holds the asks a return call answers and none of the human verdicts', () => {
     const { CALLBACK_SPAM_MOOT_CODES } = require('../services/call-triage-flags');
     for (const f of ['missing_service_address', 'address_unverifiable', 'missing_last_name', 'not_confirmed', 'quote_promised']) expect(CALLBACK_SPAM_MOOT_CODES.has(f)).toBe(true);
     // callback_number_needed: the caller said the inbound number was not theirs, so a callback to it answers nothing.
     for (const f of ['callback_number_needed', 'missing_unit_number', 'on_file_house_number_conflict', 'email_unverified', 'caller_not_authorized', 'out_of_service_area', 'property_role_confirm']) expect(CALLBACK_SPAM_MOOT_CODES.has(f)).toBe(false);
   });
+
+  test('the sweep rule resolves a moot card on callback_spam evidence and nothing without it', () => {
+    const { classifyTriageItem } = require('../services/triage-auto-resolve');
+    const item = { id: 't1', status: 'open', severity: 'blocking', reason_code: 'missing_service_address', payload: {}, created_at: new Date() };
+    expect(classifyTriageItem(item, { evidence: new Map([['t1', { callback_spam: true }]]) })).toEqual({ action: 'resolve', rule: 'callback_spam' });
+    expect(classifyTriageItem({ ...item, reason_code: 'on_file_house_number_conflict' }, { evidence: new Map([['t1', { callback_spam: true }]]) })?.rule).not.toBe('callback_spam');
+    expect(classifyTriageItem(item, { evidence: new Map([['t1', {}]]) })?.rule).not.toBe('callback_spam');
+  });
 });
 
-maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
+maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () => {
   let db;
   let processor;
-  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID];
-  const reminderIds = [];
+  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID];
   const readCall = (s) => db('call_log').where({ twilio_call_sid: s }).first();
+  // A voicemail an hour ago: the promise lifecycle counts evidence from the
+  // end of the call, so the callback (now) is after it.
   const insertCall = async (s, overrides = {}) => {
     const [row] = await db('call_log').insert({
       twilio_call_sid: s,
@@ -95,6 +105,7 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
       call_outcome: 'voicemail',
       answered_by: 'voicemail',
       review_status: 'open',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
       metadata: JSON.stringify({ source: 'voice_webhook', fixture: 'callback-spam' }),
       ...overrides,
     }).returning('id');
@@ -105,17 +116,20 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
   const insertChild = (s, parentId, overrides = {}) => insertCall(s, {
     direction: 'outbound-api', source: 'admin-callback', from_phone: '+15555550100', to_phone: '+15555550144',
     processing_status: 'spam', processing_generation: 3, processing_token: null, call_outcome: null, answered_by: null,
-    review_status: null, metadata: JSON.stringify({ source: 'admin-callback', relatedCallId: parentId }),
+    review_status: null, created_at: new Date(), metadata: JSON.stringify({ source: 'admin-callback', relatedCallId: parentId }),
     ...overrides,
   });
   const card = (callLogId, reason, status = 'open') => ({ call_log_id: callLogId, category: 'address_review', reason_code: reason, status, summary: 'fixture' });
   const promise = (callLogId, key, kind = 'callback', status = 'open') => ({
-    call_log_id: callLogId, commitment_key: key, party: 'waves', kind, description: 'Call the customer back', status, evidence: '[]',
+    call_log_id: callLogId, commitment_key: key, party: 'waves', kind, description: 'Call the customer back', status, evidence: '[]', source: 'ai',
   });
   const close = (s, procGeneration = 3) => readCall(s).then((c) => processor.closeParentOnCallbackSpam(c, { callSid: s, procGeneration }));
+  const reopen = (s, procGeneration = 3) => readCall(s).then((c) => processor.reopenParentOnCallbackCorrected(c, { callSid: s, procGeneration }));
 
   beforeAll(async () => {
     process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT = 'true';
+    process.env.GATE_TRIAGE_AUTO_RESOLVE = 'true';
+    process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE = 'true';
     jest.resetModules();
     db = require('../models/db');
     processor = require('../services/call-recording-processor');
@@ -124,12 +138,13 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
 
   afterAll(async () => {
     delete process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT;
-    if (reminderIds.length) await db('notifications').whereIn('id', reminderIds).del();
+    delete process.env.GATE_TRIAGE_AUTO_RESOLVE;
+    delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
     await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del(); // cards and commitments cascade
     await db.destroy();
   });
 
-  test('the parent voicemail\'s open asks resolve, its callback promise is dismissed, review closes, verdict stamped; another call is untouched', async () => {
+  test('the parent voicemail\'s open asks resolve, its callback promise is dismissed through the promise lifecycle, review closes, verdict stamped; another call is untouched', async () => {
     const parentId = await insertCall(PARENT_SID);
     const otherId = await insertCall(OTHER_PARENT_SID, { from_phone: '+15555550155' });
     await db('triage_items').insert([
@@ -144,19 +159,8 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
       promise(otherId, 'cb-other'),
     ]);
     const childId = await insertChild(CHILD_SID, parentId);
-    const openPromiseId = (await db('call_commitments').where({ call_log_id: parentId, commitment_key: 'cb-open' }).first('id')).id;
-    const [reminder] = await db('notifications').insert({
-      recipient_type: 'admin', category: 'call_commitment', title: 'fixture: callback overdue',
-      metadata: JSON.stringify({ commitment_id: openPromiseId, dedupeKey: `call-commitment-overdue:${openPromiseId}:fixture` }),
-    }).returning('id');
-    reminderIds.push(reminder.id);
 
     expect(await close(CHILD_SID)).toEqual({ applied: true, cards: 2, promises: 1, reviewSynced: true });
-
-    // The promise's admin reminder closed with it (callback-cards closeCallbackReminders).
-    const bell = await db('notifications').where({ id: reminder.id }).first();
-    expect(bell.done_at).not.toBeNull();
-    expect(bell.done_by).toBe('callback:callback_spam');
 
     const cards = await db('triage_items').where({ call_log_id: parentId }).orderBy('reason_code');
     expect(cards.map((c) => [c.reason_code, c.status, c.resolution_rule])).toEqual([
@@ -165,11 +169,11 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
       ['quote_promised', 'resolved', null],
     ]);
     const promises = await db('call_commitments').where({ call_log_id: parentId }).orderBy('commitment_key');
-    expect(promises.map((p) => [p.commitment_key, p.status, p.fulfillment?.closed_by || null, p.fulfilled_at])).toEqual([
+    expect(promises.map((p) => [p.commitment_key, p.status, p.fulfillment?.kind || null, p.fulfilled_at])).toEqual([
       ['cb-done', 'fulfilled', null, null],
       ['cb-open', 'dismissed', 'callback_spam', null],
     ]);
-    expect(promises[1].fulfillment.callback_call_log_id).toBe(childId);
+    expect(promises[1].fulfillment).toMatchObject({ record_id: childId, strength: 'direct', basis: 'callback_reached_solicitor' });
 
     const parent = await readCall(PARENT_SID);
     expect(parent.review_status).toBe('resolved');
@@ -232,9 +236,54 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
   });
 
   test('a parent id that is not an inbound call is reported, not written', async () => {
-    const childId = await insertChild(sid('c6'), '33333333-3333-4333-8333-333333333333');
-    ALL_SIDS.push(sid('c6'));
-    const r = await processor.closeParentOnCallbackSpam(await db('call_log').where({ id: childId }).first(), { callSid: sid('c6'), procGeneration: 3 });
+    const childId = await insertChild(ORPHAN_CHILD_SID, '33333333-3333-4333-8333-333333333333');
+    const r = await processor.closeParentOnCallbackSpam(await db('call_log').where({ id: childId }).first(), { callSid: ORPHAN_CHILD_SID, procGeneration: 3 });
     expect(r).toEqual({ applied: false, reason: 'parent_not_found' });
+  });
+
+  test('a callback corrected to a real conversation gives the parent back its cards and its promise', async () => {
+    const parentId = await insertCall(FIXED_PARENT_SID, { from_phone: '+15555550188' });
+    await db('triage_items').insert([card(parentId, 'missing_service_address'), card(parentId, 'on_file_house_number_conflict', 'resolved')]);
+    await db('call_commitments').insert([promise(parentId, 'cb-fixed')]);
+    const childId = await insertChild(FIXED_CHILD_SID, parentId, { to_phone: '+15555550188' });
+    expect(await close(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 1, promises: 1, reviewSynced: true });
+
+    // The correction only counts once the child's row reads processed with no live token, on this pass's generation.
+    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'verdict_superseded' });
+    await db('call_log').where({ id: childId }).update({ processing_status: 'processed' });
+    expect(await reopen(FIXED_CHILD_SID, 2)).toEqual({ applied: false, reason: 'verdict_superseded' });
+    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 1, promises: 1 });
+
+    const cards = await db('triage_items').where({ call_log_id: parentId }).orderBy('reason_code');
+    expect(cards.map((c) => [c.reason_code, c.status, c.resolution_rule])).toEqual([
+      ['missing_service_address', 'open', null],
+      ['on_file_house_number_conflict', 'resolved', null], // someone else's close stays
+    ]);
+    const p = await db('call_commitments').where({ call_log_id: parentId }).first();
+    expect([p.status, p.fulfillment, p.fulfilled_at]).toEqual(['open', null, null]);
+    const parent = await readCall(FIXED_PARENT_SID);
+    expect(parent.review_status).toBe('open');
+    expect(parent.metadata.callback_verdict).toBeUndefined();
+    // Nothing left to undo.
+    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'no_verdict' });
+  });
+
+  test('the nightly sweep re-closes a moot card a reprocess filed again after the callback verdict', async () => {
+    const parentId = await insertCall(SWEPT_PARENT_SID, { from_phone: '+15555550133' });
+    // The spam callback happened 30 minutes ago; the card was filed just now (a reprocess).
+    await insertChild(SWEPT_CHILD_SID, parentId, { to_phone: '+15555550133', created_at: new Date(Date.now() - 30 * 60 * 1000) });
+    await db('triage_items').insert([
+      { ...card(parentId, 'missing_service_address'), severity: 'blocking' },
+      { ...card(parentId, 'on_file_house_number_conflict'), severity: 'blocking' },
+    ]);
+    const sweep = require('../services/triage-auto-resolve');
+    const result = await sweep.runTriageAutoResolve({ now: new Date() });
+    expect(result.skipped).toBeFalsy();
+    const cards = await db('triage_items').where({ call_log_id: parentId }).orderBy('reason_code');
+    expect(cards.map((c) => [c.reason_code, c.status, c.resolution_rule])).toEqual([
+      ['missing_service_address', 'resolved', 'callback_spam'],
+      ['on_file_house_number_conflict', 'open', null],
+    ]);
+    expect((await readCall(SWEPT_PARENT_SID)).review_status).toBe('open'); // one human verdict still owed
   });
 });

@@ -180,6 +180,7 @@ const RULE_NOTES = {
   caller_phone_added: "Auto-resolved: the caller's number was added as a service contact on the account after this call.",
   booking_created: 'Auto-resolved: a live appointment matching the requested window was booked after this card was filed.',
   visit_completed_at_address: 'Auto-resolved: a visit was completed at the address this call named; the address is proven.',
+  callback_spam: 'Auto-resolved: the office called this voicemail back and reached a solicitor; the ask is moot.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
   house_number_adopted: 'Auto-resolved: the customer record now carries the house number the caller stated; the disagreement is settled.',
@@ -1020,6 +1021,13 @@ function recordCarriesStatedStreet(item) {
 // outrank age-based dismissal, so a card that is BOTH old and moot records
 // the real reason it closed.
 const CLASSIFY_RULES = [
+  // The office called the voicemail back and reached a solicitor
+  // (GATE_CALLBACK_SPAM_CLOSES_PARENT): every ask a return call would have
+  // answered is moot. The processor closes them the moment the verdict
+  // lands (closeParentOnCallbackSpam); this rule re-closes what a later
+  // reprocess of the voicemail filed again. Same code set, same verdict.
+  { rule: 'callback_spam', action: 'resolve',
+    when: (item, ev) => ev?.callback_spam === true && require('./call-triage-flags').CALLBACK_SPAM_MOOT_CODES.has(item.reason_code) },
   // Address cards are moot ONLY for a pre-existing trusted customer with a
   // full on-file address whose call supplied no address of its own
   // (payload evidence AND the call's extraction both empty) — the mirror
@@ -1216,6 +1224,8 @@ function loadCandidateItems(conn, itemIds = null) {
 const EVIDENCE_CODES = new Set([
   'quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed',
   ...ADDRESS_MOOT_CODES,
+  // callback_spam: the asks a return call would have answered.
+  ...require('./call-triage-flags').CALLBACK_SPAM_MOOT_CODES,
   // house_number_adopted needs booking_after_card for a confirmed call
   // (its booking is held on this very card).
   'on_file_house_number_conflict',
@@ -1245,6 +1255,32 @@ const cardBoundary = (item) => new Date(Math.max(
 // for, at the address asked for (estimateCoversAsk): a reprocess that moved
 // the service or the property, or an estimate pricing part of a multi-
 // service ask, does not keep the promise this card recorded.
+// callback_spam: an office callback (call_log.source admin-callback, naming
+// this call in metadata.relatedCallId) that settled as spam and was dialed to
+// the number this call came from. Not bounded by the card's filing time: the
+// case this rule exists for is a card re-filed AFTER that callback. The
+// processor's gate decides whether the verdict closes anything at all.
+async function loadCallbackSpamEvidence(conn, items, flag) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('callbackSpamClosesParent')) return;
+  const { CALLBACK_SPAM_MOOT_CODES } = require('./call-triage-flags');
+  const candidates = items.filter((i) => CALLBACK_SPAM_MOOT_CODES.has(i.reason_code) && String(i.call_direction || '').startsWith('inbound'));
+  if (!candidates.length) return;
+  const callIds = [...new Set(candidates.map((i) => String(i.call_log_id)))];
+  const children = await conn('call_log')
+    .where('direction', 'like', 'outbound%')
+    .where({ source: 'admin-callback', processing_status: 'spam' })
+    .whereNull('processing_token')
+    .whereIn(conn.raw("metadata->>'relatedCallId'"), callIds)
+    .select('to_phone', conn.raw("metadata->>'relatedCallId' as parent_id"));
+  if (!children.length) return;
+  const key = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length === 11 && d.startsWith('1') ? d.slice(1) : d; };
+  for (const item of candidates) {
+    const hit = children.some((c) => String(c.parent_id) === String(item.call_log_id) && key(c.to_phone) && key(c.to_phone) === key(item.call_from_phone));
+    if (hit) flag(item.id, 'callback_spam');
+  }
+}
+
 async function loadEstimateEvidence(conn, items, flag) {
   const quoteItems = items.filter((i) => i.reason_code === 'quote_promised');
   if (!quoteItems.length) return;
@@ -2554,6 +2590,7 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   } catch (e) {
     logger.warn(`[triage-auto-resolve] catalog read for specific-service keys skipped: ${e.message}`);
   }
+  await loadCallbackSpamEvidence(conn, candidates, flag);
   await loadEstimateEvidence(conn, candidates, flag);
   await loadStaffEstimateEvidence(conn, candidates, flag);
   await loadEmailEvidence(conn, candidates, flag);

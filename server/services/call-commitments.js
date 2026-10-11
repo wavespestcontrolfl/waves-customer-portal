@@ -2049,6 +2049,37 @@ async function evidenceBoundary(conn, commitment, call, { endOf = callEndedAt } 
 // leaving — a merge soft-deletes the duplicate profile while the caller is
 // still a customer on the surviving one.
 const CUSTOMER_LEFT = "customer_left";
+// The office called the voicemail back and reached a solicitor: the callback
+// row the admin "Call back" action wrote (source admin-callback, linked to
+// this promise or to its call) settled as spam. The promise is moot, not
+// kept — refreshFulfillment writes it as a dismissal, like CUSTOMER_LEFT —
+// and it is judged from the evidence boundary like every other proof, so a
+// callback staff renewed after the attempt is never dismissed by it. The
+// callback processor asks for the refresh the moment the verdict lands
+// (closeParentOnCallbackSpam); the watchdog's sweep is the fallback.
+const CALLBACK_SPAM = "callback_spam";
+async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
+  if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
+  const row = await conn("call_log")
+    .where("direction", "like", "outbound%")
+    .where({ source: "admin-callback", processing_status: "spam" })
+    .whereNull("processing_token")
+    .where("created_at", ">", after)
+    .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
+    .modify((b) => phoneWhere(b, "to_phone", phone))
+    .orderBy("created_at", "asc")
+    .first("id", "created_at");
+  return row ? { kind: CALLBACK_SPAM, record_type: "call_log", record_id: row.id, matched_at: row.created_at, strength: "direct", basis: "callback_reached_solicitor" } : null;
+}
+// The correction: that callback reprocessed into a real conversation. The
+// dismissal it produced (and only it — a human verdict stands) is owed again.
+async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
+  return conn("call_commitments")
+    .where({ call_log_id: callLogId, party: "waves", kind: "callback", status: "dismissed" })
+    .whereNull("human_state")
+    .whereRaw("fulfillment->>'kind' = ? AND fulfillment->>'record_id' = ?", [CALLBACK_SPAM, String(callbackCallId)])
+    .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+}
 async function customerLeftProof(conn, commitment, call) {
   const after = await evidenceBoundary(conn, commitment, call);
   if (!call?.customer_id || !after) return null;
@@ -2209,6 +2240,10 @@ async function resolveCallback(ctx) {
   // text-fallback suppressor.
   const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
   const policyBindings = [commitment.id, commitment.call_log_id];
+  // Reaching a solicitor is judged before any connected-call proof: the
+  // same completed customer leg must not read as a kept promise.
+  const solicitor = await callbackReachedSolicitor(conn, commitment, { after, phone });
+  if (solicitor) return solicitor;
   const connected = await cardConnectedCall(conn, commitment, { after, phone, customerId });
   if (connected) {
     // The proof is the completed customer leg, so the promise is kept
@@ -2624,8 +2659,9 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       continue;
     }
     if (proof.strength === "direct" || closesOnAssociation(c, proof)) {
-      // A customer who left dismisses the promise; every other proof keeps it.
-      const left = proof.kind === CUSTOMER_LEFT;
+      // A customer who left, or a callback that reached a solicitor,
+      // dismisses the promise; every other proof keeps it.
+      const left = proof.kind === CUSTOMER_LEFT || proof.kind === CALLBACK_SPAM;
       fulfilled += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
@@ -3815,6 +3851,9 @@ module.exports = {
   callbackEditEventMetadata,
   addHumanCommitment,
   obligationRenewedAt,
+  callbackReachedSolicitor,
+  reopenCallbackSpamDismissals,
+  CALLBACK_SPAM,
   renewalBoundaryUnknown,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
