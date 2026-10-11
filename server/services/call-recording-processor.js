@@ -1141,6 +1141,9 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback', 'p.direction': 'inbound' })
     .where('cb.direction', 'like', 'outbound%')
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    // A parent itself reprocessed to spam keeps its cards closed on its own
+    // verdict (parentSpam): nothing to correct, so it never fills the batch.
+    .whereRaw("p.processing_status IS DISTINCT FROM 'spam'")
     .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
     .whereNotNull('p.duration_seconds').whereNull('p.processing_token')
     .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(COALESCE(p.duration_seconds, 0), 0))")

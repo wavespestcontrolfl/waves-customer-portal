@@ -2071,6 +2071,9 @@ const CALLBACK_SPAM = "callback_spam";
 // refresh that ran mid-pass would record a solicitor call as the office
 // keeping its word, and the spam settlement scans open promises only.
 const UNSETTLED_CALLBACK_STATUSES = ["spam", "pending", "processing", "extraction_failed", "no_transcription"];
+// SQL twin over a call_log alias, for the lapse scan (constants inlined: the
+// scan's raw query binds by position).
+const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")})))`;
 function settledNonSpamCallback(b) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
   b.whereNull("processing_token")
@@ -3050,6 +3053,15 @@ async function listLapsedEvidenceClosedCallIds(conn) {
                   AND (ev.direction IS DISTINCT FROM 'outbound' OR (${personCallBackSql('ev')}) IS NOT TRUE
                     -- ... and still say what the model read (a reprocess re-transcribes).
                     OR md5(COALESCE(ev.transcription, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))))
+          -- A close resting on an outbound call (plain, card, or model-judged)
+          -- whose call has since been reprocessed to spam, or is back in a pass
+          -- that may yet say spam: under GATE_CALLBACK_SPAM_CLOSES_PARENT the
+          -- resolvers would no longer acquire it (settledNonSpamCallback), so
+          -- the close is judged again.
+          ${require("../config/feature-gates").isEnabled("callbackSpamClosesParent")
+    ? `OR ((cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'kind') IN ('outbound_call', '${PERSON_CONTACT_KIND}')
+              AND ev.id IS NOT NULL AND NOT ${settledNonSpamCallbackSql('ev')})`
+    : ''}
           -- ... or on a person's delivered text: gone, relinked to another
           -- customer, or no longer a text a person sent that was delivered.
           OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
