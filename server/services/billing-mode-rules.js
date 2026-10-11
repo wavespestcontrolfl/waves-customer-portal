@@ -68,9 +68,11 @@ async function unpricedOngoingSeries(dbh, customerId, alreadyListed, customerOve
   try {
     const { eligibleSeriesParentIds } = require('./recurring-series-topup');
     const { seriesNextOccurrencesUnbillable, splitRootsByTopupSkip } = require('../routes/admin-schedule');
-    // Only the roots the nightly top-up would extend (its own customer and series skip rules).
+    // Only the roots the nightly top-up would extend (its own customer and series skip rules),
+    // plus the ones it skips only while a hold lasts: they resume with their terms intact.
     const listed = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
-    const ids = (await splitRootsByTopupSkip(dbh, customerId, listed)).extend;
+    const split = await splitRootsByTopupSkip(dbh, customerId, listed);
+    const ids = [...split.extend, ...split.held.map((h) => h.id)];
     const out = [];
     for (const id of ids) {
       // Any verdict blocks: no billable amount, or a plan that could not be verified.

@@ -4520,6 +4520,20 @@ function storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discount
   return Number(price) > 0 ? Number(price) : 0;
 }
 
+// The same price plus the LINE price behind it: what the visit's lines come to before any
+// discount, from the same calculation with the discount fields cleared. Tells a root that is
+// unpriced (no line price) from one whose known line price is discounted to $0. Read-only
+// companion for the Intelligence Bar billing type card; storedOccurrenceFloorPrice, and so
+// what the top-up stamps, is unchanged.
+function storedOccurrenceFloorVerdict(parent, dueAddons, allParentAddons, discountScope, discountCaps) {
+  const price = storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discountScope, discountCaps);
+  const undiscounted = {
+    ...parent, discount_type: null, discount_amount: null, discount_max_dollars: null, line_discount_dollars: null,
+  };
+  const line = calculateStoredVisitFinancials(undiscounted, dueAddons, allParentAddons, discountScope).price;
+  return { price, linePrice: Number(line) > 0 ? Number(line) : 0 };
+}
+
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
   const serviceKeyFilter = parent?.discount_service_key_filter || null;
   const serviceCategoryFilter = parent?.discount_service_category_filter || null;
@@ -5958,7 +5972,11 @@ function recurringWithoutBillableAmount({
 // that date, through storedOccurrenceFloorPrice. The one read seriesExtensionUnbillable
 // takes its minimum from and the Intelligence Bar billing type card takes its maximum
 // from (seriesNextOccurrencesPrice): the price the top-up copies onto the visits it mints.
-async function seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate = null }) {
+async function seriesExtensionDatePrices(conn, args) {
+  return (await seriesExtensionDateVerdicts(conn, args)).map((v) => v.price);
+}
+
+async function seriesExtensionDateVerdicts(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate = null }) {
   const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
   // Codex pre-push audit P1 (deferred fast-follow): routed through
   // storedOccurrenceFloorPrice so this guard reads the SAME restacked
@@ -5974,7 +5992,7 @@ async function seriesExtensionDatePrices(conn, { parent, dates, parentAddons, st
   const discountCaps = discountStackingLive()
     ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
     : null;
-  return dates.map((d) => storedOccurrenceFloorPrice(
+  return dates.map((d) => storedOccurrenceFloorVerdict(
     gatePriceParent,
     filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent),
     parentAddons, storedDiscountScope, discountCaps,
@@ -6145,19 +6163,23 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
 async function seriesNextOccurrencesPrice(conn, parentId) {
   const walk = await seriesVerdictWalk(conn, parentId);
   if (!walk) return null;
-  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, explicitZero: false };
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false };
   const { parent, parentAddons } = walk;
-  const prices = await seriesExtensionDatePrices(conn, {
+  const verdicts = await seriesExtensionDateVerdicts(conn, {
     ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
   });
-  const price = Math.max(0, ...prices);
+  const price = Math.max(0, ...verdicts.map((v) => v.price));
+  const linePrice = Math.max(0, ...verdicts.map((v) => v.linePrice));
   // An explicit $0 template override (written only by the price/service scope lane) stays an
   // authoritative $0 on every visit the top-up mints (applyStoredVisitFinancials, same gate and
   // same condition: the lines price to nothing and the override is exactly 0), so those visits
   // bill nothing; kept apart from a root that is merely unpriced.
   const explicitZero = price === 0 && isEnabled('editApptPriceServiceScope')
     && parseTemplateOverrides(parent.recurring_template_overrides)?.estimated_price === 0;
-  return { unverified: false, price, explicitZero };
+  // Which kind of zero: the override above, a known line price discounted away, or no price at all.
+  let zero = null;
+  if (price === 0) zero = explicitZero ? 'override' : (linePrice > 0 ? 'discounted' : 'unpriced');
+  return { unverified: false, price, linePrice, zero, explicitZero };
 }
 
 
@@ -21201,19 +21223,30 @@ async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
 // root's series rules (topupSeriesSkipReason: annual prepay, plan hold, duplicate series),
 // the same calls topUpRecurringSeriesLocked makes. Read-only; used by billing checks that ask
 // "what would the next visit be" (billing-mode-rules.js unpricedOngoingSeries, the
-// Intelligence Bar billing type card) so a root the top-up skips never blocks them.
-// Returns { extend: [id], skipped: [{ id, reason }] }.
+// Intelligence Bar billing type card).
+// A skip is PERMANENT (deleted or churned or inactive customer, annual prepay, duplicate
+// series: nothing resumes it) or REVERSIBLE (a plan hold or a customer service hold: the daily
+// hold lifecycle resumes the series with its terms intact), so a reversible skip is reported as
+// `held` and callers keep checking the root's real terms.
+// Returns { extend: [id], held: [{ id, reason }], skipped: [{ id, reason }] }.
+const TOPUP_REVERSIBLE_SKIP_REASONS = new Set(['plan_hold', 'customer_service_held']);
 async function splitRootsByTopupSkip(conn, customerId, ids) {
-  if (!ids.length) return { extend: [], skipped: [] };
+  const out = { extend: [], held: [], skipped: [] };
+  if (!ids.length) return out;
+  const place = (id, reason) => {
+    if (!reason) out.extend.push(id);
+    else (TOPUP_REVERSIBLE_SKIP_REASONS.has(reason) ? out.held : out.skipped).push({ id, reason });
+  };
   const customer = await conn('customers').where({ id: customerId }).first(...SERIES_CUSTOMER_COLUMNS);
   const customerSkip = topupCustomerSkipReason(customer);
-  if (customerSkip) return { extend: [], skipped: ids.map((id) => ({ id, reason: customerSkip })) };
+  if (customerSkip) {
+    ids.forEach((id) => place(id, customerSkip));
+    return out;
+  }
   const cols = await conn('scheduled_services').columnInfo();
-  const out = { extend: [], skipped: [] };
   for (const id of ids) {
     const parent = await conn('scheduled_services').where({ id }).first();
-    const reason = parent ? await topupSeriesSkipReason(conn, parent, id, cols) : 'series_not_found';
-    if (reason) out.skipped.push({ id, reason }); else out.extend.push(id);
+    place(id, parent ? await topupSeriesSkipReason(conn, parent, id, cols) : 'series_not_found');
   }
   return out;
 }

@@ -317,10 +317,15 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   // eligibleSeriesParentIds is the coarse selector; the nightly writer also skips a root for a
   // deleted / held / inactive / churned customer and for an annual-prepay, plan-hold or
   // duplicate series. Those roots are asked of the top-up's own two skip rules (admin-schedule.js
-  // splitRootsByTopupSkip) and kept out of the price, zero and payer checks, listed on the card.
+  // splitRootsByTopupSkip). A PERMANENT skip (churned or deleted customer, annual prepay,
+  // duplicate series) is kept out of the price, zero and payer checks and listed on the card. A
+  // REVERSIBLE one (plan hold, customer service hold) resumes with its terms intact, so that root
+  // keeps its real payer and price, goes through every check an ongoing root does, and is listed
+  // as on hold.
   const { seriesNextOccurrencesPrice, splitRootsByTopupSkip } = require('../../routes/admin-schedule');
-  const { skipped } = await splitRootsByTopupSkip(dbh, customerId, rows.map((r) => r.id));
+  const { skipped, held } = await splitRootsByTopupSkip(dbh, customerId, rows.map((r) => r.id));
   const skipReason = new Map(skipped.map((x) => [String(x.id), x.reason]));
+  const heldReason = new Map(held.map((x) => [String(x.id), x.reason]));
   // The price the top-up would copy onto each visit it mints from the root (its own
   // resolver, admin-schedule.js seriesNextOccurrencesPrice: extension price template +
   // due add-on lines, read after the root lock). A priced template is billing the new
@@ -329,11 +334,20 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   const out = [];
   for (const r of rows) {
     if (skipReason.has(String(r.id))) {
-      out.push({ ...r, payer_id: null, price: 0, unverified: false, explicitZero: false, skipped: skipReason.get(String(r.id)) });
+      out.push({ ...r, payer_id: null, price: 0, linePrice: 0, unverified: false, zero: null, skipped: skipReason.get(String(r.id)), held: null });
       continue;
     }
     const verdict = await seriesNextOccurrencesPrice(dbh, r.id);
-    out.push({ ...r, price: verdict ? verdict.price : 0, unverified: !!(verdict && verdict.unverified), explicitZero: !!(verdict && verdict.explicitZero), skipped: null });
+    out.push({
+      ...r,
+      price: verdict ? verdict.price : 0,
+      linePrice: verdict ? verdict.linePrice || 0 : 0,
+      unverified: !!(verdict && verdict.unverified),
+      // 'override' | 'discounted' | 'unpriced' | null (admin-schedule.js seriesNextOccurrencesPrice).
+      zero: verdict ? verdict.zero || null : null,
+      skipped: null,
+      held: heldReason.get(String(r.id)) || null,
+    });
   }
   return out;
 }
@@ -386,7 +400,7 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.explicitZero ? 'zero' : '', r.skipped || '']);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', r.held || '']);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
   return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing, +facts.scopeGate])}`;
@@ -534,9 +548,13 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   // prepayment, invoices, dues coverage all move completion's amount): a visit
   // that carries any of them keeps the change on the customer page, which shows
   // each visit's charge.
-  const zeroRoot = facts.roots.find((r) => r.explicitZero);
+  const zeroRoot = facts.roots.find((r) => r.zero === 'override' || r.zero === 'discounted');
   if (zeroRoot) {
-    return refuse(`This customer's ongoing ${zeroRoot.service_type || 'recurring'} plan has a $0.00 price override on each visit it adds; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
+    const plan = zeroRoot.service_type || 'recurring';
+    const why = zeroRoot.zero === 'override'
+      ? 'a $0.00 price override on each visit it adds'
+      : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
+    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
   }
   const pricedRoot = facts.roots.find((r) => r.unverified || r.price > 0);
   if (pricedRoot) {
@@ -568,8 +586,11 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 // states the rule, and a customer with any priced, prepaid or invoiced upcoming
 // visit never reaches it.
 const SALES_TAX = 'Sales tax is added where it applies.';
+// The visits a completion does not invoice or charge (visit-outcomes.js, the completion route's own
+// list): both per-visit lanes say so.
+const NOT_PERFORMED_WORDS = NON_PERFORMED_VISIT_OUTCOMES.map((o) => o.replace(/_/g, ' ')).join(' or ');
 const LANE_HEAD = {
-  per_application: ({ after }) => `Each performed application is charged the ${money(after.per_application_fee)} per-application fee. A visit closed out as ${NON_PERFORMED_VISIT_OUTCOMES.map((o) => o.replace(/_/g, ' ')).join(' or ')} performs none and bills nothing, and neither do callbacks and free visit types. No monthly dues charge. ${SALES_TAX}`,
+  per_application: ({ after }) => `Each performed application is charged the ${money(after.per_application_fee)} per-application fee. A visit closed out as ${NOT_PERFORMED_WORDS} performs none and bills nothing, and neither do callbacks and free visit types. No monthly dues charge. ${SALES_TAX}`,
   monthly_membership: ({ after, dues, visits }) => (dues && !dues.eligible
     // Promised only when the dues run really charges this customer
     // (monthly-dues-eligibility.js); a move into monthly is refused unless
@@ -578,7 +599,7 @@ const LANE_HEAD = {
     // No upcoming visit carries a price here, and Auto Pay (pinned) is on, so
     // billing-lane.js membershipDuesCoverVisit covers every one of them.
     : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run.${visits.length ? ` ${plural(visits.length, 'upcoming visit has', 'upcoming visits have')} no price today and ${visits.length === 1 ? 'is' : 'are'} covered by dues.` : ''}`),
-  per_visit: () => `Each completed visit is charged its own scheduled price. No monthly dues charge. ${SALES_TAX}`,
+  per_visit: () => `Each performed visit is charged its own scheduled price. A visit closed out as ${NOT_PERFORMED_WORDS} performs none and bills nothing. No monthly dues charge. ${SALES_TAX}`,
 };
 
 // Who gets the charges, and how: the saved method Auto Pay would use, by tender
@@ -624,6 +645,7 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
     head,
     ...tenderLines(laneAfter, charge),
     ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
+    ...facts.roots.filter((r) => r.held).map((r) => `On hold: the ${r.service_type || 'recurring'} plan (${r.held.replace(/_/g, ' ')}); it has no price and no Bill-To payer, so this change applies to it when it resumes.`),
     ...facts.roots.filter((r) => r.skipped).map((r) => `Not extended: the ${r.service_type || 'recurring'} plan (${r.skipped.replace(/_/g, ' ')}); the nightly top-up adds no visits to it, so this change does not reach it.`),
   ];
 }

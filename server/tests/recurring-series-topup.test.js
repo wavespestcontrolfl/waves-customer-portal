@@ -1087,11 +1087,40 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
 
     test('the top-up\'s own customer and series rules decide: churned customer, annual-prepay series skip; an active series is extended', async () => {
       expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { pipeline_stage: 'churned' } }).conn, 5, [10]))
-        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'customer_churned' }] });
+        .toEqual({ extend: [], held: [], skipped: [{ id: 10, reason: 'customer_churned' }] });
       expect(await splitRootsByTopupSkip(topupScenario({ colsOverrides: { annual_prepay_term_id: {} }, stampedAnnualTermId: true }).conn, 5, [10]))
-        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'annual_prepay_series' }] });
-      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [10])).toEqual({ extend: [10], skipped: [] });
-      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [])).toEqual({ extend: [], skipped: [] });
+        .toEqual({ extend: [], held: [], skipped: [{ id: 10, reason: 'annual_prepay_series' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [10])).toEqual({ extend: [10], held: [], skipped: [] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [])).toEqual({ extend: [], held: [], skipped: [] });
+    });
+
+    test('Codex round 21: a plan hold and a customer service hold are REVERSIBLE (held), not permanent skips', async () => {
+      familyOfServiceRow.mockReturnValue('lawn_care');
+      expect(await splitRootsByTopupSkip(topupScenario({ activeHold: true }).conn, 5, [10]))
+        .toEqual({ extend: [], held: [{ id: 10, reason: 'plan_hold' }], skipped: [] });
+      expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { service_paused_at: new Date(), service_paused_reason: 'customer_request' } }).conn, 5, [10]))
+        .toEqual({ extend: [], held: [{ id: 10, reason: 'customer_service_held' }], skipped: [] });
+    });
+
+    test('Codex round 21: the price verdict tells an unpriced root, a discounted-to-zero line and a priced one apart', async () => {
+      const base = { create_invoice_on_complete: false };
+      const unpriced = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: { ...base, estimated_price: null } }).conn, 10);
+      expect(unpriced).toMatchObject({ price: 0, linePrice: 0, zero: 'unpriced' });
+      const discounted = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: { ...base, estimated_price: '100.00', discount_type: 'fixed_amount', discount_amount: 100 } }).conn, 10);
+      expect(discounted).toMatchObject({ price: 0, linePrice: 100, zero: 'discounted', explicitZero: false });
+      const priced = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: { ...base, estimated_price: '100.00', discount_type: 'fixed_amount', discount_amount: 25 } }).conn, 10);
+      expect(priced).toMatchObject({ price: 75, linePrice: 100, zero: null });
+    });
+
+    test('Codex round 21: the override zero stays its own kind, and the top-up\'s unbillable verdict is unchanged by the new field', async () => {
+      const before = FG.gates.editApptPriceServiceScope;
+      try {
+        FG.gates.editApptPriceServiceScope = true;
+        const zero = { parentOverrides: { estimated_price: null, create_invoice_on_complete: false, recurring_template_overrides: { estimated_price: 0 } }, colsOverrides: { recurring_template_overrides: {} } };
+        expect(await seriesNextOccurrencesPrice(topupScenario(zero).conn, 10)).toMatchObject({ price: 0, zero: 'override', explicitZero: true });
+        const discounted = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '100.00', discount_type: 'fixed_amount', discount_amount: 100 } });
+        expect(await seriesNextOccurrencesUnbillable(discounted.conn, 10, { customerOverride: PER_VISIT })).not.toBeNull();
+      } finally { FG.gates.editApptPriceServiceScope = before; }
     });
 
     test('an explicit $0 override reads as explicitZero only with the scope gate on; an unpriced root never does', async () => {
@@ -1116,7 +1145,7 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
       languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs' },
       rules: { complexity: ['error', 20] },
     }, 'admin-schedule.js');
-    expect(messages.filter((m) => /seriesNextOccurrencesUnbillable|seriesVerdictWalk|seriesNextOccurrencesPrice|seriesExtensionDatePrices/.test(m.message)).map((m) => m.message)).toEqual([]);
+    expect(messages.filter((m) => /seriesNextOccurrencesUnbillable|seriesVerdictWalk|seriesNextOccurrencesPrice|seriesExtensionDatePrices|seriesExtensionDateVerdicts|storedOccurrenceFloorVerdict/.test(m.message)).map((m) => m.message)).toEqual([]);
   });
 
   test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
