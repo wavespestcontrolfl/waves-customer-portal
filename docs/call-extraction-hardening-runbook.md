@@ -102,9 +102,14 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   The card is version-bound (`expected_updated_at`). Same tech-or-admin access as the
   `callback_number_needed` card. A call
   vetoed for spam, out-of-area or do-not-contact gets neither the hold nor the card in ENFORCE mode;
-  in SHADOW mode the legacy pipeline still runs, so the hold is armed regardless and only the card is
-  skipped (a hold only blocks texts). The model sets `ani_cannot_text` whenever the caller says the
-  line cannot get texts, with or without another number (prompt v26). The inbox shows
+  in SHADOW mode the legacy pipeline still runs, so the hold is armed regardless, and the
+  `text_number_differs` release card is filed WITH it in the same transaction (a hold never exists
+  without the card that releases it). A non-workable voicemail that says the line cannot get texts
+  arms the hold and card too; spam does not. The model sets `ani_cannot_text` whenever the caller says the
+  line cannot get texts, with or without another number; it is independent of `caller_id_disclaimed`
+  (both are set for a borrowed line that cannot get texts) (prompt v30). "Line can get texts" while
+  this call's "not my number" card is still open closes the text card but keeps the hold, and the
+  inbox says so. The inbox shows
   the customer's live phone, with the phone at the time of the call only when it differs. The appointment-contact backfill never saves a no-text
   line into a blank `customers.phone`. The office updates the phones by hand.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
