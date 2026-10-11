@@ -2116,3 +2116,229 @@ describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / s
     expect(filedAgainstProperty(filed({ ...snap, zip: null, city: null }), { ...noZip, city: null })).toBe(false);
   });
 });
+
+// 2026-10-10 audit of 48 hours of calls: cards stayed open forever after a
+// person did the work, because the older staff-work rules need the booking to
+// cover the card's exact service ask and time of day. These two rules close
+// the card on the work itself: a technician arrived inside the asked days
+// (staff_visit_arrived_after_card), or the calendar already shows the agreed
+// slot. The agreed-slot rule was withdrawn after three Codex rounds (see the PR); only
+// the arrival rule ships. Fixtures synthetic.
+describe('staff_visit_arrived_after_card', () => {
+  const { arrivedVisitsAfterCard, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
+  const ctxOf = (flags, id = 't1') => ({ evidence: new Map([[id, flags]]) });
+  const CARD_AT = '2026-10-09T14:00:00Z';
+  const after = (minutes) => new Date(new Date(CARD_AT).getTime() + minutes * 60 * 1000).toISOString();
+  const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+  const windowOf = (over = {}) => ({
+    status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
+    preferred_time_of_day: 'unspecified', requested_date_range_start: '2026-10-09', requested_date_range_end: '2026-10-09', ...over,
+  });
+  const HOME = { address_line1: '1234 Sample Palm Dr', address_line2: null, city: 'Sampleton', zip: '34200' };
+  const askPayload = (code, windowOver = {}, status = 'requested') => ({ flag: code, confidence: 0.6, scheduling_status: status, on_file_address: HOME, scheduling_window: windowOf({ status, ...windowOver }) });
+  const card = (over = {}) => item({ id: 't1', call_log_id: 'call-1', call_customer_id: 'c1', created_at: CARD_AT, call_created_at: '2026-10-09T13:50:00Z', ...over });
+  const notConfirmed = (over = {}) => card({ reason_code: 'not_confirmed', payload: askPayload('not_confirmed', { preferred_time_of_day: 'morning' }), ...over });
+  const ambiguous = (over = {}) => card({ reason_code: 'ambiguous_scheduling', payload: askPayload('ambiguous_scheduling', {}, 'ambiguous'), ...over });
+  const visit = (over = {}) => ({
+    id: 'v1', customer_id: 'c1', status: 'completed', created_at: after(43), scheduled_date: '2026-10-09', window_start: '16:00:00',
+    parent_service_id: null, recurring_parent_id: null, source_call_log_id: null, service_type: 'Rodent Trapping Service', ...over,
+  });
+
+  describe('classifier', () => {
+    test('each rule fires only for its own codes and flag', () => {
+      const arrived = ctxOf({ staff_visit_arrived_after_card: true });
+      expect(classifyTriageItem(notConfirmed(), arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
+      expect(classifyTriageItem(ambiguous(), arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
+      const reschedule = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', {}, 'reschedule_requested') });
+      // Neither flag does anything on another card type, or on the other rule's code.
+      for (const code of ['cancellation_request', 'quote_promised', 'email_unverified', 'caller_not_authorized', 'commercial_requires_quote']) {
+        expect(classifyTriageItem(card({ reason_code: code }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+      }
+      expect(classifyTriageItem(reschedule, arrived, { now: NOW })).toBeNull();
+      // Gate off (no evidence): nothing.
+      for (const c of [notConfirmed(), ambiguous(), reschedule]) expect(classifyTriageItem(c, noBookings, { now: NOW })).toBeNull();
+      expect(RULE_NOTES.staff_visit_arrived_after_card).toMatch(/^Auto-resolved: /);
+    });
+
+    test('a soft-deleted customer keeps the card', () => {
+      expect(classifyTriageItem(notConfirmed({ customer_deleted_at: CARD_AT }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+      expect(classifyTriageItem(ambiguous({ customer_deleted_at: CARD_AT }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+    });
+
+    test('a confirmed call whose appointment nobody booked keeps its not_confirmed card', () => {
+      const confirmed = notConfirmed({ payload: askPayload('not_confirmed', { confirmed_start_at: '2026-10-09T16:00:00-04:00' }, 'confirmed') });
+      expect(classifyTriageItem(confirmed, ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+      // The booking arm proved the confirmed appointment exists: the card may close.
+      expect(classifyTriageItem(confirmed, ctxOf({ staff_visit_arrived_after_card: true, booking_after_card: true }), { now: NOW }))
+        .toEqual({ action: 'resolve', rule: 'booking_created' });
+    });
+  });
+
+  describe('arrivedVisitsAfterCard', () => {
+    const ids = (c, visits) => arrivedVisitsAfterCard(c, visits).map((v) => v.id);
+
+    // Codex r3: a day the caller ruled out is not a day the caller asked for.
+    test('a visit on a blackout day does not count', () => {
+      const ranged = (blackout) => notConfirmed({ payload: askPayload('not_confirmed', { requested_date_range_end: '2026-10-12', blackout_dates: blackout }) });
+      const onTheTenth = visit({ scheduled_date: '2026-10-10' });
+      expect(ids(ranged(['2026-10-10']), [onTheTenth])).toEqual([]);
+      expect(ids(ranged(['2026-10-11']), [onTheTenth])).toEqual(['v1']);
+      expect(ids(ranged([]), [onTheTenth])).toEqual(['v1']);
+    });
+
+    test('audited shape 1: completed visit, other service, other time of day, one-day range', () => {
+      expect(ids(notConfirmed(), [visit()])).toEqual(['v1']);
+    });
+
+    test('audited shape 2: on_site visit for an ambiguous call', () => {
+      expect(ids(ambiguous(), [visit({ status: 'on_site', created_at: after(150), window_start: '10:00:00' })])).toEqual(['v1']);
+    });
+
+    test('a visit made by this call itself counts; one carrying another call does not', () => {
+      expect(ids(notConfirmed(), [visit({ id: 'own', source_call_log_id: 'call-1' }), visit({ id: 'other', source_call_log_id: 'call-9' })])).toEqual(['own']);
+    });
+
+    test.each(['pending', 'confirmed', 'en_route', 'cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit is not an arrival', (status) => {
+      expect(ids(notConfirmed(), [visit({ status })])).toEqual([]);
+    });
+
+    test('a visit created before or at the card does not count', () => {
+      expect(ids(notConfirmed(), [visit({ created_at: after(-5) })])).toEqual([]);
+      expect(ids(notConfirmed(), [visit({ created_at: CARD_AT })])).toEqual([]);
+    });
+
+    test('follow-up children and series occurrences do not count', () => {
+      expect(ids(notConfirmed(), [visit({ parent_service_id: 'p' }), visit({ recurring_parent_id: 'p' })])).toEqual([]);
+    });
+
+    test('with a requested range the visit day must fall inside it, inclusive', () => {
+      const range = notConfirmed({ payload: askPayload('not_confirmed', { requested_date_range_start: '2026-10-10', requested_date_range_end: '2026-10-12' }) });
+      expect(ids(range, [visit({ id: 'a', scheduled_date: '2026-10-09' }), visit({ id: 'b', scheduled_date: '2026-10-10' }),
+        visit({ id: 'c', scheduled_date: '2026-10-12' }), visit({ id: 'd', scheduled_date: '2026-10-13' }), visit({ id: 'e', scheduled_date: null })])).toEqual(['b', 'c']);
+    });
+
+    test('with no range the visit day must fall within the max age after the card', () => {
+      const open = notConfirmed({ payload: askPayload('not_confirmed', { requested_date_range_start: null, requested_date_range_end: null }) });
+      expect(ids(open, [visit({ id: 'same', scheduled_date: '2026-10-09' }), visit({ id: 'last', scheduled_date: '2026-10-23' }),
+        visit({ id: 'late', scheduled_date: '2026-10-24' }), visit({ id: 'before', scheduled_date: '2026-10-08' })])).toEqual(['same', 'last']);
+      expect(STAFF_WORK_MAX_AGE_DAYS).toBe(14);
+    });
+  });
+
+  // Codex r1: an arrival answers a wanted-but-unsettled visit only.
+  test('an arrival does not close a card whose status asks something else', () => {
+    const arrived = ctxOf({ staff_visit_arrived_after_card: true });
+    for (const status of ['canceled', 'reschedule_requested', 'none', 'confirmed']) {
+      const c = notConfirmed({ payload: askPayload('not_confirmed', {}, status) });
+      expect(classifyTriageItem(c, arrived, { now: NOW })).toBeNull();
+    }
+    expect(classifyTriageItem(notConfirmed({ payload: { flag: 'not_confirmed' } }), arrived, { now: NOW })).toBeNull();
+    for (const status of ['requested', 'offered', 'ambiguous']) {
+      const c = notConfirmed({ payload: askPayload('not_confirmed', {}, status) });
+      expect(classifyTriageItem(c, arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
+    }
+  });
+
+  describe('loadEvidence', () => {
+    const chainable = (rows) => {
+      const c = { leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c, select: async () => rows };
+      return c;
+    };
+    const oneHome = [
+      { id: 'p1', customer_id: 'c1', address_line1: '1234 Sample Palm Dr', address_line2: null, city: 'Sampleton', zip: '34200' },
+      { id: 'p2', customer_id: 'c2', address_line1: '500 Sample Tower Blvd', address_line2: null, city: 'Sampleton', zip: '34200' },
+    ];
+    const fakeConn = ({ visits = [], cards = [], throwOnCards = false, properties = oneHome }) => (table) => {
+      if (table === 'customer_properties') return chainable(properties);
+      if (table === 'scheduled_services') return chainable(visits);
+      if (table === 'triage_items as t') {
+        if (!throwOnCards) return chainable(cards);
+        const c = chainable([]);
+        c.select = async () => { throw new Error('connection reset'); };
+        return c;
+      }
+      return chainable([]); // customer_properties, services
+    };
+    const claim = (id, callId, customer = 'c1') => ({ id, call_log_id: callId, call_customer_id: customer, created_at: CARD_AT, payload: '{}' });
+    const run = async (cards, conn) => loadEvidence(conn, cards, { ignoreGate: true });
+
+    test('closes the audited not_confirmed and ambiguous shapes', async () => {
+      const nc = notConfirmed();
+      const amb = ambiguous({ id: 't2', call_log_id: 'call-2', call_customer_id: 'c2', payload: { ...askPayload('ambiguous_scheduling', {}, 'ambiguous'), on_file_address: { ...HOME, address_line1: '500 Sample Tower Blvd' } } });
+      const ev = await run([nc, amb], fakeConn({
+        visits: [visit({ customer_id: 'c1' }), visit({ id: 'v2', customer_id: 'c2', status: 'on_site', created_at: after(150), window_start: '10:00:00' })],
+        cards: [claim('t1', 'call-1'), claim('t2', 'call-2', 'c2')],
+      }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBe(true);
+      expect(ev.get('t2')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    // Codex r3: with several homes the arrival may have been at another one.
+    test('an account with two active properties, or none on file, keeps the card', async () => {
+      const args = { visits: [visit()], cards: [claim('t1', 'call-1')] };
+      const second = { id: 'p9', customer_id: 'c1', address_line1: '77 Sample Shore Ln', address_line2: null, city: 'Sampleton', zip: '34200' };
+      expect((await run([notConfirmed()], fakeConn({ ...args, properties: [...oneHome, second] }))).get('t1')).toBeUndefined();
+      expect((await run([notConfirmed()], fakeConn({ ...args, properties: [] }))).get('t1')).toBeUndefined();
+      expect((await run([notConfirmed()], fakeConn(args))).get('t1')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    // Codex r4: one property on the account is not enough; the card and the visit must both be at it.
+    test('the card must be filed against the property, the call must name no other address, and the visit must be there', async () => {
+      const args = (v = visit()) => ({ visits: [v], cards: [claim('t1', 'call-1')] });
+      const flagged = async (c, a = args()) => (await run([c], fakeConn(a))).get('t1')?.staff_visit_arrived_after_card;
+      expect(await flagged(notConfirmed())).toBe(true);
+      // No on-file snapshot, or a snapshot of another address.
+      expect(await flagged(notConfirmed({ payload: { ...askPayload('not_confirmed'), on_file_address: null } }))).toBeUndefined();
+      expect(await flagged(notConfirmed({ payload: { ...askPayload('not_confirmed'), on_file_address: { ...HOME, address_line1: '77 Sample Shore Ln' } } }))).toBeUndefined();
+      // The call named a different address.
+      const elsewhere = { street_line_1: '77 Sample Shore Ln', street_line_2: null, city: 'Sampleton', postal_code: '34200', raw_text: '77 Sample Shore Ln', additional_properties: 0 };
+      expect(await flagged(notConfirmed({ payload: askPayload('not_confirmed', { requested_address: elsewhere }) }))).toBeUndefined();
+      // The visit is stamped to another address, or points at another property.
+      expect(await flagged(notConfirmed(), args(visit({ service_address_line1: '77 Sample Shore Ln', service_address_city: 'Sampleton', service_address_zip: '34200' })))).toBeUndefined();
+      expect(await flagged(notConfirmed(), args(visit({ property_id: 'p-other' })))).toBeUndefined();
+      expect(await flagged(notConfirmed(), args(visit({ property_id: 'p1' })))).toBe(true);
+    });
+
+    test('a not_confirmed and an ambiguous card of the SAME call both close', async () => {
+      const ev = await run([notConfirmed(), ambiguous({ id: 't2' })], fakeConn({ visits: [visit()], cards: [claim('t1', 'call-1'), claim('t2', 'call-1')] }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBe(true);
+      expect(ev.get('t2')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    test('another call\'s open card for the same customer keeps both, even when it is human-claimed', async () => {
+      const ev = await run([ambiguous()], fakeConn({ visits: [visit()], cards: [claim('t1', 'call-1'), claim('t9', 'call-9')] }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+      const batch = await run([ambiguous(), ambiguous({ id: 't3', call_log_id: 'call-3' })], fakeConn({ visits: [visit()], cards: [] }));
+      expect(batch.get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+      expect(batch.get('t3')?.staff_visit_arrived_after_card).toBeUndefined();
+    });
+
+    test('a failed claimant lookup closes nothing', async () => {
+      const ev = await run([ambiguous()], fakeConn({ visits: [visit()], throwOnCards: true }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+    });
+
+    test('no flag when the call has no customer, or the visit is merely booked, early, elsewhere or another call\'s', async () => {
+      const cards = [claim('t1', 'call-1')];
+      expect((await run([ambiguous({ call_customer_id: null })], fakeConn({ visits: [visit()], cards }))).get('t1')).toBeUndefined();
+      for (const v of [visit({ status: 'confirmed' }), visit({ created_at: after(-1) }), visit({ scheduled_date: '2026-10-20' }),
+        visit({ source_call_log_id: 'call-9' }), visit({ parent_service_id: 'p' }), visit({ customer_id: 'c2' })]) {
+        expect((await run([ambiguous()], fakeConn({ visits: [v], cards }))).get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+      }
+    });
+
+    test('the evidence gate off: no flag and no query', async () => {
+      const OLD = process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+      delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+      try {
+        const conn = jest.fn(() => { throw new Error('must not query'); });
+        const map = await loadEvidence(conn, [notConfirmed(), ambiguous({ id: 't2' }), card({ id: 't3', reason_code: 'reschedule_or_cancel' })]);
+        expect(map.size).toBe(0);
+        expect(conn).not.toHaveBeenCalled();
+      } finally {
+        if (OLD === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+        else process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE = OLD;
+      }
+    });
+  });
+});
