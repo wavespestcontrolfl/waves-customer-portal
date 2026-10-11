@@ -215,7 +215,7 @@ describe('codex r45', () => {
 describe('estimate reactivations take the per-customer estimate lock (booking open-estimate guard, #6100)', () => {
   test('the wizard draft refresh (archived_at: null) locks before its write, after the transaction opens', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/public-quote'), 'utf8');
-    const lock = src.indexOf('lockCustomerEstimates(trx, estFields.customer_id)');
+    const lock = src.indexOf('lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })');
     const write = src.indexOf("const refreshedExisting = await trx('estimates')");
     expect(lock).toBeGreaterThan(-1);
     expect(lock).toBeLessThan(write);
@@ -224,9 +224,9 @@ describe('estimate reactivations take the per-customer estimate lock (booking op
 });
 
 describe('proposal save that revives an expired bid locks before its write (#6100)', () => {
-  test('lockCustomerEstimates is guarded by revivingBid and precedes the revival UPDATE, inside the transaction', () => {
+  test('lockCustomerEstimatesForEstimate is guarded by revivingBid and precedes the revival UPDATE, inside the transaction', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
-    const lock = src.indexOf('if (revivingBid) await require(\'../utils/customer-estimate-lock\').lockCustomerEstimates(trx,');
+    const lock = src.indexOf('if (revivingBid) await require(\'../utils/customer-estimate-lock\').lockCustomerEstimatesForEstimate(trx,');
     const write = src.indexOf("const count = await updateQuery.update({\n      estimate_data: JSON.stringify(nextData),\n      category: 'COMMERCIAL',");
     expect(lock).toBeGreaterThan(-1);
     expect(lock).toBeLessThan(write);
