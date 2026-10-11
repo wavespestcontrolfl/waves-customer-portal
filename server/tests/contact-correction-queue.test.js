@@ -331,7 +331,7 @@ describe('crash recovery', () => {
       contact_correction_jobs: [jobRow({ id: 1, customer_id: CUSTOMER_ID, expected_values: snapshot, created_at: Date.now() - 11 * 60_000 })],
       customers: [{ id: CUSTOMER_ID, deleted_at: null }],
       messages: [{ id: 'message-9', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
-      sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', created_at: Date.now() }],
+      sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: CUSTOMER_ID, created_at: Date.now() }],
     });
     const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
     expect(summary.promoted).toBe(1);
@@ -1021,6 +1021,22 @@ test('a dead reservation on a shared number is cancelled unless the primary mark
   } finally {
     if (saved === undefined) delete process.env.GATE_SMS_SHARED_PHONE_LINK; else process.env.GATE_SMS_SHARED_PHONE_LINK = saved;
   }
+});
+
+test('a dead reservation the route logged as unlinked (or linked elsewhere) is never replayed', async () => {
+  mockDetectIntent.mockReturnValue(true);
+  const aged = () => jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 });
+  const inbox = [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }];
+  let knex = makeStubKnex({ contact_correction_jobs: [aged()], messages: inbox, customers: [{ id: CUSTOMER_ID, deleted_at: null, phone: '+15550001111' }],
+    sms_log: [{ id: 's1', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: null, created_at: Date.now() }] });
+  expect(await queue._internals.promoteStaleReservations(knex)).toBe(0);
+  expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_route_unlinked');
+  expect(knex._data.contact_correction_jobs[0].body).toBeNull();
+  // Logged to the same customer: replays.
+  knex = makeStubKnex({ contact_correction_jobs: [aged()], messages: inbox, customers: [{ id: CUSTOMER_ID, deleted_at: null, phone: '+15550001111' }],
+    sms_log: [{ id: 's1', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: CUSTOMER_ID, created_at: Date.now() }] });
+  expect(await queue._internals.promoteStaleReservations(knex)).toBe(1);
+  expect(knex._data.contact_correction_jobs[0].sms_log_id).toBe('s1');
 });
 
 test('a dead reservation without an inbox source cannot run a correction', async () => {

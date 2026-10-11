@@ -472,8 +472,19 @@ async function promoteStaleReservations(knex) {
         ? await knex('sms_log')
           .where({ twilio_sid: job.message_sid, direction: 'inbound' })
           .orderBy('created_at', 'desc')
-          .first('id')
+          .first('id', 'customer_id')
         : null;
+      // The route persists its own linkage decision on the inbound sms_log
+      // row (customer_id, null when it handled the sender as unlinked). A
+      // row whose customer differs from the stored context means the route
+      // decided NOT to link this message here (a failed marked lookup, a
+      // mark transfer) and its best-effort cancel was lost — never replay
+      // it (codex #6268 r9). No sms_log row = the route died before that
+      // write; the stored context stands as before.
+      if (smsLog && String(smsLog.customer_id || '') !== String(job.customer_id)) {
+        await cancelContactCorrectionJob(job.id, 'stale_route_unlinked', { knex });
+        continue;
+      }
       // Flip to queued preserving the stored match-time context (linkage +
       // CAS baseline) — enqueueContactCorrectionJob would overwrite the
       // baseline, and the route already attached the authoritative one.

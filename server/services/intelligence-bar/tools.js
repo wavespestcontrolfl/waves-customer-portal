@@ -1845,7 +1845,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared = 0 } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
@@ -1958,6 +1958,20 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
+      // Receipt for the shared-phone mark clear the card disclosed (codex
+      // #6268 r9): rows marked primary whose number identity this write
+      // changes. Counted under the same statement's lock set, before the CASE
+      // in `clean` clears them.
+      let sharedPhoneMarksCleared = 0;
+      if (clean.phone !== undefined) {
+        const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+        const marked = await trx('customers')
+          .whereIn('id', targetIds)
+          .where({ sms_primary_for_shared_phone: true })
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) <> ?", [newKey])
+          .count({ n: '*' });
+        sharedPhoneMarksCleared = Number(marked?.[0]?.n || 0);
+      }
       const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
@@ -1968,7 +1982,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
@@ -1999,6 +2013,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
+      ...(sharedPhoneMarksCleared ? { shared_phone_marks_cleared: sharedPhoneMarksCleared, shared_phone_mark_note: `${sharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
       ...bulkLaneStampResult(laneStampIds),
       // Skipped rows surface on the card, never a silent Done (same
       // contract as the per-row address/email path; GH r9 P1). Each skipped

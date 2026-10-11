@@ -156,6 +156,8 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   // A phone change appends the hold-clear clause (codex round-5 P2).
   expect(labels).toContainEqual(`${CONTACT_FANOUT_DISCLOSURE} ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`);
   expect(labels).toContainEqual(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
+  const bulk = buildContract({ toolName: 'bulk_update_customers', params: { customer_ids: ['c1', 'c2'], updates: { phone: '9415550000' } }, displayParams: { updates: { phone: '9415550000' } } });
+  expect(bulk.effects.map((e) => e.label)).toContainEqual(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   const only = buildContract({ toolName: 'update_customer', params: { updates: { notes: 'gate code 1234' } }, displayParams: { updates: { notes: 'gate code 1234' } } });
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
 });

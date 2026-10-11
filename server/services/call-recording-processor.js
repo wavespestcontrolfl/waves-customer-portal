@@ -7308,6 +7308,10 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (!customer.state && extracted.state) updates.state = extracted.state;
   if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
   if (Object.keys(updates).length === 0) return customer;
+  // A backfilled number is a phone-identity change for a marked profile with
+  // an empty phone: the shared-phone texting mark was chosen for a number this
+  // profile no longer has (codex #6268 r9) — same rule as every other writer.
+  require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, customer);
   updates.updated_at = new Date();
   // An empty→value email write has no old address to retarget, so the
   // lightweight path (resolve the cards only) is right. REPLACING a garbled

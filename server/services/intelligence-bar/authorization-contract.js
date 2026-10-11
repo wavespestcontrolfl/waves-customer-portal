@@ -931,9 +931,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', params?.updates?.phone !== undefined
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
-    // The shared-phone mark clear is a server-derived effect of a phone edit
-    // (codex #6268 r8): bound into the contract so Confirm covers it.
-    if (params?.updates?.phone !== undefined) push('customer', require('../shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
+  }
+  // The shared-phone mark clear is a server-derived effect of a phone edit,
+  // single or bulk (codex #6268 r8/r9): bound into the contract so Confirm covers it.
+  if ((toolName === 'update_customer' || toolName === 'bulk_update_customers') && params?.updates?.phone !== undefined) {
+    push('customer', require('../shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   }
 
   // Grouped-visit ripple of a reschedule (GH r12 P1): a pinned visit_id
