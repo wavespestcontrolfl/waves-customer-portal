@@ -247,18 +247,24 @@ function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes =
 
 const squashName = (v) => String(v || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
 
-// One comparable full name: "first last", trimmed, whitespace-collapsed,
-// lower-cased. Both parts are required.
+// One comparable name that keeps the first/last boundary: "first|last",
+// trimmed, whitespace-collapsed, lower-cased. Both parts are required. The
+// boundary matters: "Mary Jane" + "Smith" and "Mary" + "Jane Smith" are two
+// different people.
 function nameKey(first, last) {
   const f = squashName(first);
   const l = squashName(last);
-  return f && l ? `${f} ${l}` : null;
+  return f && l ? `${f}|${l}` : null;
 }
+// The same record as one unsplit string, for a caller known only by name_full.
+const unsplitKey = (splitKey) => splitKey.replace('|', ' ');
 
-// The name the caller gave. The V2 schema lets either split field be null
-// beside a complete name_full, so a name_full of two or more words stands in
-// when a split part is missing. It is compared whole against "first last";
-// nothing is sliced out of it.
+// The name the caller gave: { split } when both parts were heard, else
+// { unsplit } from a name_full of two or more words (the V2 schema lets either
+// split field be null beside a complete name_full). A split name matches a
+// record only on the same boundary; an unsplit one has no boundary to keep, so
+// it is compared whole against the record's "first last". Nothing is sliced
+// out of it.
 function callerNameKey(extractionRaw) {
   let extraction = extractionRaw;
   if (typeof extraction === 'string') {
@@ -266,15 +272,16 @@ function callerNameKey(extractionRaw) {
   }
   const caller = extraction?.caller || {};
   const split = nameKey(caller.first_name, caller.last_name);
-  if (split) return split;
-  const full = squashName(caller.name_full);
-  return full.includes(' ') ? full : null;
+  if (split) return { split };
+  const unsplit = squashName(caller.name_full);
+  return unsplit.includes(' ') ? { unsplit } : null;
 }
 
 // The other accounts that carry each missed call's name: the linked
 // customer's first and last name, or for an unlinked call the name the caller
-// gave. Exact match on the squashed full name; a missing first or last name
-// on a record matches nothing.
+// gave. Exact match on the boundary-keeping key (or, for a name_full-only
+// caller, on the whole unsplit name); a missing first or last name on a
+// record matches nothing.
 //
 // Scope: active, not soft-deleted, ANY pipeline stage. Not whereLiveCustomer
 // on purpose: a customer the call pipeline created stays at new_lead after
@@ -296,10 +303,12 @@ async function loadNamesakeAccounts(misses) {
   const linkedKey = new Map(linked.map((c) => [c.id, nameKey(c.first_name, c.last_name)]));
   const keyByCall = new Map();
   for (const m of misses) {
-    const key = m.call.customer_id ? linkedKey.get(m.call.customer_id) : callerNameKey(m.call.ai_extraction_enriched);
+    const linkedSplit = m.call.customer_id ? linkedKey.get(m.call.customer_id) : null;
+    const key = m.call.customer_id ? (linkedSplit && { split: linkedSplit }) : callerNameKey(m.call.ai_extraction_enriched);
     if (key) keyByCall.set(m.call.id, key);
   }
-  const keys = [...new Set(keyByCall.values())];
+  // One fetch on the unsplit form (a superset); the boundary is applied below.
+  const keys = [...new Set([...keyByCall.values()].map((k) => k.unsplit || unsplitKey(k.split)))];
   if (!keys.length) return { namesakes, accounts };
   const squash = (col) => `lower(btrim(regexp_replace(COALESCE(${col}, ''), '\\s+', ' ', 'g')))`;
   const rows = await db('customers')
@@ -307,16 +316,19 @@ async function loadNamesakeAccounts(misses) {
     .whereNull('deleted_at')
     .whereRaw(`(${squash('first_name')} || ' ' || ${squash('last_name')}) = ANY(?)`, [keys])
     .select('id', 'first_name', 'last_name', 'city', 'pipeline_stage');
-  const idsByKey = new Map();
+  const idsBySplit = new Map();
+  const idsByUnsplit = new Map();
+  const index = (map, key, id) => { if (!map.has(key)) map.set(key, new Set()); map.get(key).add(id); };
   for (const r of rows) {
     const key = nameKey(r.first_name, r.last_name);
     if (!key) continue;
     accounts.set(r.id, { ...r, live: CUSTOMER_STAGES.includes(r.pipeline_stage) });
-    if (!idsByKey.has(key)) idsByKey.set(key, new Set());
-    idsByKey.get(key).add(r.id);
+    index(idsBySplit, key, r.id);
+    index(idsByUnsplit, unsplitKey(key), r.id);
   }
   for (const m of misses) {
-    const ids = new Set(idsByKey.get(keyByCall.get(m.call.id)) || []);
+    const k = keyByCall.get(m.call.id) || {};
+    const ids = new Set((k.split ? idsBySplit.get(k.split) : idsByUnsplit.get(k.unsplit)) || []);
     if (m.call.customer_id) ids.delete(m.call.customer_id);
     if (ids.size) namesakes.set(m.call.id, ids);
   }

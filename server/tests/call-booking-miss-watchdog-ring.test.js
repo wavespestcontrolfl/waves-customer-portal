@@ -196,6 +196,20 @@ describe('booked on another account with the same name', () => {
     expect(result).toMatchObject({ misses: 1, alerted: 1 });
   });
 
+  // Codex r2: "Mary Jane" + "Sample" and "Mary" + "Jane Sample" are two people.
+  test('the first/last boundary is kept: the same words split differently are not a namesake', async () => {
+    mockState.customers = [
+      { id: 'cust-9', first_name: 'Mary Jane', last_name: 'Sample', pipeline_stage: 'active_customer' },
+      { id: 'cust-first', first_name: 'Mary', last_name: 'Jane Sample', pipeline_stage: 'active_customer' },
+    ];
+    mockState.booked = [namesakeVisit()];
+    expect(await runCallBookingMissWatchdog({ now: NOW })).toMatchObject({ misses: 1, alerted: 1 });
+    const split = { first_name: 'Mary Jane', last_name: 'Sample', name_full: 'Mary Jane Sample' };
+    mockState.calls = [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller: split } })];
+    mockState.customers = [mockState.customers[1]];
+    expect(await runCallBookingMissWatchdog({ now: NOW })).toMatchObject({ misses: 1 });
+  });
+
   test('an unlinked call is cleared by the same rule, through the name the caller gave', async () => {
     mockState.calls = [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller: { name_full: 'Robin Example', first_name: 'Robin', last_name: 'Example' } } })];
     mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton', pipeline_stage: 'active_customer' }];
