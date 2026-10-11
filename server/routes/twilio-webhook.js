@@ -162,7 +162,7 @@ async function findSingleCustomerByPhone(phone) {
 
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
-    if (require('../config/feature-gates').gateEnvValue('GATE_SMS_SHARED_PHONE_LINK')) {
+    if (require('../services/shared-phone-link').sharedPhoneLinkEnabled()) {
       return pickSharedPhoneCustomer(key, phone);
     }
     logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
@@ -170,38 +170,27 @@ async function findSingleCustomerByPhone(phone) {
   return null;
 }
 
-// GATE_SMS_SHARED_PHONE_LINK (owner 2026-10-10, "link text"): two or more
-// customer rows share the sender's phone. Attach the text to ONE account only
-// when staff marked exactly one of them customers.sms_primary_for_shared_phone.
-// No mark, or more than one mark, leaves the text unlinked as before. There is
-// deliberately NO recency fallback (Codex #6268 r1): the linked customer feeds
-// handleRescheduleReply and the draft paths, so a guess could let one person on
-// a shared phone move the other account's visit. The marked rows are read with
-// their own predicate, never a truncated prefix of all matches. A failed
-// lookup returns null, the same outcome as the gate off.
+// GATE_SMS_SHARED_PHONE_LINK: the rule lives in services/shared-phone-link.js
+// (one matcher for this route and the contact-correction queue). Here only
+// the logging; a failed lookup returns null, the same outcome as the gate off.
 async function pickSharedPhoneCustomer(key, phone) {
-  let marked;
+  let picked;
   try {
-    marked = await db('customers')
-      .whereNull('deleted_at')
-      .where({ sms_primary_for_shared_phone: true })
-      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
-      .orderBy('updated_at', 'desc')
-      .limit(2);
+    picked = await require('../services/shared-phone-link').pickMarkedCustomerForPhone(db, key);
   } catch (err) {
     logger.warn(`[sms] shared-phone lookup failed for ${maskPhone(phone)}; not auto-linking inbound SMS`, { code: err.code || 'unknown' });
     return null;
   }
-  if (!Array.isArray(marked) || marked.length === 0) {
+  if (picked.reason === 'none') {
     logger.warn(`[sms] shared-phone: no primary mark for sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
     return null;
   }
-  if (marked.length > 1) {
-    logger.warn(`[sms] shared-phone: ${marked.length} customers marked primary for sender phone ${maskPhone(phone)}; ambiguous, not auto-linking inbound SMS`);
+  if (picked.reason === 'ambiguous') {
+    logger.warn(`[sms] shared-phone: more than one customer marked primary for sender phone ${maskPhone(phone)}; ambiguous, not auto-linking inbound SMS`);
     return null;
   }
-  logger.info(`[sms] shared-phone: primary mark; sender phone ${maskPhone(phone)} linked to ${marked[0].id}`);
-  return marked[0];
+  logger.info(`[sms] shared-phone: primary mark; sender phone ${maskPhone(phone)} linked to ${picked.customer.id}`);
+  return picked.customer;
 }
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook

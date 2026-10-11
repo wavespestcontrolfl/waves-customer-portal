@@ -48,6 +48,7 @@ const {
   normalizeContactZip,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
+  clearSharedPhoneMarkOnPhoneChange,
 } = require('../../utils/intake-normalize');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
@@ -1354,6 +1355,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
+  // Phone change → drop the shared-phone texting mark (codex #6268 r3); the IB
+  // never sets the mark, so there is no same-write exception here.
+  clearSharedPhoneMarkOnPhoneChange(clean, before);
 
   // Stage change → the FULL canonical lifecycle stamps, identical to the
   // admin route (codex #3282 audit P1 — the old member_since-only handling
@@ -1750,7 +1754,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
   // when phone is part of the update).
-  if (clean.phone !== undefined) clean.line_type = null;
+  if (clean.phone !== undefined) {
+    clean.line_type = null;
+    // ...and the shared-phone texting mark, chosen for the old number (codex #6268 r3).
+    clean.sms_primary_for_shared_phone = false;
+  }
 
   // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
   // per row, since there's no per-row before-state) — codex #3282 audit P1:

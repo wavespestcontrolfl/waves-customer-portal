@@ -242,9 +242,21 @@ async function attachContactCorrectionContext(jobId, { senderPhone, knex = db } 
         .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
         .limit(2)
         .select('id');
-      if (matches.length !== 1) return false;
+      // A shared number attaches only the one account staff marked for it,
+      // under GATE_SMS_SHARED_PHONE_LINK — the same rule as the route's
+      // matcher, so a marked sender's correction is not linked there and
+      // dropped here as stale_no_context (codex #6268 r3).
+      let matchedId = matches.length === 1 ? matches[0].id : null;
+      if (!matchedId && matches.length > 1) {
+        const link = require('./shared-phone-link');
+        if (link.sharedPhoneLinkEnabled()) {
+          const picked = await link.pickMarkedCustomerForPhone(trx, senderKey);
+          matchedId = picked.customer ? picked.customer.id : null;
+        }
+      }
+      if (!matchedId) return false;
       const row = await trx('customers')
-        .where({ id: matches[0].id })
+        .where({ id: matchedId })
         .whereNull('deleted_at')
         .forUpdate()
         .first();

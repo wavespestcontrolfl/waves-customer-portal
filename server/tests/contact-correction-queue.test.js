@@ -530,6 +530,29 @@ describe('round-19 hardening', () => {
     expect(await queue.attachContactCorrectionContext(2, { senderPhone: '+15550001111', knex })).toBe(false);
   });
 
+  it('a shared number attaches the one marked account under GATE_SMS_SHARED_PHONE_LINK, nothing otherwise', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000c2';
+    const base = { deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null, updated_at: 1 };
+    const rows = () => ({
+      contact_correction_jobs: [jobRow()],
+      customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: true }, { ...base, id: OTHER, sms_primary_for_shared_phone: false }],
+    });
+    const saved = process.env.GATE_SMS_SHARED_PHONE_LINK;
+    try {
+      delete process.env.GATE_SMS_SHARED_PHONE_LINK;
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex: makeStubKnex(rows()) })).toBe(false);
+      process.env.GATE_SMS_SHARED_PHONE_LINK = 'true';
+      const knex = makeStubKnex(rows());
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex })).toBe(true);
+      expect(knex._data.contact_correction_jobs[0].customer_id).toBe(CUSTOMER_ID);
+      // Two marked rows stay ambiguous.
+      const both = rows(); both.customers[1].sms_primary_for_shared_phone = true;
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex: makeStubKnex(both) })).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_SMS_SHARED_PHONE_LINK; else process.env.GATE_SMS_SHARED_PHONE_LINK = saved;
+    }
+  });
+
   it('each processing pass claims under a distinct lock owner', async () => {
     // (round-19) A shared hostname:pid owner let a pass whose lock went
     // stale overwrite the state of the in-process sibling that reclaimed

@@ -3479,6 +3479,8 @@ delivery time. Deliberate suppression is terminal. Push-only retries reuse the
 message tag without renotification; provider acceptance followed by a crash
 before receipt persistence remains ambiguous and can repeat a provider handoff.
 
+`GATE_SMS_SHARED_PHONE_LINK` (dark; owner 2026-10-10 "link text"): the inbound SMS matcher (`findSingleCustomerByPhone`) links a sender phone that two or more non-deleted customer rows share ONLY to the one row staff marked `customers.sms_primary_for_shared_phone` (admin `PUT /api/admin/customers/:id` field `smsPrimaryForSharedPhone`, audited as a sensitive field); no mark, or more than one mark, keeps today's behaviour (unlinked, unknown-sender path). The contact-correction queue's locked match applies the same rule. No recency or any other guess, ever: the linked customer feeds the reschedule-reply and draft paths. Any writer that changes a marked row's phone identity (last 10 digits) clears the mark unless that write sets it for the new number. Gate off = byte-identical to before. Sends nothing.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
