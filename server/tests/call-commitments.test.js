@@ -1143,7 +1143,8 @@ describe('model vocabulary slips are normalized before schema validation (audit 
   test('the prompt lists only promises that still stood when the call ended', () => {
     const prompt = buildCommitmentsPrompt({ transcript: 'Agent: We will call the resident to schedule.', callStartedAt: '2026-09-01T14:00:00Z' });
     expect(prompt).toMatch(/1b\. List only what still stood when the call ended\./);
-    expect(prompt).toMatch(/later withdrew or replaced THAT SAME action/);
+    expect(prompt).toMatch(/later withdrew, replaced or already completed THAT SAME action/);
+    expect(prompt).toMatch(/did the promised thing before the call ended and the call itself shows it was done/);
     expect(prompt).toMatch(/does not cancel a DIFFERENT promise the agent still owes/);
     expect(prompt).toMatch(/When it is unclear whether a later statement cancels a promise, keep the promise\./);
     expect(require('../services/call-commitments').EXTRACTOR_VERSION).toBe('commitments-v10');
