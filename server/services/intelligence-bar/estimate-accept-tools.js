@@ -267,7 +267,10 @@ async function propertyLinkRefusal(estimate, customerId) {
   const Linkage = require('../estimate-property-linkage');
   if (!Linkage.customerPropertiesGateOn()) return null;
   const linked = await Linkage.linkedAcceptPropertyId(db, estimate, customerId);
-  const primary = linked && await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first('id');
+  // An inactive primary is no primary: the post-commit backfill
+  // (ensurePrimaryProperty) would treat it as existing and create none, and
+  // the account would stay without an active address for downstream readers.
+  const primary = linked && await db('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first('id');
   return primary ? null : refuse('Add or link the service address on the customer page first.', 'property_not_linked');
 }
 
@@ -347,7 +350,7 @@ function perApplicationLine({ conv, cust, monthlyRate, laneAfter }) {
       : `Bills each service per application at its own visit price; the account fee stays ${money(fee)} for any visit with no price`;
   }
   const kept = fee != null && fee !== conv.per_application_amount ? ` (the account fee stays ${money(fee)})` : '';
-  return `Bills ${money(conv.per_application_amount)} per application (about ${money(monthlyRate)} a month)${kept}`;
+  return `Bills ${money(conv.per_application_amount)} per application (about ${money(monthlyRate)} a month equivalent, not a monthly bill)${kept}`;
 }
 
 // Row changes in the tables the accept writes (estimate-accept-snapshot.js),

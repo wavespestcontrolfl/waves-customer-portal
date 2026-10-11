@@ -466,6 +466,16 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
         .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*comped/) });
     }
   });
+  test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
+    const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
+    const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
+    const bare = makeWorld({ estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify(data) } });
+    await expect(markEstimateManuallyAccepted(base(bare, fakeConverter(bare), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringContaining('Rodent bundle discount is a discount row with no one-time total') });
+    const totaled = makeWorld({ estimateOverrides: { onetime_total: '300.00', estimate_data: JSON.stringify(data) } });
+    const { effects } = await markEstimateManuallyAccepted(base(totaled, fakeConverter(totaled), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Rodent Exclusion', 350], ['Discount applied to the one-time total', -50]]);
+  });
   test('round 20: a $0 (comped) row refuses as one_time_unrepresentable instead of being dropped from the card', async () => {
     const world = makeWorld({
       estimateOverrides: {

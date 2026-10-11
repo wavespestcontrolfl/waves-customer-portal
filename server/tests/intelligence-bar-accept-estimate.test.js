@@ -254,7 +254,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       ledger: [],
     });
     dryEffects = () => addOnEffects({ conversion: { per_application_amount: 147 } });
-    expect(await cardFor()).toContain('Bills $147.00 per application (about $49.00 a month)');
+    expect(await cardFor()).toContain('Bills $147.00 per application (about $49.00 a month equivalent, not a monthly bill)');
   });
 
   test('a multi-service accept by a per-application customer discloses the account fee it keeps', async () => {
@@ -574,6 +574,16 @@ describe('refusals before any card', () => {
       const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
       expect(result.code).toBe('property_not_linked');
       expect(result.error).toBe('Add or link the service address on the customer page first. Nothing was changed.');
+    });
+
+    test('round 25: an estimate linked to an active secondary while the only primary is inactive is refused', async () => {
+      seed({ estimate: { property_id: 'prop-2' } });
+      tables.customer_properties = [
+        { id: 'prop-1', customer_id: CUSTOMER_ID, active: false, is_primary: true },
+        { id: 'prop-2', customer_id: CUSTOMER_ID, active: true, is_primary: false },
+      ];
+      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(result.code).toBe('property_not_linked');
     });
 
     test('an estimate linked to the customer\'s property, with a primary on file, gets its card', async () => {

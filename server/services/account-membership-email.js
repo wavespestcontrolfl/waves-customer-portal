@@ -145,6 +145,54 @@ async function logLifecycleEmailAttempt({
   }
 }
 
+// The portal-wide "Email Messages" switch for one customer. A lookup FAILURE
+// is not the same fact as a genuine opt-out, and the two must not collapse
+// to the same {skipped:true} shape: several callers treat `skipped` as a
+// DEFINITIVE recipient state that closes the run without retrying
+// (cancellation-confirmations.js's emailBlocked check,
+// deferred-replay-registry.js's `skipped !== true` retry gate). A transient
+// DB blip reported as skipped/email_opted_out would settle those callers as
+// "nothing more to do" instead of retrying, so the failure is reported as
+// unavailable (fail closed, retryable).
+async function readEmailOptOut(customerId) {
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    return { emailOptedOut: prefs ? prefs.email_enabled === false : false };
+  } catch (err) {
+    logger.warn(`[account-membership-email] notification_prefs lookup failed for ${customerId}: ${err.message}`);
+    return { unavailable: true, emailOptedOut: false };
+  }
+}
+
+// The attempt log and the caller's outcome for a provider result.
+async function settleTemplateResult(result, { customerId, templateKey, eventType, metadata }) {
+  const providerMessageId = result.message?.provider_message_id || null;
+  const sentAt = result.message?.sent_at || null;
+  const status = result.sent ? 'sent' : (result.blocked ? 'blocked' : 'failed');
+  await logLifecycleEmailAttempt({
+    customerId,
+    templateKey,
+    eventType,
+    status,
+    providerMessageId,
+    sentAt,
+    failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
+    metadata,
+  });
+  return result.sent
+    ? { ok: true, messageId: providerMessageId, sentAt }
+    : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
+}
+
+// Why a template is not sent to this contact: the address is not the one an
+// operator approved (checked against the contact of the CURRENT read), or
+// there is no usable address. null when it can be sent.
+function templateRecipientSkip(contact, expectedRecipientKey) {
+  if (expectedRecipientKey && require('./estimate-accept-effects').recipientKey(contact.email) !== expectedRecipientKey) return 'recipient_changed';
+  if (!isEmailLike(contact.email)) return 'missing_email';
+  return null;
+}
+
 async function sendTemplate({
   customerId,
   recipientCustomerId = customerId,
@@ -167,28 +215,11 @@ async function sendTemplate({
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
   const contact = contactOverride || getPrimaryContact(recipientCustomer);
-  if (expectedRecipientKey && require('./estimate-accept-effects').recipientKey(contact.email) !== expectedRecipientKey) {
-    logger.warn(`[account-membership-email] ${templateKey} not sent for customer ${recipientCustomer.id}: the address changed since it was approved`);
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'recipient_changed',
-      metadata,
-    });
-    return { ok: false, skipped: true, reason: 'recipient_changed' };
-  }
-  if (!isEmailLike(contact.email)) {
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'missing_email',
-      metadata,
-    });
-    return { ok: false, skipped: true, reason: 'missing_email' };
+  const recipientSkip = templateRecipientSkip(contact, expectedRecipientKey);
+  if (recipientSkip) {
+    if (recipientSkip === 'recipient_changed') logger.warn(`[account-membership-email] ${templateKey} not sent for customer ${recipientCustomer.id}: the address changed since it was approved`);
+    await logLifecycleEmailAttempt({ customerId: recipientCustomer.id, templateKey, eventType, status: 'skipped', failureReason: recipientSkip, metadata });
+    return { ok: false, skipped: true, reason: recipientSkip };
   }
 
   // Portal-wide "Email Messages" kill switch (notification_prefs.email_enabled
@@ -204,32 +235,12 @@ async function sendTemplate({
   // choice and the recipient to the shared billing email authority (owner
   // ruling 2026-09-27): read by the caller, and again at the provider handoff
   // below.
-  let emailOptedOut = false;
-  if (!billingAuthorityInput) try {
-    const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
-    emailOptedOut = prefs ? prefs.email_enabled === false : false;
-  } catch (err) {
-    // A lookup FAILURE is not the same fact as a genuine opt-out, and the
-    // two must not collapse to the same {skipped:true} shape: several
-    // callers treat `skipped` as a DEFINITIVE recipient state that closes
-    // the run without retrying (cancellation-confirmations.js's emailBlocked
-    // check, deferred-replay-registry.js's `skipped !== true` retry gate). A
-    // transient DB blip reported as skipped/email_opted_out would settle
-    // those callers as "nothing more to do" instead of retrying — a
-    // customer whose SMS leg also failed would then get NO confirmation at
-    // all over one brief DB hiccup. Still fail closed (no send this attempt)
-    // but report it as a non-definitive, retryable failure.
-    logger.warn(`[account-membership-email] notification_prefs lookup failed for ${recipientCustomer.id}: ${err.message}`);
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'failed',
-      failureReason: 'prefs_unavailable',
-      metadata,
-    });
+  const optOut = billingAuthorityInput ? { emailOptedOut: false } : await readEmailOptOut(recipientCustomer.id);
+  if (optOut.unavailable) {
+    await logLifecycleEmailAttempt({ customerId: recipientCustomer.id, templateKey, eventType, status: 'failed', failureReason: 'prefs_unavailable', metadata });
     return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
   }
+  const emailOptedOut = optOut.emailOptedOut;
   if (emailOptedOut) {
     await logLifecycleEmailAttempt({
       customerId: recipientCustomer.id,
@@ -300,21 +311,7 @@ async function sendTemplate({
       };
     }
 
-    const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status,
-      providerMessageId: result.message?.provider_message_id || null,
-      sentAt: result.message?.sent_at || null,
-      failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
-      metadata,
-    });
-
-    return result.sent
-      ? { ok: true, messageId: result.message?.provider_message_id || null, sentAt: result.message?.sent_at || null }
-      : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
+    return settleTemplateResult(result, { customerId: recipientCustomer.id, templateKey, eventType, metadata });
   } catch (err) {
     if (billingAuthorityInput) {
       return billingEmailSendFailure(err, state.handoffStarted, billingLog, {

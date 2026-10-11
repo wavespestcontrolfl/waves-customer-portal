@@ -263,11 +263,25 @@ function unrepresentableRow(data, converter, { hasTotal }) {
     }
   }
   // The raw engine line items (the shape the extractor reads beside the
-  // mapped items): an explicit $0 in any sold-net alias is comped scope.
+  // mapped items): an explicit $0 in any sold-net alias is comped scope, and
+  // a negative row (a bundle discount) is dropped by the extractor, so with
+  // no aggregate to pool against the gross line would over-invoice.
   for (const container of oneTimeContainers(data)) {
     for (const line of Array.isArray(container.lineItems) ? container.lineItems : []) {
       if (explicitZeroNet(line)) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+      const amount = rawLineAmount(line);
+      if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
     }
+  }
+  return null;
+}
+// The raw row's amount, in the extractor's own alias order (rawResolvedAmount).
+const RAW_ONE_TIME_AMOUNT_FIELDS = ['manualFinalOneTime', 'oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'price', 'total'];
+function rawLineAmount(line) {
+  for (const key of RAW_ONE_TIME_AMOUNT_FIELDS) {
+    if (line?.[key] == null || line[key] === '') continue;
+    const n = Number(line[key]);
+    if (Number.isFinite(n)) return round2(n);
   }
   return null;
 }
