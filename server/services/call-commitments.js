@@ -2093,7 +2093,8 @@ const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND (($
 const terminalNonSpamCallbackSql = (t) => `(${settledNonSpamCallbackSql(t)} OR ${exhaustedExtractionSql(t)})`;
 function settledNonSpamCallback(b) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
-  b.whereRaw(settledNonSpamCallbackSql("call_log"));
+  // Never a voice-agent sandbox row (the shared exclusion every call_log reader carries).
+  require("./voice-agent/relay-protocol").whereNotSandboxCall(b).whereRaw(settledNonSpamCallbackSql("call_log"));
 }
 // The PARENT voicemail, settled: ended (a reported duration), no pass holding
 // its token, not in a retryable state, and no adopted recording still waiting
@@ -2128,6 +2129,7 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
     .whereExists(function parentIsVoicemail() {
       this.select(conn.raw("1")).from("call_log as parent").where({ "parent.id": commitment.call_log_id, "parent.direction": "inbound" })
+        .modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "parent.source"))
         .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')")
         // ...and settled (lockCallbackPair's parent_not_settled): without the
         // duration the boundary reads the call as ended at its start, and a
@@ -2886,7 +2888,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .modify((q) => {
           if (proof.kind !== CALLBACK_SPAM) return;
           q.whereExists(function callbackStillSpam() {
-            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
+            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "cb.source")).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof, row.customer_id)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
@@ -2999,7 +3001,7 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
         .modify((q) => {
           if (keeps.kind !== CALLBACK_SPAM) return;
           q.whereExists(function callbackStillSpam() {
-            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": keeps.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
+            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": keeps.record_id, "cb.processing_status": "spam" }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "cb.source")).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(stored), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
@@ -3114,10 +3116,11 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           AND cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
           AND (cc.fulfillment ->> 'kind') = 'outbound_call'
         WHERE ev.direction LIKE 'outbound%' AND ev.updated_at > ?
+          AND COALESCE(ev.source, '') <> ?
           -- IS NOT TRUE, not NOT: a status NULL row with a recording waiting
           -- (adoption) makes the predicate NULL, and that row is unsettled too.
           AND (${settledNonSpamCallbackSql("ev")}) IS NOT TRUE`,
-      [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000)],
+      [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000), require("./voice-agent/relay-protocol").VOICE_RELAY_SANDBOX_SOURCE],
     );
     for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
   }

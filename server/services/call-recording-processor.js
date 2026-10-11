@@ -1151,30 +1151,31 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   const RECONCILE_WINDOW_DAYS = 30;
   // Each carries its partial index's own predicate (outbound; inbound + stamp),
   // so the planner can use it.
-  const recentCb = (q) => q.where('cb.direction', 'like', 'outbound%').whereRaw(`cb.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
+  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const recentCb = (q) => whereNotSandboxCall(q.where('cb.direction', 'like', 'outbound%').whereRaw(`cb.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`), 'cb.source');
   const recentParent = (q) => q.where('p.direction', 'inbound').whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
     .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
   const settledNonSpam = (q) => q.modify(recentCb).whereRaw(terminalNonSpamCallbackSql('cb')).whereNot('cb.processing_status', 'spam');
   const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
-    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
+    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
   const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
-    .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(settledNonSpam).limit(limit).select('cb.*');
+    .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
   // The parent re-read as something other than a voicemail (a replaced
   // recording, settled) while the callback still reads spam: the proof no
   // longer applies (callbackReachedSolicitor refuses it), so the stamp, the
   // cards and the dismissal it holds are retired through the same correction
   // (standingSpamCallbacks is empty for a non-voicemail parent).
-  const notVoicemail = (q) => q.where('cb.processing_status', 'spam').whereNull('cb.processing_token')
+  const notVoicemail = (q) => whereNotSandboxCall(q, 'cb.source').where('cb.processing_status', 'spam').whereNull('cb.processing_token')
     // NULL-safe (adoption clears the markers to NULL): isVoicemailParent's twin.
     .whereRaw("p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail'")
     .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(terminalParentSql('p'));
   const obsoleteStamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
-    .modify(recentParent).modify(notVoicemail).limit(limit).select('cb.*');
+    .modify(recentParent).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
   // Driven by the dismissed set (its partial index); the parent, stamped or
   // not, is read by primary key and bounded by its own change time.
   const obsoleteDismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'")).join('call_log as p', 'p.id', 'cc.call_log_id')
     .where({ 'cc.status': 'dismissed', 'p.direction': 'inbound' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'")
-    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`).modify(notVoicemail).limit(limit).select('cb.*');
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
   // Cards the nightly sweep closed on callback-spam evidence carry no stamp:
   // start from the card (resolved callback_spam, no live row for its reason,
   // parent unstamped) and every settled non-spam office callback linked to
@@ -1205,7 +1206,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
         .whereRaw('later.call_log_id = ti.call_log_id AND later.reason_code = ti.reason_code AND later.id <> ti.id')
         .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
     })
-    .modify(settledNonSpam).limit(limit).distinct('cb.*');
+    .modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
   const callbacks = new Map([...stamped, ...dismissed, ...obsoleteStamped, ...obsoleteDismissed, ...swept].map((cb) => [cb.id, cb]));
   // The FORWARD half: a settlement whose promise refresh was lost (the cards
   // closed and the stamp written, the callback still settled spam, a callback
@@ -1214,7 +1215,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   const forward = !gateOn ? [] : await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
     .whereRaw("(p.metadata->'callback_verdict'->>'at')::timestamptz > now() - interval '7 days'")
-    .where({ 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
+    .where({ 'cb.processing_status': 'spam' }).whereNull('cb.processing_token').modify((q) => whereNotSandboxCall(q, 'cb.source'))
     .whereExists(function openCallbackPromise() {
       // ...a promise that callback could still dismiss: made before the
       // callback and not renewed (a staff reopen / edit, obligationRenewedAt's
@@ -1242,7 +1243,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // voicemail ended) never occupies the batch.
   const phoneKey = (col) => `(CASE WHEN length(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g')) = 11 AND left(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 1) = '1' THEN substr(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 2) ELSE regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g') END)`;
   const unsettled = !gateOn ? [] : await db('call_log as cb').join('call_log as p', db.raw("p.id::text = cb.metadata->>'relatedCallId'"))
-    .where({ 'cb.source': 'admin-callback', 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
+    .where({ 'cb.source': 'admin-callback', 'cb.processing_status': 'spam' }).whereNull('cb.processing_token').modify((q) => whereNotSandboxCall(q, 'cb.source'))
     .where('cb.direction', 'like', 'outbound%')
     .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
     .whereRaw("cb.created_at > now() - interval '7 days'")
@@ -1351,6 +1352,7 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
   const rows = await trx('call_log')
     .where('direction', 'like', 'outbound%')
     .where({ source: 'admin-callback', processing_status: 'spam' })
+    .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q))
     .whereNull('processing_token')
     .whereNot('id', exceptCallId)
     .whereRaw("metadata->>'relatedCallId' = ?", [String(parent.id)])
