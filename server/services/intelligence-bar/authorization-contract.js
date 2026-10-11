@@ -93,7 +93,7 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
 
 // Tools whose card lines are curated below from their own preview, not the
 // generic one-line-per-preview-key dump.
-const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address']);
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'delete_duplicate_customer']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -156,6 +156,7 @@ const ACTION_LABELS = {
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
   merge_customers: 'Merge duplicate customer',
+  delete_duplicate_customer: 'Delete empty duplicate customer',
   add_customer_property: 'Add saved property',
   update_customer_property: 'Update saved property',
   set_primary_property: 'Change primary property',
