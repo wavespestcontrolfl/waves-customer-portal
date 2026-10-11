@@ -1975,23 +1975,18 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // frozen backfillMintTaxRate and the live mint (round-10 contract),
       // and the returned rate is bounded to what the resume validator
       // accepts (finite, 0 <= rate < 1).
-      // The derivation is TaxCalculator.completionTaxRate (tax-calculator.js), shared with
-      // the Intelligence Bar billing-type card; the route passes the visit's customer,
-      // service type, property type, the payer flags and the same database.
-      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1800}require\('\.\.\/services\/tax-calculator'\)\.completionTaxRate\(\{\s*\n\s*customerId: svc\.customer_id,\s*\n\s*serviceType: svc\.service_type,\s*\n\s*propertyType: svc\.property_type,\s*\n\s*subtotal: invoiceAmount,\s*\n\s*payerBilled: visitIsPayerBilled,\s*\n\s*payerTaxExempt: completionPayerTaxExempt,\s*\n\s*database: db,\s*\n\s*\}\);/);
-      const calculator = fs.readFileSync(path.join(__dirname, '../services/tax-calculator.js'), 'utf8');
-      expect(calculator).toMatch(/async completionTaxRate\([\s\S]{0,1800}this\.calculateTax\(customerId, serviceType, Number\(subtotal\) \|\| 0, \{\s*\n\s*database: database \|\| db, skipCustomerExemption: payerBilled,/);
+      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\{ database: db, skipCustomerExemption: visitIsPayerBilled \},\s*\n\s*\);/);
       // Payer authority at the freeze (pre-push P0): the payer resolves
       // BEFORE the rate derivation; an exempt payer freezes 0, a non-exempt
       // payer's rate excludes the service customer's certificate.
       expect(source.indexOf('const visitIsPayerBilled')).toBeGreaterThan(-1);
       expect(source.indexOf('const visitIsPayerBilled')).toBeLessThan(source.indexOf('const completionInvoiceTaxRate'));
-      expect(calculator).toMatch(/if \(payerTaxExempt\) return 0;/);
-      expect(calculator).toMatch(/if \(Number\.isFinite\(rate\) && rate >= 0 && rate < 1\) return rate;/);
+      expect(source).toMatch(/if \(completionPayerTaxExempt\) return 0;/);
+      expect(source).toMatch(/if \(Number\.isFinite\(r\) && r >= 0 && r < 1\) return r;/);
       // Calculator failure fails CLOSED (pre-push P0 r3): no flat-rate
       // guess is ever frozen — the completion errors and is retried. NO
       // flat tax expression remains anywhere on the route.
-      expect(calculator).toMatch(/refusing to use a guessed rate/);
+      expect(source).toMatch(/refusing to freeze a guessed rate/);
       expect((source.match(/\? 0\.07 : 0/g) || []).length).toBe(0);
     });
 

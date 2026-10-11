@@ -143,28 +143,6 @@ const TaxCalculator = {
   },
 
   /**
-   * The tax RATE a completion invoice carries for one visit: the one derivation
-   * the completion route (complete-scheduled-service.js deriveCompletionTaxRate)
-   * and the Intelligence Bar billing-type card share. Exempt payer -> 0;
-   * non-commercial property -> 0 (InvoiceService.create zeroes residential tax
-   * whatever the taxability rows say); otherwise calculateTax's county / service
-   * / exemption rate, with the service customer's certificate skipped for a
-   * payer-billed visit. Fails closed: an unusable rate throws, a guessed rate is
-   * never returned. It depends on the customer's ZIP and service type only, not
-   * on who performs the visit.
-   */
-  async completionTaxRate({ customerId, serviceType, propertyType, subtotal = 0, payerBilled = false, payerTaxExempt = false, database = null }) {
-    if (payerTaxExempt) return 0;
-    if (!['commercial', 'business'].includes(propertyType)) return 0;
-    const taxResult = await this.calculateTax(customerId, serviceType, Number(subtotal) || 0, {
-      database: database || db, skipCustomerExemption: payerBilled,
-    });
-    const rate = Number(taxResult?.rate);
-    if (Number.isFinite(rate) && rate >= 0 && rate < 1) return rate;
-    throw new Error(`completion tax derivation returned unusable rate ${taxResult?.rate} for customer ${customerId} — refusing to use a guessed rate`);
-  },
-
-  /**
    * Map SWFL ZIP codes to county names.
    */
   /**

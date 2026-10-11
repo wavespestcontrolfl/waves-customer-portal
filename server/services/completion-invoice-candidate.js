@@ -134,24 +134,6 @@ function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
   return { existing: null, terminal: refunded, liveBeside: newestLive || existing || null };
 }
 
-// What completion does with a visit's invoices, from the rows
-// completionInvoicesOnVisits returns for that ONE visit (newest first; void and
-// canceled rows are already left out): 'reuse_invoice' (the live invoice is
-// reused, nothing new is minted), 'parked_manual' (a refunded invoice sits on
-// the visit, alone or beside a live one: nothing is reused or minted, the office
-// bills it by hand), or 'mint_new'. The decision is reconcileLiveVsRefunded's
-// own, so this cannot drift from the completion route. `row` is the invoice that
-// decides: the refunded one when parked, else the live one reused.
-function completionInvoiceOutcome(rows) {
-  const list = rows || [];
-  const refunded = list.find((r) => COMPLETION_TERMINAL_INVOICE_STATUSES.includes(r.status)) || null;
-  const live = list.find((r) => !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(r.status)) || null;
-  const reconciled = reconcileLiveVsRefunded(live, refunded, live);
-  if (reconciled.terminal) return { outcome: 'parked_manual', row: reconciled.terminal };
-  if (reconciled.existing) return { outcome: 'reuse_invoice', row: reconciled.existing };
-  return { outcome: 'mint_new', row: null };
-}
-
 // The sibling first-application lookup (services/estimate-first-application-
 // invoice.js) deliberately keeps its void-only filter, so it can return a
 // refunded/canceled row — a SIBLING visit's, or (same customer/estimate/
@@ -176,7 +158,6 @@ function splitTerminalCompletionInvoice(row) {
 module.exports = {
   completionSuppressorInvoiceLookup,
   completionInvoicesOnVisits,
-  completionInvoiceOutcome,
   completionTerminalInvoiceLookup,
   completionNewestLiveInvoiceLookup,
   reconcileLiveVsRefunded,
