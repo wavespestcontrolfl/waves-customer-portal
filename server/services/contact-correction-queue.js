@@ -435,6 +435,29 @@ async function promoteStaleReservations(knex) {
         await cancelContactCorrectionJob(job.id, 'stale_no_context', { knex });
         continue;
       }
+      // A SHARED number's linkage is re-checked here independently (codex
+      // #6268 r7): the route's attach can pick the marked account, then the
+      // route's own match resolves to nothing or to the other account and
+      // its fire-and-forget 'unlinked' cancel fails. The stored linkage is
+      // never re-pointed; it is only refused when the number is currently
+      // shared and the gated primary mark no longer names this customer.
+      // A single-owner number keeps replaying what the route matched.
+      const senderKey = tail10(job.sender_phone);
+      if (senderKey) {
+        const live = await knex('customers')
+          .whereNull('deleted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+          .limit(2)
+          .select('id');
+        if (live.length > 1) {
+          const link = require('./shared-phone-link');
+          const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
+          if (!picked.customer || String(picked.customer.id) !== String(job.customer_id)) {
+            await cancelContactCorrectionJob(job.id, 'stale_link_mismatch', { knex });
+            continue;
+          }
+        }
+      }
       // A reservation is ordering/context evidence, not a saved inbox source.
       // A failed inbox write may outlive the route's best-effort cancellation;
       // never replay that body into customer data without its durable message.
