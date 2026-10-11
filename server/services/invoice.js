@@ -7157,6 +7157,9 @@ const InvoiceService = {
     expectedSmsPhone = undefined,
     // Intelligence Bar send_invoice only: its live owner check, run at this leg's provider boundary.
     verifyOwner = null,
+    // Intelligence Bar send_invoice only: a leg that did not send is reported on the result and NEVER queued as a later
+    // replay (a replay would deliver outside the approval: its recipient, its total).
+    noReplay = false,
   } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
@@ -7217,7 +7220,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, verifyOwner,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, verifyOwner, noReplay,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -7483,6 +7486,8 @@ const InvoiceService = {
     // return for the pendingChannelQueued flag.
     let pendingChannelToQueue = null;
     let pendingChannelQueued = false;
+    // The Intelligence Bar's no-replay posture: the leg that did not send, reported on the result instead of queued.
+    let replayWarning = null;
     // Post-delivery finalize, extracted so the delivered-SMS recovery in the
     // catch below can retry it once after a transient DB failure. Wrapped in
     // its own transaction (Codex round-3 P1 #4963, pre-push audit): when
@@ -7774,6 +7779,8 @@ const InvoiceService = {
           for (const [uncertainChannel] of uncertainLegs) {
             logger.warn(`[invoice] payment-link ${uncertainChannel} leg for invoice ${invoiceId} outcome uncertain — not requeued (a whole-notice replay would retry it too, risking a double-send)`);
           }
+        } else if (retryableLegs.length && noReplay) {
+          replayWarning = `The ${retryableLegs[0][0]} leg did not send (${String(retryableLegs[0][1]?.reason || retryableLegs[0][1]?.code || "not sent").slice(0, 120)}); send it by hand`;
         } else if (retryableLegs.length) {
           const [, representativeRetryableLeg] = retryableLegs[0];
           const explicitNextAllowedAt = representativeRetryableLeg.nextAllowedAt ? new Date(representativeRetryableLeg.nextAllowedAt) : null;
@@ -7837,6 +7844,7 @@ const InvoiceService = {
 
       return {
         sent: true, payUrl, ...settledEvent, ...queueOutcome,
+        ...(replayWarning ? { replayWarning } : {}),
         ...(pendingChannel ? {
           pendingChannel: pendingChannel[0],
           pendingChannelCode: pendingChannel[1]?.code,
@@ -8228,6 +8236,8 @@ const InvoiceService = {
           adoptsQueuedInvoiceSend: false,
           ...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),
           ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
+          // The bar never leaves a replay behind (no later text or email outside its approval).
+          ...(refusalOnly ? { noReplay: true } : {}),
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.settled_zero_due) {
@@ -8330,6 +8340,7 @@ const InvoiceService = {
             sms.originalAt = billingLegContactTime(smsResult);
           }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
+          if (smsResult.replayWarning) sms.warning = smsResult.replayWarning;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
           if (smsResult?.code) sms.code = smsResult.code;
@@ -8481,6 +8492,8 @@ const InvoiceService = {
           // The Intelligence Bar's approved attachment list (digest), checked once more right before the provider call.
           ...(expectedVersion && expectedVersion.attachments !== undefined ? { expectedAttachments: expectedVersion.attachments } : {}),
           ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
+          // The bar's card showed the invoice email only: no other-balance note, no account details.
+          ...(expectedVersion ? { plainInvoiceEmail: true } : {}),
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;
@@ -8618,6 +8631,7 @@ const InvoiceService = {
     const deliveryOutcomeUncertain = !ok && (sms.deliveryOutcome === "uncertain"
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
+    let deliveryRecordFailed = false;
     let queueOutcome = {};
     let adoptedQueueUnrestored = false;
     // Codex round-8 audit P1 (#4131 slice 4): defaults to voided=true for the
@@ -8650,8 +8664,8 @@ const InvoiceService = {
       }
       if (!adoptedQueueUnrestored) {
         const priorSettlement = previouslySettledBillingLegs([sms, email]);
-        const finalized = await whereSendClaimOwned(
-          db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
+        const finalizeSent = (conn) => whereSendClaimOwned(
+          conn("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
           claim.invoice.send_claim_token,
         )
           .update({
@@ -8667,6 +8681,28 @@ const InvoiceService = {
             send_claim_token: null,
             updated_at: new Date(),
           });
+        let finalized;
+        if (expectedVersion?.closeoutTarget) {
+          // The Intelligence Bar's send: the delivery marker that binds its closeout pin to this delivery is written in the
+          // SAME transaction that finalizes the invoice as sent, and the write is mandatory. If it fails, the finalization
+          // rolls back (the claim stays held for review) and the send reports that the message went out but is unrecorded;
+          // the sweep can never see a sent invoice without its marker.
+          try {
+            finalized = await db.transaction(async (trx) => {
+              const count = await finalizeSent(trx);
+              if (count !== 0) {
+                await require("./invoice-issued-closeout").recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token, { conn: trx, actorTechnicianId });
+              }
+              return count;
+            });
+          } catch (markerErr) {
+            deliveryRecordFailed = true;
+            finalized = 0;
+            logger.error(`[invoice] delivery of ${claim.invoice.invoice_number} could not be recorded; finalization rolled back, claim held for review: ${markerErr.message}`);
+          }
+        } else {
+          finalized = await finalizeSent(db);
+        }
         ownedDeliveryFinalized = finalized !== 0;
         // First send finalized on SMS and/or email — convert the originating lead.
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
@@ -8743,6 +8779,14 @@ const InvoiceService = {
       // its claim (stale-claim recovery parks it for review) rather than
       // requeueing a second send over an unrestored text.
       adoptedQueueUnrestored = !restored && rowsToRestore.length > 0;
+      // The claim ended without a delivery: its closeout pin is finished business, not a delivery with a missing marker.
+      if (restored && expectedVersion?.closeoutTarget) {
+        try {
+          await require("./invoice-issued-closeout").recordApprovedCloseoutRetired(invoiceId, claim.invoice.send_claim_token);
+        } catch (retireErr) {
+          logger.warn(`[invoice] closeout pin retire record failed for ${invoiceId}: ${retireErr.message}`);
+        }
+      }
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
@@ -8771,16 +8815,6 @@ const InvoiceService = {
     let issuedCloseout = null;
     if (ownedDeliveryFinalized) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-      // The pin written under this claim becomes the invoice's delivery episode now that this claim delivered: the retry
-      // sweep honors it only while this delivery is still the invoice's newest. Best-effort; without the row the sweep
-      // ignores the pin (the send's own closeout below still keeps to the card).
-      if (expectedVersion?.closeoutTarget) {
-        try {
-          await require("./invoice-issued-closeout").recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token, { actorTechnicianId });
-        } catch (pinErr) {
-          logger.error(`[invoice] approved closeout delivery record failed for ${invoiceId}: ${pinErr.message}`);
-        }
-      }
       // The Intelligence Bar's card named the visit this send closes (or none): the closeout runs for that visit only.
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId, approvedTarget: expectedVersion?.closeoutTarget || null });
     }
@@ -8802,8 +8836,12 @@ const InvoiceService = {
     const holdLegs = [sms, email].filter((leg) => leg?.code === "COLLECTION_HOLD_DEFER");
     const holdOnly = !ok && holdLegs.length > 0 && !sms.ok && !email.ok
       && !terminalVisitObserved && !deliveryOutcomeUncertain && !adoptedQueueUnrestored;
-    return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
+    return { ok: ok && !deliveryRecordFailed, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
+      ...(deliveryRecordFailed ? {
+        code: "INVOICE_DELIVERY_RECORD_FAILED", deliveryHeld: true,
+        error: "The invoice went out, but the app could not record it as sent. Check the invoice by hand and do not send it again.",
+      } : {}),
       ...(holdOnly ? {
         code: "COLLECTION_HOLD_DEFER", retryable: true, deferred: true, deliveryOutcome: "not_sent",
         error: holdLegs[0].error || "Customer has an active collections dispute hold; delivery deferred until it is released",

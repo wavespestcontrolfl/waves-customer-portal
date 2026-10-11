@@ -24,12 +24,13 @@ const SETUP_FEE_WAIVED_RE = /setup fee waived|setup.*waiv/i;
 // the displayed schedule on it, and an unselected column reads as undefined,
 // silently falling back to term_start.
 let coverageColsCache = null;
-async function optionalRead(conn, read, fallback) {
+async function optionalRead(conn, read, fallback, { strict = false } = {}) {
   try {
     return conn?.isTransaction && typeof conn.transaction === 'function'
       ? await conn.transaction(read)
       : await read(conn);
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return fallback;
   }
 }
@@ -245,7 +246,9 @@ const ANCHOR_MIN_PREPAY_FRACTION = 0.5;
 // term's registered anchor (prepay_invoice_id) or it collects ~the full prepay
 // amount — never a small residual. Never throws; a lookup failure resolves to
 // null (standard, non-prepay copy).
-async function resolveInvoiceTermId(invoice, conn = db) {
+// `strict`: a lookup that fails throws instead of resolving to null, for a caller that must refuse when it cannot tell
+// (the Intelligence Bar's send refuses an annual-plan invoice and must not mistake "could not read" for "not a plan").
+async function resolveInvoiceTermId(invoice, conn = db, { strict = false } = {}) {
   if (invoice?.annual_prepay_term_id) return invoice.annual_prepay_term_id;
   if (!invoice?.scheduled_service_id) return null;
   return optionalRead(conn, async (database) => {
@@ -277,7 +280,7 @@ async function resolveInvoiceTermId(invoice, conn = db) {
       return termId;
     }
     return null;
-  }, null);
+  }, null, { strict });
 }
 
 // Loads + normalizes the annual-prepay term for an invoice, or null when the

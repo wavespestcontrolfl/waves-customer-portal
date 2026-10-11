@@ -46,6 +46,7 @@ const SEND_CALL_COVERAGE = {
   scheduleForInvoice: { effect: 'followups' },
   closeOutVisitForIssuedInvoice: { effect: 'closeout' },
   recordApprovedCloseoutDelivery: { effect: null, why: 'an audit row on the invoice that binds the closeout pin to this delivery; nothing the customer sees' },
+  recordApprovedCloseoutRetired: { effect: null, why: 'an audit row on the invoice that marks the closeout pin of a handed-back claim as finished; nothing the customer sees' },
   enrollReviewAfterInvoiceDelivery: { effect: 'review' },
   autoApplyAccountCreditIfEnabled: { effect: 'credit' },
   reverseAppliedCredit: { effect: 'credit' },
@@ -63,6 +64,8 @@ const FOLLOWUP_STATE_TEXT = {
   autopay_unreadable: 'Auto Pay could not be checked; reminders may run',
   not_schedulable: 'none: the invoice is not in a billable state',
   payer_billed: 'none: the invoice is billed to a payer',
+  paused: 'held: an earlier pause on the invoice is restored, so reminders stay paused until someone resumes them',
+  completed: 'none: every reminder step has already passed',
 };
 const followupStateText = (state) => (state.startsWith('existing:')
   ? `the invoice already has a reminder sequence (${state.slice(9)}); it is left as it is`
@@ -77,8 +80,10 @@ function closeoutLine(closeout, lead) {
 const closeoutState = (closeout) => (closeout ? `${closeout.visitId}:${closeout.resuming === true ? 'resuming' : 'new'}` : 'none');
 
 // GATE_INVOICE_ISSUED_CLOSES_VISIT: the closeout's own read-only probe, with the handler's trigger.
-async function closeoutEffect(invoice, trigger, lead) {
-  const closeout = await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger });
+// `database` is the planner's own handle: inside the send claim it is the claim's transaction, and a probe on the root pool
+// would take a second connection while that one is held (DB_POOL_MAX=2 deadlocks).
+async function closeoutEffect(invoice, trigger, lead, database = db) {
+  const closeout = await require('../invoice-issued-closeout').issuedCloseoutTarget(invoice, { trigger, conn: database });
   return effect('closeout', Boolean(closeout), closeoutState(closeout), closeout ? closeoutLine(closeout, lead) : null);
 }
 
@@ -129,7 +134,7 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
   return finish([
     effect('delivery', true, delivered ? 'resend' : 'first', deliveryNote(invoice, delivered)),
     await attachmentsEffect(invoice, database),
-    await closeoutEffect(invoice, 'sent', 'Sending this invoice'),
+    await closeoutEffect(invoice, 'sent', 'Sending this invoice', database),
     lead,
     followups,
     effect('review', review, review ? 'requested' : 'none',
@@ -163,4 +168,5 @@ module.exports = {
   effectsDigest,
   closeoutLine,
   SEND_CALL_COVERAGE,
+  FOLLOWUP_STATE_TEXT,
 };

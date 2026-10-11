@@ -117,6 +117,33 @@ function activePaymentPlan(database, invoiceId) {
 // The system stops a void leaves on a sequence; the resend re-arms them (scheduleForInvoice).
 const VOID_STOP_STAMPS = ['invoice_voided', 'invoice_voided:prev=paused', 'invoice_terminal_status:void'];
 
+// A sequence the SYSTEM stopped for a void (no admin id): the resend re-arms it.
+function isSystemVoidStop(existing) {
+  return existing.status === 'stopped'
+    && VOID_STOP_STAMPS.includes(String(existing.stopped_reason || ''))
+    && !existing.stopped_by_admin_id;
+}
+
+// What a resend does to a system-void-stopped sequence: ONE decision, made by scheduleForInvoice (which then writes it) and
+// by the Intelligence Bar's planner (which only reads it), so the card cannot describe an outcome the scheduler does not make.
+// In this order (each check ends the decision):
+//   payment_plan  an active payment plan owns collection: the row is left stopped;
+//   paused        a pause retained through the void (paused_* fields, the ':prev=paused' stamp, or the legacy migration stamp)
+//                 is restored as PAUSED, never as active dunning;
+//   autopay_hold  the row was held for Auto Pay and the customer is still enrolled (`holdForAutopay` is read only now);
+//   active / completed  otherwise the cadence resumes from `anchor`: active with the next touch, or completed when every step
+//                 has passed.
+// `planActive` and `holdForAutopay` are async readers so a reader runs only when the checks before it did not decide.
+async function voidStopRearmDecision(existing, { planActive, holdForAutopay, anchor }) {
+  const stamp = String(existing.stopped_reason || '');
+  if (await planActive()) return { kind: 'payment_plan' };
+  if (stamp === 'invoice_voided:prev=paused' || stamp === 'invoice_terminal_status:void'
+    || existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) return { kind: 'paused' };
+  if (await holdForAutopay()) return { kind: 'autopay_hold', nextTouchAt: null };
+  const nextTouchAt = computeNextTouchAt(anchor, existing.step_index);
+  return { kind: nextTouchAt ? 'active' : 'completed', nextTouchAt };
+}
+
 // Collections policy consult lives in the SHARED rail guard (codex
 // 2026-08-14: one implementation, not three that drift) — gate-off
 // byte-identical, per-channel verdicts, invoice-membership required.
@@ -527,93 +554,42 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
       // invoice restored and resent would never be reminded again
       // (Codex #3493 r12 P0).
       const voidStopStamp = String(existing.stopped_reason || '');
-      const isSystemVoidStop = existing.status === 'stopped'
-        && VOID_STOP_STAMPS.includes(voidStopStamp)
-        && !existing.stopped_by_admin_id;
-      if (isSystemVoidStop) {
-        // Never re-arm under an ACTIVE payment plan (Codex #3493 r6): plan
-        // creation can't take ownership of a void-stopped row (its restamp
-        // deliberately skips stops with non-plan reasons), so a plan created
-        // between unvoid and resend leaves 'invoice_voided' in place — the
-        // plan owns collection, and reviving ordinary dunning here would dun
-        // a customer who is already paying. Same check as the INSERT path
-        // below, under the same invoice lock.
-        const planActive = await activePaymentPlan(trx, invoiceId);
-        if (planActive) return existing;
-        // A pre-void ADMIN PAUSE survives the void stop as the retained
-        // paused_* fields (stopSequence never clears them) or, for
-        // metadata-less legacy pauses, as the ':prev=paused' stamp —
-        // restore the PAUSE, not active dunning (Codex #3493 r3/r8). Same
-        // conditional shape as the re-arm below so a racing admin write
-        // still wins.
-        // The LEGACY migration stamp restores to PAUSED unconditionally
-        // (Codex #3493 r14 P0): the 20260601000012 backfill flattened
-        // active/paused/autopay_hold rows to one stamp, and a blank-reason
-        // legacy pause left NO recoverable signal — restoring to active
-        // could revive reminders an admin explicitly paused. The quiet
-        // state is the safe direction; the operator resumes deliberately.
-        if (voidStopStamp === 'invoice_voided:prev=paused'
-          || voidStopStamp === 'invoice_terminal_status:void'
-          || existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) {
-          const [repaused] = await trx('invoice_followup_sequences')
-            .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
-            .whereNull('stopped_by_admin_id')
-            .update({
-              updated_at: trx.fn.now(),
-              status: 'paused',
-              stopped_reason: null,
-              stopped_by_admin_id: null,
-              next_touch_at: null,
-            })
-            .returning('*');
-          return repaused || existing;
-        }
-        const customerNow = await trx('customers').where({ id: invoice.customer_id }).first();
-        // Hold only when BOTH the retained held marker and live enrollment
-        // agree (Codex #3493 r7 + r12): the stored flag alone goes stale
-        // when the customer disables autopay while the invoice sits void
-        // (a hold nothing can release), and live enrollment alone would
-        // re-hold a sequence releaseFromAutopayHold already escalated to
-        // active after the failure threshold (undoing the escalation on an
-        // invoice that may see no further autopay attempt).
-        let holdForAutopay = false;
-        if (existing.is_autopay_held) {
-          try {
-            // failClosed: a swallowed payment_methods read error would
-            // read as unenrolled and activate dunning for an enrolled
-            // customer — on a read error keep the hold, the quiet
-            // direction (Codex #3493 r16, same rule as resumeSequence).
-            holdForAutopay = await customerOnAutopay(customerNow, { db: trx, failClosed: true });
-          } catch (err) {
-            logger.warn(`[invoice-followups] re-arm autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
-            holdForAutopay = true;
-          }
-        }
-        // Anchor like the ordinary scheduling path: the cadence is measured
-        // from when the invoice went out (sent_at → sms_sent_at →
-        // created_at), NOT the due date — a due date weeks past delivery
-        // would delay every remaining reminder by those weeks (Codex #3493
-        // r4). A shifted anchor_at (delivered-invoice due-date edit) still
-        // wins.
-        const nextTouchAt = holdForAutopay
-          ? null
-          : computeNextTouchAt(
-            existing.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at,
-            existing.step_index,
-          );
-        const [rearmed] = await trx('invoice_followup_sequences')
+      if (isSystemVoidStop(existing)) {
+        // Every check below is voidStopRearmDecision's (shared with the Intelligence Bar's planner); this block only writes
+        // the decision. Never re-arm under an ACTIVE payment plan (Codex #3493 r6), restore a retained PAUSE rather than
+        // active dunning (r3/r8, and the legacy migration stamp unconditionally, r14 P0), and hold an Auto Pay customer
+        // (r7 + r12: the retained held marker AND live enrollment must agree; a read error keeps the hold, r16). The cadence
+        // anchors on when the invoice went out (sent_at, sms_sent_at, created_at), NOT the due date (r4); a shifted anchor_at
+        // wins. Each write stays conditional on the exact system stop, so a racing admin pause/stop wins.
+        const decision = await voidStopRearmDecision(existing, {
+          planActive: () => activePaymentPlan(trx, invoiceId),
+          holdForAutopay: async () => {
+            if (!existing.is_autopay_held) return false;
+            try {
+              return await customerOnAutopay(await trx('customers').where({ id: invoice.customer_id }).first(), { db: trx, failClosed: true });
+            } catch (err) {
+              logger.warn(`[invoice-followups] re-arm autopay re-check failed for invoice ${invoiceId} — keeping the hold: ${err.message}`);
+              return true;
+            }
+          },
+          anchor: existing.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at,
+        });
+        if (decision.kind === 'payment_plan') return existing;
+        const [written] = await trx('invoice_followup_sequences')
           .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
           .whereNull('stopped_by_admin_id')
-          .update({
-            updated_at: trx.fn.now(),
-            status: holdForAutopay ? 'autopay_hold' : (nextTouchAt ? 'active' : 'completed'),
-            is_autopay_held: !!holdForAutopay,
-            stopped_reason: null,
-            stopped_by_admin_id: null,
-            next_touch_at: nextTouchAt,
-          })
+          .update(decision.kind === 'paused'
+            ? { updated_at: trx.fn.now(), status: 'paused', stopped_reason: null, stopped_by_admin_id: null, next_touch_at: null }
+            : {
+              updated_at: trx.fn.now(),
+              status: decision.kind === 'autopay_hold' ? 'autopay_hold' : decision.kind,
+              is_autopay_held: decision.kind === 'autopay_hold',
+              stopped_reason: null,
+              stopped_by_admin_id: null,
+              next_touch_at: decision.nextTouchAt,
+            })
           .returning('*');
-        return rearmed || existing;
+        return written || existing;
       }
       // Don't clobber admin-controlled state; just make sure we're aligned.
       if (existing.status === 'stopped' || existing.status === 'completed') return existing;
@@ -693,10 +669,25 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
   const cadence = followupSteps().map((step) => step.daysAfterSend);
   const block = invoice ? followupArmBlock(invoice) : 'no_invoice';
   if (block) return { arms: false, state: block, cadence };
-  const existing = await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first('status', 'stopped_reason', 'stopped_by_admin_id');
+  const existing = await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
   if (existing) {
-    const rearm = existing.status === 'stopped' && VOID_STOP_STAMPS.includes(String(existing.stopped_reason || '')) && !existing.stopped_by_admin_id;
-    return { arms: rearm, state: rearm ? 'rearm' : `existing:${existing.status}`, cadence };
+    if (!isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
+    // The same decision scheduleForInvoice makes for a void-stopped sequence. The cadence restarts from the send (the
+    // post-send row is stamped now), unless a shifted anchor_at wins.
+    const decision = await voidStopRearmDecision(existing, {
+      planActive: () => activePaymentPlan(database, invoice.id),
+      holdForAutopay: async () => {
+        if (!existing.is_autopay_held) return false;
+        try {
+          return await customerOnAutopay(knownCustomer || await database('customers').where({ id: invoice.customer_id }).first(), { db: database, failClosed: true });
+        } catch {
+          return true;
+        }
+      },
+      anchor: existing.anchor_at || new Date(),
+    });
+    const REARM_STATE = { payment_plan: 'payment_plan', paused: 'paused', autopay_hold: 'autopay_hold', active: 'rearm', completed: 'completed' };
+    return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence };
   }
   if (await activePaymentPlan(database, invoice.id)) return { arms: false, state: 'payment_plan', cadence };
   try {
@@ -3145,6 +3136,8 @@ async function isDunningStopped(invoiceId, database = db) {
 }
 
 module.exports = {
+  voidStopRearmDecision,
+  isSystemVoidStop,
   activePaymentPlan,
   adoptOrphanInvoices,
   scheduleForInvoice,

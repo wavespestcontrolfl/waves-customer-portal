@@ -354,7 +354,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // saved billing recipient may see the note. (effectiveOverride also covers
   // the payer-AP reroute, belt-and-braces with the payer_id check.)
   let previousBalanceNote = '';
-  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
+  if (!options.plainInvoiceEmail && isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
     try {
       const { openBalanceSummary } = require('./open-balance');
       const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });
@@ -519,7 +519,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // address and payment method on file. The
   // template rows are variable-driven, so gate off nothing below is filled and
   // the email is exactly what it was.
-  const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
+  // plainInvoiceEmail (the Intelligence Bar's send): the invoice only. The approval card never showed the other-balance
+  // note or the service / address / payment-method details, so neither is added.
+  const detailsLive = !options.plainInvoiceEmail && BillingEmailDetails.billingEmailDetailsLive();
   let detailPayload = {};
   if (detailsLive) {
     // Details are additive: any lookup failure sends the email without them.

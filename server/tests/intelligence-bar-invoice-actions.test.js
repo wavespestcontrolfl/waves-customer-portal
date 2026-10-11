@@ -193,7 +193,7 @@ describe('send_invoice card', () => {
     });
     expect(effectTexts(p)).toEqual(expect.arrayContaining(['Not sent before.', 'No review request is sent.']));
     expect(p.text).toBe('Text to ***0100: the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link. Not sent if the customer opted out of texts.');
-    expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link.');
+    expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).');
     const lines = cardLines('send_invoice', p).map((l) => l.text);
     expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line 1 of 2: Quarterly Pest Control $99.00', p.text, p.email,
       ...effectTexts(p),
@@ -212,6 +212,37 @@ describe('send_invoice card', () => {
   ])('refuses %s with the route text', async (_label, overrides, text) => {
     state.invoices[0] = invoiceRow(overrides);
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ error: text });
+  });
+
+  describe('the annual-plan check (round 9) uses the pay page\'s resolver and fails closed', () => {
+    const Prepay = require('../services/invoice-prepay');
+    afterEach(() => jest.restoreAllMocks());
+
+    test('an invoice with no tag that is the anchor of its visit\'s annual term is refused (the resolver finds it)', async () => {
+      state.invoices[0] = invoiceRow({ annual_prepay_term_id: null });
+      const resolve = jest.spyOn(Prepay, 'resolveInvoiceTermId').mockResolvedValue('term-9');
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'annual_plan_invoice', error: 'This is an annual-plan invoice. Send it from the Invoices page.' });
+      expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), db, { strict: true });
+    });
+
+    test('a resolver that throws refuses with the unverified text and builds no card', async () => {
+      jest.spyOn(Prepay, 'resolveInvoiceTermId').mockRejectedValue(new Error('lookup failed'));
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'annual_plan_invoice', error: expect.stringMatching(/could not verify whether this is an annual-plan invoice/) });
+    });
+
+    test('the send claim asks again on the claimed row: a plan that appeared after the card, or a lookup that fails, refuses', async () => {
+      Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+      const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      await run();
+      const { verifyOwner } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+      const claimed = { ...state.invoices[0], status: 'draft' };
+      await expect(verifyOwner(claimed, db)).resolves.toBeNull();
+      const resolve = jest.spyOn(Prepay, 'resolveInvoiceTermId').mockResolvedValue('term-9');
+      await expect(verifyOwner(claimed, db)).resolves.toMatch(/annual-plan invoice/);
+      expect(resolve).toHaveBeenCalledWith(claimed, db, { strict: true });
+      resolve.mockRejectedValue(new Error('lookup failed'));
+      await expect(verifyOwner(claimed, db)).resolves.toMatch(/could not verify whether this is an annual-plan invoice/);
+    });
   });
 
   test('a linked visit that never ran is refused with the route text', async () => {
@@ -284,10 +315,16 @@ describe('send_invoice commit', () => {
     ['the lines (same total)', () => { state.invoices[0].line_items = JSON.stringify([{ description: 'Quarterly Pest Control', amount: 129 }]); }],
     ['the row version', () => { state.invoices[0].updated_at = new Date('2099-01-03T00:00:00Z'); }],
     ['the email recipient', () => { Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ emailRecipient: { email: 'other@example.com' } })); }],
+    ['the email-content gates (round 9 pin)', () => { jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((gate) => gate === 'balanceVisibility'); }],
   ])('drift in %s refuses with preview_changed and sends nothing', async (_label, mutate) => {
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
     mutate();
-    await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    try {
+      await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    } finally {
+      // Only the gate spy of the round 9 row is a real spy; the rest are fakes the file resets itself.
+      jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockRestore();
+    }
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
   });
 
@@ -319,7 +356,7 @@ describe('send_invoice commit', () => {
   test('the visit closeout the send would run is probed with the closeout\'s own function, named on the card, pinned, and refused as preview_changed when it differs', async () => {
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Quarterly Pest Control', date: '2099-01-02', resuming: false });
     const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
-    expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), { trigger: 'sent' });
+    expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), { trigger: 'sent', conn: expect.anything() });
     const closeoutSentence = 'Sending this invoice also completes the linked visit (Quarterly Pest Control on 2099-01-02) and creates its service record; no completion text, report, review request or charge';
     expect(effectText(card, 'closeout')).toBe(closeoutSentence);
     expect(cardLines('send_invoice', card).map((l) => l.text)).toContain(closeoutSentence);

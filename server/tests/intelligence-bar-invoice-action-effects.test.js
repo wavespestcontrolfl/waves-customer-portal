@@ -53,7 +53,7 @@ describe('planSendEffects', () => {
     const plan = await effects.planSendEffects(invoice(), customer, {});
     expect(plan.effects.map((e) => e.key)).toEqual(['delivery', 'attachments', 'closeout', 'lead_conversion', 'followups', 'review', 'credit']);
     expect(byKey(plan, 'delivery')).toMatchObject({ state: 'first', line: 'Not sent before.' });
-    expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { trigger: 'sent' });
+    expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { trigger: 'sent', conn: expect.anything() });
     expect(byKey(plan, 'closeout').line).toMatch(/^Sending this invoice also completes the linked visit/);
     // The lead is named by a masked id (first 8 characters), and the resolver is the lead module's own.
     expect(LeadLink.invoiceSentConversionTargets).toHaveBeenCalledWith('cust-1', expect.anything());
@@ -174,6 +174,20 @@ describe('source contract', () => {
     expect(calls.length).toBeGreaterThan(4);
     const unnamed = calls.filter((name) => !(name in effects.SEND_CALL_COVERAGE));
     expect(unnamed).toEqual([]);
+  });
+
+  test('round 9: the planners read through the handle they are given, never the root pool (DB_POOL_MAX=2 deadlocks a pool query inside a held transaction)', () => {
+    const text = code(read('../services/intelligence-bar/invoice-action-effects.js'));
+    const bodies = [slice(text, 'async function closeoutEffect(', 'async function planSendEffects('), text.slice(text.indexOf('async function planSendEffects('))];
+    for (const body of bodies) {
+      // The only mention of the root handle is a default parameter.
+      const afterSignature = body.slice(body.indexOf('{\n') + 2);
+      expect(afterSignature).not.toMatch(/\bdb\b/);
+    }
+    expect(text).toMatch(/issuedCloseoutTarget\(invoice, \{ trigger, conn: database \}\)/);
+    expect(text).toMatch(/closeoutEffect\([^)]*database\)/);
+    // The claim's verifyEffects hands the planner the claim's own handle.
+    expect(code(read('../services/intelligence-bar/invoice-action-tools.js'))).toMatch(/planSendEffects\(claimed, [^\n]*\{ database, requestReview: false \}\)/);
   });
 
   test('the coverage tables point at real effects, and each non-applying call states why', () => {

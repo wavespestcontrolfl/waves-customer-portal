@@ -649,6 +649,34 @@ describe('invoice SMS provider handoff', () => {
       expect(activityInserts[0]?.description).toMatch(/^Invoice WPC-2026-1234 sent via Email:/);
     });
 
+    test('round 9: the Intelligence Bar\'s no-replay posture queues nothing for a leg that did not send and reports it on the result', async () => {
+      const partial = {
+        sent: false, blocked: false, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+        },
+      };
+      sendCustomerMessage.mockImplementation(async () => partial);
+      const run = async (options) => {
+        const smsLogInserts = [];
+        db.mockImplementation(invoiceQueryDb({ smsLogInserts }).mock);
+        const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', ...options });
+        return { result, smsLogInserts };
+      };
+      // The page send queues the replay (a later text with a refreshed phone), as before.
+      const page = await run({});
+      expect(page.result.pendingChannelQueued).toBe(true);
+      expect(page.smsLogInserts).toHaveLength(1);
+      expect(JSON.parse(page.smsLogInserts[0].metadata)).toMatchObject({ entry_point: 'invoice_send_deferred', refresh_customer_phone: true });
+      // The bar's send queues nothing; the leg that did not send is a warning on the result.
+      const bar = await run({ noReplay: true });
+      expect(bar.result).toMatchObject({ sent: true, replayWarning: 'The sms leg did not send (twilio unavailable); send it by hand' });
+      expect(bar.result.pendingChannelQueued).not.toBe(true);
+      expect(bar.smsLogInserts).toEqual([]);
+    });
+
     test('an accepted Email leg is finalized and never restores the claim when the Text leg returns a deferred replay hold (deferred + nextAllowedAt preserved)', async () => {
       const { invoiceQueries, mock } = invoiceQueryDb();
       db.mockImplementation(mock);

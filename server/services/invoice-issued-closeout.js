@@ -391,6 +391,7 @@ const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.co
 // second bar send) moves the stamp or carries its own token, so the pin never reaches another send's episode.
 const CLOSEOUT_PIN_ACTION = 'invoice.send_closeout_target_approved';
 const CLOSEOUT_PIN_DELIVERED_ACTION = 'invoice.send_closeout_target_delivered';
+const CLOSEOUT_PIN_RETIRED_ACTION = 'invoice.send_closeout_target_retired';
 const newestDeliveryMs = (row) => {
   const stamps = [row?.sent_at, row?.sms_sent_at, row?.email_sent_at].filter(Boolean).map((v) => new Date(v).getTime());
   return stamps.length ? Math.max(...stamps) : null;
@@ -429,24 +430,45 @@ async function recordApprovedCloseoutDelivery(invoiceId, claimToken, { conn = db
   });
 }
 
-// The pinned target for an invoice's CURRENT delivery episode, or null: the newest delivery row whose recorded stamp is
-// still the invoice's newest stamp names the claim token that delivered it, and the pin written under that token carries
-// the target. A pin whose claim never delivered, or an episode a later send replaced, matches no delivery row and is
-// ignored. Throws on a failed read (the sweep skips the row and the next pass re-reads).
+// A pin whose claim ended without a delivery (the claim was handed back): written by the sender, so the sweep can tell
+// that pin is finished business and not a delivery whose marker went missing.
+async function recordApprovedCloseoutRetired(invoiceId, claimToken, { conn = db } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  await recordAuditEvent({
+    actor_type: 'system',
+    action: CLOSEOUT_PIN_RETIRED_ACTION,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+    metadata: { invoiceId: String(invoiceId), claimToken: claimToken ? String(claimToken) : null },
+    trx: conn,
+  });
+}
+
+// What the sweep may do for an invoice's CURRENT delivery episode:
+//   { target }   the newest delivery row whose recorded stamp is still the invoice's newest stamp names the claim token
+//                that delivered it; the pin written under that token carries the target.
+//   { unbound }  the newest pin has no delivery row at all and was not retired: its claim may have delivered with no
+//                marker, so the sweep must not close anything the card did not approve (fail closed).
+//   null         no pin, a retired pin, or a pin whose episode a later send replaced (a page send is judged as always).
+// Throws on a failed read (the sweep skips the row and the next pass re-reads).
 async function approvedCloseoutTargetFor(conn, invoiceId) {
   const current = newestDeliveryMs(await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at'));
   if (current === null) return null;
-  const deliveries = await conn('audit_log')
-    .where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_DELIVERED_ACTION })
-    .orderBy('created_at', 'desc').limit(5).select('metadata');
+  const ofInvoice = (action) => conn('audit_log').where({ resource_type: 'invoices', resource_id: invoiceId, action });
+  const deliveries = await ofInvoice(CLOSEOUT_PIN_DELIVERED_ACTION).orderBy('created_at', 'desc').limit(5).select('metadata');
   const episode = (deliveries || []).map((row) => parseMeta(row.metadata)).find((meta) => meta.claimToken && meta.deliveredAtMs === current);
-  if (!episode) return null;
-  const pin = await conn('audit_log')
-    .where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_ACTION })
-    .whereRaw("metadata->>'claimToken' = ?", [String(episode.claimToken)])
-    .orderBy('created_at', 'desc').first('metadata');
-  const meta = pin ? parseMeta(pin.metadata) : null;
-  return meta?.approvedTarget || null;
+  if (episode) {
+    const pin = await ofInvoice(CLOSEOUT_PIN_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(episode.claimToken)])
+      .orderBy('created_at', 'desc').first('metadata');
+    const target = pin ? parseMeta(pin.metadata).approvedTarget : null;
+    return target ? { target } : null;
+  }
+  const newest = await ofInvoice(CLOSEOUT_PIN_ACTION).orderBy('created_at', 'desc').first('metadata');
+  const token = newest ? parseMeta(newest.metadata).claimToken : null;
+  if (!token) return null;
+  const finished = (await ofInvoice(CLOSEOUT_PIN_DELIVERED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'))
+    || (await ofInvoice(CLOSEOUT_PIN_RETIRED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'));
+  return finished ? null : { unbound: true };
 }
 
 // The sweeps' PREFILTER for the prepayment rule (issuedCloseoutVisitRefusal,
@@ -595,12 +617,27 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
     // send's closeout only, so a settled invoice (trigger 'paid') is retried as the payment rails always do.
     let approvedTarget = null;
     if (trigger === 'sent') {
+      let pinned;
       try {
-        approvedTarget = await approvedCloseoutTargetFor(conn, row.invoice_id);
+        pinned = await approvedCloseoutTargetFor(conn, row.invoice_id);
       } catch (err) {
         logger.error(`[invoice-issued-closeout] issued-invoice retry: pin lookup failed for invoice ${row.invoice_id}: ${err.message}`);
         continue;
       }
+      if (pinned?.unbound) {
+        // A pin with no delivery marker and no retirement: the sweep cannot tell what the card approved, so it closes nothing.
+        logger.warn(`[invoice-issued-closeout] issued-invoice retry: invoice ${row.invoice_id} has an approved closeout pin with no delivery marker; skipped`);
+        try {
+          await require('./audit-log').recordAuditEvent({
+            actor_type: 'system', action: 'invoice.closeout_pin_unbound', resource_type: 'invoices', resource_id: row.invoice_id,
+            metadata: { invoiceId: String(row.invoice_id), visitId: row.visit_id ? String(row.visit_id) : null },
+          });
+        } catch (auditErr) {
+          logger.error(`[invoice-issued-closeout] unbound pin audit failed for invoice ${row.invoice_id}: ${auditErr.message}`);
+        }
+        continue;
+      }
+      approvedTarget = pinned?.target || null;
     }
     retried += 1;
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today, ...(approvedTarget ? { approvedTarget } : {}) });
@@ -840,4 +877,5 @@ module.exports = {
   issuedCloseoutTarget,
   recordApprovedCloseoutTarget,
   recordApprovedCloseoutDelivery,
+  recordApprovedCloseoutRetired,
 };

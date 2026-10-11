@@ -161,6 +161,19 @@ async function ownerRefusalText(invoice, database = db) {
   return verdict === 'payer_owned' ? PAYER_OWNED_TEXT : OWNER_UNVERIFIED_TEXT;
 }
 
+// An annual-plan invoice's send re-enters under the renewal gate, which the bar does not carry. The plan is found the way the
+// pay page finds it (invoice-prepay.js resolveInvoiceTermId: the invoice's own tag, else its visit's term when this invoice is
+// the term's anchor), so an anchor with no tag is still refused. A lookup that fails refuses too. Also run by the send claim.
+const ANNUAL_PLAN_TEXT = 'This is an annual-plan invoice. Send it from the Invoices page.';
+const ANNUAL_PLAN_UNVERIFIED_TEXT = 'The bar could not verify whether this is an annual-plan invoice, so it was not sent. Send it from the Invoices page.';
+async function annualPlanRefusalText(invoice, database = db) {
+  try {
+    return (await require('../invoice-prepay').resolveInvoiceTermId(invoice, database, { strict: true })) ? ANNUAL_PLAN_TEXT : null;
+  } catch {
+    return ANNUAL_PLAN_UNVERIFIED_TEXT;
+  }
+}
+
 // The send refusals the bar checks before reading recipients (the route's own
 // text where the route has one), or null.
 async function sendRefusal(invoice, dueCents) {
@@ -173,7 +186,8 @@ async function sendRefusal(invoice, dueCents) {
   if (dueCents <= 0) return refusal('Nothing is due on this invoice, so there is no pay link to send.', 'nothing_due', at);
   // An annual-plan invoice's send re-enters under the renewal gate, which does not
   // carry the bar's approved total or its no-credit rule: it stays on the Invoices page.
-  if (invoice.annual_prepay_term_id) return refusal('This is an annual-plan invoice. Send it from the Invoices page.', 'annual_plan_invoice', at);
+  const planText = await annualPlanRefusalText(invoice);
+  if (planText) return refusal(planText, 'annual_plan_invoice', at);
   // A linked visit that never ran: the route's own refusal text. (If it is cancelled
   // after this check, the send refuses under its claim and never voids for the bar.)
   const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
@@ -198,9 +212,14 @@ function sendLegs(who, invoice, dueCents) {
     : 'No text: no phone on file.';
   const subject = `Invoice ${invoice.invoice_number} — ${money(dueCents)}`;
   const emailLine = email
-    ? `Email to ${maskEmail(email)}: the invoice email (template invoice.sent), subject "${subject}", with the invoice PDF and the pay link.`
+    ? `Email to ${maskEmail(email)}: the invoice email (template invoice.sent), subject "${subject}", with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).`
     : 'No email: no billing email on file.';
   return { phone, email, text, emailLine };
+}
+
+function emailContentGates() {
+  const gates = require('../../config/feature-gates');
+  return `${gates.isEnabled('balanceVisibility') ? 1 : 0}${gates.billingEmailDetailsLive() ? 1 : 0}`;
 }
 
 // opts.forSend: the confirmed run also gets the exact recipients (never on the
@@ -263,6 +282,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       // The attachment list as the email handoff re-checks it (the same files the attachments effect pins).
       attachments: digestOfFingerprint(planned.effects.find((e) => e.key === 'attachments').state),
       recipients: digest(recipients),
+      // The two gates that add live content to the page's email (other-balance note; service, address and payment-method
+      // details). The bar's email omits both, so a flip changes nothing it sends; it is pinned so the card never goes stale on it.
+      email_content_gates: emailContentGates(),
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -270,7 +292,7 @@ async function buildSendPlan(input, { forSend = false } = {}) {
 
 function channelResult(leg) {
   if (!leg) return { status: 'not_sent', detail: 'not attempted' };
-  if (leg.ok) return { status: 'sent' };
+  if (leg.ok) return { status: 'sent', ...(leg.warning ? { warning: String(leg.warning).slice(0, 200) } : {}) };
   // The provider may have taken it: never reported as not sent (a resend could duplicate it).
   if (leg.deliveryOutcome === 'uncertain') {
     return { status: 'unknown', detail: 'the provider did not confirm — it may or may not have gone out; check before sending again' };
@@ -309,6 +331,10 @@ const SEND_OUTCOME_RULES = [
   // Uncertain and not retryable, no fresh card (a retry could send it twice).
   [(c) => c.status === 409 || c.json.in_progress,
     (c) => ({ ...c.base, outcome_unknown: true, code: (c.status === 409 && c.json.code) || 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE })],
+  // The message went out but the app could not record the invoice as sent (the finalization rolled back): never a retry.
+  [(c) => c.json.code === 'INVOICE_DELIVERY_RECORD_FAILED',
+    (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code, text: c.text, email: c.email,
+      error: 'The invoice went out, but the app could not record it as sent. Check the invoice by hand and do not send it again.' })],
   [(c) => c.unknown && !c.sent,
     (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code || 'delivery_uncertain', text: c.text, email: c.email,
       error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' })],
@@ -321,7 +347,8 @@ const SEND_OUTCOME_RULES = [
     (c) => ({ ...c.base, success: true, text: c.text, email: c.email,
       note: c.json.covered_by_credit ? 'Nothing was sent: account credit now covers this invoice.' : 'Nothing new was sent: the invoice was already delivered or is being delivered.' })],
   [(c) => c.requested.every((leg) => leg.status === 'sent'),
-    (c) => ({ ...c.base, success: true, text: c.text, email: c.email, note: 'The invoice was sent.' })],
+    (c) => ({ ...c.base, success: true, text: c.text, email: c.email,
+      note: ['The invoice was sent.', ...[c.text, c.email].map((leg) => leg.warning).filter(Boolean)].join(' ') })],
   [() => true,
     (c) => ({ ...c.base, partial: true, text: c.text, email: c.email,
       note: c.unknown ? 'Part of the invoice was sent; delivery of the rest could not be confirmed — check before sending again.' : 'Part of the invoice send did not go out — see text and email.' })],
@@ -369,8 +396,9 @@ async function commitSend(input, actionContext) {
         // The leads the card said this send marks won (or none): the conversion after delivery touches those and no others.
         leadTargets: plan._lead_targets,
         // Run by the send claim on the claimed row, and again at each provider handoff (text and email): who owes the
-        // invoice must still be the customer.
-        verifyOwner: (claimed, database) => ownerRefusalText(claimed, database),
+        // invoice must still be the customer, and it must still not be an annual-plan invoice (resolved as the pay page does;
+        // a failed lookup refuses).
+        verifyOwner: async (claimed, database) => (await ownerRefusalText(claimed, database)) || annualPlanRefusalText(claimed, database),
         // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
         verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,
       },

@@ -52,7 +52,7 @@ describe('invoice-followups planFollowupSequence (scheduleForInvoice\'s own pred
   });
 
   test('a sequence a void stopped is re-armed by the resend; an admin\'s own stop is not', async () => {
-    await expect(Followups.planFollowupSequence(invoice(), fakeDb({ sequence: { status: 'stopped', stopped_reason: 'invoice_voided', stopped_by_admin_id: null } })))
+    await expect(Followups.planFollowupSequence(invoice(), fakeDb({ sequence: { status: 'stopped', stopped_reason: 'invoice_voided', stopped_by_admin_id: null, step_index: 0 } })))
       .resolves.toMatchObject({ arms: true, state: 'rearm' });
     await expect(Followups.planFollowupSequence(invoice(), fakeDb({ sequence: { status: 'stopped', stopped_reason: 'invoice_voided', stopped_by_admin_id: 'admin-1' } })))
       .resolves.toMatchObject({ arms: false, state: 'existing:stopped' });

@@ -79,12 +79,13 @@ const SENT_AT = '2021-03-01T15:00:00Z';
 const SENT_MS = new Date(SENT_AT).getTime();
 const PIN = 'invoice.send_closeout_target_approved';
 const DELIVERED = 'invoice.send_closeout_target_delivered';
-function sweepConn({ pins = [], deliveries = [], sentAt = SENT_AT, pinReadFails = false } = {}) {
+const RETIRED = 'invoice.send_closeout_target_retired';
+function sweepConn({ pins = [], deliveries = [], retired = [], sentAt = SENT_AT, pinReadFails = false } = {}) {
   const invoice = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: 'sent', scheduled_service_id: 'visit-live', sent_at: sentAt };
   const candidate = { invoice_id: 'inv-1', invoice_status: 'sent', visit_id: 'visit-live', visit_status: 'pending', own_attempt_parked: false, issued_after_service_day: true };
   const connFor = (table) => {
     const state = { action: null, token: null };
-    const rowsOf = () => (state.action === DELIVERED ? deliveries : pins)
+    const rowsOf = () => (state.action === DELIVERED ? deliveries : state.action === RETIRED ? retired.map((claimToken) => ({ claimToken })) : pins)
       .filter((row) => state.token === null || row.claimToken === state.token)
       .map((row) => ({ metadata: row }));
     const b = new Proxy({}, {
@@ -95,7 +96,7 @@ function sweepConn({ pins = [], deliveries = [], sentAt = SENT_AT, pinReadFails 
         if (prop === 'first') {
           return async () => {
             if (table === 'audit_log' && pinReadFails && state.action === PIN) throw new Error('read failed');
-            if (table === 'audit_log') return state.action === PIN ? (rowsOf()[0] || null) : null;
+            if (table === 'audit_log') return [PIN, DELIVERED, RETIRED].includes(state.action) ? (rowsOf()[0] || null) : null;
             if (table === 'invoices') return invoice;
             return rows[table] || null;
           };
@@ -132,11 +133,19 @@ describe('the retry sweep keeps to the target the bar send pinned (bound to the 
     await expect(sweep()).resolves.toMatchObject({ retried: 1, closed: 1 });
   });
 
-  test('a pin from a bar send that failed (its claim never delivered) is not the episode of a later page send: the sweep ignores it', async () => {
-    // The failed claim left a pin and no delivery row; the page send then delivered.
-    const out = await sweep({ pins: [pin('claim-failed', 'none')], deliveries: [] });
+  test('a pin from a bar send whose claim was handed back (retired) is finished: a later page send is judged as always', async () => {
+    const out = await sweep({ pins: [pin('claim-failed', 'none')], deliveries: [], retired: ['claim-failed'] });
     expect(out).toMatchObject({ retried: 1, closed: 1 });
     expect(completeScheduledService).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pin with no delivery marker and no retirement is unbound: the sweep closes nothing and audits closeout_pin_unbound', async () => {
+    const out = await sweep({ pins: [pin('claim-lost-marker', 'none')], deliveries: [] });
+    expect(out).toMatchObject({ retried: 0, closed: 0 });
+    expect(completeScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'invoice.closeout_pin_unbound', resource_type: 'invoices', resource_id: 'inv-1',
+    }));
   });
 
   test('a pin whose delivery was replaced by a later send (the delivery stamp moved) is ignored', async () => {
