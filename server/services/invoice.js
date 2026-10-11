@@ -3194,11 +3194,31 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
 // retry rather than a refusal: the immediate send reports it to the operator,
 // a queued replay would otherwise drop the notice on a transient lock
 // conflict.
-async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispatch, { retryableSetupErrors = false } = {}) {
+//
+// `recipientLocks` ({ customerId, phone }, the Intelligence Bar's text) holds the SAME two locks the comms writers take, around
+// the whole handoff, so the phone the precondition re-reads is the phone the provider request goes to. LOCK ORDER (the one
+// billing-channel-email-authority.js dispatchUnderBillingEmailAuthority already uses, and utils/customer-comms-lock.js's
+// contract): customer-comms, then the SMS phone, then the invoice row and its deposit ledger (withInvoiceDepositSettlement,
+// joined on the same connection as a savepoint). Both advisory locks are TRY locks: a writer holding either is a refusal
+// (`recipient_busy`, nothing sent), never a wait, so this handoff cannot join a deadlock cycle with a writer that holds the
+// invoice row and wants comms.
+async function withRecipientLocks(recipientLocks, run) {
+  const { tryLockCustomerComms, tryLockSmsPhone } = require("../utils/customer-comms-lock");
+  return db.transaction(async (trx) => {
+    if (!(await tryLockCustomerComms(trx, recipientLocks.customerId)) || !(await tryLockSmsPhone(trx, recipientLocks.phone))) {
+      const message = "The customer's contact details are being changed; the text was not sent. Try again in a minute.";
+      return { sent: false, blocked: true, deliveryOutcome: "not_sent", code: "recipient_busy", error: message, reason: message,
+        retryable: false, validator: "check_invoice_recipient" };
+    }
+    return run(trx);
+  });
+}
+
+async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispatch, { retryableSetupErrors = false, recipientLocks = null } = {}) {
   let dispatchedOutcome = null;
   let providerStarted = false;
   try {
-    const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+    const settle = (database) => require("./estimate-deposits").withInvoiceDepositSettlement(
       invoiceId,
       async (trx, current) => {
         const verdict = await precondition(trx, current);
@@ -3207,7 +3227,9 @@ async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispat
         dispatchedOutcome = await dispatch();
         return dispatchedOutcome;
       },
+      ...(database ? [database] : []),
     );
+    const outcome = recipientLocks ? await withRecipientLocks(recipientLocks, settle) : await settle();
     return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
       validator: "check_invoice_deposit_settlement" };
@@ -7673,6 +7695,8 @@ const InvoiceService = {
             sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner, expectedSmsPhone,
           }),
           dispatch,
+          // The bar's approved phone: the final recipient read and the provider request run under the comms writers' locks.
+          { recipientLocks: expectedSmsPhone ? { customerId: invoice.customer_id, phone: expectedSmsPhone } : null },
         ),
       });
       // Available to the catch block's retry call too (declared outside the

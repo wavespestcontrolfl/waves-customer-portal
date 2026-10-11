@@ -162,13 +162,15 @@ describe('the send card and the scheduler agree on a void-stopped sequence', () 
     expect(voidStopRearmAnchor({}, { sms_sent_at: 'M', created_at: 'C' })).toBe('M');
     expect(voidStopRearmAnchor({}, { created_at: 'C' })).toBe('C');
     const source = require('fs').readFileSync(require.resolve('../services/invoice-followups'), 'utf8');
-    expect(source.match(/anchor: voidStopRearmAnchor\(existing, invoice\),/g)).toHaveLength(2);
+    // The one decision site (rearmDecisionFor) takes the anchor; the scheduler and the planner both go through it.
+    expect(source.match(/anchor: voidStopRearmAnchor\(existing, invoice\),/g)).toHaveLength(1);
     expect(source).not.toMatch(/anchor: existing\.anchor_at/);
   });
 
   test('the decision is one function: neither caller carries its own copy of the checks', () => {
     const source = require('fs').readFileSync(require.resolve('../services/invoice-followups'), 'utf8');
-    expect(source.match(/await voidStopRearmDecision\(existing/g)).toHaveLength(2);
+    expect(source.match(/return voidStopRearmDecision\(existing,/g)).toHaveLength(1);
+    expect(source.match(/await rearmDecisionFor\(/g)).toHaveLength(2);
     expect(typeof voidStopRearmDecision).toBe('function');
     const planner = source.slice(source.indexOf('async function planFollowupSequence'));
     expect(planner.slice(0, planner.indexOf('\n}\n'))).not.toMatch(/invoice_voided:prev=paused|paused_reason/);

@@ -413,6 +413,10 @@ const SEND_OUTCOME_RULES = [
   [(c) => c.unknown && !c.sent,
     (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code || 'delivery_uncertain', text: c.text,
       error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' })],
+  // A writer held the customer's comms or phone lock at the final handoff (nothing sent, the invoice as it was): try again.
+  [(c) => (c.json.sms?.code || c.json.code) === 'recipient_busy',
+    (c) => ({ ...c.base, failed: true, code: 'recipient_busy', text: c.text,
+      error: "The customer's contact details are being changed, so the text was not sent. Try again in a minute." })],
   // Both channels failed (or the route refused before sending). The invoice changed after the card was
   // shown (nothing claimed or sent): a fresh card is right.
   [(c) => c.status !== 200,

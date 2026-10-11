@@ -4,9 +4,16 @@ jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
   messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
+// The advisory locks the bar's text handoff tries (round 15): keys held by a writer in this test, and the order they were tried.
+const mockLockState = { held: new Set(), tried: [] };
 jest.mock('../models/db', () => {
   const database = jest.fn();
-  database.raw = jest.fn((sql) => sql);
+  database.raw = jest.fn((sql, bindings) => {
+    if (!/pg_try_advisory_xact_lock/.test(sql)) return sql;
+    const key = String(bindings[0]);
+    mockLockState.tried.push(key);
+    return Promise.resolve({ rows: [{ locked: !mockLockState.held.has(key) }] });
+  });
   database.transaction = jest.fn(async (callback) => callback(database));
   return database;
 });
@@ -210,6 +217,78 @@ describe('invoice SMS provider handoff', () => {
     await expect(precondition(db, invoice, { ...base, expectedSmsPhone: null })).resolves.toMatchObject({ blocked: true, code: 'recipient_changed' });
     // No approved phone (every other sender): not checked.
     await expect(precondition(unreadable, invoice, base)).resolves.toEqual({ ok: true });
+  });
+
+  describe('round 15: the final recipient read and the provider request run under the comms writers\' locks', () => {
+    const COMMS = 'customer-comms:cust-1';
+    const PHONE = '+19415550101';
+    const send = (extra = {}) => InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101', ...extra });
+    let dispatch;
+    beforeEach(() => {
+      mockLockState.held = new Set();
+      mockLockState.tried = [];
+      withInvoiceDepositSettlement.mockClear();
+      dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }));
+      withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoice));
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+      invoiceReads = [invoice, invoice, invoice, invoice];
+    });
+
+    test('free locks: comms is tried first, then the phone, both before the invoice row is locked, on the one connection', async () => {
+      await expect(send()).resolves.toMatchObject({ sent: true });
+      expect(mockLockState.tried).toEqual([COMMS, PHONE]);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      // The invoice lock joins the lock transaction (a savepoint on the same connection), so the pool needs no second connection.
+      expect(withInvoiceDepositSettlement.mock.calls[0][2]).toBe(db);
+    });
+
+    test('a writer holding the customer-comms lock: nothing is sent, the phone and invoice are never locked', async () => {
+      mockLockState.held.add(COMMS);
+      await expect(send()).rejects.toMatchObject({ code: 'recipient_busy', deliveryOutcome: 'not_sent' });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(mockLockState.tried).toEqual([COMMS]);
+      expect(withInvoiceDepositSettlement).not.toHaveBeenCalled();
+    });
+
+    test('a writer holding the phone lock: nothing is sent, the invoice is never locked', async () => {
+      mockLockState.held.add(PHONE);
+      await expect(send()).rejects.toMatchObject({ code: 'recipient_busy', deliveryOutcome: 'not_sent' });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(mockLockState.tried).toEqual([COMMS, PHONE]);
+      expect(withInvoiceDepositSettlement).not.toHaveBeenCalled();
+    });
+
+    test('a phone write that lands while the handoff waits for its locks never gets the old number: busy refuses, and the new number refuses as changed', async () => {
+      // The writer commits a new number and releases: the handoff gets its locks, re-reads, and finds a number the card never showed.
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550199' } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      await expect(send()).rejects.toMatchObject({ code: 'recipient_changed' });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('a send with no approved phone (the Invoices page) takes neither lock', async () => {
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' })).resolves.toMatchObject({ sent: true });
+      expect(mockLockState.tried).toEqual([]);
+    });
+
+    test('source order: customer-comms, then the phone, then the invoice row; both are try locks (no waiting)', () => {
+      const source = require('fs').readFileSync(require.resolve('../services/invoice.js'), 'utf8');
+      const fn = source.slice(source.indexOf('async function withRecipientLocks('), source.indexOf('async function withCheckedInvoiceProviderHandoff('));
+      expect(fn.indexOf('tryLockCustomerComms(trx,')).toBeGreaterThan(-1);
+      expect(fn.indexOf('tryLockCustomerComms(trx,')).toBeLessThan(fn.indexOf('tryLockSmsPhone(trx,'));
+      expect(fn).not.toMatch(/\blockCustomerComms\(|\blockSmsPhone\(/);
+      const handoff = source.slice(source.indexOf('async function withCheckedInvoiceProviderHandoff('), source.indexOf('// A queued invoice notice (invoice_send_deferred) replays'));
+      // The locks wrap the invoice settlement, never the other way round.
+      expect(handoff.indexOf('withRecipientLocks(recipientLocks, settle)')).toBeGreaterThan(handoff.indexOf('const settle ='));
+      expect(handoff).toMatch(/recipientLocks \? await withRecipientLocks\(recipientLocks, settle\) : await settle\(\)/);
+      expect(fn).toMatch(/return run\(trx\)/);
+      expect(source).toMatch(/LOCK ORDER[^]*customer-comms, then the SMS phone, then the invoice row/);
+    });
   });
 
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {

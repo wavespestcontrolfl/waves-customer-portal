@@ -468,6 +468,29 @@ describe('claimInvoiceForSend, the invoice text renderer and the closeout sweep 
       .toEqual(['readable', 'send_claim', 'linked_visit', 'ownership', 'approved_owner', 'recipient', 'collection_hold', 'balance']);
   }, 120000);
 
+  test('scheduleForInvoice\'s transaction and its domain helpers in invoice-followups.js are at or below 20', () => {
+    const { Linter } = require('eslint');
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice-followups.js'), 'utf8');
+    const messages = new Linter({ configType: 'flat' }).verify(source, [{
+      languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs' },
+      rules: { complexity: ['warn', 1] },
+    }]);
+    const complexityOf = (name) => {
+      const hit = messages.find((m) => m.ruleId === 'complexity' && m.message.includes(`'${name}'`));
+      return hit ? Number(/complexity of (\d+)/.exec(hit.message)[1]) : null;
+    };
+    for (const name of ['rearmDecisionFor', 'rearmPatch', 'reconcileExistingSequence', 'adoptionBlockedByAchFailures', 'newSequencePlanFor', 'scheduleForInvoice']) {
+      expect([name, complexityOf(name)]).toEqual([name, expect.any(Number)]);
+      expect([name, complexityOf(name) <= 20]).toEqual([name, true]);
+    }
+    // The transaction callback inside scheduleForInvoice (an anonymous arrow) is under the cap too: every message in its span.
+    const from = source.slice(0, source.indexOf('async function scheduleForInvoice(')).split('\n').length;
+    const to = source.slice(0, source.indexOf('// What scheduleForInvoice would do for this invoice row')).split('\n').length;
+    const inside = messages.filter((m) => m.ruleId === 'complexity' && m.line >= from && m.line < to);
+    expect(inside.length).toBeGreaterThan(0);
+    for (const m of inside) expect([m.line, Number(/complexity of (\d+)/.exec(m.message)[1]) <= 20]).toEqual([m.line, true]);
+  }, 120000);
+
   test('retryIssuedInvoiceCloseouts and its steps in invoice-issued-closeout.js are at or below 20', () => {
     const complexityOf = complexityReport('../services/invoice-issued-closeout.js');
     for (const name of ['retryIssuedInvoiceCloseouts', 'retryOneIssuedInvoice', 'pinDecisionFor', 'skipByVisitState']) {
