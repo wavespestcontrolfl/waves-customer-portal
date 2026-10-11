@@ -156,10 +156,10 @@ function lineAmount(item) {
   }
   return null;
 }
+// A listed line is either priced work (the extractor keeps only positive
+// amounts) or the pooled discount; a $0 row refuses before it is listed.
 function lineConsequence(amount) {
-  if (amount > 0) return 'schedule_and_invoice_by_hand';
-  if (amount < 0) return 'subtract_when_invoicing';
-  return 'schedule_by_hand_comped';
+  return amount < 0 ? 'subtract_when_invoicing' : 'schedule_and_invoice_by_hand';
 }
 
 function parseData(value) {
@@ -174,52 +174,95 @@ function parseData(value) {
 // invoices none of them (skipAutoSchedule + skipSetupInvoice), so each one
 // says the work is scheduled and billed by hand.
 //
+// The lines come from deriveCorrectiveWork (estimate-proposal-generate), the
+// ONE extractor the proposal draft uses for the same question: it walks every
+// persisted container (oneTime.items, specItems, nested results, the separate
+// engineResult container and its raw lineItems), collapses a row mirrored
+// across containers while keeping a legitimate repeat inside one container,
+// and merges a mapped item with its raw twin. Never a narrower parallel walk.
+// It is called with no stored total, so it only extracts; the reconciliation
+// against the aggregate (membership fee, pooled discount, the unitemized
+// refusal) is done here, where those lines are listed.
+//
+// Whatever the extractor cannot represent (a review-gated row, an accepted
+// $0 row, mirrored rows whose amounts disagree, more than 24 rows) refuses:
+// the card would otherwise name less work than the customer bought. The page
+// accept is not carded and stays open for those estimates.
+//
 // The WaveGuard membership fee is the one component the engine counts in
 // oneTime.total but keeps OUT of oneTime.items (v1-legacy-mapper), so it is
 // listed as its own line from the fee field; a line sum that still falls
 // short of the aggregate is refused by unitemizedOneTimeRefusal below.
-const MEMBERSHIP_FEE_PATHS = [
-  ['oneTime', 'membershipFee'], ['result', 'oneTime', 'membershipFee'], ['results', 'oneTime', 'membershipFee'],
-  ['result', 'results', 'oneTime', 'membershipFee'], ['engineResult', 'oneTime', 'membershipFee'],
-];
-const readPath = (data, path) => path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), data);
+//
+// The one-time containers the mapper and the engine persist, in the order
+// the proposal generator reads them. Both the aggregate total and the
+// membership fee are read from this ONE list, so a shape one resolver sees
+// is never invisible to the other.
+function oneTimeContainers(data) {
+  const candidates = [
+    data, data?.result, data?.results, data?.result?.results, data?.result?.result,
+    data?.engineResult, data?.engineResult?.results, data?.engineResult?.result,
+  ];
+  const seen = new Set();
+  return candidates.filter((c) => {
+    if (!c || typeof c !== 'object' || seen.has(c)) return false;
+    seen.add(c);
+    return true;
+  });
+}
 function membershipFeeLine(data) {
-  for (const path of MEMBERSHIP_FEE_PATHS) {
-    const n = Number(readPath(data, path));
+  for (const container of oneTimeContainers(data)) {
+    const n = Number(container.oneTime?.membershipFee);
     if (Number.isFinite(n) && n > 0) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(n), consequence: 'invoice_by_hand' };
   }
   return null;
 }
-// The parser reads `result` (or the document itself), never `engineResult`:
-// an estimate stored with only an engineResult container, or with a mapped
-// `result` beside a separate engineResult, keeps those rows invisible unless
-// the container is wrapped, exactly as estimate-proposal-generate does. The
-// same row mirrored across containers is collapsed by content identity.
-function oneTimeItemsAcrossContainers(data, converter) {
-  const read = (doc) => converter.estimateOneTimeItemsFromData(doc, { collapseMirrored: true });
-  const engine = data?.engineResult && typeof data.engineResult === 'object' && data.engineResult !== data.result ? data.engineResult : null;
-  const rows = [...read(data), ...(engine ? read({ result: engine }) : [])];
-  const seen = new Set();
-  return rows.filter((item) => {
-    const key = [String(item.service || '').toLowerCase(), String(item.name || item.label || '').trim().toLowerCase(), lineAmount(item)].join('|');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+
+function unrepresentableRefusal(warning) {
+  const why = String(warning || '').replace(/^One-time work was not generated: /, '').replace(/\s*Author the corrective work manually.*$/i, '').trim();
+  return { message: `The bar cannot list this estimate's one-time work: ${why}. Accept it from the estimate page.`, statusCode: 409, code: 'one_time_unrepresentable', reason: why };
+}
+
+// The canonical rows, or the refusal when the extractor cannot represent
+// them. A row below zero (a bundle discount persisted as its own item) is
+// dropped by the extractor, so it is only representable through the pooled
+// discount line, which needs an aggregate to pool against.
+function canonicalOneTimeLines(estimate, data) {
+  const { deriveCorrectiveWork } = require('./estimate-proposal-generate');
+  const { correctiveWork, warning } = deriveCorrectiveWork(data, { ...estimate, onetime_total: null }, null);
+  if (warning) return { lines: [], refusal: unrepresentableRefusal(warning) };
+  const lines = (correctiveWork || []).map((w) => ({ kind: 'one_time_line', name: String(w.label || 'One-time service').trim(), amount: round2(w.amount), consequence: lineConsequence(w.amount) }));
+  return { lines, refusal: null };
+}
+// The extractor drops a row whose amount resolves to zero or below without a
+// word: an accepted $0 row is comped work the card must not lose, and a
+// bundle discount persisted as its own row is only representable through
+// the pooled discount line, which needs an aggregate to pool against. Both
+// are found with the converter's own item reader over the same containers.
+function unrepresentableRow(data, converter, { hasTotal }) {
+  if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return null;
+  const docs = [data, ...oneTimeContainers(data).filter((c) => c !== data).map((c) => ({ result: c }))];
+  for (const doc of docs) {
+    for (const item of converter.estimateOneTimeItemsFromData(doc)) {
+      const amount = lineAmount(item);
+      const name = String(item.name || item.label || item.service || 'a one-time row').trim();
+      if (amount === 0) return `${name} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+      if (amount != null && amount < 0 && !hasTotal) return `${name} is a discount row with no one-time total to apply it to`;
+    }
+  }
+  return null;
 }
 
 function oneTimeLineEffects(estimate, converter) {
-  if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return [];
   const data = parseData(estimate.estimate_data);
-  const items = oneTimeItemsAcrossContainers(data, converter);
-  const lines = items
-    .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: lineAmount(item) }))
-    .filter((line) => line.amount != null)
-    .map((line) => ({ kind: 'one_time_line', ...line, consequence: lineConsequence(line.amount) }));
+  const canonical = canonicalOneTimeLines(estimate, data);
+  if (canonical.refusal) return canonical;
+  const dropped = unrepresentableRow(data, converter, { hasTotal: oneTimeAggregateTotal(estimate) != null });
+  if (dropped) return { lines: [], refusal: unrepresentableRefusal(dropped) };
   const fee = membershipFeeLine(data);
-  const listed = fee ? [...lines, fee] : lines;
+  const listed = fee ? [...canonical.lines, fee] : canonical.lines;
   const discount = pooledDiscountLine(estimate, listed);
-  return discount ? [...listed, discount] : listed;
+  return { lines: discount ? [...listed, discount] : listed, refusal: null };
 }
 
 // A legacy estimate can hold a manual discount only in the aggregate
@@ -236,20 +279,16 @@ function pooledDiscountLine(estimate, lines) {
 }
 
 // The one-time total the estimate carries as a plain number: the row's
-// onetime_total or the engine's aggregate, whichever is positive first. A
-// legacy estimate can carry only this aggregate and no priced item, so the
-// lines above are empty while the customer still owes the amount.
-const ONE_TIME_AGGREGATE_PATHS = [
-  ['onetime_total'], ['oneTime', 'total'], ['results', 'oneTime', 'total'], ['result', 'oneTime', 'total'],
-  ['result', 'results', 'oneTime', 'total'], ['engineResult', 'oneTime', 'total'],
-];
+// onetime_total or the first aggregate the containers above carry. A legacy
+// estimate can carry only this aggregate and no priced item, so the lines
+// above are empty while the customer still owes the amount.
 //
 // An explicit zero is authoritative: the mapper lets a positive item be
 // discounted to an aggregate of exactly $0, and the customer accepted $0.
 // The first field that holds a number decides; null only when none does.
 function oneTimeAggregateTotal(estimate) {
   const data = parseData(estimate.estimate_data);
-  const candidates = [estimate.onetime_total, ...ONE_TIME_AGGREGATE_PATHS.map((path) => readPath(data, path))];
+  const candidates = [estimate.onetime_total, ...oneTimeContainers(data).map((c) => c.oneTime?.total)];
   for (const value of candidates) {
     if (value == null || value === '') continue;
     const n = Number(value);
