@@ -386,20 +386,35 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
   };
 }
 
-// The short form's customer text. Without the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) it is today's flags.
-// With it, the tech's choices stand in for them and the fixed-text mode stays (the Wrap-up shows only
-// where GATE_FAST_COMPLETE_RECAP is on): untouched, the one change is requestReview true (owner 2026-10-10).
-function shortFormCustomerText(wrapUp, recapEnabled) {
-  const today = recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS;
-  return wrapUp.enabled ? { ...wrapUp.fields(today), customerRecapMode: today.customerRecapMode } : today;
+// The short re-service form's Wrap-up (GATE_FAST_COMPLETE_WRAP_UP), as one seam: the gate, the spray
+// evidence, the section's state and the submit-time check. `customerText()` is the body's customer-text
+// flags: without the section they are today's (the fixed text's flags, or all false while
+// GATE_FAST_COMPLETE_RECAP is off); with it the tech's choices stand in and the fixed-text mode stays,
+// so untouched the one change is requestReview true (owner 2026-10-10). The section shows only where the
+// fixed customer text is on: without that text the customer is sent nothing today, and the Wrap-up must
+// not turn one on. The fixed text carries no pay link and the form posted no `reviewTiming`.
+// `passesCheck()` runs the full form's review checks before a submit; false = do not post (a stored
+// attempt replays its body unchanged, so it skips them; the check answers false after unmount).
+function useShortFormWrapUp({ ctx, service, submission, request, rows, form, onChecking }) {
+  const recapEnabled = recapOn(service);
+  const wrapUp = useWrapUp({
+    gate: ctx.wrapUp === true && recapEnabled,
+    submission,
+    service,
+    request,
+    base: `/admin/dispatch/${service?.id}`,
+    applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => rowMethod(row, form.method)),
+    omitAutoTiming: true,
+    noPayLink: true,
+    onChecking,
+  });
+  const customerText = () => {
+    const today = recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS;
+    return wrapUp.enabled ? { ...wrapUp.fields(today), customerRecapMode: today.customerRecapMode } : today;
+  };
+  const passesCheck = async () => !wrapUp.needsCheck() || wrapUp.check();
+  return { wrapUp, customerText, passesCheck };
 }
-
-// The short form's Wrap-up gate: the context says so and the fixed customer text is on. Without that text
-// the customer is sent nothing today, and the Wrap-up must not turn one on, so it is not shown at all.
-const shortFormWrapUpGate = (ctx, service) => ctx.wrapUp === true && service?.recapEnabled === true;
-
-// Whether the short form's products show spray evidence (lib/spray-evidence.js).
-const shortFormSprayEvidence = (rows, form) => rowsShowSpray(rows.filter((row) => row.active), (row) => rowMethod(row, form.method));
 
 // The report flow takes visits the house mix is not for (an initial
 // cleanout), so it seeds only where the recap modal and the full form would;
@@ -811,19 +826,14 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     }
     setCheckingStock(false);
   };
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. A re-service asks for a review by default
-  // (owner 2026-10-10); its fixed text carries no pay link and the short form posted no `reviewTiming`.
-  const wrapUp = useWrapUp({
-    gate: shortFormWrapUpGate(ctx, service), submission, service, request, base: `/admin/dispatch/${serviceId}`, applicationsRecorded: shortFormSprayEvidence(rows, form), omitAutoTiming: true, noPayLink: true, onChecking: onWrapChecking,
-  });
+  const { wrapUp, customerText, passesCheck } = useShortFormWrapUp({ ctx, service, submission, request, rows, form, onChecking: onWrapChecking });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
-    // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
-    if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
+    if (!(await passesCheck())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
       () => completionBody(form, rows, {
-        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, customerText: shortFormCustomerText(wrapUp, recapOn(service)),
+        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, customerText: customerText(),
         officeNote: voice.enabled ? voice.officeNote : '',
       }),
       `${names} · ${targetsOf(form).join(', ')}`,
