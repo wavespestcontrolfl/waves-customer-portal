@@ -2436,6 +2436,12 @@ async function alertRegistrationFailure({ scheduledServiceId, customerId, source
 // ══════════════════════════════════════════════════════════════
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
+// The rows the deferred-confirmation recovery sweep (checkAndSendReminders) picks up: a live reminder whose
+// confirmation was never marked sent. A caller that decides a confirmation must NOT go out closes the row by
+// setting confirmation_sent=true, which takes it out of this set. Exported so that callers and tests use the
+// sweep's own filter.
+const STRANDED_CONFIRMATION_FILTER = { cancelled: false, confirmation_sent: false, windows_preclosed: false };
+
 const AppointmentReminders = {
 
   // Exposed for route-level registration wrappers (spawned-visit path in
@@ -3195,7 +3201,7 @@ const AppointmentReminders = {
         // windows_preclosed belt-and-braces: placeholders insert with the
         // confirmation already closed, but a pre-closed row must never be
         // healable into an 08:00 confirmation even if a flag write regresses.
-        .where({ cancelled: false, confirmation_sent: false, windows_preclosed: false })
+        .where(STRANDED_CONFIRMATION_FILTER)
         .where('created_at', '<', staleCutoff)
         .whereNotExists(function () {
           this.select(1)
@@ -5872,6 +5878,7 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
 // The confirmation and reminder toggles and channel, as the senders read them (booking-contact-state.js pins them).
 AppointmentReminders.getReminderPrefs = getReminderPrefs;
+AppointmentReminders.STRANDED_CONFIRMATION_FILTER = STRANDED_CONFIRMATION_FILTER;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({

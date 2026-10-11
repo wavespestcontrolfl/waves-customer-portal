@@ -356,6 +356,12 @@ async function initPurchase({ customerId, clicked }) {
   const token = crypto.randomBytes(16).toString('hex');
   const { superseded, estimate, purchase } = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_init:${customerId}`]);
+    // Customer row first, then the per-customer estimate lock below: the Intelligence Bar's start_program holds the
+    // customer row FOR UPDATE and then waits for the estimate lock, while the estimate insert below takes a KEY
+    // SHARE on the same row through its customer foreign key. Taking the row after the estimate lock is the
+    // reverse order (AB-BA). FOR KEY SHARE is the weakest lock that queues behind that FOR UPDATE; it is exactly
+    // the lock the insert takes anyway, and unlike FOR UPDATE it does not block a concurrent customer edit.
+    await trx('customers').where({ id: customerId }).forKeyShare().first('id');
     const priorOpen = await trx('one_tap_purchases')
       .where({ customer_id: customerId })
       .whereIn('status', ['initiated', 'reserved'])

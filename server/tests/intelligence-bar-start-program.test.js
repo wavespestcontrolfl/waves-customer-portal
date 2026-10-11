@@ -825,6 +825,54 @@ describe('commit', () => {
     expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
   });
 
+  describe('ambiguous commit of the tier and bill step (round 8): the receipt reads what landed', () => {
+    const LANDED = [{ family_key: 'pest_control', monthly_rate: '41.33' }, { family_key: 'lawn_care', monthly_rate: '61.33' }];
+    // The step's own write fails with a lost acknowledgement; `landedState` says what the database holds afterwards.
+    async function runLostAck(landedState) {
+      const version = await approvedVersion();
+      let reconciling = false;
+      bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      PlanRateLedger.setLineForScalarWrite.mockImplementation(async () => {
+        reconciling = true;
+        if (landedState === 'landed') tables.customers = [memberCustomer({ waveguard_tier: 'Silver', waveguard_tier_source: 'manual', monthly_rate: 102.66 })];
+        if (landedState === 'mixed') tables.customers = [memberCustomer({ waveguard_tier: 'Silver', waveguard_tier_source: 'manual', monthly_rate: 102.66 })];
+        throw Object.assign(new Error('Connection terminated unexpectedly'), { code: 'ECONNRESET' });
+      });
+      PlanRateLedger.loadComponents.mockImplementation(async () => {
+        if (reconciling && landedState === 'unreadable') throw new Error('read failed');
+        return reconciling && landedState === 'landed' ? LANDED : PEST_LINE;
+      });
+      return run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    }
+
+    test('both the customer row and the ledger lines landed: the step is reported done', async () => {
+      const result = await runLostAck('landed');
+      expect(result.partial).toBeUndefined();
+      expect(result).toMatchObject({ success: true, tier: { after: 'Silver' }, monthly_bill: { before: 41.33, after: 102.66 } });
+      expect(executionOutcome(result)).not.toBe('outcome_unknown');
+    });
+
+    test('neither landed: the monthly bill is reported not done', async () => {
+      const result = await runLostAck('none');
+      expect(result).toMatchObject({ success: true, partial: true });
+      expect(result.not_done).toContain('monthly_bill');
+    });
+
+    test('the row moved but the ledger lines did not: outcome unknown, check by hand', async () => {
+      const result = await runLostAck('mixed');
+      expect(result.outcome_unknown).toBe(true);
+      expect(result.error).toContain('Check this customer');
+      expect(result.series_booked).toMatchObject({ series_id: 'series-1', visits_booked: 4 });
+      expect(executionOutcome(result)).toBe('outcome_unknown');
+    });
+
+    test('the follow-up read fails: outcome unknown, check by hand', async () => {
+      const result = await runLostAck('unreadable');
+      expect(result.outcome_unknown).toBe(true);
+      expect(executionOutcome(result)).toBe('outcome_unknown');
+    });
+  });
+
   test('fewer visits than the card promised: tier and bill are not applied, the shortfall is named', async () => {
     const version = await approvedVersion();
     createScheduleBooking.mockResolvedValue({ status: 201, json: {

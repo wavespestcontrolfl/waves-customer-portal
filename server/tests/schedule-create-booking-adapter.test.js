@@ -276,6 +276,44 @@ describe('createScheduleBooking runs the POST / handler', () => {
       keySpy.mockRestore(); confirmSpy.mockRestore(); welcomeSpy.mockRestore();
     });
 
+    test('drift closes the unsent reminder row so the recovery sweep cannot pick it up, and leaves an audit row (round 8)', async () => {
+      const Contact = require('../services/booking-contact-state');
+      const AppointmentReminders = require('../services/appointment-reminders');
+      const { sendDeferredConfirmations } = require('../routes/admin-schedule')._test;
+      const keySpy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-b');
+      const confirmSpy = jest.spyOn(AppointmentReminders, 'sendConfirmation').mockResolvedValue(true);
+      const reminder = { scheduled_service_id: 'visit-1', cancelled: false, confirmation_sent: false, windows_preclosed: false };
+      const audits = [];
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'appointment_reminders') {
+          c.update = jest.fn(async (patch) => { Object.assign(reminder, patch); return 1; });
+        }
+        if (table === 'activity_log') c.insert = jest.fn(async (row) => { audits.push(row); return [1]; });
+        return c;
+      });
+      // The recovery sweep's own filter (exported from the service that runs it) selects the row before the booking.
+      const sweepSelects = (row) => Object.entries(AppointmentReminders.STRANDED_CONFIRMATION_FILTER).every(([k, v]) => row[k] === v);
+      expect(sweepSelects(reminder)).toBe(true);
+      await sendDeferredConfirmations({
+        customerId: 'cust-1', customer: { id: 'cust-1' }, svc: { id: 'visit-1' }, recurringPattern: 'monthly',
+        createdAppointments: [{ id: 'visit-1', confirmation: true }], req: { approvedContact: 'key-a' },
+      });
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(sweepSelects(reminder)).toBe(false);
+      expect(audits).toHaveLength(1);
+      expect(audits[0]).toMatchObject({ customer_id: 'cust-1', action: 'confirmation_suppressed_contact_drift' });
+      expect(audits[0].description).toContain('send the confirmation by hand');
+      keySpy.mockRestore(); confirmSpy.mockRestore();
+    });
+
+    test('the recovery sweep reads the exported filter, not its own copy of the conditions', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
+      expect(src).toContain('.where(STRANDED_CONFIRMATION_FILTER)');
+      expect(require('../services/appointment-reminders').STRANDED_CONFIRMATION_FILTER).toEqual({ cancelled: false, confirmation_sent: false, windows_preclosed: false });
+    });
+
     test('approvedConsultations threads to the rail: a consultation the card did not list refuses with CONSULTATIONS_CHANGED', async () => {
       const Consultations = require('../services/consultation-outcomes');
       const spy = jest.spyOn(Consultations, 'openConsultationCandidates').mockResolvedValue([{ outcome_id: 9, outcome: 'warm' }]);

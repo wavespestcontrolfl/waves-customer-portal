@@ -9167,9 +9167,29 @@ async function bookingContactDrifted(c) {
   if (c.contactDrifted === undefined) {
     const key = await require('../services/booking-contact-state').currentContactKey(c.customerId);
     c.contactDrifted = key !== c.req.approvedContact;
-    if (c.contactDrifted) logger.warn(`[schedule] customer ${c.customerId}: phone, email or notification settings changed after the card; the booking confirmation and welcome were not sent`);
+    if (c.contactDrifted) await suppressConfirmationsOnContactDrift(c);
   }
   return c.contactDrifted;
+}
+
+// Drift: the confirmation must not go to the new recipients, and the recovery sweep (shared by every booking path,
+// so it does not know the pin) would send it within minutes to a row still marked unsent. Close the rows the way the
+// preference skip does (confirmation_sent=true, which also lets the 72h and 24h reminders run), and leave an audit
+// row so a person checks the recipient and sends the confirmation by hand.
+async function suppressConfirmationsOnContactDrift(c) {
+  const ids = c.createdAppointments.map((a) => a.id);
+  logger.warn(`[schedule] customer ${c.customerId}: phone, email or notification settings changed after the card; the booking confirmation and welcome were not sent`);
+  try {
+    await db('appointment_reminders').whereIn('scheduled_service_id', ids).where({ confirmation_sent: false })
+      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+    await db('activity_log').insert({
+      customer_id: c.customerId,
+      action: 'confirmation_suppressed_contact_drift',
+      description: `Visit(s) ${ids.join(', ')}: the customer's phone, email or notification settings changed after the program card was approved, so the booking confirmation and welcome were not sent. Check the recipient, then send the confirmation by hand.`,
+    });
+  } catch (e) {
+    logger.error(`[schedule] could not close the unsent confirmation(s) for ${ids.join(', ')} after contact drift (recovery may send to the new recipients): ${e.message}`);
+  }
 }
 
 async function sendDeferredConfirmations(c) {

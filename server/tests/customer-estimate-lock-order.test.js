@@ -83,6 +83,18 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(src.slice(src.indexOf('const existingDraft'), start)).toMatch(/status: 'draft'[\s\S]*whereNull\('archived_at'\)/);
   });
 
+  test('one-tap init takes the customer row before the estimate lock, as start_program does (round 8)', () => {
+    const src = read('../services/one-tap-purchase');
+    const row = src.indexOf("await trx('customers').where({ id: customerId }).forKeyShare().first('id');");
+    const leaf = src.indexOf('lockCustomerEstimates(trx, customerId)');
+    const insert = src.indexOf("trx('estimates').insert(", leaf);
+    expect(row).toBeGreaterThan(-1);
+    expect(leaf).toBeGreaterThan(row);
+    expect(insert).toBeGreaterThan(leaf);
+    // start_program (which holds the row FOR UPDATE, then the estimate lock) is the other side of the pair.
+    expect(read('../services/intelligence-bar/start-program')).toContain('forUpdate()');
+  });
+
   test('the lock module exports only the two lock functions', () => {
     expect(Object.keys(require('../utils/customer-estimate-lock')).sort()).toEqual(['lockCustomerEstimates', 'lockCustomerEstimatesForEstimate']);
   });

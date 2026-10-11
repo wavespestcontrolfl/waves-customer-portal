@@ -913,6 +913,38 @@ async function applyTierAndBill(plan) {
   });
 }
 
+// After a failed or ambiguous tier-and-bill step (an acknowledgement lost after COMMIT looks like a failure),
+// read what the step writes: the customer's monthly rate and tier, and the ledger lines. Returns 'done' when
+// every write landed, 'not_done' when the bill and ledger are still exactly what the card started from, and
+// 'unknown' when the read fails or the state is neither (a concurrent edit, or a partial state). The step is
+// one transaction, so a mix is never its own doing.
+async function reconcileTierAndBill(plan) {
+  try {
+    const PlanRateLedger = require('../plan-rate-ledger');
+    const RateChange = require('./rate-change');
+    const row = await db('customers').where('id', plan.customerId).first('waveguard_tier', 'waveguard_tier_source', 'monthly_rate');
+    if (!row) return 'unknown';
+    const components = await PlanRateLedger.loadComponents(db, plan.customerId);
+    if (RateChange.ledgerPin(components, row.monthly_rate) === plan.ledgerPin) return 'not_done';
+    const byFamily = new Map(components.map((c) => [c.family_key, round(c.monthly_rate)]));
+    const linesLanded = plan.bill.lines.every((l) => (byFamily.get(l.family) || 0) === round(l.after));
+    const landed = round(row.monthly_rate) === round(plan.bill.totalAfter) && linesLanded
+      && row.waveguard_tier === plan.tier && row.waveguard_tier_source === 'manual';
+    return landed ? 'done' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+// The step failed to confirm and the read cannot say what landed: the booking step's own wording and shape.
+function tierAndBillUnknown(plan, booked, err) {
+  return {
+    outcome_unknown: true,
+    series_booked: booked,
+    error: `The visits are booked (${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}). The tier and monthly bill step ended without a clear answer (${err.code || err.message}), and a follow-up read could not say whether it landed. Check this customer's WaveGuard tier and monthly bill on the customer profile before trying again. Do not run this card again: the visits are already booked.`,
+  };
+}
+
 // The customer row as it is after the booking (its plan sync may have moved
 // the tier), for a partial receipt that reports the real state.
 async function customerStateAfterBooking(customerId) {
@@ -1063,10 +1095,19 @@ async function commitProgram(input, actionContext) {
     await applyTierAndBill(plan);
   } catch (err) {
     logger.error(`[intelligence-bar] start_program tier/bill step failed for customer ${plan.customerId} after booking ${created.id}: ${err.message}`);
+    // An acknowledgement lost after COMMIT lands here too: read what the step writes before reporting.
+    // A drift refusal is thrown by this step before its first write: it never needs a reconcile read.
+    const landed = err.drift ? 'not_done' : await reconcileTierAndBill(plan);
+    if (landed === 'done') return programStartedReceipt(plan, created, booked, warnings);
+    if (landed === 'unknown') return tierAndBillUnknown(plan, booked, err);
     const state = await customerStateAfterBooking(plan.customerId);
     return partialReceipt(plan, booked, state,
       `${err.drift ? err.message : `the update failed (${err.code || err.message})`} Set them with update_customer, or cancel the series on the Schedule screen`);
   }
+  return programStartedReceipt(plan, created, booked, warnings);
+}
+
+function programStartedReceipt(plan, created, booked, warnings) {
   logger.info(`[intelligence-bar] start_program: customer ${plan.customerId}, series ${created.id}, ${plan.family} ${money(plan.bill.newLine)}, tier ${plan.tier}`);
   return {
     success: true,
