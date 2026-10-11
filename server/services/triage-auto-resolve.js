@@ -1272,11 +1272,21 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
     .where({ source: 'admin-callback', processing_status: 'spam' })
     .whereNull('processing_token')
     .whereIn(conn.raw("metadata->>'relatedCallId'"), callIds)
-    .select('to_phone', conn.raw("metadata->>'relatedCallId' as parent_id"));
+    .select('to_phone', 'customer_id', conn.raw("metadata->>'relatedCallId' as parent_id"));
   if (!children.length) return;
+  // The same eligibility the processor's writer applies (lockCallbackPair):
+  // the parent is an inbound VOICEMAIL, and the callback went to its number
+  // or its customer. A callback from the Call Log action on an answered call
+  // proves nothing about that call's asks.
+  const parents = new Map((await conn('call_log').whereIn('id', [...new Set(children.map((c) => String(c.parent_id)))])
+    .select('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status')).map((p) => [String(p.id), p]));
+  const voicemail = (p) => p.call_outcome === 'voicemail' || p.answered_by === 'voicemail' || p.processing_status === 'voicemail';
   const key = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length === 11 && d.startsWith('1') ? d.slice(1) : d; };
   for (const item of candidates) {
-    const hit = children.some((c) => String(c.parent_id) === String(item.call_log_id) && key(c.to_phone) && key(c.to_phone) === key(item.call_from_phone));
+    const parent = parents.get(String(item.call_log_id));
+    if (!parent || !voicemail(parent)) continue;
+    const hit = children.some((c) => String(c.parent_id) === String(item.call_log_id)
+      && ((key(c.to_phone) && key(c.to_phone) === key(parent.from_phone)) || (!!parent.customer_id && parent.customer_id === c.customer_id)));
     if (hit) flag(item.id, 'callback_spam');
   }
 }
@@ -2577,20 +2587,23 @@ function loadStaffAddressEvidence(facts, flag) {
 async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   const evidence = new Map();
   const { isEnabled } = require('../config/feature-gates');
-  if (!ignoreGate && !isEnabled('triageAutoResolveEvidence')) return evidence;
-  const candidates = items.filter((i) => EVIDENCE_CODES.has(i.reason_code) && i.status === 'open');
-  if (!candidates.length) return evidence;
   const flag = (id, key) => {
     const cur = evidence.get(id) || {};
     cur[key] = true;
     evidence.set(id, cur);
   };
+  // callback_spam evidence answers to GATE_CALLBACK_SPAM_CLOSES_PARENT alone
+  // (its own check inside): the verdict's fallback must not hide behind the
+  // general evidence gate.
+  await loadCallbackSpamEvidence(conn, items.filter((i) => i.status === 'open'), flag);
+  if (!ignoreGate && !isEnabled('triageAutoResolveEvidence')) return evidence;
+  const candidates = items.filter((i) => EVIDENCE_CODES.has(i.reason_code) && i.status === 'open');
+  if (!candidates.length) return evidence;
   try {
     stampSpecificServiceKeys(candidates, await conn('services').select('service_key', 'name', 'engine_keys', 'is_active'));
   } catch (e) {
     logger.warn(`[triage-auto-resolve] catalog read for specific-service keys skipped: ${e.message}`);
   }
-  await loadCallbackSpamEvidence(conn, candidates, flag);
   await loadEstimateEvidence(conn, candidates, flag);
   await loadStaffEstimateEvidence(conn, candidates, flag);
   await loadEmailEvidence(conn, candidates, flag);

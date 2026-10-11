@@ -2059,6 +2059,7 @@ const CUSTOMER_LEFT = "customer_left";
 // (closeParentOnCallbackSpam); the watchdog's sweep is the fallback.
 const CALLBACK_SPAM = "callback_spam";
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
+  if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
   const row = await conn("call_log")
     .where("direction", "like", "outbound%")
