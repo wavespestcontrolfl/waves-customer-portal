@@ -34,7 +34,11 @@
  *   - Refused too: a customer whose completed visit is still finalizing its billing
  *     (billing_completion_pending: the completion attempt row is the durable fence),
  *     and any live upcoming visit that carries a price, a prepayment,
- *     create-invoice-on-complete or an invoice of any kind (billing_visits_priced).
+ *     create-invoice-on-complete or an invoice of any kind (billing_visits_priced),
+ *     and any live unpriced estimate-linked visit whose combined first-application invoice
+ *     was voided (or canceled without a setup fee) with no live replacement
+ *     (billing_visits_held: completion's lane-independent hold,
+ *     billing-lane.js combinedInvoiceVoidedWithoutLiveReplacement, parks it for manual billing).
  *     The card does not predict per-visit charges (price, tax, surcharge,
  *     prepayment, invoices and dues coverage all move completion's amount); the
  *     customer page shows each visit's charge.
@@ -175,17 +179,31 @@ const VISIT_HARD_LIMIT = 2000;
 async function withVisitInvoices(dbh, visits, customerId, { lock = false } = {}) {
   const { completionInvoicesOnVisits } = require('../completion-invoice-candidate');
   const { findFirstApplicationInvoiceForEstimateService } = require('../estimate-first-application-invoice');
+  const { combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit } = require('../billing-lane');
   const rows = await completionInvoicesOnVisits(dbh, visits.map((v) => v.id), { lock });
   const own = new Map();
   for (const r of rows) if (!own.has(String(r.scheduled_service_id))) own.set(String(r.scheduled_service_id), r.id);
   const out = [];
   for (const v of visits) {
-    const row = { ...v, invoice_id: own.get(String(v.id)) ?? null, sibling_invoice_id: null };
+    const row = {
+      ...v, invoice_id: own.get(String(v.id)) ?? null, sibling_invoice_id: null, void_hold_invoice_id: null,
+    };
     // Only a visit from an accepted estimate can have a sibling invoice, and one
     // that carries nothing yet is the only one that needs the lookup.
     if (v.source_estimate_id && !hasOwnBilling(row)) {
       const prior = await findFirstApplicationInvoiceForEstimateService({ ...v, customer_id: customerId }, dbh, lock ? { lockRows: true, noWait: true } : {});
       row.sibling_invoice_id = [prior.invoice, prior.liveBeside, prior.canceledSetupFee].find(Boolean)?.id ?? null;
+      // Completion's lane-independent hold (complete-scheduled-service.js, after the lookup above finds
+      // nothing): an unpriced, estimate-linked, sibling-eligible visit whose combined invoice is
+      // void / canceled with no live recognized replacement is parked for manual billing. That lookup
+      // excludes a void invoice, so it reads "none"; the same canonical function completion asks is
+      // asked here, read errors propagating (never read as "no hold").
+      if (!row.sibling_invoice_id && isSiblingCoverageEligibleVisit({
+        sourceEstimateId: v.source_estimate_id, hasOwnPrice: false, isCallback: !!v.is_callback, serviceType: v.service_type,
+      })) {
+        const voided = await combinedInvoiceVoidedWithoutLiveReplacement({ ...v, customer_id: customerId }, dbh, lock ? { lockRows: true, noWait: true } : {});
+        row.void_hold_invoice_id = voided?.id ?? null;
+      }
     }
     out.push(row);
   }
@@ -231,7 +249,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   return ordered();
 }
 
-const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_id', 'sibling_invoice_id'];
+const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_id', 'sibling_invoice_id', 'void_hold_invoice_id'];
 
 function visitsPin(visits) {
   return JSON.stringify((visits || []).map((v) => PIN_COLUMNS.map((c) => {
@@ -583,6 +601,11 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   const priced = pricedVisitCount(visits);
   if (priced > 0) {
     return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+  }
+  const voidHeld = visits.find((v) => v.void_hold_invoice_id);
+  if (voidHeld) {
+    const label = `${voidHeld.service_type || 'An upcoming visit'}${voidHeld.scheduled_date ? ` on ${String(voidHeld.scheduled_date instanceof Date ? voidHeld.scheduled_date.toISOString() : voidHeld.scheduled_date).slice(0, 10)}` : ''}`;
+    return refuse(`${label} has a voided first-application invoice with no replacement; completion will park it for manual billing. Resolve it on the invoice page first. Nothing was changed.`, 'billing_visits_held');
   }
   const pageRefusal = await customerPageRefusal(dbh, customerId, row, fields);
   if (pageRefusal) return pageRefusal;

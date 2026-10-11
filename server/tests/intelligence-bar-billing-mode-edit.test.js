@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, linePrices: {}, addonLines: {}, hosts: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, voidedCombined: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, linePrices: {}, addonLines: {}, hosts: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -102,6 +102,11 @@ jest.mock('../utils/customer-billing-lock', () => ({
 jest.mock('../services/estimate-first-application-invoice', () => ({
   findFirstApplicationInvoiceForEstimateService: jest.fn(async (svc) => mockState.siblingInvoices[String(svc.id)] || { invoice: null, liveBeside: null, canceledSetupFee: null }),
 }));
+// Completion's lane-independent void hold (billing-lane.js): mockState.voidedCombined = { visitId: invoiceRow }.
+jest.mock('../services/billing-lane', () => ({
+  ...jest.requireActual('../services/billing-lane'),
+  combinedInvoiceVoidedWithoutLiveReplacement: jest.fn(async (svc) => mockState.voidedCombined[String(svc.id)] || null),
+}));
 jest.mock('../services/recurring-series-topup', () => ({ eligibleSeriesParentIds: jest.fn(async () => mockState.seriesIds) }));
 // The top-up's own billable-amount verdict (admin-schedule.js), with its own tests in recurring-series-topup.test.js.
 jest.mock('../routes/admin-schedule', () => ({
@@ -179,6 +184,7 @@ beforeEach(() => {
   mockState.dues = [];
   mockState.unbillableSeries = new Set();
   mockState.siblingInvoices = {};
+  mockState.voidedCombined = {};
   mockState.orphan = null;
   mockState.ambiguous = null;
   mockState.inFlight = false;
@@ -1508,6 +1514,59 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(head).not.toContain('completed visit');
       const { NON_PERFORMED_VISIT_OUTCOMES } = require('../services/visit-outcomes');
       NON_PERFORMED_VISIT_OUTCOMES.forEach((o) => expect(head).toContain(o.replace(/_/g, ' ')));
+    });
+  });
+
+  describe('Codex round 24: completion\'s void hold on a combined first-application invoice', () => {
+    const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
+    const { combinedInvoiceVoidedWithoutLiveReplacement } = require('../services/billing-lane');
+    const run = (pin) => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: pin });
+
+    test('a void combined invoice with no replacement refuses at the card, naming the visit', async () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [clean('s1', { source_estimate_id: 'est-1' })];
+      mockState.voidedCombined = { s1: { id: 'inv-void', status: 'void' } };
+      expect(await propose(PER_APP)).toEqual({
+        code: 'billing_visits_held',
+        error: 'Pest Control on 2099-09-01 has a voided first-application invoice with no replacement; completion will park it for manual billing. Resolve it on the invoice page first. Nothing was changed.',
+      });
+      expect(combinedInvoiceVoidedWithoutLiveReplacement).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', customer_id: CUSTOMER_ID, source_estimate_id: 'est-1' }), expect.anything(), {});
+    });
+
+    test('a void with a live replacement (the canonical function returns none) passes; a visit with no estimate link or a callback never asks', async () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [clean('s1', { source_estimate_id: 'est-1' }), clean('s2'), clean('s3', { source_estimate_id: 'est-1', is_callback: true })];
+      const card = await propose(PER_APP);
+      expect(card.error).toBeUndefined();
+      expect(combinedInvoiceVoidedWithoutLiveReplacement).toHaveBeenCalledTimes(1);
+      // At commit the same function runs on the locked rows, row-locked with NOWAIT.
+      expect((await run(card.pin)).error).toBeUndefined();
+      expect(combinedInvoiceVoidedWithoutLiveReplacement).toHaveBeenLastCalledWith(expect.objectContaining({ id: 's1' }), expect.anything(), { lockRows: true, noWait: true });
+    });
+
+    test('a void that appears after the card refuses at commit as preview_changed; nothing is written', async () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [clean('s1', { source_estimate_id: 'est-1' })];
+      const card = await propose(PER_APP);
+      expect(card.error).toBeUndefined();
+      mockState.voidedCombined = { s1: { id: 'inv-void', status: 'void' } };
+      expect(await run(card.pin)).toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('a priced visit or one carrying an invoice keeps its own refusal and is not asked', async () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [clean('s1', { source_estimate_id: 'est-1', estimated_price: '90.00' })];
+      mockState.voidedCombined = { s1: { id: 'inv-void', status: 'void' } };
+      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced' });
+      expect(combinedInvoiceVoidedWithoutLiveReplacement).not.toHaveBeenCalled();
+    });
+
+    test('source contract: the card asks completion\'s own function and eligibility predicate, no copy', () => {
+      const card = require('fs').readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
+      expect(card).toContain('combinedInvoiceVoidedWithoutLiveReplacement');
+      expect(card).toContain('isSiblingCoverageEligibleVisit');
+      expect(card).not.toMatch(/firstApplicationCandidateQuery|isAutoGeneratedPayPerApplicationInvoice/);
     });
   });
 
