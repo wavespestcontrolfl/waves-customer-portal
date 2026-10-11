@@ -51,6 +51,16 @@
  *   - address flags → such a booking at the single active property that the
  *     card was filed against (street, unit and locality all agree with its
  *     on-file snapshot) (staff_booked_at_account_address)
+ *   - not_confirmed / ambiguous_scheduling → a technician ARRIVED (on_site or
+ *     completed) at a visit staff made for the call's customer after the card,
+ *     on a day the caller asked for. Service, cadence and time of day are NOT
+ *     checked: a person went to the property inside the asked days, so the
+ *     scheduling doubt has nothing left to settle. The customer has ONE call
+ *     with an open card of these codes (staff_visit_arrived_after_card)
+ *   - reschedule_or_cancel → the card's reschedule request carries a confirmed
+ *     date and hour, and the customer's only live visit that ET day already
+ *     starts at exactly that hour; the calendar shows the agreed slot
+ *     (agreed_slot_on_calendar). Never for a cancellation
  *
  *   DISMISS (informational card aged out unactioned):
  *   - spam_or_wrong_number after SPAM_AGE_DAYS
@@ -97,6 +107,13 @@ const MAX_TRANSITIONS_PER_RUN = 500;
 // estimate or booking still reads as the answer to it. Later work is more
 // likely an unrelated request from the same customer.
 const STAFF_WORK_MAX_AGE_DAYS = 14;
+// staff_visit_arrived_after_card: the scheduling-doubt cards a technician's
+// arrival answers, and the visit statuses that show one arrived.
+const ARRIVED_VISIT_CODES = new Set(['not_confirmed', 'ambiguous_scheduling']);
+const ARRIVED_VISIT_STATUSES = new Set(['on_site', 'completed']);
+// Cards that need the customer's visits loaded for the staff-work arms below
+// (on top of the booking and address cards).
+const STAFF_VISIT_CODES = new Set([...ARRIVED_VISIT_CODES, 'reschedule_or_cancel']);
 
 const ADDRESS_MOOT_CODES = new Set([
   'missing_service_address', 'low_confidence_address', 'address_unverifiable',
@@ -172,6 +189,8 @@ const RULE_NOTES = {
   quote_sent_to_customer: 'Auto-resolved: an estimate covering the promised quote was delivered to this customer after the call (not linked to the call by the system); the promised quote went out.',
   staff_booked_after_card: 'Auto-resolved: staff booked an appointment answering this call\'s request (not linked to the call by the system) after the card was filed.',
   staff_booked_at_account_address: 'Auto-resolved: staff booked an appointment at the account\'s only service address after the call; the address question is answered.',
+  staff_visit_arrived_after_card: 'Auto-resolved: a technician arrived at a visit staff made for this customer after the card was filed, on a day the caller asked for; the scheduling doubt is answered.',
+  agreed_slot_on_calendar: 'Auto-resolved: the customer\'s only visit that day already starts at the date and hour this call agreed; the calendar shows the new slot.',
   email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
   // Keyed from the release engine's constant: the ledger tells this approval
   // from an operator's by resolution_rule (codex #4622 r4 P1, gate re-asked
@@ -1079,6 +1098,19 @@ const CLASSIFY_RULES = [
   { rule: 'booking_created', action: 'resolve', when: (item, ev) => item.reason_code === 'not_confirmed' && ev?.booking_after_card === true },
   { rule: 'staff_booked_after_card', action: 'resolve',
     when: (item, ev) => item.reason_code === 'not_confirmed' && ev?.staff_booked_after_card === true && !item.customer_deleted_at },
+  // A person went to the property after the call, inside the days the caller
+  // asked for: the doubt about WHEN is answered whatever service or time of
+  // day the visit carried, so those are deliberately not compared. A call
+  // that confirmed an appointment nobody booked keeps its card (the
+  // confirmed-unbooked guard). Evidence arm loadStaffVisitArrivedEvidence.
+  { rule: 'staff_visit_arrived_after_card', action: 'resolve',
+    when: (item, ev) => ARRIVED_VISIT_CODES.has(item.reason_code) && ev?.staff_visit_arrived_after_card === true
+      && !item.customer_deleted_at && !cardConfirmedUnbooked(item, ev) },
+  // A reschedule request that already carries the agreed date and hour, with
+  // the customer's one visit that day starting at exactly that hour (it may
+  // predate the card: the office often moves the visit during the call).
+  { rule: 'agreed_slot_on_calendar', action: 'resolve',
+    when: (item, ev) => item.reason_code === 'reschedule_or_cancel' && ev?.agreed_slot_on_calendar === true && !item.customer_deleted_at },
   // A confirmed call held solely on its address card has no not_confirmed
   // sibling: an unrelated recurring visit completing at the address must
   // not close the call's only trace while the confirmed appointment was
@@ -1215,6 +1247,7 @@ function loadCandidateItems(conn, itemIds = null) {
 
 const EVIDENCE_CODES = new Set([
   'quote_promised', 'email_unverified', 'caller_not_authorized', 'not_confirmed',
+  ...STAFF_VISIT_CODES,
   ...ADDRESS_MOOT_CODES,
   // house_number_adopted needs booking_after_card for a confirmed call
   // (its booking is held on this very card).
@@ -2384,7 +2417,7 @@ async function loadVisitFacts(conn, items) {
   // not_confirmed cards, address cards, and every card whose call CONFIRMED
   // an appointment (the confirmed-unbooked guard is answered only by a
   // booking matching the card's snapshotted ask).
-  const visitItems = items.filter((i) => (needsBooking(i) || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
+  const visitItems = items.filter((i) => (needsBooking(i) || ADDRESS_MOOT_CODES.has(i.reason_code) || STAFF_VISIT_CODES.has(i.reason_code)) && i.call_customer_id);
   if (!visitItems.length) return null;
   const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
   // ACTIVE rows only — the uniqueness customer-properties'
@@ -2531,6 +2564,107 @@ function loadStaffAddressEvidence(facts, flag) {
   }
 }
 
+// The calls with an OPEN or in_progress card of the arrived-visit codes, by
+// the customer their call is linked to: customer id → Set of call ids. One
+// arrived visit cannot answer two different calls' cards, but a call's own
+// not_confirmed and ambiguous_scheduling cards ask the same thing and close
+// together. Null when the lookup fails: unknown is not "no sibling".
+async function loadArrivedClaimantCalls(conn, customerIds) {
+  if (!customerIds.length) return new Map();
+  try {
+    const rows = await conn('triage_items as t')
+      .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
+      .whereIn('t.reason_code', [...ARRIVED_VISIT_CODES])
+      .whereIn('t.status', ['open', 'in_progress'])
+      .whereIn('cl.customer_id', customerIds)
+      .select('t.id', 't.call_log_id', 'cl.customer_id as call_customer_id');
+    const out = new Map();
+    for (const r of rows) {
+      if (!r.call_customer_id || !r.call_log_id) continue;
+      const key = String(r.call_customer_id);
+      out.set(key, (out.get(key) || new Set()).add(String(r.call_log_id)));
+    }
+    return out;
+  } catch (err) {
+    logger.warn(`[triage-sweep] arrived-visit claimant lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+// The days a visit may fall on to answer the card: the requested range when
+// the snapshot has one (inclusive), else STAFF_WORK_MAX_AGE_DAYS ET days from
+// the card's own day.
+function visitDayInAskedDays(item, visit) {
+  if (!toDate(visit.scheduled_date)) return false;
+  const day = etCalendarDayOf(visit.scheduled_date);
+  const asked = requestedWindow(item);
+  if (asked) return day >= asked.start && day <= asked.end;
+  const first = etCalendarDayOf(item.created_at);
+  const last = new Date(Date.parse(`${first}T00:00:00Z`) + STAFF_WORK_MAX_AGE_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  return day >= first && day <= last;
+}
+
+// The PARENT visits a technician arrived at (on_site / completed) that a
+// person made, or this call itself made, after the card, on a day the caller
+// asked for. A visit carrying ANOTHER call's id, a follow-up child or a series
+// occurrence is the system's work, never the hand-made visit.
+function arrivedVisitsAfterCard(item, mine) {
+  return mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id
+    && ARRIVED_VISIT_STATUSES.has(v.status)
+    && strictlyAfter(v.created_at, item.created_at)
+    && (!v.source_call_log_id || String(v.source_call_log_id) === String(item.call_log_id))
+    && visitDayInAskedDays(item, v));
+}
+
+// not_confirmed / ambiguous_scheduling → a technician arrived at a visit staff
+// made after the card, inside the asked days. Single claimant: the customer's
+// open and in-progress cards of these codes all belong to this card's call.
+async function loadStaffVisitArrivedEvidence(conn, facts, flag) {
+  const cards = facts?.visitItems.filter((i) => ARRIVED_VISIT_CODES.has(i.reason_code)) || [];
+  if (!cards.length) return;
+  const claimed = await loadArrivedClaimantCalls(conn, [...new Set(cards.map((i) => i.call_customer_id))]);
+  if (!claimed) return;
+  for (const item of cards) {
+    const customer = String(item.call_customer_id);
+    const calls = new Set(claimed.get(customer) || []);
+    for (const other of cards) if (String(other.call_customer_id) === customer) calls.add(String(other.call_log_id));
+    if (calls.size === 1 && calls.has(String(item.call_log_id))
+      && arrivedVisitsAfterCard(item, facts.visitsByCustomer.get(customer) || []).length) {
+      flag(item.id, 'staff_visit_arrived_after_card');
+    }
+  }
+}
+
+// A reschedule request, never a cancellation: the card's filing-time status
+// says reschedule_requested and neither status reads canceled.
+function isRescheduleRequest(item) {
+  const payload = parseMaybeJson(item.payload);
+  const statuses = [payload?.scheduling_window?.status, payload?.scheduling_status];
+  if (statuses.some((s) => s === 'canceled' || s === 'cancelled')) return false;
+  return cardSchedulingStatus(item) === 'reschedule_requested';
+}
+
+// The customer's visit already sitting on the agreed slot: ONE live visit on
+// the confirmed ET day (two visits that day cannot say which was agreed), a
+// parent row, starting at exactly the confirmed wall-clock hour and minute.
+// It may predate the card. Null when there is no such visit.
+function agreedSlotVisit(item, mine) {
+  const wall = isRescheduleRequest(item) ? confirmedWall(item) : null;
+  if (!wall) return null;
+  const sameDay = mine.filter((v) => LIVE_BOOKING_STATUSES.has(v.status)
+    && toDate(v.scheduled_date) && etCalendarDayOf(v.scheduled_date) === wall.slice(0, 10));
+  const [only] = sameDay;
+  return sameDay.length === 1 && !only.parent_service_id && !only.recurring_parent_id
+    && String(only.window_start || '').slice(0, 5) === wall.slice(11, 16) ? only : null;
+}
+
+function loadAgreedSlotEvidence(facts, flag) {
+  if (!facts) return;
+  for (const item of facts.visitItems.filter((i) => i.reason_code === 'reschedule_or_cancel')) {
+    if (agreedSlotVisit(item, facts.visitsByCustomer.get(String(item.call_customer_id)) || [])) flag(item.id, 'agreed_slot_on_calendar');
+  }
+}
+
 // Per-item proof map for the evidence rules — the four arms above over the
 // open evidence-coded cards. Empty when the evidence gate is off.
 // `ignoreGate`: the verdict-time coverage check (admin-triage
@@ -2563,6 +2697,8 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   loadVisitEvidence(visitFacts, flag, { ignoreGate });
   await loadStaffBookedEvidence(conn, visitFacts, flag);
   loadStaffAddressEvidence(visitFacts, flag);
+  await loadStaffVisitArrivedEvidence(conn, visitFacts, flag);
+  loadAgreedSlotEvidence(visitFacts, flag);
   return evidence;
 }
 
@@ -2735,6 +2871,8 @@ module.exports = {
   MAX_TRANSITIONS_PER_RUN,
   STAFF_WORK_MAX_AGE_DAYS,
   staffBookingsAfterCard,
+  arrivedVisitsAfterCard,
+  agreedSlotVisit,
   visitAtSoleProperty,
   soleClaimant,
   filedAgainstProperty,

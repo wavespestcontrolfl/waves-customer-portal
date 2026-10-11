@@ -2116,3 +2116,239 @@ describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / s
     expect(filedAgainstProperty(filed({ ...snap, zip: null, city: null }), { ...noZip, city: null })).toBe(false);
   });
 });
+
+// 2026-10-10 audit of 48 hours of calls: cards stayed open forever after a
+// person did the work, because the older staff-work rules need the booking to
+// cover the card's exact service ask and time of day. These two rules close
+// the card on the work itself: a technician arrived inside the asked days
+// (staff_visit_arrived_after_card), or the calendar already shows the agreed
+// slot (agreed_slot_on_calendar). Fixtures synthetic.
+describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
+  const { arrivedVisitsAfterCard, agreedSlotVisit, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
+  const ctxOf = (flags, id = 't1') => ({ evidence: new Map([[id, flags]]) });
+  const CARD_AT = '2026-10-09T14:00:00Z';
+  const after = (minutes) => new Date(new Date(CARD_AT).getTime() + minutes * 60 * 1000).toISOString();
+  const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+  const windowOf = (over = {}) => ({
+    status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
+    preferred_time_of_day: 'unspecified', requested_date_range_start: '2026-10-09', requested_date_range_end: '2026-10-09', ...over,
+  });
+  const askPayload = (code, windowOver = {}, status = 'requested') => ({ flag: code, confidence: 0.6, scheduling_status: status, scheduling_window: windowOf({ status, ...windowOver }) });
+  const card = (over = {}) => item({ id: 't1', call_log_id: 'call-1', call_customer_id: 'c1', created_at: CARD_AT, call_created_at: '2026-10-09T13:50:00Z', ...over });
+  const notConfirmed = (over = {}) => card({ reason_code: 'not_confirmed', payload: askPayload('not_confirmed', { preferred_time_of_day: 'morning' }), ...over });
+  const ambiguous = (over = {}) => card({ reason_code: 'ambiguous_scheduling', payload: askPayload('ambiguous_scheduling', {}, 'ambiguous'), ...over });
+  const visit = (over = {}) => ({
+    id: 'v1', customer_id: 'c1', status: 'completed', created_at: after(43), scheduled_date: '2026-10-09', window_start: '16:00:00',
+    parent_service_id: null, recurring_parent_id: null, source_call_log_id: null, service_type: 'Rodent Trapping Service', ...over,
+  });
+
+  describe('classifier', () => {
+    test('each rule fires only for its own codes and flag', () => {
+      const arrived = ctxOf({ staff_visit_arrived_after_card: true });
+      expect(classifyTriageItem(notConfirmed(), arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
+      expect(classifyTriageItem(ambiguous(), arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
+      const slot = ctxOf({ agreed_slot_on_calendar: true });
+      const reschedule = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', {}, 'reschedule_requested') });
+      expect(classifyTriageItem(reschedule, slot, { now: NOW })).toEqual({ action: 'resolve', rule: 'agreed_slot_on_calendar' });
+      // Neither flag does anything on another card type, or on the other rule's code.
+      for (const code of ['cancellation_request', 'quote_promised', 'email_unverified', 'caller_not_authorized', 'commercial_requires_quote']) {
+        expect(classifyTriageItem(card({ reason_code: code }), ctxOf({ staff_visit_arrived_after_card: true, agreed_slot_on_calendar: true }), { now: NOW })).toBeNull();
+      }
+      expect(classifyTriageItem(reschedule, arrived, { now: NOW })).toBeNull();
+      expect(classifyTriageItem(notConfirmed(), slot, { now: NOW })).toBeNull();
+      expect(classifyTriageItem(ambiguous(), slot, { now: NOW })).toBeNull();
+      // Gate off (no evidence): nothing.
+      for (const c of [notConfirmed(), ambiguous(), reschedule]) expect(classifyTriageItem(c, noBookings, { now: NOW })).toBeNull();
+      expect(RULE_NOTES.staff_visit_arrived_after_card).toMatch(/^Auto-resolved: /);
+      expect(RULE_NOTES.agreed_slot_on_calendar).toMatch(/^Auto-resolved: /);
+    });
+
+    test('a soft-deleted customer keeps the card', () => {
+      expect(classifyTriageItem(notConfirmed({ customer_deleted_at: CARD_AT }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+      expect(classifyTriageItem(ambiguous({ customer_deleted_at: CARD_AT }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+      const reschedule = card({ reason_code: 'reschedule_or_cancel', customer_deleted_at: CARD_AT, payload: askPayload('reschedule_or_cancel', {}, 'reschedule_requested') });
+      expect(classifyTriageItem(reschedule, ctxOf({ agreed_slot_on_calendar: true }), { now: NOW })).toBeNull();
+    });
+
+    test('a confirmed call whose appointment nobody booked keeps its not_confirmed card', () => {
+      const confirmed = notConfirmed({ payload: askPayload('not_confirmed', { confirmed_start_at: '2026-10-09T16:00:00-04:00' }, 'confirmed') });
+      expect(classifyTriageItem(confirmed, ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
+      // The booking arm proved the confirmed appointment exists: the card may close.
+      expect(classifyTriageItem(confirmed, ctxOf({ staff_visit_arrived_after_card: true, booking_after_card: true }), { now: NOW }))
+        .toEqual({ action: 'resolve', rule: 'booking_created' });
+    });
+  });
+
+  describe('arrivedVisitsAfterCard', () => {
+    const ids = (c, visits) => arrivedVisitsAfterCard(c, visits).map((v) => v.id);
+
+    test('audited shape 1: completed visit, other service, other time of day, one-day range', () => {
+      expect(ids(notConfirmed(), [visit()])).toEqual(['v1']);
+    });
+
+    test('audited shape 2: on_site visit for an ambiguous call', () => {
+      expect(ids(ambiguous(), [visit({ status: 'on_site', created_at: after(150), window_start: '10:00:00' })])).toEqual(['v1']);
+    });
+
+    test('a visit made by this call itself counts; one carrying another call does not', () => {
+      expect(ids(notConfirmed(), [visit({ id: 'own', source_call_log_id: 'call-1' }), visit({ id: 'other', source_call_log_id: 'call-9' })])).toEqual(['own']);
+    });
+
+    test.each(['pending', 'confirmed', 'en_route', 'cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit is not an arrival', (status) => {
+      expect(ids(notConfirmed(), [visit({ status })])).toEqual([]);
+    });
+
+    test('a visit created before or at the card does not count', () => {
+      expect(ids(notConfirmed(), [visit({ created_at: after(-5) })])).toEqual([]);
+      expect(ids(notConfirmed(), [visit({ created_at: CARD_AT })])).toEqual([]);
+    });
+
+    test('follow-up children and series occurrences do not count', () => {
+      expect(ids(notConfirmed(), [visit({ parent_service_id: 'p' }), visit({ recurring_parent_id: 'p' })])).toEqual([]);
+    });
+
+    test('with a requested range the visit day must fall inside it, inclusive', () => {
+      const range = notConfirmed({ payload: askPayload('not_confirmed', { requested_date_range_start: '2026-10-10', requested_date_range_end: '2026-10-12' }) });
+      expect(ids(range, [visit({ id: 'a', scheduled_date: '2026-10-09' }), visit({ id: 'b', scheduled_date: '2026-10-10' }),
+        visit({ id: 'c', scheduled_date: '2026-10-12' }), visit({ id: 'd', scheduled_date: '2026-10-13' }), visit({ id: 'e', scheduled_date: null })])).toEqual(['b', 'c']);
+    });
+
+    test('with no range the visit day must fall within the max age after the card', () => {
+      const open = notConfirmed({ payload: askPayload('not_confirmed', { requested_date_range_start: null, requested_date_range_end: null }) });
+      expect(ids(open, [visit({ id: 'same', scheduled_date: '2026-10-09' }), visit({ id: 'last', scheduled_date: '2026-10-23' }),
+        visit({ id: 'late', scheduled_date: '2026-10-24' }), visit({ id: 'before', scheduled_date: '2026-10-08' })])).toEqual(['same', 'last']);
+      expect(STAFF_WORK_MAX_AGE_DAYS).toBe(14);
+    });
+  });
+
+  describe('agreedSlotVisit', () => {
+    const resched = (windowOver = {}, status = 'reschedule_requested', over = {}) => card({
+      reason_code: 'reschedule_or_cancel',
+      payload: askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00', ...windowOver }, status),
+      ...over,
+    });
+    const slotVisit = (over = {}) => visit({ id: 's1', status: 'confirmed', created_at: after(-3 * 24 * 60), scheduled_date: '2026-10-09', window_start: '16:00:00', ...over });
+
+    test('audited shape: a live visit already on the agreed hour, even one that predates the card', () => {
+      expect(agreedSlotVisit(resched(), [slotVisit()])?.id).toBe('s1');
+      expect(agreedSlotVisit(resched(), [slotVisit({ status: 'completed' })])?.id).toBe('s1');
+    });
+
+    test('a different start time or day keeps the card', () => {
+      expect(agreedSlotVisit(resched(), [slotVisit({ window_start: '15:00:00' })])).toBeNull();
+      expect(agreedSlotVisit(resched(), [slotVisit({ window_start: '16:30:00' })])).toBeNull();
+      expect(agreedSlotVisit(resched(), [slotVisit({ window_start: null })])).toBeNull();
+      expect(agreedSlotVisit(resched(), [slotVisit({ scheduled_date: '2026-10-10' })])).toBeNull();
+    });
+
+    test.each(['cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit is not on the calendar', (status) => {
+      expect(agreedSlotVisit(resched(), [slotVisit({ status })])).toBeNull();
+    });
+
+    test('two live visits that day are ambiguous; a dead one beside the live one is not', () => {
+      expect(agreedSlotVisit(resched(), [slotVisit(), slotVisit({ id: 's2', window_start: '09:00:00' })])).toBeNull();
+      expect(agreedSlotVisit(resched(), [slotVisit(), slotVisit({ id: 's2', status: 'cancelled', window_start: '09:00:00' })])?.id).toBe('s1');
+    });
+
+    test('a follow-up child or series occurrence is not the agreed parent visit', () => {
+      expect(agreedSlotVisit(resched(), [slotVisit({ parent_service_id: 'p' })])).toBeNull();
+      expect(agreedSlotVisit(resched(), [slotVisit({ recurring_parent_id: 'p' })])).toBeNull();
+    });
+
+    test('a cancellation never closes, whichever status field says so', () => {
+      expect(agreedSlotVisit(resched({}, 'canceled'), [slotVisit()])).toBeNull();
+      expect(agreedSlotVisit(resched({ status: 'reschedule_requested' }, 'reschedule_requested', {
+        payload: { ...askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00' }, 'reschedule_requested'), scheduling_status: 'canceled' },
+      }), [slotVisit()])).toBeNull();
+      expect(agreedSlotVisit(resched({}, 'requested'), [slotVisit()])).toBeNull();
+      expect(agreedSlotVisit(resched({}, 'confirmed'), [slotVisit()])).toBeNull();
+    });
+
+    test('a missing or unparseable confirmed start keeps the card', () => {
+      expect(agreedSlotVisit(resched({ confirmed_start_at: null }), [slotVisit()])).toBeNull();
+      expect(agreedSlotVisit(resched({ confirmed_start_at: 'Friday afternoon' }), [slotVisit()])).toBeNull();
+      expect(agreedSlotVisit(resched({ confirmed_start_at: '2026-10-09' }), [slotVisit()])).toBeNull();
+    });
+  });
+
+  describe('loadEvidence', () => {
+    const chainable = (rows) => {
+      const c = { leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c, select: async () => rows };
+      return c;
+    };
+    const fakeConn = ({ visits = [], cards = [], throwOnCards = false }) => (table) => {
+      if (table === 'scheduled_services') return chainable(visits);
+      if (table === 'triage_items as t') {
+        if (!throwOnCards) return chainable(cards);
+        const c = chainable([]);
+        c.select = async () => { throw new Error('connection reset'); };
+        return c;
+      }
+      return chainable([]); // customer_properties, services
+    };
+    const claim = (id, callId, customer = 'c1') => ({ id, call_log_id: callId, call_customer_id: customer, created_at: CARD_AT, payload: '{}' });
+    const run = async (cards, conn) => loadEvidence(conn, cards, { ignoreGate: true });
+
+    test('closes the audited not_confirmed and ambiguous shapes', async () => {
+      const nc = notConfirmed();
+      const amb = ambiguous({ id: 't2', call_log_id: 'call-2', call_customer_id: 'c2', payload: askPayload('ambiguous_scheduling', {}, 'ambiguous') });
+      const ev = await run([nc, amb], fakeConn({
+        visits: [visit({ customer_id: 'c1' }), visit({ id: 'v2', customer_id: 'c2', status: 'on_site', created_at: after(150), window_start: '10:00:00' })],
+        cards: [claim('t1', 'call-1'), claim('t2', 'call-2', 'c2')],
+      }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBe(true);
+      expect(ev.get('t2')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    test('a not_confirmed and an ambiguous card of the SAME call both close', async () => {
+      const ev = await run([notConfirmed(), ambiguous({ id: 't2' })], fakeConn({ visits: [visit()], cards: [claim('t1', 'call-1'), claim('t2', 'call-1')] }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBe(true);
+      expect(ev.get('t2')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    test('another call\'s open card for the same customer keeps both, even when it is human-claimed', async () => {
+      const ev = await run([ambiguous()], fakeConn({ visits: [visit()], cards: [claim('t1', 'call-1'), claim('t9', 'call-9')] }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+      const batch = await run([ambiguous(), ambiguous({ id: 't3', call_log_id: 'call-3' })], fakeConn({ visits: [visit()], cards: [] }));
+      expect(batch.get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+      expect(batch.get('t3')?.staff_visit_arrived_after_card).toBeUndefined();
+    });
+
+    test('a failed claimant lookup closes nothing', async () => {
+      const ev = await run([ambiguous()], fakeConn({ visits: [visit()], throwOnCards: true }));
+      expect(ev.get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+    });
+
+    test('no flag when the call has no customer, or the visit is merely booked, early, elsewhere or another call\'s', async () => {
+      const cards = [claim('t1', 'call-1')];
+      expect((await run([ambiguous({ call_customer_id: null })], fakeConn({ visits: [visit()], cards }))).get('t1')).toBeUndefined();
+      for (const v of [visit({ status: 'confirmed' }), visit({ created_at: after(-1) }), visit({ scheduled_date: '2026-10-20' }),
+        visit({ source_call_log_id: 'call-9' }), visit({ parent_service_id: 'p' }), visit({ customer_id: 'c2' })]) {
+        expect((await run([ambiguous()], fakeConn({ visits: [v], cards }))).get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
+      }
+    });
+
+    test('agreed slot: flags the audited shape, not two visits that day or another hour', async () => {
+      const r = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00' }, 'reschedule_requested') });
+      const slot = visit({ id: 's1', status: 'confirmed', created_at: after(-60), window_start: '16:00:00' });
+      expect((await run([r], fakeConn({ visits: [slot] }))).get('t1')?.agreed_slot_on_calendar).toBe(true);
+      expect((await run([r], fakeConn({ visits: [slot, visit({ id: 's2', status: 'confirmed', window_start: '09:00:00' })] }))).get('t1')).toBeUndefined();
+      expect((await run([r], fakeConn({ visits: [{ ...slot, window_start: '15:00:00' }] }))).get('t1')).toBeUndefined();
+      expect((await run([{ ...r, call_customer_id: null }], fakeConn({ visits: [slot] }))).get('t1')).toBeUndefined();
+    });
+
+    test('the evidence gate off: no flag and no query', async () => {
+      const OLD = process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+      delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+      try {
+        const conn = jest.fn(() => { throw new Error('must not query'); });
+        const map = await loadEvidence(conn, [notConfirmed(), ambiguous({ id: 't2' }), card({ id: 't3', reason_code: 'reschedule_or_cancel' })]);
+        expect(map.size).toBe(0);
+        expect(conn).not.toHaveBeenCalled();
+      } finally {
+        if (OLD === undefined) delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
+        else process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE = OLD;
+      }
+    });
+  });
+});
