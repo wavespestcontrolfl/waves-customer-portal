@@ -53,13 +53,15 @@
  *     on-file snapshot) (staff_booked_at_account_address)
  *   - not_confirmed / ambiguous_scheduling → a technician ARRIVED (on_site or
  *     completed) at a visit staff made for the call's customer after the card,
- *     on a day the caller asked for. Service, cadence and time of day are NOT
+ *     on a day the caller asked for (card status requested, offered or
+ *     ambiguous only). Service, cadence and time of day are NOT
  *     checked: a person went to the property inside the asked days, so the
  *     scheduling doubt has nothing left to settle. The customer has ONE call
  *     with an open card of these codes (staff_visit_arrived_after_card)
  *   - reschedule_or_cancel → the card's reschedule request carries a confirmed
  *     date and hour, and the customer's only live visit that ET day already
- *     starts at exactly that hour; the calendar shows the agreed slot
+ *     starts at exactly that hour for a service the call asked about; the
+ *     calendar shows the agreed slot
  *     (agreed_slot_on_calendar). Never for a cancellation
  *
  *   DISMISS (informational card aged out unactioned):
@@ -111,6 +113,16 @@ const STAFF_WORK_MAX_AGE_DAYS = 14;
 // arrival answers, and the visit statuses that show one arrived.
 const ARRIVED_VISIT_CODES = new Set(['not_confirmed', 'ambiguous_scheduling']);
 const ARRIVED_VISIT_STATUSES = new Set(['on_site', 'completed']);
+// An arrival answers only a card whose own filing-time status says the caller
+// wanted a visit and no time was settled: requested or offered (the same two
+// the bare-booking path accepts) or ambiguous. A canceled, reschedule, none,
+// confirmed or missing status asks something a visit does not answer (a
+// completed visit contradicts a cancellation), so those keep the card.
+const ARRIVAL_ANSWERED_STATUSES = new Set(['requested', 'offered', 'ambiguous']);
+function arrivalAnswersCard(item) {
+  return ARRIVAL_ANSWERED_STATUSES.has(cardSchedulingStatus(item));
+}
+
 // Cards that need the customer's visits loaded for the staff-work arms below
 // (on top of the booking and address cards).
 const STAFF_VISIT_CODES = new Set([...ARRIVED_VISIT_CODES, 'reschedule_or_cancel']);
@@ -1105,7 +1117,7 @@ const CLASSIFY_RULES = [
   // confirmed-unbooked guard). Evidence arm loadStaffVisitArrivedEvidence.
   { rule: 'staff_visit_arrived_after_card', action: 'resolve',
     when: (item, ev) => ARRIVED_VISIT_CODES.has(item.reason_code) && ev?.staff_visit_arrived_after_card === true
-      && !item.customer_deleted_at && !cardConfirmedUnbooked(item, ev) },
+      && arrivalAnswersCard(item) && !item.customer_deleted_at && !cardConfirmedUnbooked(item, ev) },
   // A reschedule request that already carries the agreed date and hour, with
   // the customer's one visit that day starting at exactly that hour (it may
   // predate the card: the office often moves the visit during the call).
@@ -2646,8 +2658,12 @@ function isRescheduleRequest(item) {
 
 // The customer's visit already sitting on the agreed slot: ONE live visit on
 // the confirmed ET day (two visits that day cannot say which was agreed), a
-// parent row, starting at exactly the confirmed wall-clock hour and minute.
-// It may predate the card. Null when there is no such visit.
+// parent row, starting at exactly the confirmed wall-clock hour and minute,
+// AND for a service the call was about: the visit's service words answer at
+// least one of the card's snapshotted service requirements (a lawn visit at
+// 16:00 does not show that a pest visit was moved to 16:00). A card that
+// snapshotted no service ask proves nothing and keeps its card. It may
+// predate the card. Null when there is no such visit.
 function agreedSlotVisit(item, mine) {
   const wall = isRescheduleRequest(item) ? confirmedWall(item) : null;
   if (!wall) return null;
@@ -2655,7 +2671,13 @@ function agreedSlotVisit(item, mine) {
     && toDate(v.scheduled_date) && etCalendarDayOf(v.scheduled_date) === wall.slice(0, 10));
   const [only] = sameDay;
   return sameDay.length === 1 && !only.parent_service_id && !only.recurring_parent_id
-    && String(only.window_start || '').slice(0, 5) === wall.slice(11, 16) ? only : null;
+    && String(only.window_start || '').slice(0, 5) === wall.slice(11, 16)
+    && visitIsForAskedService(item, only) ? only : null;
+}
+
+function visitIsForAskedService(item, visit) {
+  const words = `${visit.service_type || ''} ${visit.service_category_snapshot || ''}`;
+  return requestedServiceTokens(item).some((requirement) => serviceTypeMatches(words, requirement));
 }
 
 function loadAgreedSlotEvidence(facts, flag) {

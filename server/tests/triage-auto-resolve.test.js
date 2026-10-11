@@ -2221,13 +2221,40 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
     });
   });
 
+  // Codex r1: an arrival answers a wanted-but-unsettled visit only.
+  test('an arrival does not close a card whose status asks something else', () => {
+    const arrived = ctxOf({ staff_visit_arrived_after_card: true });
+    for (const status of ['canceled', 'reschedule_requested', 'none', 'confirmed']) {
+      const c = notConfirmed({ payload: askPayload('not_confirmed', {}, status) });
+      expect(classifyTriageItem(c, arrived, { now: NOW })).toBeNull();
+    }
+    expect(classifyTriageItem(notConfirmed({ payload: { flag: 'not_confirmed' } }), arrived, { now: NOW })).toBeNull();
+    for (const status of ['requested', 'offered', 'ambiguous']) {
+      const c = notConfirmed({ payload: askPayload('not_confirmed', {}, status) });
+      expect(classifyTriageItem(c, arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
+    }
+  });
+
   describe('agreedSlotVisit', () => {
     const resched = (windowOver = {}, status = 'reschedule_requested', over = {}) => card({
       reason_code: 'reschedule_or_cancel',
-      payload: askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00', ...windowOver }, status),
+      payload: askPayload('reschedule_or_cancel', {
+        confirmed_start_at: '2026-10-09T16:00:00-04:00', requested_specific_service: 'Waves Assessment',
+        requested_service_categories: ['inspection_only', 'rodent', 'pest_general'], ...windowOver,
+      }, status),
       ...over,
     });
     const slotVisit = (over = {}) => visit({ id: 's1', status: 'confirmed', created_at: after(-3 * 24 * 60), scheduled_date: '2026-10-09', window_start: '16:00:00', ...over });
+
+    // Codex r1: a lawn visit at 16:00 does not show that a pest visit moved to 16:00.
+    test('the visit must be for a service the call asked about', () => {
+      expect(agreedSlotVisit(resched(), [slotVisit({ service_type: 'Every 6 Weeks Lawn Care Service' })])).toBeNull();
+      expect(agreedSlotVisit(resched({ requested_specific_service: null, requested_service_categories: ['pest_general'] }), [slotVisit({ service_type: 'Every 6 Weeks Lawn Care Service' })])).toBeNull();
+      expect(agreedSlotVisit(resched({ requested_specific_service: null, requested_service_categories: ['lawn_care'] }), [slotVisit({ service_type: 'Every 6 Weeks Lawn Care Service' })])?.id).toBe('s1');
+      // No snapshotted service ask proves nothing.
+      expect(agreedSlotVisit(resched({ requested_specific_service: null, requested_service_categories: [] }), [slotVisit()])).toBeNull();
+      expect(agreedSlotVisit(resched({ requested_specific_service: null, requested_service_categories: undefined }), [slotVisit()])).toBeNull();
+    });
 
     test('audited shape: a live visit already on the agreed hour, even one that predates the card', () => {
       expect(agreedSlotVisit(resched(), [slotVisit()])?.id).toBe('s1');
@@ -2329,7 +2356,7 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
     });
 
     test('agreed slot: flags the audited shape, not two visits that day or another hour', async () => {
-      const r = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00' }, 'reschedule_requested') });
+      const r = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00', requested_service_categories: ['rodent'] }, 'reschedule_requested') });
       const slot = visit({ id: 's1', status: 'confirmed', created_at: after(-60), window_start: '16:00:00' });
       expect((await run([r], fakeConn({ visits: [slot] }))).get('t1')?.agreed_slot_on_calendar).toBe(true);
       expect((await run([r], fakeConn({ visits: [slot, visit({ id: 's2', status: 'confirmed', window_start: '09:00:00' })] }))).get('t1')).toBeUndefined();
