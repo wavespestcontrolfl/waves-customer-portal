@@ -16,12 +16,13 @@ const CUSTOMER_ID = '00000000-0000-4000-8000-00000000c0a1';
 let log;
 let billingRow;
 let catalogRow;
+let prefsGate = null;
 
 function fakeTrx() {
   return (table) => {
     let locked = false;
     const b = {
-      where: () => b,
+      where: () => b, whereIn: () => b, whereRaw: () => b, orderBy: () => b, select: () => (table === 'notification_prefs' && prefsGate ? prefsGate.then(() => b) : b),
       forUpdate: () => { locked = true; log.push(`lock:${table}`); return b; },
       forShare: () => { locked = true; log.push(`lock:${table}`); return b; },
       first: async () => { if (!locked) log.push(`read:${table}`); if (table === 'services') return locked ? { id: 'svc-1' } : catalogRow; return table === 'customers' ? billingRow : { address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' }; },
@@ -42,6 +43,7 @@ const BILLING = { payer_id: null, billing_mode: 'monthly_membership', per_applic
 
 beforeEach(() => {
   log = [];
+  prefsGate = null;
   jest.spyOn(require('../services/booking-contact-state'), 'currentContactKey').mockImplementation(async () => { log.push('read:contact'); return 'key-a'; });
   jest.spyOn(require('../services/consultation-outcomes'), 'openConsultationCandidates').mockImplementation(async () => { log.push('read:consultations'); return []; });
   billingRow = { ...BILLING };
@@ -193,6 +195,40 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     // The confirmation moved for that property alone.
     expect(await codeOf(run({ ...req, approvedContact: 'confirm-other' }))).toBe('CONTACT_CHANGED');
   });
+  test('CONTACT_CHANGED share-locks the prefs rows before it reads the key, and waits for a writer that holds the row (round 15)', async () => {
+    const req = { approvedContact: 'key-a', approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' } };
+    expect(await codeOf(run(req))).toBeNull();
+    expect(log.indexOf('lock:notification_prefs')).toBeGreaterThan(-1);
+    expect(log.indexOf('lock:notification_prefs')).toBeLessThan(log.indexOf('read:contact'));
+    expect(log.indexOf('lock:property_notification_prefs')).toBeLessThan(log.indexOf('read:contact'));
+    // A writer holds the notification_prefs row: the rail does not read the key until the writer commits.
+    let release;
+    prefsGate = new Promise((resolve) => { release = resolve; });
+    log = [];
+    const pending = run(req);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(log).not.toContain('read:contact');
+    release();
+    expect(await codeOf(pending)).toBeNull();
+    expect(log).toContain('read:contact');
+  });
+  test('the admin notification-prefs save takes the comms lock, then its prefs row FOR UPDATE (source order, round 15)', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-customers'), 'utf8');
+    const start = src.indexOf("router.put('/:id/notification-prefs'");
+    const comms = src.indexOf('lockCustomerComms(trx, req.params.id)', start);
+    const row = src.indexOf("trx('notification_prefs').where({ customer_id: req.params.id }).forUpdate()", start);
+    expect(comms).toBeGreaterThan(start);
+    expect(row).toBeGreaterThan(comms);
+  });
+  test('the contact rail lock names the share lock before any read (source order)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/scheduling/approved-booking-rails'), 'utf8');
+    const lock = src.indexOf('lockContactPrefs(trx, ctx.customerId');
+    expect(lock).toBeGreaterThan(src.indexOf("code: 'CONTACT_CHANGED'"));
+    expect(lock).toBeLessThan(src.indexOf('Contact.currentContactKey(ctx.customerId'));
+    const helper = require('fs').readFileSync(require.resolve('../services/booking-contact-state'), 'utf8');
+    expect(helper).toContain("conn('notification_prefs')");
+    expect(helper).toContain(".orderBy('customer_id').forShare().select('customer_id')");
+  });
   test('INSPECTION_CREDIT_CHANGED', async () => {
     InspectionCredit.projectRedeemableOfferAmount.mockResolvedValue({ amount: 25 });
     expect(await codeOf(run({ creditFreeCard: true }))).toBe('INSPECTION_CREDIT_CHANGED');
@@ -235,7 +271,8 @@ test('every lock is taken before any read, and the estimate lock is the last loc
   const lastLock = log.map((e) => e.startsWith('lock:')).lastIndexOf(true);
   expect(lastLock).toBeLessThan(firstRead);
   // Every customer row lock (billing, commercial, ledger, consultations, contact) comes before the estimate lock, which is a leaf.
-  expect(log.slice(0, 6)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:estimates-advisory']);
+  expect(log.slice(0, 6)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:notification_prefs']);
+  expect(log.indexOf('lock:property_notification_prefs')).toBeLessThan(log.indexOf('lock:estimates-advisory'));
   // The billing read comes after the customer row lock.
   expect(log.indexOf('lock:customers')).toBeLessThan(log.indexOf('read:customers'));
   expect(log.indexOf('lock:estimates-advisory')).toBeLessThan(log.indexOf('read:open-estimate'));

@@ -762,6 +762,7 @@ module.exports = {
   sendNewRecurringWelcome,
   processDueWelcomes,
   loadWelcomeCustomer,
+  combinedSignupEmailCoversWelcome,
   _internals: {
     isNewRecurringSignupCandidate,
     hasWelcomeSequence,

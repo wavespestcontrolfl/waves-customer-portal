@@ -563,7 +563,16 @@ async function welcomeVerdict(args) {
   if (!args.sendTexts && welcomeCandidate) {
     return refusal('This customer has never had a recurring service, so booking the program queues the new-customer welcome text. The Schedule screen has no switch for that text, and neither does this tool. Propose again with send_texts on. Nothing was proposed.', 'program_welcome_cannot_skip');
   }
-  return { welcomeCandidate, delay: WELCOME_DELAY_MINUTES };
+  // The welcome EMAIL the card promises is skipped at delivery when today's full signup email already went to the same
+  // address (GATE_SIGNUP_SINGLE_EMAIL). The card asks the SAME function the delivery calls, with the customer row the
+  // delivery reads, and pins the answer; any lookup error reads "not covered", as it does at delivery.
+  let welcomeEmailCovered = false;
+  if (welcomeCandidate) {
+    const Welcome = require('../new-recurring-welcome-sms');
+    const customer = await Welcome.loadWelcomeCustomer(args.customerId);
+    welcomeEmailCovered = !!customer && await Welcome.combinedSignupEmailCoversWelcome(customer, null) === true;
+  }
+  return { welcomeCandidate, welcomeEmailCovered, delay: WELCOME_DELAY_MINUTES };
 }
 
 // create_appointment's rule: the booking redeems an open inspection-credit
@@ -603,15 +612,32 @@ async function contactPin(customerId, propertyId) {
 // warm, cold or lost consultation outcome from the last 90 days to won. The card discloses the SAME selection
 // (openConsultationCandidates, not a copy) and pins each row's id and outcome; a rail recomputes it under the
 // customer lock. The hook itself is not suppressed: the Schedule page's booking does the same.
-async function consultationPins(customerId) {
+//
+// The hook only fires for a row the sale predicate accepts (consultation-outcomes bookingMarksConsultationsWon: not a
+// Waves Assessment, and isQualifyingSaleBooking). This card books a monthly-membership customer's recurring series, which
+// the booking stamps as dues-covered (no visit price, no invoice on complete), and the predicate rejects that shape as
+// "the dues are the sale, made earlier". So the card asks the SAME predicate about the row it will create, and says so
+// when nothing would be won. `marksWon` is pinned in the card version.
+function plannedParentRow(catalogRow) {
+  return {
+    status: 'pending', source_action: null, customer_confirmed: true, is_callback: false, recurring_parent_id: null,
+    followup_included: false, estimated_price: null, annual_prepay_term_id: null, is_recurring: true,
+    create_invoice_on_complete: false, service_type: catalogRow.name, service_id: catalogRow.id,
+  };
+}
+
+async function consultationPins(customerId, catalogRow) {
   let rows;
+  let marksWon = false;
   try {
-    rows = await require('../consultation-outcomes').openConsultationCandidates(db, customerId);
+    const Outcomes = require('../consultation-outcomes');
+    rows = await Outcomes.openConsultationCandidates(db, customerId);
+    if (rows.length) marksWon = await Outcomes.bookingMarksConsultationsWon(plannedParentRow(catalogRow), db);
   } catch {
     return refusal('Could not check the customer\'s open consultations. Try again in a moment. Nothing was proposed.', 'program_consultations_unverified');
   }
   const { toDateStr } = require('../auto-dispatch/dates');
-  return { pins: consultationPinList(rows.map((r) => ({ id: r.outcome_id, outcome: r.outcome, date: toDateStr(r.scheduled_date) }))) };
+  return { marksWon, pins: consultationPinList(rows.map((r) => ({ id: r.outcome_id, outcome: r.outcome, date: toDateStr(r.scheduled_date) }))) };
 }
 
 // One shape for the card, the version and the rail: "<outcome id>:<outcome>", sorted.
@@ -662,7 +688,7 @@ const PLAN_STEPS = [
   ['planSync', (o) => predictPlanSync(o.loaded.customer, o.service.catalogRow, o.args.firstDate, o.args.cadence)],
   ['welcome', (o) => welcomeVerdict(o.args)],
   ['credit', (o) => openInspectionCredit(o.args.customerId)],
-  ['consultations', (o) => consultationPins(o.args.customerId)],
+  ['consultations', (o) => consultationPins(o.args.customerId, o.service.catalogRow)],
   ['contact', (o) => contactPin(o.args.customerId, o.loaded.propertyId)],
 ];
 
@@ -691,9 +717,10 @@ async function buildProgramPlan(input, actionContext) {
   const { catalogRow, family } = out.service;
   const { components } = out.ledger;
   const { reprice } = out.repriced;
-  const { welcomeCandidate } = welcome;
+  const { welcomeCandidate, welcomeEmailCovered } = welcome;
   const inspectionCredit = out.credit.amount;
   const consultations = out.consultations.pins;
+  const consultationsWon = out.consultations.marksWon;
   const contact = out.contact;
 
   // update_customer's implied-lane rule (#3140): a write that turns a row
@@ -712,8 +739,8 @@ async function buildProgramPlan(input, actionContext) {
       customer, customerId: args.customerId, catalogRow, family, tier: args.tier, tierBefore,
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
-      tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, consultations, contact, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
+      tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeEmailCovered, welcomeDelay: welcome.delay,
+      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, consultations, consultationsWon, contact, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -721,8 +748,8 @@ async function buildProgramPlan(input, actionContext) {
       version: crypto.createHash('sha256').update(JSON.stringify([
         customer.version, customer.active === true, customer.pipeline_stage || null, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, catalogRow.name, catalogRow.updated_at || null, family, args.tier, args.cadence, args.firstDate,
-        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
-        overlap.map((o) => o.fact), planSync.updates, consultations, contact.key, contact.welcomeKey,
+        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, welcomeEmailCovered, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
+        overlap.map((o) => o.fact), planSync.updates, consultations, consultationsWon, contact.key, contact.welcomeKey,
       ])).digest('hex'),
     },
   };
@@ -730,7 +757,7 @@ async function buildProgramPlan(input, actionContext) {
 
 // The masked confirmation and welcome recipient lines, from the pinned contact state.
 function contactLines(plan) {
-  return require('../booking-contact-state').contactCardLines(plan.contact.state, { sendTexts: plan.sendTexts, welcome: plan.welcomeCandidate });
+  return require('../booking-contact-state').contactCardLines(plan.contact.state, { sendTexts: plan.sendTexts, welcome: plan.welcomeCandidate, welcomeEmailCovered: plan.welcomeEmailCovered });
 }
 
 // The card, as ordered lines per kind. The contract sorts lines by kind and
@@ -746,7 +773,9 @@ function cardLines(plan) {
   add('operational', `Visit dates booked now: ${plan.visitDates.map((d) => dateLabel(d)).join('; ')}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
   add('operational', 'Leads: no lead status changes');
-  if (plan.consultations.length) {
+  if (plan.consultations.length && !plan.consultationsWon) {
+    add('operational', `${plan.consultations.length} open consultation(s) stay open: this booking is dues-covered and does not count as a sale`);
+  } else if (plan.consultations.length) {
     plan.consultations.forEach((c) => add('operational', `Marks consultation of ${c.date ? dateLabel(c.date) : 'an unknown date'} (outcome ${c.outcome}) as won`));
   } else {
     add('operational', 'No consultation is marked won');
@@ -793,9 +822,15 @@ function cardLines(plan) {
     add('comms', 'Texts: no booking confirmation is sent (send texts is off)');
   }
   contactLines(plan).forEach((text) => add('comms', text));
-  add('comms', plan.welcomeCandidate
-    ? `Texts and email: the new-customer welcome is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`
-    : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
+  if (plan.welcomeCandidate && plan.welcomeEmailCovered) {
+    const masked = require('../booking-contact-state').maskEmail(plan.contact.state.holder.email) || 'the same address';
+    add('comms', `Texts: the new-customer welcome text is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking, once ever, if the customer allows texts`);
+    add('comms', `Welcome email: already covered by today's signup email to ${masked}; none is sent`);
+  } else {
+    add('comms', plan.welcomeCandidate
+      ? `Texts and email: the new-customer welcome is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`
+      : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
+  }
   add('comms', 'Texts: visit reminders before each visit, set up as the Schedule screen sets them up');
   add('comms', 'Email: the membership-started email is not sent');
   if (plan.techNotice) add('comms', `Technician: notifies ${plan.tech.name} of the new visits (app notice)`);
@@ -1075,7 +1110,9 @@ function receiptTexts(plan) {
     ? ' Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).'
     : ' No booking confirmation (send texts was off).';
   const welcome = plan.welcomeCandidate
-    ? ' Welcome text and welcome email queued for about 1 hour from now (a failure is logged).'
+    ? (plan.welcomeEmailCovered
+      ? ' Welcome text queued for about 1 hour from now; no welcome email (today\'s signup email covers it).'
+      : ' Welcome text and welcome email queued for about 1 hour from now (a failure is logged).')
     : '';
   return `${confirmation}${welcome}`;
 }

@@ -4721,6 +4721,9 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
         // legacy true defaults and mint marketing consent as a side effect.
         await createDefaultCustomerRows(trx, req.params.id);
       }
+      // The comms lock first (a card-approved booking holds it for its whole transaction, then share-locks this row),
+      // then the prefs row: the save waits for an in-flight booking instead of committing between its read and its commit.
+      await require('../utils/customer-comms-lock').lockCustomerComms(trx, req.params.id);
       await trx('notification_prefs').where({ customer_id: req.params.id }).forUpdate().first('customer_id');
       await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
       await trx('notification_prefs')

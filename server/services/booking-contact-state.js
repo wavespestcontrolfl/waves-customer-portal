@@ -71,6 +71,24 @@ async function bookingContactState(customerId, { propertyId = null, conn = null 
   }
 }
 
+// Share-lock the rows the recipient key is read from, inside the booking transaction and BEFORE the key is read: the
+// customer's own notification_prefs row, the account owner's (the confirmation channel is read from the owner's row for a
+// secondary profile) and the saved property's per-property row. A writer that updates one of them (the admin
+// notification-prefs save locks its row FOR UPDATE) then waits for the booking to commit, or commits first and is seen,
+// so it cannot slip in between the rail's read and the booking commit. Rows are taken in sorted order.
+async function lockContactPrefs(conn, customerId, { propertyId = null } = {}) {
+  // One locking statement per table and no preceding read: the rails take every lock before their first read. The owner
+  // row is found inside the statement (the profile itself, plus the account primary when the profile is a secondary one).
+  await conn('notification_prefs')
+    .whereRaw(
+      `customer_id IN (SELECT id FROM customers WHERE id = ?
+        OR (is_primary_profile = true AND account_id = (SELECT account_id FROM customers WHERE id = ? AND is_primary_profile IS NOT TRUE)))`,
+      [customerId, customerId],
+    )
+    .orderBy('customer_id').forShare().select('customer_id');
+  if (propertyId) await conn('property_notification_prefs').where({ property_id: propertyId }).forShare().select('property_id');
+}
+
 const sha = (parts) => crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 
 // The keys the card pins and the rail and the senders compare: hashes, so no address rides the version.
@@ -96,7 +114,7 @@ function noConfirmationReason(t) {
 }
 
 // The card's two lines (confirmation, welcome), from the pinned state. Masked; never an address or a full number.
-function contactCardLines(state, { sendTexts, welcome }) {
+function contactCardLines(state, { sendTexts, welcome, welcomeEmailCovered = false }) {
   const lines = [];
   const t = state.toggles;
   if (sendTexts) {
@@ -110,7 +128,8 @@ function contactCardLines(state, { sendTexts, welcome }) {
   if (welcome) {
     const account = state.accountToggles || t;
     const text = account.sms ? maskPhone(state.holder.phone) : null;
-    const email = account.email ? maskEmail(state.holder.email) : null;
+    // The welcome EMAIL is skipped when today's signup email already covers it (GATE_SIGNUP_SINGLE_EMAIL); the text is not.
+    const email = account.email && !welcomeEmailCovered ? maskEmail(state.holder.email) : null;
     const legs = [text && `${text} by text`, email && `${email} by email`].filter(Boolean);
     lines.push(legs.length ? `Welcome goes to ${legs.join(' and ')}` : 'No welcome message: no phone or email to reach, or texts and email are off');
   }
@@ -122,4 +141,4 @@ function contactCardLines(state, { sendTexts, welcome }) {
 // send that happens later (the recovery sweep included) cannot reach recipients the card did not show.
 const CONTACT_PIN_ACTION = 'booking_contact_pin';
 
-module.exports = { CONTACT_PIN_ACTION, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, contactCardLines, maskPhone, maskEmail };
+module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, contactCardLines, maskPhone, maskEmail };

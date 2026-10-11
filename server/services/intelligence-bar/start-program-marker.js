@@ -260,10 +260,60 @@ async function ringAfterAbandon(marker, alert) {
   }
 }
 
+// A booking row is judged under the customer row lock, the lock the booking transaction itself holds: its stamp rows are
+// invisible until it commits, so reading them without the lock could abandon a booking still in flight. NOWAIT: a lock
+// conflict means a booking (or another confirm) is running, so this pass skips the row. The row and its stamps are read
+// again inside the lock, and the same OPEN_ROW.booking step the confirmed path uses decides.
+async function judgeBookingRow(row) {
+  let judged = null;
+  try {
+    await db.transaction(async (trx) => {
+      await trx('customers').where({ id: row.customer_id }).forUpdate().noWait().first('id');
+      const fresh = await trx('ib_action_phases').where({ id: row.id }).first();
+      if (!fresh || fresh.phase !== 'booking') return;
+      const marker = readMarker(fresh);
+      judged = { marker, step: await OPEN_ROW.booking(marker, trx) };
+    });
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      logger.info(`[start-program-marker] customer ${row.customer_id} is locked (a booking may be running); row ${row.id} is judged on a later pass`);
+      return null;
+    }
+    throw err;
+  }
+  if (judged && judged.step.audit) await audit(judged.marker.id, ...judged.step.audit);
+  return judged;
+}
+
+async function postOwedAlert(marker) {
+  const alertId = await alertOwed(marker);
+  if (!alertId) {
+    // No id to store: leave the row unstamped so the next pass posts it again. The row never expires.
+    logger.warn(`[start-program-marker] bill-owed alert for ${marker.id} came back without an id; it will be posted again`);
+    return 0;
+  }
+  await stampAlerted(marker.id, { payload: db.raw('payload || ?::jsonb', [JSON.stringify({ alert_id: alertId })]) });
+  return 1;
+}
+
+async function sweepRow(row) {
+  let marker = readMarker(row);
+  if (marker.phase === 'booking') {
+    const judged = await judgeBookingRow(row);
+    if (!judged) return 0;
+    const { step } = judged;
+    if (step.bell) { await ringAfterAbandon(judged.marker, step.bell); return 1; }
+    if (!step.out.owed) return 0;
+    marker = step.out.owed;
+  }
+  return postOwedAlert(marker);
+}
+
 // One alert per open row older than ALERT_MINUTES (the scheduler runs this every 10 minutes):
 //   booked_pending_bill  (or a booking whose stamped visits now exist)  -> "bill not set", the row stays open
 //   booking, no stamped visits, older than BOOKING_STALE_MINUTES        -> "may not have finished", the row is abandoned
-// A younger booking with no stamped visits is left alone: it may still be running.
+// A younger booking with no stamped visits is left alone: it may still be running. Booking rows are judged under the
+// customer lock (judgeBookingRow).
 async function sweepStalePending() {
   const rows = await db('ib_action_phases')
     .where({ tool: TOOL }).whereIn('phase', OPEN_PHASES)
@@ -274,27 +324,7 @@ async function sweepStalePending() {
   let raised = 0;
   for (const row of rows) {
     try {
-      const marker = readMarker(row);
-      let phase = marker.phase;
-      if (phase === 'booking' && (await module.exports.stampedVisitIds(marker.actionKey)).length) {
-        await settle(marker.id, 'booked_pending_bill', { found_by: 'stamp' });
-        phase = 'booked_pending_bill';
-      }
-      if (phase === 'booked_pending_bill') {
-        const alertId = await alertOwed(marker);
-        if (!alertId) {
-          // No id to store: leave the row unstamped so the next pass posts it again. The row never expires.
-          logger.warn(`[start-program-marker] bill-owed alert for ${marker.id} came back without an id; it will be posted again`);
-        } else {
-          await stampAlerted(marker.id, { payload: db.raw('payload || ?::jsonb', [JSON.stringify({ alert_id: alertId })]) });
-          raised += 1;
-        }
-      } else if (marker.createdAt <= minutesAgo(BOOKING_STALE_MINUTES)) {
-        await alertUnfinished(marker);
-        await settle(marker.id, 'abandoned', { reason: 'no_stamped_visits' });
-        await stampAlerted(marker.id);
-        raised += 1;
-      }
+      raised += await sweepRow(row);
     } catch (err) {
       logger.error(`[start-program-marker] stale row ${row.id} alert failed: ${err.message}`);
     }

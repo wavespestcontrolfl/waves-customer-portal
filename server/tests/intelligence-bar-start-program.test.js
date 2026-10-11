@@ -266,7 +266,35 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     expect(lines(preview, 'operational').filter((l) => l.startsWith('Marks consultation'))).toEqual([]);
   });
 
-  test('an open warm consultation: the card names it, and the booking pins it by id and outcome', async () => {
+  const OPEN_WARM = () => [
+    { outcome_id: 'co-1', scheduled_service_id: 'visit-9', outcome: 'warm', lost_reason: null, scheduled_date: '2099-02-10', window_start: '09:00' },
+  ];
+
+  test('a dues-covered recurring row is not a sale: the real predicate runs on the planned row, and the card says the consultation stays open (round 15)', async () => {
+    const Consultations = require('../services/consultation-outcomes');
+    const spy = jest.spyOn(Consultations, 'bookingMarksConsultationsWon');
+    tables['consultation_outcomes as co'] = OPEN_WARM();
+    const preview = await run(BASE_INPUT);
+    // The hook's own gate, called with the row the booking will create (recurring, no visit price, no invoice on complete).
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ is_recurring: true, estimated_price: null, create_invoice_on_complete: false, service_type: 'Lawn Care' }), expect.anything());
+    expect(lines(preview, 'operational')).toContain('1 open consultation(s) stay open: this booking is dues-covered and does not count as a sale');
+    expect(lines(preview, 'operational').filter((l) => l.startsWith('Marks consultation'))).toEqual([]);
+    spy.mockRestore();
+  });
+
+  test('the consultation-won effect is pinned: which way the predicate went changes the card version (round 15)', async () => {
+    const Consultations = require('../services/consultation-outcomes');
+    tables['consultation_outcomes as co'] = OPEN_WARM();
+    const stays = (await run(BASE_INPUT))._version;
+    jest.spyOn(Consultations, 'bookingMarksConsultationsWon').mockResolvedValue(true);
+    const wins = await run(BASE_INPUT);
+    expect(wins._version).not.toBe(stays);
+    expect(lines(wins, 'operational')).toContain('Marks consultation of Tue, Feb 10, 2099 (outcome warm) as won');
+    Consultations.bookingMarksConsultationsWon.mockRestore();
+  });
+
+  test('an open warm consultation that the booking does count as a sale: the card names it, and the booking pins it by id and outcome', async () => {
+    jest.spyOn(require('../services/consultation-outcomes'), 'bookingMarksConsultationsWon').mockResolvedValue(true);
     tables['consultation_outcomes as co'] = [
       { outcome_id: 'co-1', scheduled_service_id: 'visit-9', outcome: 'warm', lost_reason: null, scheduled_date: '2099-02-10', window_start: '09:00' },
     ];
@@ -277,6 +305,31 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
     await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
     expect(createScheduleBooking.mock.calls[0][0].approvedConsultations).toEqual(['co-1:warm']);
+  });
+
+  test('a signup email that already covers the welcome email: the card promises none, pins that, and uses the delivery function (round 15)', async () => {
+    jest.spyOn(Welcome, 'isNewRecurringSignupCandidate').mockResolvedValue(true);
+    const covers = jest.spyOn(Welcome, 'combinedSignupEmailCoversWelcome').mockResolvedValue(true);
+    const covered = await run(BASE_INPUT);
+    expect(covers).toHaveBeenCalledTimes(1);
+    expect(lines(covered, 'comms').some((l) => l.startsWith("Welcome email: already covered by today's signup email to ") && l.endsWith('; none is sent'))).toBe(true);
+    expect(lines(covered, 'comms').join('\n')).not.toMatch(/sends the welcome text and the welcome email/);
+    expect(JSON.stringify(covered)).not.toContain('lee@example.com');
+    covers.mockResolvedValue(false);
+    const open = await run(BASE_INPUT);
+    expect(lines(open, 'comms').some((l) => l.includes('It sends the welcome text and the welcome email'))).toBe(true);
+    expect(lines(open, 'comms').some((l) => l.startsWith('Welcome email: already covered'))).toBe(false);
+    // The answer is pinned.
+    expect(open._version).not.toBe(covered._version);
+    // The delivery calls the very same function (exported, no copy).
+    const delivery = require('fs').readFileSync(require.resolve('../services/new-recurring-welcome-sms'), 'utf8');
+    expect(delivery).toContain('await combinedSignupEmailCoversWelcome(customer, row)');
+  });
+
+  test('no welcome candidate: the covered check is not asked', async () => {
+    const covers = jest.spyOn(Welcome, 'combinedSignupEmailCoversWelcome').mockResolvedValue(true);
+    await run(BASE_INPUT);
+    expect(covers).not.toHaveBeenCalled();
   });
 
   test('the card reads the consultations through the hook\'s own selection, not a copy', async () => {
@@ -1258,6 +1311,54 @@ describe('commit', () => {
       expect(alert.mock.calls[0][1].action).toBe('Program start unfinished');
       expect(alert.mock.calls[0][1].why).toBe('A program start for Dana Example may not have finished; check the schedule.');
       expect(rowUpdates().map((w) => w.data.phase)).toContain('abandoned');
+    });
+
+    test('the sweep judges a booking row under the customer lock (NOWAIT): a locked customer skips the row, nothing is abandoned (round 15)', async () => {
+      stamped = [];
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
+      tables.ib_action_phases = [phaseRow({ created_at: ago(45) })];
+      db.transaction.mockImplementationOnce(async () => { throw Object.assign(new Error('could not obtain lock'), { code: '55P03' }); });
+      expect(await Marker.sweepStalePending()).toBe(0);
+      expect(writes).toEqual([]);
+      expect(alert).not.toHaveBeenCalled();
+      // A different failure is not swallowed as a skip: it is logged by the sweep and nothing is written either.
+      db.transaction.mockImplementationOnce(async () => { throw new Error('connection reset'); });
+      expect(await Marker.sweepStalePending()).toBe(0);
+      expect(writes).toEqual([]);
+    });
+
+    test('the sweep reads the row and its stamps INSIDE the customer lock; stamps visible after the lock mean booked_pending_bill, not abandoned', async () => {
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n2' });
+      tables.ib_action_phases = [phaseRow({ created_at: ago(45) })];
+      let stampReadAfterLock = null;
+      Marker.stampedVisitIds.mockImplementation(async () => {
+        stampReadAfterLock = calls.some((c) => c.table === 'customers' && c.method === 'forUpdate') && calls.some((c) => c.table === 'customers' && c.method === 'noWait');
+        return stamped;
+      });
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(stampReadAfterLock).toBe(true);
+      expect(alert.mock.calls[0][1].action).toBe('Program bill not set');
+      const phases = rowUpdates().map((w) => w.data.phase);
+      expect(phases).toContain('booked_pending_bill');
+      expect(phases).not.toContain('abandoned');
+    });
+
+    test('no stamps after the lock and older than 30 minutes: abandoned with one bell; a younger booking is left alone', async () => {
+      stamped = [];
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n3' });
+      tables.ib_action_phases = [phaseRow({ created_at: ago(45) })];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(rowUpdates().map((w) => w.data.phase)).toContain('abandoned');
+      expect(alert).toHaveBeenCalledTimes(1);
+      expect(alert.mock.calls[0][1].action).toBe('Program start unfinished');
+      writes = []; alert.mockClear();
+      tables.ib_action_phases = [phaseRow({ created_at: ago(15) })];
+      expect(await Marker.sweepStalePending()).toBe(0);
+      expect(rowUpdates()).toEqual([]);
+      expect(alert).not.toHaveBeenCalled();
     });
 
     test('the scheduler runs the stale-row sweep every 10 minutes under an exclusive lock', () => {

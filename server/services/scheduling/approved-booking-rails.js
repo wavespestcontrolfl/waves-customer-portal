@@ -133,7 +133,11 @@ const RAILS = [
     code: 'CONTACT_CHANGED',
     message: 'The customer\'s phone, email or notification settings changed since the card was shown. Nothing was booked.',
     applies: (ctx) => typeof ctx.req.approvedContact === 'string',
-    lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
+    lock: async (trx, ctx) => {
+      await trx('customers').where({ id: ctx.customerId }).forUpdate().first('id');
+      // The prefs rows the key is read from are share-locked before the read (the admin prefs save locks its row FOR UPDATE).
+      await require('../booking-contact-state').lockContactPrefs(trx, ctx.customerId, { propertyId: ctx.req.approvedServiceAnchor?.propertyId || null });
+    },
     // Two keys, as the senders split them: the confirmation for the property the visits are stamped with
     // (property-level toggles and recipient overrides), and the account-level welcome.
     // Every read goes through the booking transaction: a second connection from the pool would wait on a pool the
