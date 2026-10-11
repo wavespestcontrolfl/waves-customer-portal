@@ -33,6 +33,7 @@ const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
+const featureGates = require('../config/feature-gates');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
 const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
@@ -536,6 +537,8 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
     ...await neonicCapKey(svc, catalog, knex),
+    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
+    ...(featureGates.fastCompleteWrapUpLive() && { wrapUp: true }),
   };
 }
 

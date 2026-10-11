@@ -109,6 +109,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock';
 import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
@@ -122,7 +123,7 @@ import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
+  RecoveredCompletion, SavedView, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
@@ -136,7 +137,6 @@ import { RowMixHelp, WeedMixHelp, useMixHelp } from './LawnMixHelp';
 import { gallonsBodyFields, mixHelpOf, withGallonsArea } from '../../lib/lawn-mix-help';
 import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
-import { elapsedSince } from '../../lib/on-site-time';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import { Button, ActionFeedback, Input } from '../ui';
@@ -238,7 +238,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -332,6 +332,8 @@ const findingsTypeUndecidable = (data) => !('findingsType' in data)
 const optionalContextFields = (data) => ({
   findingsType: data.findingsType ?? null,
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
+  // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+  wrapUp: data?.wrapUp === true,
   // Spot-area rules: only while the server says so, so an older server renders as before.
   spotRules: data?.spotRules === true,
   weedMix: weedMixOf(data),
@@ -1195,7 +1197,7 @@ const sodEcho = (newSod) => (newSod?.sodLaidOn
   ? { sod: { laidOn: newSod.sodLaidOn, covers: newSod.covers, held: (newSod.plannedHeld || []).map((entry) => entry.kind) } }
   : {});
 
-function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null }) {
+function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null, customerText }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -1265,7 +1267,8 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
     // The blog post for the customer: its id; the server checks it is live and
     // freezes its title and link on the report.
     ...(form.blogPost ? { blogPostId: form.blogPost.id } : {}),
-    ...CUSTOMER_TEXT_FLAGS,
+    // The Wrap-up section's choices (GATE_FAST_COMPLETE_WRAP_UP); without it the four flags the sheet always posted.
+    ...customerText,
   };
 }
 
@@ -1329,27 +1332,6 @@ function CustomerContact({ service, visit, request }) {
   );
 }
 
-// "Time on-site", as the full form's Complete service page shows it: a small
-// label over the live elapsed time since check-in (h:mm:ss), ticking every
-// second. The page shows the card only when the visit has a check-in time, and so
-// does this: no check-in time, no card. `onSiteAt` is that time (the on-site
-// status-log entry, else checkInTime; see lib/on-site-time.js), passed by Dispatch.
-function TimeOnSite({ since }) {
-  const [elapsed, setElapsed] = useState(() => elapsedSince(since));
-  useEffect(() => {
-    setElapsed(elapsedSince(since));
-    const iv = setInterval(() => setElapsed(elapsedSince(since)), 1000);
-    return () => clearInterval(iv);
-  }, [since]);
-  if (!since) return null;
-  return (
-    <section className="tech-visit-choice-section tech-visit-on-site" aria-label="Time on-site">
-      <h3 className="tech-visit-section-title">Time on-site</h3>
-      <p className="tech-visit-on-site-time">{elapsed}</p>
-    </section>
-  );
-}
-
 // `onPrepared` (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): Complete hands the body it would have
 // posted to onPrepared(serviceId, body) and posts nothing. `sharedNote` is the stop's one note: it stands
 // in for this sheet's own, which hides. Without them the sheet is as it was.
@@ -1389,7 +1371,9 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const [dictationPending, setDictationPending] = useState(false);
   // The treatment zone tracer opens over the sheet, which is inert meanwhile.
   const [overlay, setOverlay] = useState(null);
-  usePartBusy('lawn', [submitting, dictationPending, overlay != null].some(Boolean));
+  // The Wrap-up's submit-time check of the review send time is reading: the sheet is locked like a submit.
+  const [wrapChecking, setWrapChecking] = useState(false);
+  usePartBusy('lawn', [submitting, wrapChecking, dictationPending, overlay != null].some(Boolean));
 
   // The server says this visit does not use this sheet: the parent opens the
   // full form, once. (No button on the sheet leads there.) Not while a saved
@@ -1407,25 +1391,25 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
-    if (submitting) return;
+    if (submitting || wrapChecking) return;
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for good.
-  const locked = submissionHolds(submission);
+  const locked = submissionHolds(submission) || wrapChecking;
 
   return (
     <Frame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
-      <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
-      <SheetBody operatorId={operatorId} service={service} request={stopRequest} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} />
+      <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
+      <SheetBody operatorId={operatorId} service={service} request={stopRequest} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} onWrapChecking={setWrapChecking} />
     </Frame>
   );
 }
 
-function SheetBody({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, sharedNote }) {
+function SheetBody({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, sharedNote, onWrapChecking }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -1444,7 +1428,7 @@ function SheetBody({ operatorId, service, request, catalog, ctx, propertyAreas, 
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnFastForm operatorId={operatorId} service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} />;
+  return <LawnFastForm operatorId={operatorId} service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} sharedNote={sharedNote} onWrapChecking={onWrapChecking} />;
 }
 
 // The photo step's report of the confirmed assessment, plus the context's own
@@ -1625,7 +1609,7 @@ function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
   return { newSod: sodFresh !== undefined ? sodFresh : ctx.newSod, liveCtx, rereads, confirmSodRooted, sodWait: sodBusy ? SOD_BUSY_MESSAGE : sodStale };
 }
 
-function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces, sharedNote }) {
+function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces, sharedNote, onWrapChecking }) {
   const base = `/admin/dispatch/${service?.id}`;
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
@@ -1695,6 +1679,8 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   dosesRef.current = Object.fromEntries(rows.filter((row) => row.placeRule).map((row) => [String(row.productId).toLowerCase(), JSON.stringify([row.totalAmount, row.amountUnit, row.spotArea ?? null, row.derivedRate?.rate ?? null])]));
   const doseKey = JSON.stringify(dosesRef.current);
   useEffect(() => { pruneRefused(JSON.parse(doseKey)); }, [doseKey, pruneRefused]);
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. Not a part of a grouped stop, which keeps the fixed flags.
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: rows.length > 0, onChecking: onWrapChecking });
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
@@ -1763,12 +1749,14 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
-  const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap });
+  const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   // Prepare mode: a part is prepared only while it could be prepared right now, exactly when nothing is missing
   // (the Complete button; the confirmed assessment, a product, the areas and stock are all in missingReason).
   const canPrepare = !missingReason;
-  const submit = () => {
+  const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
+    // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
+    if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(buildBody, [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '), { valid: canPrepare });
   };
@@ -1870,11 +1858,12 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
               </Button>
             </section>
           )}
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
-        submission={submission}
+        submission={wrapUp.lock(submission)}
         {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
         coverProps={picker.coverProps}

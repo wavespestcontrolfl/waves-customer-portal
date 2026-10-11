@@ -58,6 +58,8 @@ import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-compl
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
+import { onSiteTimeOf } from '../../lib/on-site-time';
+import { completionBillingFacts } from '../../lib/completion-billing-facts';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -1051,6 +1053,10 @@ export default function TechHomePage({ section = 'today' }) {
             serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
             address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || '',
             timeLabel: serviceWindowLabel(treeShrubFastService) || '',
+            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
+            ...completionBillingFacts(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,

@@ -62,11 +62,12 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
+  SheetHeader, TimeOnSite, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
+import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
 import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { evaluateNeonicCap } from '../../lib/tree-shrub-neonic-cap';
 import { Button, ActionFeedback, cn } from '../ui';
@@ -143,6 +144,8 @@ const METHOD_CHOICES = [
   { value: 'granular_broadcast', label: 'Granular' },
 ];
 const DEFAULT_METHOD = 'foliar_spray';
+// The four customer-text flags the sheet posts while the Wrap-up is off.
+const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' };
 
 // The approved shot guide: standing on the ground, about a minute for all of
 // them. The first two are the floor.
@@ -324,11 +327,13 @@ function contextFrom(data, service) {
     watchList: watchListFrom(data),
     pestCheck: objectOrNull(data?.pestCheck),
     neonicCap: objectOrNull(data?.neonicCap),
+    // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+    wrapUp: data?.wrapUp === true,
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -413,7 +418,7 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
-function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {} }) {
+function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {}, customerText }) {
   const active = rows.filter((row) => row.active);
   const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
@@ -469,11 +474,9 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
     customerInteraction: form.customerHome,
     techTips: techTipsOf(form, tipsAvailable),
     // Same as the full form (owner ruling): the completion text, the review
-    // ask and the pay link go out the way they do from there.
-    sendCompletionSms: true,
-    requestReview: true,
-    includePayLink: true,
-    reviewTiming: 'auto',
+    // ask and the pay link go out the way they do from there. The Wrap-up
+    // section's choices (GATE_FAST_COMPLETE_WRAP_UP) stand in for these four.
+    ...customerText,
   };
 }
 
@@ -491,31 +494,33 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
   // form is another page and carries nothing over, so Full form and "+ Other
   // product" wait for it, like Complete.
   const [dictationPending, setDictationPending] = useState(false);
+  // The Wrap-up's submit-time check of the review send time is reading: the sheet is locked like a submit.
+  const [wrapChecking, setWrapChecking] = useState(false);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
-    if (submitting) return;
+    if (submitting || wrapChecking) return;
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff (the technician page ignores it).
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
-  const locked = submissionHolds(submission);
+  const locked = submissionHolds(submission) || wrapChecking;
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
-      <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting || wrapChecking} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} onWrapChecking={setWrapChecking} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, onWrapChecking }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -534,7 +539,7 @@ function SheetBody({ service, request, ctx, submission, locked, dictationPending
     );
   }
   if (stop) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <TreeShrubForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <TreeShrubForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} onWrapChecking={onWrapChecking} />;
 }
 
 // The ids of the library tips written for a watch item the tech marked Seen,
@@ -547,7 +552,7 @@ function seenWatchTipIds(library, choices) {
     .map((tip) => tip.id);
 }
 
-function TreeShrubForm({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
+function TreeShrubForm({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile, onWrapChecking }) {
   const base = `/admin/dispatch/${service?.id}`;
   const products = useProductRows(ctx);
   const { rows } = products;
@@ -607,11 +612,15 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     }
     setCheckingStock(false);
   };
-  const submit = () => {
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section (the clock above the note, the options below the tips).
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: rows.some((row) => row.active), onChecking: onWrapChecking });
+  const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
+    // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
+    if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }), pestCheck.payload),
+      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) }), pestCheck.payload),
       `${names || 'Inspection'} · ${inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups)}`,
     );
   };
@@ -625,6 +634,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
+        {wrapUp.enabled && <TimeOnSite since={service?.onSiteAt} />}
         <fieldset className="tech-visit-form" disabled={locked}>
           {ctx.reminders.map((text) => <p key={text} className="tech-visit-muted" role="status">{text}</p>)}
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
@@ -674,11 +684,12 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />
           )}
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
-        submission={submission}
+        submission={wrapUp.lock(submission)}
         missingReason={missingReason}
         warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!productBlock}
         label="Complete tree & shrub"
