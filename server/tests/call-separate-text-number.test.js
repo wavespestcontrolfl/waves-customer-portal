@@ -400,7 +400,10 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     // in the shared tables, not parallel branches
     expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\(\[[^\]]*"text_number_differs"/);
     const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
-    expect(triage).toContain("          'text_number_differs',\n          ...(item.reason_code !== 'auto_booking_skipped_after_approval'");
+    // text_number_differs sits in the own-Resolve list right before the spread (sibling card lines may follow it)
+    const ownResolveAt = triage.indexOf("          'text_number_differs',\n");
+    expect(ownResolveAt).toBeGreaterThan(-1);
+    expect(triage.slice(ownResolveAt, ownResolveAt + 400)).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval'");
     expect(triage).toContain('text_number_differs: \'This card is a no-text line');
     expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'text_number_differs'/);
   });
