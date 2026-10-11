@@ -60,7 +60,8 @@
  *     with an open card of these codes (staff_visit_arrived_after_card)
  *   - reschedule_or_cancel → the card's reschedule request carries a confirmed
  *     date and hour, and the customer's only live visit that ET day already
- *     starts at exactly that hour for a service the call asked about; the
+ *     starts at exactly that hour for a service the call asked about, on a
+ *     one-property account with no other pre-existing upcoming visit; the
  *     calendar shows the agreed slot
  *     (agreed_slot_on_calendar). Never for a cancellation
  *
@@ -2662,17 +2663,38 @@ function isRescheduleRequest(item) {
 // AND for a service the call was about: the visit's service words answer at
 // least one of the card's snapshotted service requirements (a lawn visit at
 // 16:00 does not show that a pest visit was moved to 16:00). A card that
-// snapshotted no service ask proves nothing and keeps its card. It may
-// predate the card. Null when there is no such visit.
-function agreedSlotVisit(item, mine) {
+// snapshotted no service ask proves nothing and keeps its card. Two more
+// fences make "the calendar shows the agreed slot" complete, not partial:
+// the account has exactly one active property, and no other upcoming visit
+// that existed at filing time is left off the slot (otherVisitAwaitedTheMove).
+// It may predate the card. Null when there is no such visit.
+function agreedSlotVisit(item, mine, { soleProperty = false } = {}) {
+  // One active property only: with several, a visit at the agreed hour may be
+  // at another home than the one the call was about. Fail closed.
+  if (!soleProperty) return null;
   const wall = isRescheduleRequest(item) ? confirmedWall(item) : null;
   if (!wall) return null;
   const sameDay = mine.filter((v) => LIVE_BOOKING_STATUSES.has(v.status)
     && toDate(v.scheduled_date) && etCalendarDayOf(v.scheduled_date) === wall.slice(0, 10));
   const [only] = sameDay;
-  return sameDay.length === 1 && !only.parent_service_id && !only.recurring_parent_id
+  const onSlot = sameDay.length === 1 && !only.parent_service_id && !only.recurring_parent_id
     && String(only.window_start || '').slice(0, 5) === wall.slice(11, 16)
-    && visitIsForAskedService(item, only) ? only : null;
+    && visitIsForAskedService(item, only);
+  return onSlot && !otherVisitAwaitedTheMove(item, mine, only) ? only : null;
+}
+
+// Every visit the call could have meant is accounted for: no OTHER upcoming
+// visit (pending or confirmed) that already existed when the card was filed
+// still sits, from the card's ET day onward, anywhere but the agreed slot. A
+// call that moved two services, or a customer with a series, leaves such a
+// visit and keeps its card; a visit booked after the card is new work, not a
+// visit that was waiting to be moved.
+const UPCOMING_VISIT_STATUSES = new Set(['pending', 'confirmed']);
+function otherVisitAwaitedTheMove(item, mine, slotVisit) {
+  const cardDay = etCalendarDayOf(item.created_at);
+  return mine.some((v) => v !== slotVisit && UPCOMING_VISIT_STATUSES.has(v.status)
+    && toDate(v.scheduled_date) && etCalendarDayOf(v.scheduled_date) >= cardDay
+    && !strictlyAfter(v.created_at, item.created_at));
 }
 
 function visitIsForAskedService(item, visit) {
@@ -2683,7 +2705,8 @@ function visitIsForAskedService(item, visit) {
 function loadAgreedSlotEvidence(facts, flag) {
   if (!facts) return;
   for (const item of facts.visitItems.filter((i) => i.reason_code === 'reschedule_or_cancel')) {
-    if (agreedSlotVisit(item, facts.visitsByCustomer.get(String(item.call_customer_id)) || [])) flag(item.id, 'agreed_slot_on_calendar');
+    const customer = String(item.call_customer_id);
+    if (agreedSlotVisit(item, facts.visitsByCustomer.get(customer) || [], { soleProperty: facts.soleProperty.has(customer) })) flag(item.id, 'agreed_slot_on_calendar');
   }
 }
 
