@@ -81,6 +81,8 @@ const NOTRANS_PARENT_SID = sid('pq');
 const NOTRANS_CHILD_SID = sid('cu');
 const SWEPTOBS_PARENT_SID = sid('pr');
 const SWEPTOBS_CHILD_SID = sid('cv');
+const DUAL_PARENT_SID = sid('ps');
+const DUAL_CHILD_SID = sid('cw');
 const UUID = '11111111-1111-4111-8111-111111111111';
 
 describe('closeParentOnCallbackSpam without a database', () => {
@@ -145,7 +147,7 @@ describe('closeParentOnCallbackSpam without a database', () => {
 maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () => {
   let db;
   let processor;
-  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID, SWEPT_PLAIN_PARENT_SID, SWEPT_PLAIN_CHILD_SID, TWICE_PARENT_SID, TWICE_CHILD_A_SID, TWICE_CHILD_B_SID, SIBLING_PARENT_SID, SIBLING_CHILD_A_SID, SIBLING_CHILD_B_SID, RENEW_PARENT_SID, RENEW_CHILD_A_SID, RENEW_CHILD_B_SID, RENEW_CHILD_C_SID, LOST_PARENT_SID, LOST_CHILD_SID, UNSTAMPED_PARENT_SID, UNSTAMPED_CHILD_SID, KEPT_SPAM_PARENT_SID, KEPT_SPAM_CHILD_SID, UNVM_PARENT_SID, UNVM_CHILD_SID, FWD_PARENT_SID, FWD_CHILD_SID, LOSTSTAMP_PARENT_SID, LOSTSTAMP_CHILD_SID, ROLLBACK_PARENT_SID, ROLLBACK_CHILD_SID, NOOP_PARENT_SID, NOOP_CHILD_SID, NOEND_PARENT_SID, NOEND_CHILD_SID, EXHAUST_PARENT_SID, EXHAUST_CHILD_SID, QUEUED_PARENT_SID, QUEUED_CHILD_SID, REREAD_PARENT_SID, REREAD_CHILD_SID, PEXHAUST_PARENT_SID, PEXHAUST_CHILD_SID, NOTRANS_PARENT_SID, NOTRANS_CHILD_SID, SWEPTOBS_PARENT_SID, SWEPTOBS_CHILD_SID];
+  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID, SWEPT_PLAIN_PARENT_SID, SWEPT_PLAIN_CHILD_SID, TWICE_PARENT_SID, TWICE_CHILD_A_SID, TWICE_CHILD_B_SID, SIBLING_PARENT_SID, SIBLING_CHILD_A_SID, SIBLING_CHILD_B_SID, RENEW_PARENT_SID, RENEW_CHILD_A_SID, RENEW_CHILD_B_SID, RENEW_CHILD_C_SID, LOST_PARENT_SID, LOST_CHILD_SID, UNSTAMPED_PARENT_SID, UNSTAMPED_CHILD_SID, KEPT_SPAM_PARENT_SID, KEPT_SPAM_CHILD_SID, UNVM_PARENT_SID, UNVM_CHILD_SID, FWD_PARENT_SID, FWD_CHILD_SID, LOSTSTAMP_PARENT_SID, LOSTSTAMP_CHILD_SID, ROLLBACK_PARENT_SID, ROLLBACK_CHILD_SID, NOOP_PARENT_SID, NOOP_CHILD_SID, NOEND_PARENT_SID, NOEND_CHILD_SID, EXHAUST_PARENT_SID, EXHAUST_CHILD_SID, QUEUED_PARENT_SID, QUEUED_CHILD_SID, REREAD_PARENT_SID, REREAD_CHILD_SID, PEXHAUST_PARENT_SID, PEXHAUST_CHILD_SID, NOTRANS_PARENT_SID, NOTRANS_CHILD_SID, SWEPTOBS_PARENT_SID, SWEPTOBS_CHILD_SID, DUAL_PARENT_SID, DUAL_CHILD_SID];
   const readCall = (s) => db('call_log').where({ twilio_call_sid: s }).first();
   // A voicemail an hour ago: the promise lifecycle counts evidence from the
   // end of the call, so the callback (now) is after it.
@@ -658,6 +660,19 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     // A replacement recording: the parent is a settled answered call now (markers cleared); the callback still reads spam.
     await db('call_log').where({ id: parentId }).update({ call_outcome: null, answered_by: null, processing_status: 'processed' });
     const childId = (await readCall(SWEPTOBS_CHILD_SID)).id;
+    const run = await processor.reconcileCorrectedCallbackVerdicts();
+    expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1 });
+    expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
+  });
+
+  test('a card the sweep closed reopens when BOTH the callback and the parent were corrected before the scan', async () => {
+    const parentId = await insertCall(DUAL_PARENT_SID, { from_phone: '+15555550140' });
+    await insertChild(DUAL_CHILD_SID, parentId, { to_phone: '+15555550140', created_at: new Date(Date.now() - 30 * 60 * 1000) });
+    await db('triage_items').insert([{ ...card(parentId, 'missing_service_address', 'resolved'), resolution_rule: 'callback_spam', resolution_source: 'auto' }]);
+    const childId = (await readCall(DUAL_CHILD_SID)).id;
+    // The callback re-read as a real conversation AND the parent re-read as an answered call.
+    await db('call_log').where({ id: childId }).update({ processing_status: 'processed' });
+    await db('call_log').where({ id: parentId }).update({ call_outcome: null, answered_by: null, processing_status: 'processed' });
     const run = await processor.reconcileCorrectedCallbackVerdicts();
     expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1 });
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');

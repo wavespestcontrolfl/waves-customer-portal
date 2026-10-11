@@ -1194,8 +1194,12 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     // A parent itself reprocessed to spam keeps its cards closed on its own
     // verdict (parentSpam): nothing to correct, so it never fills the batch.
     .whereRaw("p.processing_status IS DISTINCT FROM 'spam'")
-    .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
-    .whereNotNull('p.duration_seconds').whereNull('p.processing_token')
+    // The parent: a settled voicemail (the proof still applied, the callback
+    // alone corrected), OR terminally no longer one (both sides corrected
+    // before the immediate correction ran: neither source above sees that
+    // pair, codex #6271 r43 P1). Either way the correction reopens the card.
+    .whereRaw(`(((p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail') AND p.duration_seconds IS NOT NULL AND p.processing_token IS NULL)
+      OR (p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail' AND ${terminalParentSql('p')}))`)
     .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(COALESCE(p.duration_seconds, 0), 0))")
     .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
     // ...and only the NEWEST row for its reason: a later row of any status
@@ -1440,18 +1444,19 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
         return { applied: true, cards: 0, promises: judged.reopened, standing: standing.length > 0, ...(parentSpam ? { parentSpam: true } : {}) };
       }
       // One canonical card per reason comes back: the newest callback_spam
-      // row for each reason, and only where no open / in_progress row for
-      // that reason exists (a reprocess after the settlement may have filed
-      // one; triage_items_open_unique_idx allows one live row per reason).
-      // Older history rows stay resolved.
+      // row for each reason, and only where no LATER row of any status exists
+      // for that reason (a reprocess after the settlement may have filed one
+      // that is open, or that staff already resolved: either way that newer
+      // row owns the ask and the history row stays resolved; the scans'
+      // newerRowForReason twin, codex #6271 r43 P2).
       const cards = await trx('triage_items')
         .whereIn('id', trx('triage_items').distinctOn('reason_code').select('id')
           .where({ call_log_id: parentId, status: 'resolved', resolution_rule: CALLBACK_SPAM_RULE })
           .orderBy([{ column: 'reason_code' }, { column: 'resolved_at', order: 'desc', nulls: 'last' }, { column: 'id', order: 'desc' }]))
-        .whereNotExists(function liveRowForReason() {
-          this.select(trx.raw('1')).from('triage_items as live')
-            .whereRaw('live.call_log_id = triage_items.call_log_id AND live.reason_code = triage_items.reason_code')
-            .whereIn('live.status', ['open', 'in_progress']);
+        .whereNotExists(function newerRowForReason() {
+          this.select(trx.raw('1')).from('triage_items as later')
+            .whereRaw('later.call_log_id = triage_items.call_log_id AND later.reason_code = triage_items.reason_code AND later.id <> triage_items.id')
+            .whereRaw('(later.created_at > triage_items.created_at OR (later.created_at = triage_items.created_at AND later.id > triage_items.id))');
         })
         .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now });
       // Only a settlement that existed is undone: a first-time non-spam
@@ -11180,8 +11185,8 @@ const CallRecordingProcessor = {
           // recording adoption resets the count (codex #6271 r38/r39).
           extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
           updated_at: new Date(),
-        });
-      if (!released) {
+        }).returning(['extraction_attempts']);
+      if (!released.length) {
         logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
         // Ownership loss, not a transcription failure — same treatment as the
         // extraction branch. This pass persisted nothing and the peer that
@@ -11190,6 +11195,11 @@ const CallRecordingProcessor = {
         // (codex P1).
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // At the cap the lane has ended: the call produced no lead, customer or
+      // routing decision and no pass will try again, so the same permanent
+      // processing-failure card the extraction lane files is owed here
+      // (codex #6271 r43 P1). fileExtractionExhaustedTriage is a no-op under the cap.
+      await fileExtractionExhaustedTriage(call.id, Number(released[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
       return { success: false, error: 'No transcription available' };
     }
 
