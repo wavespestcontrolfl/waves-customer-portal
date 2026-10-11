@@ -262,28 +262,23 @@ async function hasCommittedCompletionAttempt(serviceId, knex = db) {
 // durable "billing is not settled" mark: until it clears, the process that
 // committed the record still holds the billing type it read at entry, so a
 // billing-type edit landing now would not reach it (the visit is completed, so
-// no visit-based check sees it either). Bounded by the window claimSideEffectsRun
-// itself treats as owned (STALE_SIDE_EFFECTS_MS) for a RUNNING row: after it another
-// run reclaims the attempt and reloads the customer, so an abandoned running row never
-// blocks an edit for long. A PENDING row (a released completion) is claimed at any age
-// and resumes with the frozen amount, so it fences until it is finished or released. Writers that hold the customer row FOR UPDATE (the Intelligence Bar
+// no visit-based check sees it either). It carries NO age window: claimSideEffectsRun
+// resumes a pending row at any age and reclaims a stale running row, both with the frozen
+// required amount, so an unfinished attempt fences until it is finished or released (an
+// abandoned one blocks a billing edit, by design: a money edit fails closed). Writers that
+// hold the customer row FOR UPDATE (the Intelligence Bar
 // billing-type commit) cannot race the transition into this state: the
 // completing transaction holds the customer FOR SHARE from before its first
 // write to its commit.
 async function customerCompletionInFlightState(customerId, knex = db) {
-  const cutoff = new Date(Date.now() - STALE_SIDE_EFFECTS_MS);
-  // The window applies to `side_effects_running` only (another run reclaims a stale one).
-  // A `side_effects_pending` row is a released completion: claimSideEffectsRun accepts it
-  // at ANY age and the resume mints the frozen required amount, so it fences at any age.
+  // No age window, for either state (fail closed, owner/coordinator ruling): claimSideEffectsRun
+  // accepts a `side_effects_pending` row at any age and reclaims a stale `side_effects_running`
+  // row, and both resume with the frozen required amount. So an unfinished attempt of either
+  // kind can still mint the old invoice after an edit; it fences until it is finished or released.
   const rows = await knex('service_completion_attempts as a')
     .join('scheduled_services as s', 's.id', 'a.service_id')
     .where('s.customer_id', customerId)
-    .where(function inFlight() {
-      this.where('a.status', 'side_effects_pending')
-        .orWhere(function running() {
-          this.where('a.status', 'side_effects_running').where('a.updated_at', '>=', cutoff);
-        });
-    })
+    .whereIn('a.status', ['side_effects_running', 'side_effects_pending'])
     .select('a.status');
   if (rows.some((r) => r.status === 'side_effects_pending')) return 'pending';
   return rows.length ? 'running' : null;

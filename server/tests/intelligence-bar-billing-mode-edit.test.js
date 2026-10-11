@@ -1007,7 +1007,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
   });
 
   describe('a completion that committed its record but has not finished billing fences the edit (completion-attempts.js customerHasCompletionInFlight)', () => {
-    const MESSAGE = 'A visit for this customer was just completed and its billing is still being finalized. Try again in a few minutes.';
+    const MESSAGE = 'A completed visit for this customer still has billing in progress. Wait for it to finish, or release it, then try again.';
 
     test('an unpriced monthly visit completing while the edit switches to per application: the card is refused, never a silent no-bill', async () => {
       mockState.customer = { ...MONTHLY };
@@ -1036,7 +1036,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       })).error).toBeUndefined();
     });
 
-    describe('Codex round 17: the staleness window applies to running rows only', () => {
+    describe('Codex round 17: both unfinished states fence at any age', () => {
       // A tiny in-memory knex that EVALUATES the where clauses the fence builds: a flat list of
       // terms joined by AND / OR, a function argument being a nested group.
       const fakeKnex = (rows) => {
@@ -1056,6 +1056,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
           };
           b.join = () => b;
           b.where = (c, o, v) => add('and', c, o, v);
+          b.whereIn = (c, vals) => { terms.push({ conn: 'and', f: (r) => vals.includes(r[c.replace('a.', '')]) }); return b; };
           b.orWhere = (c, o, v) => add('or', c, o, v);
           b.select = async () => rows.filter((r) => terms.reduce((acc, t, i) => (i === 0 ? t.f(r) : (t.conn === 'or' ? acc || t.f(r) : acc && t.f(r))), true));
           return b;
@@ -1066,9 +1067,10 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       const HOURS = (n) => new Date(Date.now() - n * 3600 * 1000);
       const state = async (rows) => require('../services/completion-attempts').customerCompletionInFlightState('cust-9', fakeKnex(rows));
 
-      test('a 2-hour-old pending row fences; a 2-hour-old running row does not; a fresh running row does', async () => {
+      test('a 2-hour-old pending row fences; a 2-hour-old running row fences too; a fresh running row fences; none does not', async () => {
         expect(await state([{ status: 'side_effects_pending', updated_at: HOURS(2) }])).toBe('pending');
-        expect(await state([{ status: 'side_effects_running', updated_at: HOURS(2) }])).toBe(null);
+        expect(await state([{ status: 'side_effects_running', updated_at: HOURS(2) }])).toBe('running');
+        expect(await state([{ status: 'side_effects_running', updated_at: HOURS(48) }])).toBe('running');
         expect(await state([{ status: 'side_effects_running', updated_at: HOURS(0.01) }])).toBe('running');
         expect(await state([{ status: 'side_effects_running', updated_at: HOURS(2) }, { status: 'side_effects_pending', updated_at: HOURS(3) }])).toBe('pending');
         expect(await state([])).toBe(null);
@@ -1077,7 +1079,8 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       test('the boolean reader is the same answer', async () => {
         const { customerHasCompletionInFlight } = require('../services/completion-attempts');
         expect(await customerHasCompletionInFlight('cust-9', fakeKnex([{ status: 'side_effects_pending', updated_at: HOURS(2) }]))).toBe(true);
-        expect(await customerHasCompletionInFlight('cust-9', fakeKnex([{ status: 'side_effects_running', updated_at: HOURS(2) }]))).toBe(false);
+        expect(await customerHasCompletionInFlight('cust-9', fakeKnex([{ status: 'side_effects_running', updated_at: HOURS(2) }]))).toBe(true);
+        expect(await customerHasCompletionInFlight('cust-9', fakeKnex([]))).toBe(false);
       });
 
       test('the card words the pending case as a retry that is still owed', async () => {
@@ -1088,7 +1091,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
           error: 'A completed visit for this customer still has billing to finish (retry pending). Finish or release it first. Nothing was proposed.',
         });
         mockState.inFlight = true;
-        expect(await propose(LEAVE)).toMatchObject({ code: 'billing_completion_pending', error: expect.stringContaining('just completed') });
+        expect(await propose(LEAVE)).toMatchObject({ code: 'billing_completion_pending', error: 'A completed visit for this customer still has billing in progress. Wait for it to finish, or release it, then try again. Nothing was proposed.' });
       });
     });
   });

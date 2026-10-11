@@ -499,7 +499,7 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
     return refuse('A completed visit for this customer still has billing to finish (retry pending). Finish or release it first. Nothing was proposed.', 'billing_completion_pending');
   }
   if (inFlight) {
-    return refuse('A visit for this customer was just completed and its billing is still being finalized. Try again in a few minutes. Nothing was proposed.', 'billing_completion_pending');
+    return refuse('A completed visit for this customer still has billing in progress. Wait for it to finish, or release it, then try again. Nothing was proposed.', 'billing_completion_pending');
   }
   // The card does not predict per-visit charges (price, tax, surcharge,
   // prepayment, invoices, dues coverage all move completion's amount): a visit
