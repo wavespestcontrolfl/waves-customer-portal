@@ -1192,13 +1192,38 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     const r = await require('./call-commitments').refreshFulfillment(db, id).catch((err) => ({ error: err.message }));
     refreshed.push({ callLogId: id, ...r });
   }
+  // ...and a settlement lost BEFORE the stamp: the callback's spam write
+  // committed, the parent transaction failed or never ran. Recent (7 days)
+  // admin-placed spam callbacks whose parent carries no stamp and still has
+  // a moot card or a callback promise it could settle, run through the same
+  // closeParentOnCallbackSpam (every eligibility check again, under the
+  // locks; a settled parent is stamped and leaves this source).
+  const unsettled = await db('call_log as cb').join('call_log as p', db.raw("p.id::text = cb.metadata->>'relatedCallId'"))
+    .where({ 'cb.source': 'admin-callback', 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
+    .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
+    .whereRaw("cb.created_at > now() - interval '7 days'")
+    .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .where((q) => {
+      q.whereExists(function mootCard() {
+        this.select(db.raw('1')).from('triage_items as t').whereRaw('t.call_log_id = p.id').whereIn('t.status', ['open', 'in_progress']).whereIn('t.reason_code', [...CALLBACK_SPAM_MOOT_CODES]);
+      }).orWhereExists(function openPromise() {
+        this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' }).whereRaw('cc.created_at < cb.created_at');
+      });
+    })
+    .limit(limit).distinct('cb.*');
+  const settled = [];
+  for (const cb of unsettled) {
+    const r = await closeParentOnCallbackSpam(cb, { callSid: cb.twilio_call_sid });
+    settled.push({ callbackCallId: cb.id, ...r });
+    if (r.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} settled its parent after a lost settlement: cards=${r.cards} promises=${r.promises}`);
+  }
   const results = [];
   for (const cb of callbacks.values()) {
     const result = await reopenParentOnCallbackCorrected(cb, { callSid: cb.twilio_call_sid, status: cb.processing_status });
     results.push({ callbackCallId: cb.id, ...result });
     if (result.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} reconciled after a lost correction: cards=${result.cards} promises=${result.promises}`);
   }
-  return { skipped: false, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results, refreshed };
+  return { skipped: false, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results, refreshed, settled };
 }
 // The callback promise is NOT written here. It belongs to call-commitments'
 // fulfillment lifecycle: resolveCallback reads the spam callback as a

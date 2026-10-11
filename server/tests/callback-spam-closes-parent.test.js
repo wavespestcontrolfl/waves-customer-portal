@@ -61,6 +61,8 @@ const UNVM_PARENT_SID = sid('pg');
 const UNVM_CHILD_SID = sid('ck');
 const FWD_PARENT_SID = sid('ph');
 const FWD_CHILD_SID = sid('cl');
+const LOSTSTAMP_PARENT_SID = sid('pi');
+const LOSTSTAMP_CHILD_SID = sid('cm');
 const UUID = '11111111-1111-4111-8111-111111111111';
 
 describe('closeParentOnCallbackSpam without a database', () => {
@@ -123,7 +125,7 @@ describe('closeParentOnCallbackSpam without a database', () => {
 maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () => {
   let db;
   let processor;
-  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID, SWEPT_PLAIN_PARENT_SID, SWEPT_PLAIN_CHILD_SID, TWICE_PARENT_SID, TWICE_CHILD_A_SID, TWICE_CHILD_B_SID, SIBLING_PARENT_SID, SIBLING_CHILD_A_SID, SIBLING_CHILD_B_SID, RENEW_PARENT_SID, RENEW_CHILD_A_SID, RENEW_CHILD_B_SID, RENEW_CHILD_C_SID, LOST_PARENT_SID, LOST_CHILD_SID, UNSTAMPED_PARENT_SID, UNSTAMPED_CHILD_SID, KEPT_SPAM_PARENT_SID, KEPT_SPAM_CHILD_SID, UNVM_PARENT_SID, UNVM_CHILD_SID, FWD_PARENT_SID, FWD_CHILD_SID];
+  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID, SWEPT_PLAIN_PARENT_SID, SWEPT_PLAIN_CHILD_SID, TWICE_PARENT_SID, TWICE_CHILD_A_SID, TWICE_CHILD_B_SID, SIBLING_PARENT_SID, SIBLING_CHILD_A_SID, SIBLING_CHILD_B_SID, RENEW_PARENT_SID, RENEW_CHILD_A_SID, RENEW_CHILD_B_SID, RENEW_CHILD_C_SID, LOST_PARENT_SID, LOST_CHILD_SID, UNSTAMPED_PARENT_SID, UNSTAMPED_CHILD_SID, KEPT_SPAM_PARENT_SID, KEPT_SPAM_CHILD_SID, UNVM_PARENT_SID, UNVM_CHILD_SID, FWD_PARENT_SID, FWD_CHILD_SID, LOSTSTAMP_PARENT_SID, LOSTSTAMP_CHILD_SID];
   const readCall = (s) => db('call_log').where({ twilio_call_sid: s }).first();
   // A voicemail an hour ago: the promise lifecycle counts evidence from the
   // end of the call, so the callback (now) is after it.
@@ -510,6 +512,19 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const [{ id: renewedId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-fwd-renewed'), human_state: 'confirmed', created_at: new Date(Date.now() - 30 * 60 * 1000) }]).returning('id');
     await db('audit_log').insert({ actor_type: 'technician', action: 'callback_reopen', resource_type: 'call_commitment', resource_id: renewedId, metadata: JSON.stringify({ renewed_at: new Date().toISOString() }) });
     expect((await processor.reconcileCorrectedCallbackVerdicts()).refreshed.find((r) => r.callLogId === parentId)).toBeUndefined();
+  });
+
+  test('a settlement lost before the stamp (spam written, parent transaction never ran) is finished by the watchdog scan', async () => {
+    const parentId = await insertCall(LOSTSTAMP_PARENT_SID, { from_phone: '+15555550130' });
+    await db('triage_items').insert([card(parentId, 'missing_service_address')]);
+    const childId = await insertChild(LOSTSTAMP_CHILD_SID, parentId, { to_phone: '+15555550130' });
+    // The callback reads spam; closeParentOnCallbackSpam never ran.
+    await db('call_log').where({ id: childId }).update({ processing_status: 'spam' });
+    const run = await processor.reconcileCorrectedCallbackVerdicts();
+    expect(run.settled.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1 });
+    expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('resolved');
+    expect((await readCall(LOSTSTAMP_PARENT_SID)).metadata.callback_verdict).toMatchObject({ spam: true, callback_call_log_id: childId });
+    expect((await processor.reconcileCorrectedCallbackVerdicts()).settled.find((r) => r.callbackCallId === childId)).toBeUndefined();
   });
 
   test('the nightly sweep re-closes a moot card a reprocess filed again after the callback verdict', async () => {
