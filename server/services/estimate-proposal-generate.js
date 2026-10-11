@@ -870,11 +870,14 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // mirrors whose amounts disagree with no accepted net fail the draft —
   // a nullable onetime_total gives reconciliation no backstop here.
   const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
+  // amountAfterDiscount is the same sold-net alias the area add-on limits
+  // read (SOLD_AMOUNT_FIELDS): a row persisted with a gross price and that
+  // net must draft the net (codex #6113 r21).
   const mappedResolvedAmount = (item) => num(item.manualFinalOneTime
-    ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
+    ?? item.priceAfterDiscount ?? item.amountAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
     ?? item.installation?.price);
   const rawResolvedAmount = (line) => num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
-    ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
+    ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
   const serviceIdOf = (row) => String(row.service || row.name || '').toLowerCase();
   const rawPool = fromLineItems.map((line) => ({ line, used: false }));
   for (const item of fromOneTime) {
@@ -993,8 +996,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // installation charge and silently underbill it (codex 1A-ii r9).
   const mappedOneTimePool = fromOneTime.map((item) => ({
     item,
-    amount: num(item.manualFinalOneTime ?? item.priceAfterDiscount ?? item.totalAfterDiscount
-      ?? item.price ?? item.amount ?? item.total ?? item.installation?.price),
+    amount: mappedResolvedAmount(item),
     used: false,
   }));
   for (const line of installationRows) {

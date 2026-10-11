@@ -494,7 +494,7 @@ const ONE_TIME_LINE_LABELS = {
   schedule_and_invoice_by_hand: (l) => `One-time ${l.name} (${money(l.amount)}): this accept does not schedule or invoice it — schedule it and invoice it by hand`,
   // A fee is not work: nothing to schedule, only an invoice line.
   invoice_by_hand: (l) => `${l.name} (${money(l.amount)}): this accept does not invoice it — add it to the first invoice by hand; there is no visit to schedule`,
-  subtract_when_invoicing: (l) => `${l.name}: ${money(-l.amount)} off — the lines above are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`,
+  subtract_when_invoicing: (l) => `${l.name}: ${money(-l.amount)} off — the one-time service lines on this card are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`,
 };
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
