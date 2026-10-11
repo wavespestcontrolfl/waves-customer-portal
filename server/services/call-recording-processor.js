@@ -11148,6 +11148,10 @@ const CallRecordingProcessor = {
         .update({
           processing_status: 'no_transcription',
           processing_token: null,
+          // Counted like an extraction failure: the sweep retries a
+          // no_transcription row under CALL_EXTRACTION_MAX_ATTEMPTS, and a
+          // recording adoption resets the count (codex #6271 r38/r39).
+          extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
           updated_at: new Date(),
         });
       if (!released) {
@@ -24049,8 +24053,9 @@ const CallRecordingProcessor = {
     //     IS NULL (fresh — gated by a 10-min CDN-settle age window so the cron can't beat
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
-    //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly;
-    //     inside the same 7-day created_at fence as extraction_failed)
+    //   - processing_status='no_transcription' with retry budget left (extraction_attempts
+    //     < CALL_EXTRACTION_MAX_ATTEMPTS, 10-min spacing; no creation fence, so adopted
+    //     audio on an old call still retries after the adoption resets the count)
     //   - processing_status='extraction_failed' with retry budget left (extraction_attempts
     //     < CALL_EXTRACTION_MAX_ATTEMPTS) — 10-min age gate spaces the attempts so a
     //     provider brown-out isn't burned through in one cron tick. 7-day created_at fence:
@@ -24133,14 +24138,17 @@ const CallRecordingProcessor = {
           })
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
-        // no_transcription: prompt (no age gate) but inside the same 7-day
-        // window as extraction_failed, so the retry lane has an end: past it
-        // a replaced recording that never transcribed is terminal, and a
-        // settlement the old verdict made is retired (codex #6271 r38 P1;
-        // the predicate twin is exhaustedExtractionSql in call-commitments).
+        // no_transcription: retried under the same attempt cap as
+        // extraction_failed, spaced 10 min, with NO creation fence — an
+        // operator adopting replacement audio for an old call resets the
+        // count and that audio must still retry. At the cap the lane ends:
+        // the row is terminal, and a settlement its old verdict made is
+        // retired (codex #6271 r38 P1 / r39 P2; the predicate twin is
+        // exhaustedExtractionSql in call-commitments).
         .orWhere(function () {
           this.where('processing_status', 'no_transcription')
-            .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
+            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
         .orWhere(function () {
           this.where('processing_status', 'extraction_failed')
@@ -24453,7 +24461,7 @@ const CallRecordingProcessor = {
       // P2): the failure state alone is not "queued work" — the row must
       // still carry audio (or a PAN-marked stored transcript) and clear the
       // sweep's duration floor, or the sweep will never pick it up.
-      db.raw(`COUNT(*) FILTER (WHERE (processing_status = 'no_transcription' OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
+      db.raw(`COUNT(*) FILTER (WHERE ((processing_status = 'no_transcription' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}) OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
         + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))"
         + " AND (COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying"),
       db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),

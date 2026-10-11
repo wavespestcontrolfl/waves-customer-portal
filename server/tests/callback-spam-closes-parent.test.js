@@ -623,19 +623,19 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('open');
   });
 
-  test('a callback whose replacement recording never transcribes is terminal after the retry window: the settlement is retired', async () => {
+  test('a callback whose replacement recording never transcribes is terminal at the attempt cap: the settlement is retired', async () => {
     const parentId = await insertCall(NOTRANS_PARENT_SID, { from_phone: '+15555550138' });
     await db('triage_items').insert([card(parentId, 'missing_service_address')]);
     const [{ id: promiseId }] = await db('call_commitments').insert([promise(parentId, 'cb-notrans')]).returning('id');
     const childId = await insertChild(NOTRANS_CHILD_SID, parentId, { to_phone: '+15555550138' });
     expect(await close(NOTRANS_CHILD_SID)).toMatchObject({ applied: true, cards: 1, promises: 1 });
-    // Inside the window the row is still the sweep's: not a correction yet.
-    await db('call_log').where({ id: childId }).update({ processing_status: 'no_transcription' });
+    // Under the attempt cap the row is still the sweep's: not a correction yet.
+    await db('call_log').where({ id: childId }).update({ processing_status: 'no_transcription', extraction_attempts: 1 });
     let run = await processor.reconcileCorrectedCallbackVerdicts();
     expect(run.results.find((r) => r.callbackCallId === childId)).toBeUndefined();
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('resolved');
-    // Past the window no pass will retry it: the old spam verdict is retired.
-    await db('call_log').where({ id: childId }).update({ created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) });
+    // At the cap no pass will retry it: the old spam verdict is retired.
+    await db('call_log').where({ id: childId }).update({ extraction_attempts: 3 });
     run = await processor.reconcileCorrectedCallbackVerdicts();
     expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1, promises: 1 });
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');

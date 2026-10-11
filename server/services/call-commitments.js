@@ -2083,10 +2083,11 @@ const RETRYABLE_PARENT_STATUSES = ["pending", "processing", "extraction_failed",
 const exhaustedExtractionSql = (t) => {
   const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require("../config/call-extraction-retry");
   // Mirrors pendingCandidatesQuery: an extraction_failed row retries under the
-  // attempt cap inside the window; a no_transcription row (no attempt count)
-  // retries inside the window only. Past either, no pass revisits the row.
-  const window = `${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'`;
-  return `((${t}.processing_status = 'extraction_failed' AND (COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} OR ${window})) OR (${t}.processing_status = 'no_transcription' AND ${window}))`;
+  // attempt cap inside the 7-day creation window; a no_transcription row
+  // retries under the cap with no window (adoption resets the count). Past
+  // either, no pass revisits the row.
+  const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
+  return `((${t}.processing_status = 'extraction_failed' AND (${atCap} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')) OR (${t}.processing_status = 'no_transcription' AND ${atCap}))`;
 };
 // POSITIVE proof (the office returned the call, a conversation connected):
 // a genuinely processed call only. An exhausted failure is never evidence of
