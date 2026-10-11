@@ -150,6 +150,22 @@ const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'pri
 // totals. Past this many the card is refused instead of read in part.
 const VISIT_HARD_LIMIT = 2000;
 
+// A visit that already carries an invoice is billed through it: completion
+// reuses that invoice (or parks a refunded one) and mints nothing new
+// (completion-invoice-candidate.js). Each visit gets the newest such invoice's
+// id and total, read with the completion path's own status rules, so the card
+// predicts no new charge for it and the pin changes when an invoice appears.
+async function withVisitInvoices(dbh, visits) {
+  const { completionInvoicesOnVisits } = require('../completion-invoice-candidate');
+  const rows = await completionInvoicesOnVisits(dbh, visits.map((v) => v.id));
+  const newest = new Map();
+  for (const r of rows) if (!newest.has(String(r.scheduled_service_id))) newest.set(String(r.scheduled_service_id), r);
+  return visits.map((v) => {
+    const inv = newest.get(String(v.id));
+    return { ...v, invoice_id: inv ? inv.id : null, invoice_total: inv ? inv.total : null };
+  });
+}
+
 async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   const { etDateString } = require('../../utils/datetime-et');
   // Every live visit that can still complete against the new lane: the
@@ -161,7 +177,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
     .where({ customer_id: customerId })
     .where(function live() { whereVisitRowLive(this, today); })
     .select(VISIT_COLUMNS);
-  const ordered = () => base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1);
+  const ordered = async () => withVisitInvoices(dbh, await base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1));
   if (!lock) return ordered();
   // At commit: lock every candidate visit FOR UPDATE, the row lock the
   // Schedule save takes (admin-schedule.js PUT /:id/update-details: customer
@@ -173,8 +189,10 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   return ordered();
 }
 
+const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_id', 'invoice_total'];
+
 function visitsPin(visits) {
-  return JSON.stringify((visits || []).map((v) => VISIT_COLUMNS.map((c) => {
+  return JSON.stringify((visits || []).map((v) => PIN_COLUMNS.map((c) => {
     const value = v[c];
     if (value == null) return null;
     return value instanceof Date ? value.toISOString().slice(0, 10) : String(value);
@@ -208,7 +226,11 @@ async function chargeContext(dbh, customerId, row) {
 
 const dayOf = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10));
 
+const ALREADY_INVOICED = { kind: 'existing_invoice', amount: 0, grossAmount: 0 };
+
 function visitPrediction(customer, v, charge = NO_CHARGE_CONTEXT) {
+  // Completion reuses the visit's existing invoice and mints nothing new.
+  if (v.invoice_id) return ALREADY_INVOICED;
   return predictCompletionBilling({
     lane: resolveBillingLane(customer).mode,
     billingMode: customer.billing_mode || null,
@@ -383,8 +405,13 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits) {
 // the fee; a prepayment is netted and covers the visit only when it covers the
 // whole amount; callbacks, free visit types and $0 bill nothing.
 function perApplicationVisitCounts(rows, fee) {
-  const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0 };
+  const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0, invoiced: 0, invoicedTotal: 0 };
   for (const r of rows) {
+    if (r.invoice_id) {
+      counts.invoiced += 1;
+      counts.invoicedTotal += Number(r.invoice_total) || 0;
+      continue;
+    }
     const p = predictCompletionBilling({
       lane: 'per_application', billingMode: 'per_application', perApplicationFee: fee, monthlyRate: 0,
       estimatedPrice: r.estimated_price, primaryLinePrice: r.primary_line_price, isCallback: !!r.is_callback,
@@ -438,6 +465,7 @@ const feeCountLines = ({ after, visits }) => {
     c.partly && `${plural(c.partly, 'visit is', 'visits are')} partly prepaid (the rest is charged)`,
     c.none && `${plural(c.none, 'visit bills', 'visits bill')} nothing`,
     c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
+    c.invoiced && `${plural(c.invoiced, 'visit already has', 'visits already have')} an invoice (${money(c.invoicedTotal)} in all) and ${c.invoiced === 1 ? 'is' : 'are'} billed through it, not charged again`,
   ].filter(Boolean);
   return [parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.'];
 };

@@ -5,13 +5,13 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
-    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
+    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereRaw', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
     // limit is honoured, so a card that cut the visits at a page size would show it.
     q.limit = (n) => { q.cap = n; return q; };
     // where(fn) runs its callback (the live-visit clause is built that way).
@@ -37,6 +37,7 @@ jest.mock('../models/db', () => {
         if (q.byId) rows = mockState.roots;
         if (q.cols.flat().includes('payer_id')) mockState.log.push(q.locked ? 'visits:lock' : 'visits:read');
       }
+      if (table === 'invoices') rows = mockState.invoices;
       if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
       if (q.cap != null) rows = rows.slice(0, q.cap);
       return Promise.resolve(rows).then(resolve, reject);
@@ -114,6 +115,7 @@ beforeEach(() => {
   mockState.cohortMiss = false;
   mockState.prepayBusy = false;
   mockState.roots = [];
+  mockState.invoices = [];
   mockState.seriesIds = [];
   mockState.covered = new Set();
   mockState.pending = new Set();
@@ -762,6 +764,75 @@ describe('Codex round 6 on #6118: no cut on the visits the card and the pin cove
     });
     mockState.visits = many(2000);
     expect((await propose(LEAVE)).error).toBeUndefined();
+  });
+});
+
+describe('Codex round 7 on #6118', () => {
+  const MONTHLY = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+  const LEAVE = { billing_mode: 'per_application', per_application_fee: 147 };
+  const gates = () => require('../config/feature-gates').gates;
+  const root = (extra = {}) => ({ id: 'root-1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2026-09-01', estimated_price: null, prepaid_amount: null, ...extra });
+
+  test('P1: an ongoing plan is judged on its overlaid series template, not the root\'s historical columns', async () => {
+    const was = gates().editApptPriceServiceScope;
+    try {
+      gates().editApptPriceServiceScope = true;
+      mockState.customer = { ...MONTHLY };
+      mockState.seriesIds = ['root-1'];
+      // Unpriced root, priced template: the top-up extends at $90, so per_visit is allowed.
+      mockState.roots = [root({ recurring_template_overrides: { estimated_price: 90 } })];
+      expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
+      // Priced root, template cleared to $0: the next visits are unpriced, so it refuses.
+      mockState.roots = [root({ estimated_price: '100.00', recurring_template_overrides: { estimated_price: 0 } })];
+      expect(await propose({ billing_mode: 'per_visit' })).toMatchObject({ code: 'billing_mode_rule', error: expect.stringMatching(/ongoing recurring plan/) });
+      // A template that makes the plan a callback exempts it.
+      mockState.roots = [root({ recurring_template_overrides: { is_callback: true } })];
+      expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
+      // Gate off: the overlay is a no-op, the root's own columns decide.
+      gates().editApptPriceServiceScope = false;
+      mockState.roots = [root({ recurring_template_overrides: { estimated_price: 90 } })];
+      expect((await propose({ billing_mode: 'per_visit' })).code).toBe('billing_mode_rule');
+    } finally { gates().editApptPriceServiceScope = was; }
+  });
+
+  test('P2: a live visit with an existing invoice is not predicted as a new charge, and the pin carries the invoice', async () => {
+    mockState.customer = { ...MONTHLY };
+    const visits = [
+      { id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null },
+      { id: 'iv2', status: 'confirmed', scheduled_date: '2099-05-08', estimated_price: '80.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null },
+    ];
+    mockState.visits = visits;
+    const before = await propose(LEAVE);
+    expect(before.display.next_visits.filter((l) => l.startsWith('Priced visit'))).toHaveLength(2);
+    // A pre-minted (Charge now) invoice on visit 1: it bills through that invoice.
+    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'sent' }];
+    const after = await propose(LEAVE);
+    const priced = after.display.next_visits.filter((l) => l.startsWith('Priced visit'));
+    expect(priced).toEqual(['Priced visit on 2099-05-08 (Pest Control): $80.00 scheduled — charged to the saved card at completion.']);
+    expect(after.display.next_visits.join(' ')).toContain('1 visit already has an invoice ($120.00 in all) and is billed through it, not charged again');
+    // The invoice is in the pin: one created after the card was shown refuses the commit.
+    expect(after.pin).not.toBe(before.pin);
+    mockState.invoices = [];
+    const stale = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: after.pin,
+    });
+    expect(stale).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    // A void invoice does not count (the query leaves it out): the same as no invoice.
+    expect((await propose(LEAVE)).pin).toBe(before.pin);
+  });
+
+  test('P2: the unpriced-visit check has no row cut: a billable visit behind 100+ exempt ones still refuses per_visit', async () => {
+    mockState.customer = { ...MONTHLY };
+    const exempt = Array.from({ length: 150 }, (_, i) => ({ id: `cb${i}`, service_type: 'Pest Control', is_callback: true, scheduled_date: `2099-01-${String((i % 28) + 1).padStart(2, '0')}` }));
+    mockState.unpriced = [...exempt, { id: 'late', service_type: 'Pest Control', is_callback: false, scheduled_date: '2099-12-01' }];
+    expect(await propose({ billing_mode: 'per_visit' })).toMatchObject({
+      code: 'billing_mode_rule',
+      error: expect.stringContaining('1 upcoming visit (first 2099-12-01) has no price'),
+    });
+    // All exempt: nothing blocks.
+    mockState.unpriced = exempt;
+    expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
   });
 });
 

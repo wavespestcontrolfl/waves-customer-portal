@@ -45,8 +45,9 @@ async function unpricedFutureBillableVisits(dbh, customerId) {
         this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
       })
       .select('id', 'service_type', 'is_callback', 'scheduled_date')
-      .orderBy('scheduled_date', 'asc')
-      .limit(100);
+      .orderBy('scheduled_date', 'asc');
+    // No row cut: callbacks and always-free types are removed below, so a
+    // limit applied before that would hide billable rows behind exempt ones.
     const billable = rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
     return [...billable, ...await unpricedOngoingSeries(dbh, customerId, new Set(billable.map((r) => String(r.id))))];
   } catch { return []; }
@@ -65,18 +66,18 @@ async function unpricedOngoingSeries(dbh, customerId, alreadyListed) {
     const { eligibleSeriesParentIds } = require('./recurring-series-topup');
     const ids = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
     if (!ids.length) return [];
-    const roots = await dbh('scheduled_services')
-      .whereIn('id', ids)
-      .where(function unpriced() {
-        this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
-      })
-      .where(function notPrepaid() {
-        this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
-      })
-      .select('id', 'service_type', 'is_callback', 'scheduled_date');
+    // The whole root row: the top-up extends from the root with its series
+    // template overlaid (recurring-template-overrides.js, the function
+    // topUpRecurringSeriesLocked uses), so the service, callback and price
+    // fields are judged on the overlaid row, not the root's historical columns.
+    const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+    const roots = await dbh('scheduled_services').whereIn('id', ids).select('*');
+    const positive = (v) => Number(v) > 0;
     return roots
+      .map((r) => overlayRecurringTemplateOverrides(r, { recurring_template_overrides: 'recurring_template_overrides' in r }))
+      .filter((r) => !positive(r.estimated_price) && !positive(r.prepaid_amount))
       .filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type))
-      .map((r) => ({ ...r, series: true }));
+      .map((r) => ({ id: r.id, service_type: r.service_type, is_callback: r.is_callback, scheduled_date: r.scheduled_date, series: true }));
   } catch { return []; }
 }
 

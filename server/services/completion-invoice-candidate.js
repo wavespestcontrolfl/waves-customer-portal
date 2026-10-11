@@ -26,6 +26,25 @@ function completionSuppressorInvoiceLookup(conn, where) {
     .first();
 }
 
+// The invoices that stand between each of `visitIds` and a fresh completion
+// mint, newest first: every row the suppressor lookup above reuses, plus the
+// refunded row completion parks the visit on (COMPLETION_TERMINAL_INVOICE_
+// STATUSES, below). Void / canceled rows collected nothing and are replaced by
+// a normal mint, so they are not listed. One query for many visits; the same
+// status vocabulary as the single-visit lookups.
+async function completionInvoicesOnVisits(conn, visitIds) {
+  if (!visitIds || !visitIds.length) return [];
+  const InvoiceService = require('./invoice');
+  const dropped = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES
+    .filter((status) => !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(status));
+  return conn('invoices')
+    .whereIn('scheduled_service_id', visitIds)
+    .whereNotIn('status', dropped)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .select('id', 'scheduled_service_id', 'total', 'status');
+}
+
 // Terminal status that BLOCKS the completion mint instead of being
 // re-billed (codex #3456): a refunded invoice's money may still come back
 // (refund.failed at the bank), and a replacement minted in that window can
@@ -124,6 +143,7 @@ function splitTerminalCompletionInvoice(row) {
 
 module.exports = {
   completionSuppressorInvoiceLookup,
+  completionInvoicesOnVisits,
   completionTerminalInvoiceLookup,
   completionNewestLiveInvoiceLookup,
   reconcileLiveVsRefunded,
