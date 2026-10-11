@@ -5085,8 +5085,10 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
     // Un-archiving makes the estimate open again: take the per-customer estimate lock (a reactivation,
-    // like an insert) so the booking's open-estimate check cannot miss it.
+    // like an insert) so the booking's open-estimate check cannot miss it. Lock order, as in the public
+    // refresh: the estimate row first, then the per-customer lock (a leaf).
     const [updated] = await db.transaction(async (trx) => {
+      await trx('estimates').where({ id: req.params.id }).forUpdate().first('id');
       await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, estimate.customer_id);
       return trx('estimates')
         .where({ id: req.params.id, status: estimate.status })

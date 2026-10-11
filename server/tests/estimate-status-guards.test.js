@@ -521,6 +521,7 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     const readBuilder = makeBuilder({ first: estimate });
     const writeBuilder = makeBuilder({});
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
+    writeBuilder.forUpdate = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
     // freshness re-read: concurrent decline resolved the row
     const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
@@ -535,6 +536,8 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     await unarchiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
     expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-1']);
     expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(writeBuilder.update.mock.invocationCallOrder[0]);
+    // One lock order (round 3): the estimate ROW first, then the per-customer lock.
+    expect(writeBuilder.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.raw.mock.invocationCallOrder[0]);
     expect(writeBuilder.where).toHaveBeenCalledWith({ id: 'e1', status: 'viewed' });
     expect(writeBuilder.whereNotNull).toHaveBeenCalledWith('archived_at');
     expect(writeBuilder.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });

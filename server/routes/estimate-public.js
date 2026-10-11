@@ -18198,6 +18198,9 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
           }
         }
       }
+      // The customer's selection rewrites which services the estimate carries: take the per-customer
+      // estimate lock (a leaf) after the row, group and customer locks above.
+      await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, estimate.customer_id);
       updateCount = await trx('estimates')
         .where({ id: estimate.id })
         // The staff REVERT of a send-time park runs after the pre-delivery

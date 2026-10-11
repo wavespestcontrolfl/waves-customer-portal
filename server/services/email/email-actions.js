@@ -346,6 +346,16 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
       receivedAt: email.received_at || null,
     };
     estimateData.lead_id = lead.id;
+    // The estimate carries no customer_id, but it lands on the customer its phone matches (the accept's own
+    // match): take that customer's estimate lock (a leaf, after the phone lock above) so a booking that
+    // checks for an open estimate waits for this insert and sees it (utils/customer-estimate-lock.js).
+    try {
+      const { resolveProspectiveAcceptCustomer } = require('../recurring-card-on-file');
+      const { customerId: prospectiveOwnerId } = await resolveProspectiveAcceptCustomer({ customer_phone: phone }, trx, { authoritative: true });
+      await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, prospectiveOwnerId);
+    } catch (lockErr) {
+      logger.warn(`[email-actions] prospective owner estimate lock skipped: ${lockErr.message}`);
+    }
     const [row] = await trx('estimates').insert({
       customer_id: null,
       customer_name: `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Unknown',

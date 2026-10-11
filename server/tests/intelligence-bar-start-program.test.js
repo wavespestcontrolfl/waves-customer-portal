@@ -62,7 +62,9 @@ function fakeDb() {
     const b = new Proxy(function () {}, {
       get(_t, prop) {
         if (prop === 'then') {
-          const rows = tables[table] || [];
+          let rows = tables[table] || [];
+          // The unlinked-estimate query (customer_id IS NULL) sees only rows written with customer_id null.
+          if (table === 'estimates') rows = rows.filter((r) => (state.unlinked ? r.customer_id === null : r.customer_id !== null));
           return (resolve) => resolve(state.single ? rows[0] : rows);
         }
         if (prop === 'first') return () => { state.single = true; return b; };
@@ -70,7 +72,11 @@ function fakeDb() {
         if (prop === 'update' || prop === 'insert' || prop === 'del') {
           return (data) => { writes.push({ table, op: prop, data }); return b; };
         }
-        return (...args) => { calls.push({ table, method: String(prop), args }); return b; };
+        return (...args) => {
+          calls.push({ table, method: String(prop), args });
+          if (prop === 'whereNull' && args[0] === 'customer_id') state.unlinked = true;
+          return b;
+        };
       },
     });
     return b;
@@ -353,6 +359,33 @@ describe('refusals', () => {
     // A draft for a different service, or priced lines for another family, does not refuse.
     tables.estimates = [{ id: 'est-3', status: 'draft', estimate_data: {}, service_interest: 'Pest Control' }];
     expect((await run(BASE_INPUT)).code).toBeUndefined();
+  });
+
+  test('an open estimate with no customer_id that the accept would land on this customer also refuses (round 3)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    tables.customers = [memberCustomer({ phone: '+19415550123' })];
+    tables.estimates = [{
+      id: 'est-unlinked', customer_id: null, status: 'draft', estimate_data: {}, service_interest: 'Lawn Care',
+      customer_phone: '(941) 555-0123',
+    }];
+    jest.spyOn(PlanRateLedger, 'acceptedRecurringBillingLines').mockReturnValue([]);
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer')
+      .mockResolvedValue({ customerId: CUSTOMER_ID, lookupFailed: false });
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_open_estimate');
+    expect(result.error).toContain('An unlinked open estimate matches this customer');
+    expect(result.error).toContain('Link it to the customer or close it first');
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-unlinked' }), expect.anything(), { authoritative: true });
+    // The phone digits pick the candidates; the accept's own resolver decides whose estimate it is.
+    expect(calls.some((c) => c.table === 'estimates' && c.method === 'whereRaw' && /regexp_replace/.test(c.args[0]))).toBe(true);
+    // An unlinked estimate that resolves to someone else, or to nobody, does not refuse.
+    resolver.mockResolvedValue({ customerId: '00000000-0000-4000-8000-00000000c0a2', lookupFailed: false });
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+    resolver.mockResolvedValue({ customerId: null, lookupFailed: false });
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+    // A lookup that fails reads as a match: fail closed.
+    resolver.mockResolvedValue({ customerId: null, lookupFailed: true });
+    expect((await run(BASE_INPUT)).code).toBe('program_open_estimate');
   });
 
   test('a technician marked out on a LATER series date is refused at the card, naming that date', async () => {

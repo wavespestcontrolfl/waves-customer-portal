@@ -1279,7 +1279,9 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     // Both advisory locks (the scheduled-group lock and, since #4667, the
     // contact-pair address-verdict lock) land BEFORE the row lock.
     database.raw.mockImplementation(async (sql, bindings) => {
-      order.push(Array.isArray(bindings) && bindings[0] === 'address-verdict' ? 'address-verdict-lock' : 'group-lock');
+      const first = Array.isArray(bindings) ? bindings[0] : null;
+      if (typeof first === 'string' && first.startsWith('customer-estimates:')) order.push('customer-estimates-lock');
+      else order.push(first === 'address-verdict' ? 'address-verdict-lock' : 'group-lock');
       return {};
     });
     const originalDb = database;
@@ -1295,7 +1297,8 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     // Contact pair FIRST, then the group (pre-push audit P1 after r42 on
     // #4667): the proposal editor and the public paths take
     // address-verdict before any group lock.
-    expect(order).toEqual(['address-verdict-lock', 'group-lock']);
+    // The per-customer estimate lock (round 3) is the LEAF: after the row lock, last of all.
+    expect(order).toEqual(['address-verdict-lock', 'group-lock', 'customer-estimates-lock']);
   });
 
   test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {

@@ -1231,37 +1231,42 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                 body,
                 readiness: triageReadiness,
               });
-              const estimateUpdateQuery = db('estimates')
-                .where({
-                  id: createdEstimateId,
-                  source: 'lead_webhook',
-                  status: 'draft',
-                })
-                // An archived draft is retired: never rewrite it unseen.
-                .whereNull('archived_at');
-              if (createdEstimateServiceInterest) {
-                estimateUpdateQuery.where('service_interest', createdEstimateServiceInterest);
-              } else {
-                estimateUpdateQuery.where((q) => {
-                  q.whereNull('service_interest').orWhere('service_interest', '');
+              // The triage rewrite changes the draft's services: take the per-customer estimate lock (a leaf)
+              // before the write, in a transaction of its own.
+              await db.transaction(async (trx) => {
+                await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customer.id);
+                const estimateUpdateQuery = trx('estimates')
+                  .where({
+                    id: createdEstimateId,
+                    source: 'lead_webhook',
+                    status: 'draft',
+                  })
+                  // An archived draft is retired: never rewrite it unseen.
+                  .whereNull('archived_at');
+                if (createdEstimateServiceInterest) {
+                  estimateUpdateQuery.where('service_interest', createdEstimateServiceInterest);
+                } else {
+                  estimateUpdateQuery.where((q) => {
+                    q.whereNull('service_interest').orWhere('service_interest', '');
+                  });
+                }
+                await estimateUpdateQuery.update({
+                  service_interest: triageServiceInterestUpdate,
+                  monthly_total: triageDraftEstimate?.monthly || null,
+                  annual_total: triageDraftEstimate?.annual || null,
+                  onetime_total: triageDraftEstimate?.oneTimeTotal || null,
+                  // Same stamp as the initial insert (GH codex P1 on #3750): a
+                  // triage-generated engine price is SERVER, else unstamped —
+                  // the auto-send lane fails closed on anything else.
+                  pricing_authority: triageDraftEstimate?.automation?.status === 'generated' ? 'SERVER' : null,
+                  estimate_data: JSON.stringify(triageDraftEstimate?.estimateData || {
+                    automation: {
+                      leadEstimateAutomation: triageReadiness,
+                      draftEstimateAutomation: triageDraftEstimate?.automation || null,
+                    },
+                  }),
+                  updated_at: new Date(),
                 });
-              }
-              await estimateUpdateQuery.update({
-                service_interest: triageServiceInterestUpdate,
-                monthly_total: triageDraftEstimate?.monthly || null,
-                annual_total: triageDraftEstimate?.annual || null,
-                onetime_total: triageDraftEstimate?.oneTimeTotal || null,
-                // Same stamp as the initial insert (GH codex P1 on #3750): a
-                // triage-generated engine price is SERVER, else unstamped —
-                // the auto-send lane fails closed on anything else.
-                pricing_authority: triageDraftEstimate?.automation?.status === 'generated' ? 'SERVER' : null,
-                estimate_data: JSON.stringify(triageDraftEstimate?.estimateData || {
-                  automation: {
-                    leadEstimateAutomation: triageReadiness,
-                    draftEstimateAutomation: triageDraftEstimate?.automation || null,
-                  },
-                }),
-                updated_at: new Date(),
               });
             }
             await db('lead_activities').insert({

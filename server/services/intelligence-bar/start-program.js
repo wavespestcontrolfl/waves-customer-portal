@@ -136,15 +136,38 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
   };
 }
 
+// Open estimates that are the customer's, and the ones that will land on the customer: an estimate
+// written with no customer_id (the email-inquiry draft) is the customer's when the accept's own
+// phone match (resolveProspectiveAcceptCustomer, the resolver every accept and tier read uses)
+// resolves it to this customer. A lookup that fails counts as a match: it fails closed.
+async function openEstimateRowsForCustomer(customerId, conn) {
+  // The estimate lifecycle's open set (sending included); an archived row keeps
+  // its status but is no longer an offer.
+  const { OPEN_ESTIMATE_STATUSES } = require('../estimate-conversion-agent');
+  const columns = ['id', 'status', 'estimate_data', 'service_interest'];
+  const linked = await conn('estimates').where({ customer_id: customerId })
+    .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select(...columns);
+  const customer = await conn('customers').where({ id: customerId }).first('phone');
+  const digits = String(customer?.phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length < 10) return linked;
+  const unlinked = await conn('estimates').whereNull('customer_id')
+    .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at')
+    .whereRaw("regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+    .select(...columns, 'customer_phone', 'customer_phone_typed', 'estimate_group_id');
+  const { resolveProspectiveAcceptCustomer } = require('../recurring-card-on-file');
+  const matched = [];
+  for (const est of unlinked) {
+    const { customerId: ownerId, lookupFailed } = await resolveProspectiveAcceptCustomer(est, conn, { authoritative: true });
+    if (lookupFailed || String(ownerId || '') === String(customerId)) matched.push({ ...est, unlinked: true });
+  }
+  return [...linked, ...matched];
+}
+
 // Is there an open estimate for this service family? Accepting estimates from
 // the bar is a pending owner decision (Q5), so an open quote for the service
 // refuses instead of booking around it. An unreadable estimate fails closed.
 async function openEstimateForFamily(customerId, family, conn = db) {
-  // The estimate lifecycle's open set (sending included); an archived row keeps
-  // its status but is no longer an offer.
-  const { OPEN_ESTIMATE_STATUSES } = require('../estimate-conversion-agent');
-  const rows = await conn('estimates').where({ customer_id: customerId })
-    .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select('id', 'status', 'estimate_data', 'service_interest');
+  const rows = await openEstimateRowsForCustomer(customerId, conn);
   if (!rows.length) return null;
   const { acceptedRecurringBillingLines } = require('../plan-rate-ledger');
   const { serviceFamilyKeyForAdoption } = require('../../routes/estimate-public');
@@ -332,6 +355,9 @@ async function programConflict({ customerId, catalogRow, family, components, cur
     openEstimate = await openEstimateForFamily(customerId, family);
   } catch {
     return refusal('Could not read this customer\'s open estimates. Try again in a moment. Nothing was proposed.');
+  }
+  if (openEstimate?.unlinked) {
+    return refusal(`An unlinked open estimate matches this customer for ${RateChange.lineLabel(family).toLowerCase()} (${openEstimate.status}). Link it to the customer or close it first. Nothing was proposed.`, 'program_open_estimate');
   }
   if (openEstimate) {
     return refusal(`This customer has an open estimate for ${RateChange.lineLabel(family).toLowerCase()} (${openEstimate.status}). Mark the estimate accepted on the estimate page. Nothing was proposed.`, 'program_open_estimate');

@@ -108,14 +108,18 @@ test('START-only half-hour edit → 422; a pre-8am on-the-hour start passes vali
 
 describe('rung-1 wiring (source-pattern guards)', () => {
   test('POST / locks the FULL planned date set (anchor + children + boosters) before the comms lock; the spawn loops consume the pre-trx plan', () => {
-    const post = src.slice(src.indexOf("router.post('/', requireAdmin"), src.indexOf("router.post('/bulk-action'"));
+    // The booking transaction is split into operations (lockBookingScope -> insertSeriesRows -> runPostInsertHooks)
+    // that sit before the route registration; the handler follows it.
+    const post = src.slice(src.indexOf('async function lockBookingScope('), src.indexOf("router.post('/bulk-action'"));
     const lockIdx = post.indexOf('await acquireOccupancyLocks(trx, [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates])');
     const commsIdx = post.indexOf('await lockCustomerComms(trx, customerId)');
     expect(lockIdx).toBeGreaterThan(-1);
     expect(lockIdx).toBeLessThan(commsIdx);
-    expect(post).toMatch(/for \(const nextDateStr of plannedChildDates\)/);
-    expect(post).toMatch(/for \(const boosterDate of plannedBoosterDates\)/);
-    expect(post.slice(post.indexOf('await db.transaction'))).not.toMatch(/nextRecurringDate\(/);
+    expect(post).toMatch(/dates: \(c\) => c\.plannedChildDates/);
+    expect(post).toMatch(/dates: \(c\) => c\.plannedBoosterDates/);
+    expect(post).toMatch(/for \(const date of kind\.dates\(c\)\)/);
+    // Nothing inside the transaction's operations re-plans dates.
+    expect(post.slice(0, post.indexOf('const IN_TRANSACTION_HOOKS'))).not.toMatch(/nextRecurringDate\(/);
   });
 
   test('the update-details move probe excludes every cadence-rewrite participant, not just the parent', () => {
@@ -356,8 +360,11 @@ describe('effective duration on end-less rows + submitted duration + CAS', () =>
     expect(res.status).toBe(422);
     expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
     expect(db.transaction).not.toHaveBeenCalled();
-    const post = src.slice(src.indexOf("router.post('/', requireAdmin"), src.indexOf("router.post('/bulk-action'"));
-    expect(post).toMatch(/const createWindowIntake = windowIntakeFromBody\(req\.body\)/);
+    // The booking transaction is split into operations (lockBookingScope -> insertSeriesRows -> runPostInsertHooks)
+    // that sit before the route registration; the handler follows it.
+    const post = src.slice(src.indexOf('async function lockBookingScope('), src.indexOf("router.post('/bulk-action'"));
+    expect(post).toMatch(/const intake = windowIntakeFromBody\(body\)/);
+    expect(post).toMatch(/bookingWindowFromBody\(req\.body\)/);
   });
 
   test('update-details DATE-ONLY move of a 19:00 end-less 120-min row → 422 (19:00-21:00 past the day end)', async () => {
