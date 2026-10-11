@@ -2097,11 +2097,29 @@ async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
   return callbackSpamDismissalsQ(conn, callLogId, callbackCallId)
     .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
 }
-// The correction while ANOTHER spam callback still stands: the promise stays
-// dismissed, on that callback's evidence, so correcting it later reopens.
-async function repointCallbackSpamDismissals(conn, callLogId, fromCallbackCallId, toCallbackCallId) {
-  return callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId)
-    .update({ fulfillment: conn.raw("jsonb_set(fulfillment, '{record_id}', to_jsonb(?::text), true)", [String(toCallbackCallId)]), updated_at: new Date() });
+// The correction while OTHER spam callbacks still stand: each dismissal the
+// corrected callback produced is judged again against them with the proof's
+// own linkage rule (callbackReachedSolicitor): a standing callback placed for
+// THIS promise (relatedCommitmentId) or for the call as a whole (no
+// relatedCommitmentId) keeps it dismissed, on that callback's evidence, so
+// correcting that one later reopens it; a callback placed for a SIBLING
+// promise proves nothing about this one, and the promise is owed again.
+// `standing` rows carry { id, related_commitment_id }.
+async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId, standing) {
+  const rows = await callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).select("id");
+  let repointed = 0;
+  let reopened = 0;
+  for (const row of rows) {
+    const keeper = standing.find((c) => !c.related_commitment_id || String(c.related_commitment_id) === String(row.id));
+    if (keeper) {
+      repointed += await conn("call_commitments").where({ id: row.id })
+        .update({ fulfillment: conn.raw("jsonb_set(fulfillment, '{record_id}', to_jsonb(?::text), true)", [String(keeper.id)]), updated_at: new Date() });
+    } else {
+      reopened += await conn("call_commitments").where({ id: row.id })
+        .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+    }
+  }
+  return { repointed, reopened };
 }
 async function customerLeftProof(conn, commitment, call) {
   const after = await evidenceBoundary(conn, commitment, call);
@@ -3887,7 +3905,7 @@ module.exports = {
   obligationRenewedAt,
   callbackReachedSolicitor,
   reopenCallbackSpamDismissals,
-  repointCallbackSpamDismissals,
+  rejudgeCallbackSpamDismissals,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,
   buildCallOutcomes,

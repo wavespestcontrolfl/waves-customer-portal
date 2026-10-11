@@ -1173,8 +1173,11 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
     .whereNot('id', exceptCallId)
     .whereRaw("metadata->>'relatedCallId' = ?", [String(parent.id)])
     .orderBy('created_at', 'asc')
-    .select('id', 'to_phone', 'customer_id');
-  return rows.filter((c) => samePhone(parent.from_phone, c.to_phone) || (!!parent.customer_id && parent.customer_id === c.customer_id));
+    .select('id', 'to_phone', 'customer_id', 'created_at', trx.raw("metadata->>'relatedCommitmentId' as related_commitment_id"));
+  // The same eligibility as the callback being judged: dialed to the
+  // voicemail's number or customer, and placed after the voicemail ended.
+  return rows.filter((c) => callbackAfterCallEnd(c, parent)
+    && (samePhone(parent.from_phone, c.to_phone) || (!!parent.customer_id && parent.customer_id === c.customer_id)));
 }
 // The correction: a callback first classified spam, reprocessed into anything
 // that is not spam. The parent's verdict is recomputed from every linked
@@ -1199,15 +1202,16 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
       const commitments = require('./call-commitments');
       const hadVerdict = !!callMetadataObject(pair.parent).callback_verdict;
       if (standing.length) {
-        // Still settled: the stamp and the promise's dismissal move to the
-        // callback that still stands, so correcting THAT one later reopens.
+        // Still settled: the stamp moves to a callback that still stands, and
+        // each promise this callback dismissed is judged again against the
+        // standing ones (a sibling promise's callback keeps nothing).
         await trx('call_log').where({ id: parentId }).update({
           metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
             [JSON.stringify({ spam: true, callback_call_log_id: standing[0].id, at: now.toISOString() })]),
           updated_at: now,
         });
-        await commitments.repointCallbackSpamDismissals(trx, parentId, call.id, standing[0].id);
-        return { applied: true, cards: 0, promises: 0, standing: true };
+        const judged = await commitments.rejudgeCallbackSpamDismissals(trx, parentId, call.id, standing);
+        return { applied: true, cards: 0, promises: judged.reopened, standing: true };
       }
       // One canonical card per reason comes back: the newest callback_spam
       // row for each reason, and only where no open / in_progress row for
