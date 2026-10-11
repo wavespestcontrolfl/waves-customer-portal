@@ -2198,7 +2198,10 @@ async function runLegacyAiDraft(ctx) {
     const ContextAggregator = require('../services/context-aggregator');
     const ResponseDrafter = require('../services/response-drafter');
 
-    const context = await ContextAggregator.getFullCustomerContext(From);
+    // Context from the customer THIS route resolved (single active match, or
+    // the gated shared-phone mark), never a fresh unordered phone lookup
+    // that could load the other account on a shared number (codex #6268 r10).
+    const context = await ContextAggregator.getContextForCustomer(customer);
 
     // Simple intent classification
     const intentMap = [

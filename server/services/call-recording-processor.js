@@ -7308,10 +7308,17 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (!customer.state && extracted.state) updates.state = extracted.state;
   if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
   if (Object.keys(updates).length === 0) return customer;
-  // A backfilled number is a phone-identity change for a marked profile with
-  // an empty phone: the shared-phone texting mark was chosen for a number this
-  // profile no longer has (codex #6268 r9) — same rule as every other writer.
-  require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, customer);
+  // A backfilled number is a phone-identity change for a marked profile: the
+  // shared-phone texting mark was chosen for a number this profile no longer
+  // has (codex #6268 r9/r10). Decided INSIDE the UPDATE against the row's
+  // current phone and mark, not the unlocked `customer` snapshot, so a mark
+  // staff commit between this read and the write is still cleared.
+  if (updates.phone !== undefined) {
+    const newKey = String(updates.phone == null ? '' : updates.phone).replace(/\D/g, '').slice(-10);
+    updates.sms_primary_for_shared_phone = db.raw(
+      "CASE WHEN RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN sms_primary_for_shared_phone ELSE false END",
+      [newKey]);
+  }
   updates.updated_at = new Date();
   // An empty→value email write has no old address to retarget, so the
   // lightweight path (resolve the cards only) is right. REPLACING a garbled
@@ -7369,7 +7376,10 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
       logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
     }
   }
-  return { ...customer, ...updates };
+  // The in-UPDATE CASE is not a value; the merged row reports the mark as
+  // cleared only when it was set and the number changed.
+  const { sms_primary_for_shared_phone: markCase, ...plainUpdates } = updates;
+  return { ...customer, ...plainUpdates, ...(markCase !== undefined ? { sms_primary_for_shared_phone: customer.sms_primary_for_shared_phone === true && String(customer.phone || '').replace(/\D/g, '').slice(-10) === String(updates.phone || '').replace(/\D/g, '').slice(-10) } : {}) };
 }
 
 let Anthropic;

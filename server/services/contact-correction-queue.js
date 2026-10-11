@@ -371,6 +371,37 @@ async function recoverStaleLocks(knex) {
 }
 
 /**
+ * A SHARED number's linkage is re-checked independently before promotion
+ * (codex #6268 r7/r10): the route's attach can pick the marked account, then
+ * the route's own match resolves to nothing or to the other account and its
+ * fire-and-forget 'unlinked' cancel fails. The stored linkage is never
+ * re-pointed; it is refused when the number is currently shared and the
+ * gated primary mark no longer names this customer. A single-owner number
+ * keeps replaying what the route matched. Returns a cancel reason or null.
+ * Checked after the sms_log read so both linkage decisions sit in one place.
+ */
+async function staleLinkageRefusal(knex, job, smsLog) {
+  // The route persists its own linkage decision on the inbound sms_log row
+  // (customer_id, null when it handled the sender as unlinked). A row whose
+  // customer differs from the stored context means the route decided NOT to
+  // link this message here (a failed marked lookup, a mark transfer) and its
+  // best-effort cancel was lost — never replay it (codex #6268 r9). No
+  // sms_log row = the route died before that write; the stored context stands.
+  if (smsLog && String(smsLog.customer_id || '') !== String(job.customer_id)) return 'stale_route_unlinked';
+  const senderKey = tail10(job.sender_phone);
+  if (!senderKey) return null;
+  const live = await knex('customers')
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+    .limit(2)
+    .select('id');
+  if (live.length < 2) return null;
+  const link = require('./shared-phone-link');
+  const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
+  return picked.customer && String(picked.customer.id) === String(job.customer_id) ? null : 'stale_link_mismatch';
+}
+
+/**
  * Rows a dead instance left 'reserved': the route never reached its
  * finally, so the message may have been acked-and-lost (Twilio's retry
  * is ignored once the MessageSid claim is durable). Promotion requires
@@ -435,29 +466,6 @@ async function promoteStaleReservations(knex) {
         await cancelContactCorrectionJob(job.id, 'stale_no_context', { knex });
         continue;
       }
-      // A SHARED number's linkage is re-checked here independently (codex
-      // #6268 r7): the route's attach can pick the marked account, then the
-      // route's own match resolves to nothing or to the other account and
-      // its fire-and-forget 'unlinked' cancel fails. The stored linkage is
-      // never re-pointed; it is only refused when the number is currently
-      // shared and the gated primary mark no longer names this customer.
-      // A single-owner number keeps replaying what the route matched.
-      const senderKey = tail10(job.sender_phone);
-      if (senderKey) {
-        const live = await knex('customers')
-          .whereNull('deleted_at')
-          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
-          .limit(2)
-          .select('id');
-        if (live.length > 1) {
-          const link = require('./shared-phone-link');
-          const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
-          if (!picked.customer || String(picked.customer.id) !== String(job.customer_id)) {
-            await cancelContactCorrectionJob(job.id, 'stale_link_mismatch', { knex });
-            continue;
-          }
-        }
-      }
       // A reservation is ordering/context evidence, not a saved inbox source.
       // A failed inbox write may outlive the route's best-effort cancellation;
       // never replay that body into customer data without its durable message.
@@ -474,15 +482,9 @@ async function promoteStaleReservations(knex) {
           .orderBy('created_at', 'desc')
           .first('id', 'customer_id')
         : null;
-      // The route persists its own linkage decision on the inbound sms_log
-      // row (customer_id, null when it handled the sender as unlinked). A
-      // row whose customer differs from the stored context means the route
-      // decided NOT to link this message here (a failed marked lookup, a
-      // mark transfer) and its best-effort cancel was lost — never replay
-      // it (codex #6268 r9). No sms_log row = the route died before that
-      // write; the stored context stands as before.
-      if (smsLog && String(smsLog.customer_id || '') !== String(job.customer_id)) {
-        await cancelContactCorrectionJob(job.id, 'stale_route_unlinked', { knex });
+      const linkRefusal = await staleLinkageRefusal(knex, job, smsLog);
+      if (linkRefusal) {
+        await cancelContactCorrectionJob(job.id, linkRefusal, { knex });
         continue;
       }
       // Flip to queued preserving the stored match-time context (linkage +
