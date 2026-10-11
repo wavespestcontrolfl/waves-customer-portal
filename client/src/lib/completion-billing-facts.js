@@ -17,5 +17,7 @@ export function completionBillingFacts(row) {
     isCallback: row.isCallback,
     completionProfile: row.completionProfile ? { billingType: row.completionProfile.billingType } : undefined,
     billedToPayer: row.billedToPayer,
+    // The visit's invoice was already sent (Dispatch marks the row): the completion reuses it, so no pay-link row.
+    completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
   };
 }
