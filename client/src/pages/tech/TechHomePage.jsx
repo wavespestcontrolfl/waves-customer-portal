@@ -59,7 +59,7 @@ import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLa
 import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
 import { onSiteTimeOf } from '../../lib/on-site-time';
-import { completionBillingFacts } from '../../lib/completion-billing-facts';
+import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -976,6 +976,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteSheet
           key={fastCompleteService.id}
           service={{
+            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            ...wrapUpSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
             serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,

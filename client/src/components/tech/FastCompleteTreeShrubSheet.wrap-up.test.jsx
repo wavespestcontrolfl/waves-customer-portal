@@ -19,7 +19,10 @@ vi.setConfig({ testTimeout: 30000 });
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); localStorage.clear(); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
 
-const CATALOG = [{ id: 'iron', name: 'Chelated Iron Plus', category: 'micronutrient', tsFlags: {} }];
+const CATALOG = [
+  { id: 'iron', name: 'Chelated Iron Plus', category: 'micronutrient', tsFlags: {} },
+  { id: 'feed', name: 'Example Trunk Feed', category: 'micronutrient', tsFlags: {} },
+];
 const VISIT = {
   id: 'svc-ts', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-ts',
   serviceType: 'Tree & Shrub Program', scheduledDate: '2026-10-04', address: { line1: '123 Main St' }, status: 'confirmed',
@@ -30,7 +33,7 @@ const SERVICE = {
 };
 const context = (wrapUp) => ({
   eligible: true, reason: null, service: VISIT, products: CATALOG,
-  monthProducts: [{ productId: 'iron', method: 'foliar_spray' }],
+  monthProducts: [{ productId: 'iron', method: 'foliar_spray' }, { productId: 'feed', method: 'trunk_injection' }],
   lastVisit: { plantGroups: ['Palms'], areasTreated: [], products: [] },
   warnings: [],
   ...(wrapUp ? { wrapUp: true } : {}),
@@ -174,5 +177,20 @@ describe('while the review send time is being re-checked', () => {
     await act(async () => { request.release(); });
     await act(async () => { await Promise.resolve(); });
     expect(opened(request).some((path) => path.endsWith('/complete'))).toBe(false);
+  });
+});
+
+describe('the re-entry steppers are asked for with the same spray evidence the full form uses', () => {
+  const seedReads = (request) => request.calls.filter((c) => c.path.includes('/reentry-defaults')).map((c) => c.path.split('?')[1]);
+
+  test('a trunk injection alone asks for applicationsRecorded=0; a foliar spray added asks again with =1', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await waitFor(() => expect(seedReads(request)).toEqual(['applicationsRecorded=0']));
+    fireEvent.click(screen.getByRole('button', { name: /^Example Trunk Feed/ }));
+    await act(async () => { await Promise.resolve(); });
+    expect(seedReads(request)).toEqual(['applicationsRecorded=0']);
+    fireEvent.click(screen.getByRole('button', { name: /^Chelated Iron Plus/ }));
+    await waitFor(() => expect(seedReads(request)).toEqual(['applicationsRecorded=0', 'applicationsRecorded=1']));
   });
 });

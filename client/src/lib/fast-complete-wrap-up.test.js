@@ -24,6 +24,11 @@ describe('the Wrap-up body fragment', () => {
     expect(fields).not.toHaveProperty('reentryInteriorMinutes');
   });
 
+  test('a sheet that posted no reviewTiming keeps the key absent while the timing is Automatic', () => {
+    expect(wrapUpFields({ ...base, omitAutoTiming: true })).toEqual({ sendCompletionSms: true, requestReview: true, includePayLink: true });
+    expect(wrapUpFields({ ...base, omitAutoTiming: true, reviewTiming: 'tomorrow_8' })).toMatchObject({ reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0 });
+  });
+
   test('the pay link posts its choice only while the visit invoices and the text is on', () => {
     expect(wrapUpFields({ ...base, includePayLink: false }).includePayLink).toBe(true);
     expect(wrapUpFields({ ...base, includePayLink: false, willInvoice: true }).includePayLink).toBe(false);

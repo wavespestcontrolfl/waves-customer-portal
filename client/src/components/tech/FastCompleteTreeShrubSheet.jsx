@@ -68,6 +68,7 @@ import {
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
 import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
+import { rowsShowSpray } from '../../lib/spray-evidence';
 import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { evaluateNeonicCap } from '../../lib/tree-shrub-neonic-cap';
 import { Button, ActionFeedback, cn } from '../ui';
@@ -613,7 +614,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     setCheckingStock(false);
   };
   // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section (the clock above the note, the options below the tips).
-  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: rows.some((row) => row.active), onChecking: onWrapChecking });
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, service, request, base, applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => row.method), onChecking: onWrapChecking });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
     // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
