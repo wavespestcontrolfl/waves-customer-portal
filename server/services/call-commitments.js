@@ -2066,11 +2066,11 @@ const CALLBACK_SPAM = "callback_spam";
 // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
 // only once SETTLED and not spam: no pass holds its token, and its status is
 // not spam nor one a later pass may still turn into spam (processing, and
-// the retry states extraction_failed / no_transcription; a row never
+// pending, and the retry states extraction_failed / no_transcription; a row never
 // processed counts only while it has no recording to process). Otherwise a
 // refresh that ran mid-pass would record a solicitor call as the office
 // keeping its word, and the spam settlement scans open promises only.
-const UNSETTLED_CALLBACK_STATUSES = ["spam", "processing", "extraction_failed", "no_transcription"];
+const UNSETTLED_CALLBACK_STATUSES = ["spam", "pending", "processing", "extraction_failed", "no_transcription"];
 function settledNonSpamCallback(b) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
   b.whereNull("processing_token")

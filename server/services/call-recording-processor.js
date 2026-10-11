@@ -1114,8 +1114,9 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
 // call is fail-soft, so a crash or a failed transaction in between would
 // leave the parent settled on a callback that no longer reads spam. The
 // commitments watchdog calls this every tick: it finds every such callback
-// from the data itself (the parent still stamped with it, or a promise still
-// dismissed on it; both partial indexes in migration 20261010280000) and runs
+// from the data itself (the parent still stamped with it, a promise still
+// dismissed on it, or a card the sweep closed on it; partial indexes in
+// migrations 20261010280000 and 20261010290000) and runs
 // the same correction. Converges: a correction clears the stamp and reopens
 // or re-points the dismissal, so the row leaves both scans.
 async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
@@ -1126,7 +1127,20 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
   const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
     .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(settledNonSpam).limit(limit).select('cb.*');
-  const callbacks = new Map([...stamped, ...dismissed].map((cb) => [cb.id, cb]));
+  // Cards the nightly sweep closed on callback-spam evidence carry no stamp:
+  // start from the card (resolved callback_spam, no live row for its reason,
+  // parent unstamped) and every settled non-spam office callback linked to
+  // that parent. A correction reopens the card or stamps a standing
+  // callback, so the parent leaves this scan either way.
+  const swept = await db('triage_items as ti').join('call_log as p', 'p.id', 'ti.call_log_id')
+    .join('call_log as cb', db.raw("cb.metadata->>'relatedCallId' = p.id::text"))
+    .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback' })
+    .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .whereNotExists(function liveRowForReason() {
+      this.select(db.raw('1')).from('triage_items as live').whereRaw('live.call_log_id = ti.call_log_id AND live.reason_code = ti.reason_code').whereIn('live.status', ['open', 'in_progress']);
+    })
+    .modify(settledNonSpam).limit(limit).distinct('cb.*');
+  const callbacks = new Map([...stamped, ...dismissed, ...swept].map((cb) => [cb.id, cb]));
   const results = [];
   for (const cb of callbacks.values()) {
     const result = await reopenParentOnCallbackCorrected(cb, { callSid: cb.twilio_call_sid, status: cb.processing_status });
