@@ -262,6 +262,11 @@ async function loadProgramCustomer(customerId) {
   if (require('../self-booking-plan-sync').isCommercialAccount(customer)) {
     return refusal('This is a commercial or business account. WaveGuard tiers and this program card are for residential customers. Book the visits from the Schedule screen. Nothing was proposed.', 'program_commercial_account');
   }
+  // A churned or inactive customer can keep a monthly_membership lane and an old rate. The booking's plan sync would mark
+  // the account active again as a side effect this card does not show, so a restart is a separate, deliberate step.
+  if (customer.active !== true || customer.pipeline_stage === 'churned') {
+    return refusal('This customer is inactive or churned. Restart this customer from the customer page first. Nothing was proposed.', 'program_customer_inactive');
+  }
   if (customer.payer_id || resolveBillingLane(customer).mode !== 'monthly_membership' || !(Number(customer.monthly_rate) > 0)) {
     return refusal('This tool starts a program only for a customer who already pays a monthly plan bill (monthly membership, no Bill-To payer). Start this customer\'s first plan from an accepted estimate or the Schedule screen. Nothing was proposed.', 'program_needs_monthly_plan');
   }
@@ -714,7 +719,7 @@ async function buildProgramPlan(input, actionContext) {
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
       // before anything is written.
       version: crypto.createHash('sha256').update(JSON.stringify([
-        customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
+        customer.version, customer.active === true, customer.pipeline_stage || null, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, catalogRow.name, catalogRow.updated_at || null, family, args.tier, args.cadence, args.firstDate,
         window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
         overlap.map((o) => o.fact), planSync.updates, consultations, contact.key, contact.welcomeKey,
@@ -1173,12 +1178,13 @@ async function billFailure(run, err) {
     return programStartedReceipt(plan, created, booked, warnings);
   }
   if (landed !== 'not_done') return tierAndBillUnknown(plan, booked, err);
-  // A drift refusal is for the operator to settle by hand; any other failure leaves the row open so the next program
-  // start for this customer finishes the bill step.
-  if (err.drift) await Marker.settle(plan.markerId, 'abandoned', { reason: 'bill_drift' });
+  // The series IS booked and the bill is NOT set, so the row stays booked_pending_bill whatever the cause (drift or a
+  // failed write): the sweep rings the bill-owed bell, the next start is refused as program_bill_step_owed, and the
+  // office clears it by marking the alert done. Only a drift before any visit is booked may abandon (that refusal is
+  // raised before the record phase, or abandons in the booking phase).
   const state = await customerStateAfterBooking(plan.customerId);
   return partialReceipt(plan, booked, state,
-    `${err.drift ? err.message : `the update failed (${err.code || err.message}). The office is alerted; another program start for this customer is refused until the bill is set by hand.`} Set them with update_customer, or cancel the series on the Schedule screen`);
+    `${err.drift ? `${err.message} The visits are booked and the bill step is owed. The office is alerted; another program start for this customer is refused until the bill is set by hand.` : `the update failed (${err.code || err.message}). The office is alerted; another program start for this customer is refused until the bill is set by hand.`} Set them with update_customer, or cancel the series on the Schedule screen`);
 }
 
 async function commitProgram(input, actionContext) {

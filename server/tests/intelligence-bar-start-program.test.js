@@ -1398,6 +1398,63 @@ describe('commit', () => {
     expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
   });
 
+  describe('round 14: bill drift after booking, and inactive customers', () => {
+    const rowUpdates = () => writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'update');
+
+    test('a bill-step drift AFTER the series is booked keeps the row booked_pending_bill (never abandoned) and says the bill step is owed', async () => {
+      const version = await approvedVersion();
+      createScheduleBooking.mockImplementation(async () => {
+        // Someone raised the tier after the booking: the bill step's drift check refuses.
+        tables.customers = [memberCustomer({ waveguard_tier: 'Gold', waveguard_tier_source: 'manual' })];
+        return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+      });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result).toMatchObject({ partial: true });
+      expect(result.warning).toContain('The visits are booked and the bill step is owed');
+      const phases = rowUpdates().map((w) => w.data.phase);
+      expect(phases).toContain('booked_pending_bill');
+      expect(phases).not.toContain('abandoned');
+      expect(phases).not.toContain('billed');
+      // The next start is refused as owed, and the sweep (not the drift path) rings the bell.
+      tables.ib_action_phases = [{ id: 'phase-1', tool: 'start_program', customer_id: CUSTOMER_ID, action_key: 'v1:phase-1', created_at: new Date().toISOString(), phase: 'booked_pending_bill', payload: JSON.stringify({ target: {} }) }];
+      expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_bill_step_owed' });
+    });
+
+    test('a refusal BEFORE any visit is booked still abandons the row', async () => {
+      const version = await approvedVersion();
+      createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Slot overlap', code: 'OVERLAP_CHANGED' } });
+      await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
+    });
+
+    test.each([
+      ['a churned customer who kept a monthly lane and rate', { pipeline_stage: 'churned', active: false }],
+      ['a churned stage with the flag still on', { pipeline_stage: 'churned', active: true }],
+      ['an inactive customer', { active: false }],
+      ['a customer with no active flag', { active: null }],
+    ])('%s refuses program_customer_inactive and proposes nothing', async (_name, overrides) => {
+      tables.customers = [memberCustomer(overrides)];
+      const result = await run(BASE_INPUT);
+      expect(result).toMatchObject({ code: 'program_customer_inactive' });
+      expect(result.error).toContain('Restart this customer from the customer page first');
+      expect(result.preview).toBeUndefined();
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+    });
+
+    test('a live customer passes, and the active flag and stage are pinned in the card version', async () => {
+      const live = await approvedVersion();
+      expect(typeof live).toBe('string');
+      tables.customers = [memberCustomer({ pipeline_stage: 'at_risk' })];
+      const staged = await approvedVersion();
+      expect(staged).not.toBe(live);
+      // A change between the preview and Confirm refuses before anything is written.
+      tables.customers = [memberCustomer({ active: false })];
+      const result = await run({ ...BASE_INPUT, _verified_program_version: live }, { confirmed: true });
+      expect(result.code === 'program_customer_inactive' || result.preview_changed === true).toBe(true);
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+    });
+  });
+
   test('the handler finds changed billing under its lock: refused, nothing booked, preview_changed', async () => {
     const version = await approvedVersion();
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: "The customer's billing changed since the card was shown. Nothing was booked.", code: 'BILLING_CHANGED' } });

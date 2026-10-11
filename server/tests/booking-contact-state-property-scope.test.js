@@ -132,3 +132,23 @@ describe('the senders\' reads use the handle they are given (round 13)', () => {
     expect(db).not.toHaveBeenCalled();
   });
 });
+
+describe('a secondary profile loads on the given handle only (round 14)', () => {
+  test('loadCustomer fills the primary contact through the handle even when the global pool throws', async () => {
+    const db = require('../models/db');
+    jest.restoreAllMocks();
+    db.mockImplementation(() => { throw new Error('the global pool must not be used'); });
+    const tables = [];
+    const conn = (table) => {
+      tables.push(table);
+      const b = { where: () => b, whereNull: () => b, select: () => b, first: async () => (tables.filter((t) => t === 'customers').length === 1
+        ? { id: 'cust-2', account_id: 'acct-1', is_primary_profile: false, phone: '', email: '' }
+        : { id: 'cust-1', first_name: 'Pat', phone: '+19415550177', email: 'primary@example.com', contact_role: null }) };
+      return b;
+    };
+    const customer = await AppointmentEmail._private.loadCustomer('cust-2', conn);
+    expect(customer).toMatchObject({ id: 'cust-2', phone: '+19415550177', email: 'primary@example.com' });
+    expect(tables).toEqual(['customers', 'customers']);
+    expect(db).not.toHaveBeenCalled();
+  });
+});

@@ -386,6 +386,54 @@ describe('createScheduleBooking runs the POST / handler', () => {
       keySpy.mockRestore(); confirmSpy.mockRestore();
     });
 
+    test('an unreadable recipient lookup (null or a throw) closes nothing and skips nothing the durable senders re-check (round 14)', async () => {
+      const Contact = require('../services/booking-contact-state');
+      const AppointmentReminders = require('../services/appointment-reminders');
+      const Welcome = require('../services/new-recurring-welcome-sms');
+      const logger = require('../services/logger');
+      const { sendDeferredConfirmations, sendRecurringWelcome, tagScheduledService, bookingContactDrifted } = require('../routes/admin-schedule')._test;
+      const Tagger = require('../services/appointment-tagger');
+      const confirmSpy = jest.spyOn(AppointmentReminders, 'sendConfirmation').mockResolvedValue(true);
+      const welcomeSpy = jest.spyOn(Welcome, 'sendNewRecurringWelcome').mockResolvedValue({ queued: true });
+      const tagSpy = jest.spyOn(Tagger, 'onServiceScheduled').mockResolvedValue(undefined);
+      const closed = [];
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'appointment_reminders') c.update = jest.fn(async (patch) => { closed.push(patch); return 1; });
+        if (table === 'activity_log') c.insert = jest.fn(async (row) => { closed.push(row); return [1]; });
+        return c;
+      });
+      const booked = () => ({ customerId: 'cust-1', customer: { id: 'cust-1' }, svc: { id: 'visit-1' }, recurringPattern: 'monthly', createdAppointments: [{ id: 'visit-1', confirmation: true }], req: { approvedContact: 'key-a', approvedWelcomeContact: 'key-w', approvedWelcome: true } });
+      for (const failure of [() => null, () => { throw new Error('lookup down'); }]) {
+        confirmSpy.mockClear(); welcomeSpy.mockClear(); tagSpy.mockClear(); closed.length = 0; logger.warn.mockClear();
+        jest.spyOn(Contact, 'currentContactKey').mockImplementation(async (_id, opts = {}) => (opts.kind === 'welcome' ? 'key-w' : failure()));
+        const c = booked();
+        await sendDeferredConfirmations(c);
+        await sendRecurringWelcome(c);
+        await tagScheduledService(c);
+        expect(await bookingContactDrifted(c)).toBe(false);
+        // Nothing closed, no audit row; no confirmation now (the durable sender holds on an unreadable state and the sweep retries).
+        expect(closed).toEqual([]);
+        expect(confirmSpy).not.toHaveBeenCalled();
+        // The welcome is still queued with its pinned key (delivery re-checks it and requeues while unreadable), and the tagger keeps its verdict.
+        expect(welcomeSpy).toHaveBeenCalledWith(expect.objectContaining({ contactKey: 'key-w' }));
+        expect(tagSpy).toHaveBeenCalledWith('visit-1', { approvedWelcome: true, approvedContact: 'key-w' });
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('cust-1'));
+        Contact.currentContactKey.mockRestore();
+      }
+      // A real mismatch still closes the rows and skips the welcome.
+      jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-other');
+      confirmSpy.mockClear(); welcomeSpy.mockClear(); closed.length = 0;
+      const moved = booked();
+      await sendDeferredConfirmations(moved);
+      await sendRecurringWelcome(moved);
+      expect(closed.length).toBeGreaterThan(0);
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(welcomeSpy).not.toHaveBeenCalled();
+      jest.restoreAllMocks();
+    });
+
     test('the recovery sweep reads the exported filter, not its own copy of the conditions', () => {
       const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
       expect(src).toContain('.where(STRANDED_CONFIRMATION_FILTER)');

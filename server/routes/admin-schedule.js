@@ -9194,24 +9194,37 @@ async function queueTechVisitNotice(c) {
 // The rail checked under the lock; this checks again just before the sends, which read the live record. Once per
 // booking. Drift skips the sends and warns; the stranded-confirmation sweep still delivers the confirmation to the
 // live recipients later, and the welcome is not queued.
-async function bookingContactDrifted(c) {
-  if (typeof c.req.approvedContact !== 'string') return false;
-  if (c.contactDrifted === undefined) {
+// Three answers, not two: 'ok' (the pinned keys match, or no pin), 'drifted' (a key reads and DIFFERS from the pin) and
+// 'unreadable' (a lookup failed or threw, so nothing is known). Only a real mismatch closes the confirmation rows and
+// skips the welcome. An unreadable state changes nothing: the rows stay open for the durable confirmation sender and the
+// queued welcome, which both hold or requeue on an unreadable state and re-check on the next run.
+async function bookingContactState(c) {
+  if (typeof c.req.approvedContact !== 'string') return 'ok';
+  if (c.contactState === undefined) {
     const Contact = require('../services/booking-contact-state');
-    // The confirmation key is scoped to the property the visits are stamped with; the welcome key is the account's.
-    const key = await Contact.currentContactKey(c.customerId, { propertyId: c.req.approvedServiceAnchor?.propertyId || null });
-    const welcome = typeof c.req.approvedWelcomeContact === 'string' ? await Contact.currentContactKey(c.customerId, { kind: 'welcome' }) : null;
-    c.contactDrifted = key !== c.req.approvedContact
-      || (typeof c.req.approvedWelcomeContact === 'string' && welcome !== c.req.approvedWelcomeContact);
-    if (c.contactDrifted) await suppressConfirmationsOnContactDrift(c);
+    try {
+      // The confirmation key is scoped to the property the visits are stamped with; the welcome key is the account's.
+      const key = await Contact.currentContactKey(c.customerId, { propertyId: c.req.approvedServiceAnchor?.propertyId || null });
+      const welcome = typeof c.req.approvedWelcomeContact === 'string' ? await Contact.currentContactKey(c.customerId, { kind: 'welcome' }) : undefined;
+      if (key === null || welcome === null) {
+        c.contactState = 'unreadable';
+        logger.warn(`[schedule] customer ${c.customerId}: recipients could not be verified after the booking; the confirmation and welcome are left for their durable senders to re-check`);
+      } else {
+        c.contactState = key !== c.req.approvedContact || (welcome !== undefined && welcome !== c.req.approvedWelcomeContact) ? 'drifted' : 'ok';
+      }
+    } catch (e) {
+      c.contactState = 'unreadable';
+      logger.warn(`[schedule] customer ${c.customerId}: recipient check threw (${e.message}); the confirmation and welcome are left for their durable senders to re-check`);
+    }
+    if (c.contactState === 'drifted') await suppressConfirmationsOnContactDrift(c);
   }
-  return c.contactDrifted;
+  return c.contactState;
 }
 
-// Drift: the confirmation must not go to the new recipients, and the recovery sweep (shared by every booking path,
-// so it does not know the pin) would send it within minutes to a row still marked unsent. Close the rows the way the
-// preference skip does (confirmation_sent=true, which also lets the 72h and 24h reminders run), and leave an audit
-// row so a person checks the recipient and sends the confirmation by hand.
+async function bookingContactDrifted(c) {
+  return (await bookingContactState(c)) === 'drifted';
+}
+
 async function suppressConfirmationsOnContactDrift(c) {
   const ids = c.createdAppointments.map((a) => a.id);
   logger.warn(`[schedule] customer ${c.customerId}: phone, email or notification settings changed after the card; the booking confirmation and welcome were not sent`);
@@ -9230,7 +9243,9 @@ async function suppressConfirmationsOnContactDrift(c) {
 
 async function sendDeferredConfirmations(c) {
   const { createdAppointments } = c;
-  if (await bookingContactDrifted(c)) return;
+  // Drifted: closed and skipped. Unreadable: nothing is sent now and nothing is closed; the confirmation sender
+  // (contactPinBlocksConfirmation) holds on an unreadable state and the recovery sweep sends once it can verify.
+  if ((await bookingContactState(c)) !== 'ok') return;
   // Fire the deferred confirmation SMS for any appointment that wants one
   // (the reminder rows were already inserted durably above). This is the
   // slow, Twilio-bound step: landline lookup + send.

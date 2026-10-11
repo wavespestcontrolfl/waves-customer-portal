@@ -609,6 +609,12 @@ function resolveEntryChannel(attr) {
 // Same-phone wizard re-runs may refresh ONLY the wizard's own open draft.
 // Estimates from any other source (admin/tech/lead automation) or already
 // promoted past draft keep the duplicate hard-block.
+// A merge or relink that committed between the unlocked read of the draft and its row lock moved it to another
+// customer. The refresh writes a whole field set, customer_id included, so it would put the stale owner back.
+function wizardDraftRelinked(lockedRow, readRow) {
+  return (lockedRow?.customer_id || null) !== (readRow?.customer_id || null);
+}
+
 function shouldRefreshWizardDraft(duplicateBlock) {
   return !!duplicateBlock
     && duplicateBlock.existingSource === 'quote_wizard'
@@ -3298,8 +3304,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             .forUpdate()
             .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data', 'customer_id');
           if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
-          // A merge or relink that committed while this waited moved the draft to another customer: refuse the refresh.
-          if (!estFields.customer_id && (lockedEst.customer_id || null) !== (existingEst.customer_id || null)) return;
+          // A merge or relink that committed while this waited moved the draft to another customer: skip the refresh
+          // (whatever estFields carries, it would write the stale id back). Judged on EVERY refresh.
+          if (wizardDraftRelinked(lockedEst, existingEst)) {
+            logger.info(`[public-quote] wizard draft ${existingEst.id} moved to another customer while the refresh waited for its lock — refresh skipped`);
+            return;
+          }
           if (lockedEst.archived_at) {
             const consumedBy = await trx('scheduled_services')
               .where({ source_estimate_id: existingEst.id })
@@ -3323,7 +3333,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const { DELIVERY_CLAIM_NOT_LIVE_SQL: CLAIM_NOT_LIVE } = require('../utils/estimate-claim-sql');
           // The refresh un-archives the draft (archived_at: null) — a reactivation, so it
           // takes the same per-customer estimate lock as an insert.
-          await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields });
+          await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { ...lockedEst, ...estFields });
           const refreshedExisting = await trx('estimates').where({ id: existingEst.id }).whereRaw(CLAIM_NOT_LIVE).update({
             ...estFields,
             ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
@@ -4372,6 +4382,7 @@ module.exports._internals = {
   derivePerApplicationBreakdown,
   deriveLawnArea,
   shouldRefreshWizardDraft,
+  wizardDraftRelinked,
   resolveRealLotSqFt,
   resolveEntryChannel,
   unitOnMultiUnitParcelForcesSiteQuote,

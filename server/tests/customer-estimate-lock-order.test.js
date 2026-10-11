@@ -13,7 +13,7 @@ const LOCKS_AFTER = /pg_advisory_xact_lock|lockCustomerComms\(|lockInspectionCre
 
 // [name, file, anchor of the advisory (leaf) lock call]
 const SITES = [
-  ['public-quote refresh', '../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })'],
+  ['public-quote refresh', '../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...lockedEst, ...estFields })'],
   ['admin unarchive', '../routes/admin-estimates', 'lockCustomerEstimatesForEstimate(trx, locked)'],
   ['admin proposal revival', '../routes/admin-estimates', 'lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked })'],
   ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, anchor)'],
@@ -60,7 +60,21 @@ describe('customer estimate lock order (customer row, then estimate row, then th
   });
 
   test('public-quote refresh refuses to refresh a draft that moved to another customer', () => {
-    expect(read('../routes/public-quote')).toContain("(lockedEst.customer_id || null) !== (existingEst.customer_id || null)) return;");
+    const src = read('../routes/public-quote');
+    // Judged on EVERY refresh (not only when estFields carries no customer_id), and the advisory lock is derived from the locked row.
+    expect(src).toContain('if (wizardDraftRelinked(lockedEst, existingEst)) {');
+    // The check sits before the setup-fee write and the refresh UPDATE, so a relinked draft is never updated.
+    const check = src.indexOf('if (wizardDraftRelinked(lockedEst, existingEst)) {');
+    expect(check).toBeGreaterThan(src.indexOf(".first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data', 'customer_id')"));
+    expect(check).toBeLessThan(src.indexOf('await applySetupFeeQuote(trx);', check));
+    expect(check).toBeLessThan(src.indexOf("const refreshedExisting = await trx('estimates')", check));
+    const { wizardDraftRelinked } = require('../routes/public-quote')._internals;
+    expect(wizardDraftRelinked({ customer_id: 'c2' }, { customer_id: 'c1' })).toBe(true);
+    expect(wizardDraftRelinked({ customer_id: null }, { customer_id: 'c1' })).toBe(true);
+    expect(wizardDraftRelinked({ customer_id: 'c1' }, { customer_id: 'c1' })).toBe(false);
+    expect(wizardDraftRelinked({ customer_id: undefined }, { customer_id: null })).toBe(false);
+    expect(src).not.toContain('!estFields.customer_id && (lockedEst.customer_id');
+    expect(src).toContain('lockCustomerEstimatesForEstimate(trx, { ...lockedEst, ...estFields })');
   });
 
   test('the customer-row helper locks rows only (no advisory lock)', async () => {
@@ -164,7 +178,7 @@ describe('customer estimate lock order (customer row, then estimate row, then th
       ['../routes/admin-estimates', "lockCustomerEstimatesForEstimate(trx, locked);", 'unarchive'],
       ['../routes/admin-estimates', 'lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked })', 'revival'],
       ['../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, anchor)', 'extend'],
-      ['../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', 'refresh'],
+      ['../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...lockedEst, ...estFields })', 'refresh'],
     ];
     for (const [rel, anchor] of sites) expect(read(rel)).toContain(anchor);
   });

@@ -112,7 +112,7 @@ async function loadCustomer(customerId, conn = db) {
   // Secondary-property row with no email of its own: the account owner's
   // address (#1995 A/D) — the row IS the owner, minted from their estimate.
   // Only blank fields fill; a row-level email always wins.
-  return row ? withAccountPrimaryContact(row) : row;
+  return row ? withAccountPrimaryContact(row, { db: conn }) : row;
 }
 
 // Resolve the email recipients for an appointment notice. Mirrors the SMS
