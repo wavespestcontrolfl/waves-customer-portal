@@ -10,7 +10,7 @@ import PoisonControlCopy, { applicatorIdLine } from '../components/report/Poison
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
 import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
-import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow } from '../components/report/lawnV2/lawnLayoutRules';
+import { alsoSteps, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -2240,6 +2240,13 @@ function LawnTrendChart({ trend = [], summary }) {
   );
 }
 
+// Alt text for a lawn photo in the strip. GATE_LAWN_PHOTO_LABEL_PICK: a technician-chosen customer label
+// (labelPicked, present only while the gate is live) names the photo; otherwise the legacy type wording, as before.
+export function lawnPhotoAlt(photo) {
+  if (photo?.labelPicked) return `Lawn ${String(photo.labelPicked).toLowerCase()}`;
+  return photo?.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo';
+}
+
 function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   useEffect(() => {
     if (mode !== 'live' || !assessment) return;
@@ -2312,8 +2319,8 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
         <div className="lawn-photo-strip">
           {visiblePhotos.map((photo) => (
             <figure key={photo.id}>
-              <img src={photo.url} alt={photo.type ? `Lawn ${formatEnumLabel(photo.type).toLowerCase()}` : 'Lawn assessment photo'} />
-              <figcaption>{photo.zoneLabel || formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
+              <img src={photo.url} alt={lawnPhotoAlt(photo)} />
+              <figcaption>{photo.labelPicked || photo.zoneLabel || formatEnumLabel(photo.zone || photo.type || 'Turf photo')}</figcaption>
             </figure>
           ))}
         </div>
@@ -2795,10 +2802,14 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
               .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
               .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
           };
+          // GATE_LAWN_REPORT_STAGE1_FIXES (the server sets lawnStage1Fixes on a lawn report only): the report link can be
+          // shared, so the web hero keeps the name and the service address and leaves out the email and phone. The PDF
+          // prints its own contact block.
+          const hideContact = data.lawnStage1Fixes === true;
           const contactLines = [
             data.customerName,
-            data.customerEmail,
-            formatCustomerPhone(data.customerPhone),
+            hideContact ? null : data.customerEmail,
+            hideContact ? null : formatCustomerPhone(data.customerPhone),
             data.serviceAddress,
           ].map(displayContactLine).filter(Boolean);
           return contactLines.length ? (
@@ -10674,7 +10685,8 @@ export default function ReportViewPage() {
     // the post-service email attachment all serve this capture. The glass
     // web report (live) and the unused static mode are unchanged.
     if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
-    return <ServiceReportV1 data={data} token={token} mode={mode} />;
+    // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
+    return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }
   return <LegacyReport data={data} token={token} glass={glassActive} />;
 }

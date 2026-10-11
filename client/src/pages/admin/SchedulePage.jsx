@@ -86,6 +86,7 @@ import {
   amountInUnit,
   markTankEntry,
   tankPropagates,
+  productRowId,
   followTank,
   clearTankOnUnitChange,
   joinTankOnUnitChange,
@@ -93,6 +94,8 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -944,6 +947,19 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
   mosquito: "mosquito",
   termite: "termite",
 };
+
+// An appointment whose own service is an area add-on (GATE_AREA_ADDONS) is generic work. The name
+// reads "lawn" for "Lawn Insect Spot Treatment" and "pest" for "Web Sweep", and
+// neither takes that line's completion form: the visit's catalog key decides. A normal
+// pest or lawn visit with add-on rows attached keeps its own lane (AreaAddOnFields adds the
+// add-on's product beside it); only the lightweight shortcuts stay off for it.
+const AREA_ADDON_LINE = "general";
+function visitServiceCategory(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
+}
+function visitServiceLine(service, serviceType) {
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+}
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
@@ -7111,12 +7127,13 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D }) {
+function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
       <button
         type="button"
+        id={domId}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         style={{
@@ -7205,6 +7222,12 @@ function JobCardStrip({ strip, D }) {
   );
 }
 
+// A card's title: the product, and for a sold add-on's own card the add-on, so two cards of one product read apart.
+const jobCardProductTitle = (p) => (p.source ? `${p.name} · ${p.source}` : p.name);
+// A card's identity: the product, and the add-on for a sold add-on's own card (the server's rowId; the product ID alone for a
+// card without one). Keys the list, the DOM ids and every lookup of a card by product.
+const jobCardRowId = (p) => p.rowId || p.id;
+
 function JobCardSprayCheck({ sprayCheck, products, D }) {
   const f = sprayCheck?.forecast;
   const range = f?.tempF && f.tempF[0] != null ? `${f.tempF[0]}–${f.tempF[1]}°F` : null;
@@ -7227,8 +7250,8 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
             {products.map((p) => (
-              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <div key={jobCardRowId(p)} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{jobCardProductTitle(p)}</span>
                 <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                   {p.verdict !== "ok" && p.verdictReason && (
                     <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
@@ -7304,6 +7327,24 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
   );
 }
 
+// A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
+// basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
+// grass sends the reason in place of the rate.
+export function JobCardGoverned({ governed, D }) {
+  if (!governed) return null;
+  return (
+    <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
+      {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
+      {governed.grass && <div>{governed.grass}</div>}
+      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      <div>Area: {governed.area}</div>
+      <div>Limit: {governed.limit}</div>
+      {governed.use && <div>{governed.use}</div>}
+      {governed.safety && <div style={{ fontWeight: 500 }}>Safety: {governed.safety}</div>}
+    </div>
+  );
+}
+
 function JobCardProduct({ p, serviceId, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
@@ -7317,9 +7358,10 @@ function JobCardProduct({ p, serviceId, D }) {
     </>
   );
   return (
-    <JobCardCollapsible title={p.name} right={right} D={D}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        <JobCardGoverned governed={p.governed} D={D} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
@@ -7624,7 +7666,7 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
   );
 }
 
-function JobCardTab({ card, loading, error, D }) {
+export function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7669,7 +7711,7 @@ function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={p.id} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7766,7 +7808,7 @@ export function ProtocolPanel({ service, onClose }) {
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
   // classified from the raw value — the panel must agree with them.
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
-  const serviceCategory = detectServiceCategory(panelServiceType);
+  const serviceCategory = visitServiceCategory(service, panelServiceType);
   const isLawn = serviceCategory === "lawn";
   // Fail closed: only an affirmative { enabled: true } opens the gated tab and
   // ask bar. A failed request is shown as a notice under the header instead.
@@ -10418,6 +10460,7 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
 // covers two areas, so it records no single shared coverage (null) and its
 // products and findings keep their own areas.
 function propertyAreaLineFor(service) {
+  if (isAreaAddOnVisit(service)) return null;
   const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
   const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
   return raw === normalized ? normalized : null;
@@ -10486,6 +10529,42 @@ function requiredApplicationArea(method, serviceType = "", includeOptionalLawnAr
 
 function effectiveApplicationMethod(method) {
   return normalizeApplicationMethod(method) || "perimeter_spray";
+}
+
+// The first product row of a completion that cannot be saved yet, as the sentence to show, or null: a row whose method
+// needs a treated area that is missing, and a row recorded for a chemical area add-on without its rate, unit, treated square
+// feet or amount (the server refuses it too, the row being that add-on's application record). `typeFor` is the row's service type.
+// The completion group a removed product row belongs to: the ROW's own persisted id (a restored draft has it before any
+// protocol action loads), else the loaded action's for that product. An add-on's own row of a product is never part of the
+// host's completion group.
+export function completionGroupOfRemovedRow(removedRow, productId, protocolActions) {
+  if (removedRow?.group) return removedRow.group;
+  if (removedRow?.areaAddOnKey) return undefined;
+  return (protocolActions || []).find((a) => a.group && a.product?.id === productId)?.group;
+}
+// The rest of a completion group: the product ids that come off with it (every row with that group plus the loaded
+// actions' products) and the chip labels handleProtocolActionSelect added for each member (a member's label is its
+// product name). No group: nothing.
+export function completionGroupMates(group, selectedProducts, protocolActions) {
+  if (!group) return { productIds: new Set(), labels: new Set() };
+  const members = (selectedProducts || []).filter((p) => p.group === group);
+  const actions = (protocolActions || []).filter((a) => a.group === group);
+  return {
+    productIds: new Set([...members.map((p) => p.productId), ...actions.filter((a) => a.product?.id).map((a) => a.product.id)]),
+    labels: new Set([...members.map((p) => String(p.name)), ...actions.map((a) => String(a.note || a.label || a.raw || "Completed protocol item"))]),
+  };
+}
+
+function completionProductRowProblem(service, rows, typeFor) {
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
+  const missingArea = rows.find((p) => {
+    const requirement = areaOf(p);
+    if (!requirement) return false;
+    const value = Number(p.areaValue);
+    return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
+  });
+  // (This helper runs for a COMPLETED visit only: every chemical add-on the visit carries then needs its product row.)
+  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : (addOnActualsProblem(service, rows) || addOnRecordMissingProblem(service, rows));
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
@@ -12661,7 +12740,7 @@ export function CompletionPanel({
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
-  const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
+  const lawnDefaultAreas = completionImprovements && visitServiceLine(service, service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
   const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
   const lawnAreasInitializedRef = useRef(completionImprovements);
@@ -13535,7 +13614,7 @@ export function CompletionPanel({
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
-    !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+    !isTypedFindings && visitServiceCategory(service, service.serviceType) === "lawn";
   // The tracer's capture mode follows the SERVER's eligibility variant
   // when the feed carries one (codex P2 r3): typed lawn visits
   // (aeration/fungicide/insect control) set isTypedFindings, which forces
@@ -13563,7 +13642,12 @@ export function CompletionPanel({
   // compliance gate still requires its own completion photos (T&S needs >=2),
   // so keep the uploader whenever any companion is present.
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
-  const serviceTypeForArea = service?.serviceType || service?.service_type || "";
+  // A lawn-family area add-on that IS the visit is recorded by area on a lawn product ("Fire Ant
+  // Yard Treatment" reads as pest). On a host visit, only the rows recorded for a chemical add-on
+  // are lawn-family (typeFor); every other row keeps the host's own type.
+  const ownServiceType = service?.serviceType || service?.service_type || "";
+  const serviceTypeForArea = areaAddOnRowServiceType(service, ownServiceType, null);
+  const typeFor = (row) => areaAddOnRowServiceType(service, ownServiceType, row);
   const calibrationRequired = isLawn && !!service.waveguardTier;
   // Advisory inventory posture is member-tier only — mirrors the server's
   // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
@@ -13581,7 +13665,7 @@ export function CompletionPanel({
     }
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  const serviceCategory = visitServiceCategory(service, service.serviceType);
   // Bed bug closeouts get interior-specific treated-area chips, skip the
   // satellite spray-trace (a perimeter trace has no meaning for an interior
   // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
@@ -13611,7 +13695,7 @@ export function CompletionPanel({
   // pest visit keeps the tracer, because that visit really did spray.
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
-  const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  const serviceLineForCloseout = visitServiceLine(service, serviceTypeForArea);
   // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
   // flag): the visit's photos and their descriptions sit inside the notes
   // box and the separate photo section goes away. Never on lawn or tree,
@@ -14094,7 +14178,7 @@ export function CompletionPanel({
       if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
       const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
       const activeDefaults = lawnDefaultsSeedSuppressed
-        ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
+        ? defaults.filter(row => selectedProducts.some(product => !product.areaAddOnKey && String(product.productId) === String(row.productId))) : defaults;
       const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
       lawnDefaultMixSeededRef.current = true;
       lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
@@ -14566,9 +14650,10 @@ export function CompletionPanel({
   const nLimitSummaryText = treatmentPlanAnnualN
     ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || "lb N / 1,000 sqft / year"}.`
     : "";
+  // An area add-on's product row belongs to the add-on, not to the host's protocol: it is never "off protocol".
   const offProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter(
-        (p) => !treatmentPlanProductIds.includes(String(p.productId)),
+        (p) => !p.areaAddOnKey && !treatmentPlanProductIds.includes(String(p.productId)),
       )
     : [];
   const selectedProductIds = new Set(
@@ -14587,7 +14672,7 @@ export function CompletionPanel({
       !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
-      (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
+      (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product))),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -15800,7 +15885,7 @@ export function CompletionPanel({
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
-            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            const normalized = normalizeProductArea(product, typeFor(product));
             // Bed bug: a pre-migration draft carries the old inferred
             // perimeter default — reclassify it to the interior default so
             // a restored draft can't demand perimeter footage or record
@@ -17042,7 +17127,7 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
-        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationMethod: productApplicationMethod(p, typeFor(p)),
         applicationArea:
           p.applicationArea ||
           (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
@@ -17152,7 +17237,7 @@ export function CompletionPanel({
     if (
       activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
-        || selectedProducts.find((p) => p.productId === action.product.id))
+        || selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id))
     ) {
       return;
     }
@@ -17174,7 +17259,7 @@ export function CompletionPanel({
     }
     if (
       action.product?.id &&
-      !selectedProducts.find((p) => p.productId === action.product.id)
+      !selectedProducts.find((p) => !p.areaAddOnKey && p.productId === action.product.id)
     ) {
       addProduct({
         ...action.product,
@@ -17200,7 +17285,7 @@ export function CompletionPanel({
     // The duplicate check runs FIRST (codex r81): re-clicking an
     // already-selected product's search result changes nothing and must
     // not clear a valid untouched report.
-    if (selectedProducts.find((p) => p.productId === product.id)) return;
+    if (selectedProducts.find((p) => !p.areaAddOnKey && p.productId === product.id)) return;
     // Products feed the generation grounding (and T&S derives its treatments
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
@@ -17263,6 +17348,8 @@ export function CompletionPanel({
   // whole-lawn broadcast quantity: only a broadcast method takes it; any other
   // method on a lawn visit (a soil drench, spot work) stays manual.
   function productUsesPropertyArea(product, applicationMethod) {
+    // An add-on's product is entered with the area the add-on was sold for, never the host line's property area.
+    if (product.areaAddOnKey) return false;
     if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
@@ -17277,12 +17364,14 @@ export function CompletionPanel({
     // default falls to 'perimeter_spray' and wrongly demands linear
     // footage for an interior placement. Passed in by the protocol
     // completion-defaults seed only; every other caller is unaffected.
+    // A product recorded for a chemical add-on carries its key (areaAddOnKey) and is judged lawn-family.
+    const rowType = typeFor(product);
     const applicationMethod = applicationMethodOverride
-      || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+      || defaultApplicationMethod(product, rowType, { interiorLane: isBedBugVisit });
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -17296,7 +17385,7 @@ export function CompletionPanel({
       labelMaxRate,
     } = resolveRatePrefill(product, {
       applicationMethod,
-      serviceLine: serviceLineFromType(serviceTypeForArea),
+      serviceLine: serviceLineFromType(rowType),
     });
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
@@ -17336,7 +17425,9 @@ export function CompletionPanel({
         : perBasisUnit || areaRequirement?.unit === "linear_ft"
           ? ""
           : derivedTotalAmount(prefillRate, prefillArea);
-    return {
+    // A row recorded for an area add-on starts at the add-on's GOVERNED rate, never the catalog default
+    // (withGovernedAddOnRate); every other row passes through unchanged.
+    return withGovernedAddOnRate(service, product, {
         productId: product.id,
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
@@ -17384,9 +17475,10 @@ export function CompletionPanel({
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
+        areaAddOnKey: product.areaAddOnKey,
         areaValue: prefillArea,
         propertyServiceAreaField: !!currentPropertyAreas && productUsesServiceArea,
-        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, serviceTypeForArea, false, true)?.unit === "sqft"
+        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, rowType, false, true)?.unit === "sqft"
           ? { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId ?? null, kind: propertyAreaKey, pending: !currentPropertyAreas } : null,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
@@ -17412,7 +17504,7 @@ export function CompletionPanel({
           ),
           allowedTargetLinesForVisit(service),
         ),
-    };
+    });
   }
   function addSubstitutionProduct(substitution) {
     if (!substitution?.substituteProductId) return;
@@ -17435,8 +17527,8 @@ export function CompletionPanel({
     setSelectedProducts((prev) =>
       prev.map((p) => {
         const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
+          productApplicationMethod(p, typeFor(p)),
+          typeFor(p),
         );
         if (areaRequirement?.unit !== "linear_ft") return p;
         if (Number(p.areaValue) > 0) return p;
@@ -17444,47 +17536,49 @@ export function CompletionPanel({
       }),
     );
   }
-  function removeProduct(productId) {
+  // Records a chemical area add-on's product on a host visit (AreaAddOnFields): an ordinary product
+  // row tagged with the add-on, so its method and treated area follow the lawn rules (typeFor)
+  // whatever line the host visit is, and the server saves it like any other application row.
+  function addAreaAddOnProduct(product, addOn) {
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
+    lawnDefaultMixSeededRef.current = true;
+    const row = buildSelectedProduct({ ...product, areaAddOnKey: addOn.key });
+    setSelectedProducts((prev) => [...prev.filter((p) => productRowId(p) !== productRowId(row)), row]);
+  }
+  // `rowId` is productRowId(row): the product and, for an add-on's row, the add-on, so the host's row of a
+  // product and the add-on's row of the same product are removed and edited separately.
+  // A removed lawn plan default is remembered by product, with its name (a governed row restored while the plan request
+  // failed is still a plan default: its removal must survive a successful retry, pre-push audit).
+  function rememberRemovedLawnDefault(removedRow, productId) {
+    if (!(lawnDefaultsEnabled || removedRow?.lawnPlanDefaults)) return;
+    const removedName = removedRow?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+    if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+    setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+  }
+  function removeProduct(rowId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
-    // A governed row restored while the plan request failed is still a plan
-    // default: its removal must survive a successful retry (pre-push audit).
-    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
-    if (governed) {
-      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
-      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
-      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
-    }
+    const removedRow = selectedProducts.find((p) => productRowId(p) === rowId);
+    const productId = removedRow?.productId ?? rowId;
+    rememberRemovedLawnDefault(removedRow, productId);
     // Same ledger, for the protocol-defaults seed (pre-push audit P1, PR
     // #5049 r2) — a deliberate removal of a seeded default must survive
     // the list going empty, or a later open re-seeds what the tech took
     // off. Only THIS function (the tech's own tap) records one; the
     // non-performed-outcome clearing effect deliberately does not.
-    const removedRow = selectedProducts.find((p) => p.productId === productId);
     if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
-    // Products that share a completion group (the bermuda removal mix) come off together. The group is the
-    // ROW's own persisted id (a restored draft has it before any protocol action loads), else the loaded
-    // action's; the members are every row with that group plus the loaded actions' products.
-    const group = selectedProducts.find((p) => p.productId === productId)?.group
-      || protocolActions.find((a) => a.group && a.product?.id === productId)?.group;
-    const members = group ? selectedProducts.filter((p) => p.group === group) : [];
-    const removedIds = new Set([productId, ...members.map((p) => p.productId), ...(group
-      ? protocolActions.filter((a) => a.group === group && a.product?.id).map((a) => a.product.id)
-      : [])]);
-    // The group's chips go with its products: the labels, scopes and [Protocol] note lines
-    // handleProtocolActionSelect added for each member (a member's label is its product name).
-    if (group) {
-      const labels = new Set([
-        ...members.map((p) => String(p.name)),
-        ...protocolActions.filter((a) => a.group === group).map((a) => String(a.note || a.label || a.raw || "Completed protocol item")),
-      ]);
-      for (const label of labels) removeSelectedLabel("protocol", label);
-    }
+    // Products that share a completion group (the bermuda removal mix) come off together, with the group's chips.
+    const group = completionGroupOfRemovedRow(removedRow, productId, protocolActions);
+    const mates = completionGroupMates(group, selectedProducts, protocolActions);
+    for (const label of mates.labels) removeSelectedLabel("protocol", label);
     setSelectedProducts((prev) =>
-      promoteTankOwner(prev.filter((p) => !removedIds.has(p.productId))),
+      // The row itself goes by its row id (an add-on's row of a product and the host's row are separate); the rest of a
+      // completion group goes by product, and never takes an add-on's tagged row with it.
+      promoteTankOwner(prev.filter((p) => productRowId(p) !== rowId && !(mates.productIds.has(p.productId) && !p.areaAddOnKey))),
     );
   }
   // The x on a report pill. A label that belongs to a completion group (the bermuda
@@ -17506,7 +17600,7 @@ export function CompletionPanel({
       }
     } else removeSelectedLabel(kind, label);
   }
-  function updateProduct(productId, field, value) {
+  function updateProduct(rowId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
@@ -17515,13 +17609,13 @@ export function CompletionPanel({
       // live in lib/product-rate-prefill. Only the owner's corrections travel,
       // so a row given its own gallons detaches alone.
       const tankOwner = tankOwnerRow(prev);
-      const propagateTank = tankPropagates(prev, productId, field);
+      const propagateTank = tankPropagates(prev, rowId, field);
       // An owner that leaves per-gallon frees the slot the same way removing
       // it does, and the rows still on its mix keep the tank: without an heir
       // the next gallons edit — a detached row's included — would propagate
       // over them (pre-push audit P1). Idempotent while an owner remains.
       return promoteTankOwner(prev.map((p) => {
-        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
+        if (productRowId(p) !== rowId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
@@ -17558,7 +17652,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            serviceTypeForArea, false, next.propertyServiceAreaField,
+            typeFor(next), false, next.propertyServiceAreaField,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17583,8 +17677,8 @@ export function CompletionPanel({
           }
         } else if (field === "areaValue") {
           const areaRequirement = requiredApplicationArea(
-            productApplicationMethod(next, serviceTypeForArea),
-            serviceTypeForArea,
+            productApplicationMethod(next, typeFor(next)),
+            typeFor(next),
             governed || !!next.group, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
@@ -18531,21 +18625,15 @@ export function CompletionPanel({
         return;
       }
     }
-      const missingRequiredAreaProduct = selectedProducts.find((p) => {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
-        );
-      if (!areaRequirement) return false;
-      const value = Number(p.areaValue);
-      return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
-    });
-    if (!isIncompleteVisit && missingRequiredAreaProduct) {
-        const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(missingRequiredAreaProduct, serviceTypeForArea),
-          serviceTypeForArea,
-        );
-      alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
+    // An incomplete visit skips the ordinary row checks, but a submitted add-on row still needs its actuals (the server refuses it).
+    // The feed could not say whether this visit carries add-on treatments: a completed visit is not submitted blind.
+    if (service?.areaAddOnsLookupFailed === true && !isIncompleteVisit) {
+      alert(AREA_ADDONS_LOOKUP_FAILED_MESSAGE);
+      return;
+    }
+    const productRowProblem = isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) : completionProductRowProblem(service, selectedProducts, typeFor);
+    if (productRowProblem) {
+      alert(productRowProblem);
       return;
     }
     setSubmitting(true);
@@ -18599,7 +18687,7 @@ export function CompletionPanel({
       // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
       // server's unlisted-skip audit (Codex #4113 P2).
       const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
-        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => !row.areaAddOnKey && String(row.productId) === String(id))).flatMap((id) => {
             const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
             const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
@@ -18661,12 +18749,14 @@ export function CompletionPanel({
             ...(p.amountUnit === "tsp"
               ? submittedAmount(p.totalAmount, p.amountUnit)
               : { totalAmount: p.totalAmount, amountUnit: p.amountUnit }),
-            applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+            applicationMethod: productApplicationMethod(p, typeFor(p)),
           applicationArea:
             p.applicationArea ||
             (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
+          // The area add-on this row records (the server keeps it only for an add-on the visit carries).
+          areaAddOnKey: p.areaAddOnKey,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
         // The existing completion field carries the visit area into the server
@@ -19123,7 +19213,7 @@ export function CompletionPanel({
     return (
       (!!noteText && inSelection) ||
       (action?.product?.id &&
-        selectedProducts.some((p) => p.productId === action.product.id))
+        selectedProducts.some((p) => !p.areaAddOnKey && p.productId === action.product.id))
     );
   }
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
@@ -19368,7 +19458,7 @@ export function CompletionPanel({
       // cannot survive beside a newer application measurement.
       selectedProducts.map((p) => [
         p.productId, p.name, p.rate || null, p.rateUnit || null,
-        productApplicationMethod(p, serviceTypeForArea),
+        productApplicationMethod(p, typeFor(p)),
         p.applicationArea || null, p.areaValue ?? null, p.areaUnit || null,
         Array.isArray(p.targets) ? p.targets : [],
       ]),
@@ -21176,6 +21266,16 @@ export function CompletionPanel({
                 />
               );
             })}
+            <AreaAddOnFields
+              service={service}
+              selectedProducts={selectedProducts}
+              products={products}
+              onAddProduct={addAreaAddOnProduct}
+              disabled={generating}
+              colors={{ text: M.ink, muted: M.ink3, border: M.hairline }}
+              selectStyle={mSelect}
+              labelStyle={eyebrowStyle}
+            />
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -21183,7 +21283,7 @@ export function CompletionPanel({
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
                     const selected = !!selectedProducts.find(
-                      (sp) => sp.productId === p.id,
+                      (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                     );
                     return (
                       <Chip
@@ -21254,7 +21354,7 @@ export function CompletionPanel({
                 >
                   {selectedProducts.map((sp) => (
                     <div
-                      key={sp.productId}
+                      key={productRowId(sp)}
                       style={{
                         background: M.card,
                         border: `0.5px solid ${M.hairline}`,
@@ -21287,7 +21387,7 @@ export function CompletionPanel({
                         placeholder="Rate"
                         value={sp.rate}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "rate", e.target.value)
+                          updateProduct(productRowId(sp), "rate", e.target.value)
                         }
                         style={{
                           ...mInput,
@@ -21300,7 +21400,7 @@ export function CompletionPanel({
                         value={sp.rateUnit}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "rateUnit",
                             e.target.value,
                           )
@@ -21337,7 +21437,7 @@ export function CompletionPanel({
                             placeholder="Gal"
                             value={sp.carrierGallons ?? ""}
                             onChange={(e) =>
-                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                              updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                             }
                             style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
                           />{" "}
@@ -21352,7 +21452,7 @@ export function CompletionPanel({
                         value={sp.totalAmount || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "totalAmount",
                             e.target.value,
                           )
@@ -21368,7 +21468,7 @@ export function CompletionPanel({
                         value={sp.amountUnit ?? sp.rateUnit ?? ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "amountUnit",
                             e.target.value,
                           )
@@ -21426,7 +21526,7 @@ export function CompletionPanel({
                                 selected={selectedAreas.includes(area)}
                                 onClick={() =>
                                   updateProduct(
-                                    sp.productId,
+                                    productRowId(sp),
                                     "applicationArea",
                                     toggleProductAreaValue(
                                       sp.applicationArea,
@@ -21443,10 +21543,10 @@ export function CompletionPanel({
                         );
                       })()}
                       <select
-                        value={productApplicationMethod(sp, serviceTypeForArea)}
+                        value={productApplicationMethod(sp, typeFor(sp))}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "applicationMethod",
                             e.target.value,
                           )
@@ -21474,8 +21574,8 @@ export function CompletionPanel({
                       </select>
                       {(() => {
                         const areaRequirement = requiredApplicationArea(
-                          productApplicationMethod(sp, serviceTypeForArea),
-                          serviceTypeForArea,
+                          productApplicationMethod(sp, typeFor(sp)),
+                          typeFor(sp),
                           lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
@@ -21487,7 +21587,7 @@ export function CompletionPanel({
                             value={sp.areaValue || ""}
                             onChange={(e) =>
                               updateProduct(
-                                sp.productId,
+                                productRowId(sp),
                                 "areaValue",
                                 e.target.value,
                               )
@@ -21503,7 +21603,7 @@ export function CompletionPanel({
                       })()}
                       <button
                         type="button"
-                        onClick={() => removeProduct(sp.productId)}
+                        onClick={() => removeProduct(productRowId(sp))}
                         aria-label="Remove product"
                         style={{
                           width: 36,
@@ -21537,12 +21637,12 @@ export function CompletionPanel({
                         });
                         return (
                         <ProductTargetsPicker
-                          idSuffix={sp.productId}
+                          idSuffix={productRowId(sp)}
                           targets={sp.targets}
                           suggestions={picker.suggestions}
                           noun={picker.noun}
                           onChange={(next) =>
-                            updateProduct(sp.productId, "targets", next)
+                            updateProduct(productRowId(sp), "targets", next)
                           }
                           theme={{
                             labelColor: M.ink3,
@@ -23644,6 +23744,16 @@ export function CompletionPanel({
               />
             );
           })}
+          <AreaAddOnFields
+            service={service}
+            selectedProducts={selectedProducts}
+            products={products}
+            onAddProduct={addAreaAddOnProduct}
+            disabled={generating}
+            colors={{ text: D.text, muted: D.muted, border: D.border }}
+            selectStyle={inputStyle}
+            labelStyle={labelStyle}
+          />
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -23658,7 +23768,7 @@ export function CompletionPanel({
             >
               {(products || []).slice(0, 5).map((p) => {
                 const isSelected = selectedProducts.find(
-                  (sp) => sp.productId === p.id,
+                  (sp) => !sp.areaAddOnKey && sp.productId === p.id,
                 );
                 return (
                   <button
@@ -23736,7 +23846,7 @@ export function CompletionPanel({
             >
               {selectedProducts.map((sp) => (
                 <div
-                  key={sp.productId}
+                  key={productRowId(sp)}
                   style={{
                     background: D.card,
                     border: `1px solid ${D.border}`,
@@ -23768,14 +23878,14 @@ export function CompletionPanel({
                     placeholder="Rate"
                     value={sp.rate}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rate", e.target.value)
+                      updateProduct(productRowId(sp), "rate", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.rateUnit}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "rateUnit", e.target.value)
+                      updateProduct(productRowId(sp), "rateUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23804,7 +23914,7 @@ export function CompletionPanel({
                         placeholder="Gal"
                         value={sp.carrierGallons ?? ""}
                         onChange={(e) =>
-                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                          updateProduct(productRowId(sp), "carrierGallons", e.target.value)
                         }
                         style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                       />{" "}
@@ -23818,14 +23928,14 @@ export function CompletionPanel({
                     placeholder="Total"
                     value={sp.totalAmount || ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "totalAmount", e.target.value)
+                      updateProduct(productRowId(sp), "totalAmount", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
                     value={sp.amountUnit ?? sp.rateUnit ?? ""}
                     onChange={(e) =>
-                      updateProduct(sp.productId, "amountUnit", e.target.value)
+                      updateProduct(productRowId(sp), "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
@@ -23877,7 +23987,7 @@ export function CompletionPanel({
                               type="button"
                               onClick={() =>
                                 updateProduct(
-                                  sp.productId,
+                                  productRowId(sp),
                                   "applicationArea",
                                   toggleProductAreaValue(
                                     sp.applicationArea,
@@ -23907,10 +24017,10 @@ export function CompletionPanel({
                     );
                   })()}
                   <select
-                    value={productApplicationMethod(sp, serviceTypeForArea)}
+                    value={productApplicationMethod(sp, typeFor(sp))}
                     onChange={(e) =>
                       updateProduct(
-                        sp.productId,
+                        productRowId(sp),
                         "applicationMethod",
                         e.target.value,
                       )
@@ -23937,8 +24047,8 @@ export function CompletionPanel({
                   </select>
                   {(() => {
                     const areaRequirement = requiredApplicationArea(
-                      productApplicationMethod(sp, serviceTypeForArea),
-                      serviceTypeForArea,
+                      productApplicationMethod(sp, typeFor(sp)),
+                      typeFor(sp),
                       lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
@@ -23950,7 +24060,7 @@ export function CompletionPanel({
                         value={sp.areaValue || ""}
                         onChange={(e) =>
                           updateProduct(
-                            sp.productId,
+                            productRowId(sp),
                             "areaValue",
                             e.target.value,
                           )
@@ -23962,7 +24072,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label="Remove product"
-                    onClick={() => removeProduct(sp.productId)}
+                    onClick={() => removeProduct(productRowId(sp))}
                     style={{
                       background: "none",
                       border: "none",
@@ -23990,12 +24100,12 @@ export function CompletionPanel({
                     });
                     return (
                     <ProductTargetsPicker
-                      idSuffix={sp.productId}
+                      idSuffix={productRowId(sp)}
                       targets={sp.targets}
                       suggestions={picker.suggestions}
                       noun={picker.noun}
                       onChange={(next) =>
-                        updateProduct(sp.productId, "targets", next)
+                        updateProduct(productRowId(sp), "targets", next)
                       }
                       theme={{
                         labelColor: D.muted,

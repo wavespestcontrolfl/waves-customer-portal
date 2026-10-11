@@ -196,7 +196,10 @@ async function runCallIngestWatchdogInner({ now = new Date() } = {}) {
         `Newest: ${describe(fresh[0])}. Check the Twilio voice webhook and recent deploys.`,
         // EVERY fresh sid rides in metadata — that's what settles them for
         // sidAlreadyAlerted, so a fixed outage doesn't re-ring next hour.
-        { link: '/admin/communications', metadata: { dedupeKey, missed_call_sids: fresh.map((c) => c.sid) } },
+        // bell: true — category 'alert' is silenced under GATE_ADMIN_BELL_POLICY
+        // unless allowlisted, and this lane's whole output is the bell (the
+        // stall and unrecorded watchdogs already carry it; Codex #6267 r1 P1).
+        { link: '/admin/communications', bell: true, metadata: { dedupeKey, missed_call_sids: fresh.map((c) => c.sid) } },
       );
     }
     logger.error(`[call-ingest-watchdog] ${fresh.length} un-ingested calls in window — aggregate alert fired`);
@@ -211,7 +214,7 @@ async function runCallIngestWatchdogInner({ now = new Date() } = {}) {
       'Answered call never reached the call pipeline',
       `${describe(c)} completed on Twilio but has no call_log record — no transcription, no extraction, no lead. ` +
       'Listen to the recording in the Twilio console and check the voice webhook.',
-      { link: '/admin/communications', metadata: { dedupeKey, call_sid: c.sid, from_phone: c.from } },
+      { link: '/admin/communications', bell: true, metadata: { dedupeKey, call_sid: c.sid, from_phone: c.from } },
     );
     alerted += 1;
     logger.warn(`[call-ingest-watchdog] Un-ingested call ${c.sid} (${describeMasked(c)}) — alert fired`);

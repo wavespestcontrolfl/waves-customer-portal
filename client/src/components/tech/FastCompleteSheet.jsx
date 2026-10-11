@@ -88,7 +88,7 @@ import {
   BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter, SweepChip,
   TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
   typedScoreIsTechs,
-  WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
+  WritingView, changeLaneRecord, customerHomeWriterLabel, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
   useTraceReuse, useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
 import { promiseMarksPayload } from '../schedule/PromiseCheck';
@@ -125,7 +125,6 @@ const SPRAY_METHODS = new Set(METHOD_CHOICES.map((choice) => choice.value));
 // Every way a product goes down as a spray, a catalog's own method included
 // (product-rate-prefill.js): a note that says "didn't spray" contradicts any
 // of them, not only the How row's two (codex local r17).
-const SPRAYED_METHODS = new Set(['perimeter_spray', 'spot_treatment', 'broadcast_spray', 'foliar_spray', 'fog_ulv', 'pin_stream']);
 // The How row's starting pick.
 const DEFAULT_METHOD = 'spot_treatment';
 // The ways an added product can go down, beside its own catalog method.
@@ -1292,35 +1291,22 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
   ];
 }
 
+// Complete & send on a pest visit waits only on the report, the trace check
+// and a perimeter spray's traced length. What the note's read heard (places,
+// pests, how the sprays went down) shows in "Heard from you" but never holds
+// the send: rewriting the note for it took too long in the field (owner
+// 2026-10-10), so the record goes as it was heard.
 function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
-  // The note says no spraying, so a product still going down as a spray (the
-  // house mix starts on) would be recorded as applied when it wasn't.
-  const sprayedAnyway = draft?.facts?.noSpray
-    && active.find((row) => SPRAYED_METHODS.has(rowMethod(row, reportSprayMethod(draft.facts))));
-  // A saved trace shows on the customer's report whatever its length or
-  // kind (a perimeter, an outline), so one the record has no spray around
-  // the house for would claim a spray it never records (Codex #5538).
-  const unusedTrace = draft && traceRead.zone && !perimeterRow;
-  // An "Interior spray too" trace (saved now or earlier) claims inside on the
-  // customer's map; the record and the re-entry wait only say inside when the
-  // note does.
-  const traceMode = traceRead.zone?.capture_mode ?? traceRead.zone?.captureMode;
-  const interiorUnheard = draft && traceMode === 'interior' && !(draft.facts?.areas || []).includes('Inside');
   return [
     ...ready.report,
-    [draft && factsHold(draft.facts), draft && factsHold(draft.facts)],
-    [sprayedAnyway, sprayedAnyway && `Your note says you didn’t spray, but ${sprayedAnyway.name} is a spray. Remove it or change how it went down, then write it again.`],
-    // Whether a trace is saved decides both holds below.
+    // Whether a trace is saved decides the hold below.
     ...ready.trace,
     [untraced, untraced && (traceAvailable
       ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
       : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`), null, traceAvailable ? 'trace' : null],
-    // A trace the note doesn't back can also come off ("Remove the trace").
-    [unusedTrace, 'Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.', null, 'remove_trace'],
-    [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.', null, 'remove_trace'],
   ];
 }
 

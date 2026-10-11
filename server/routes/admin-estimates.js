@@ -58,7 +58,7 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
-const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+const { gatedAddOnStaffRefusal } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
@@ -610,15 +610,15 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
-  // A persisted bermuda-suppression estimate is only sendable while the gate
-  // is LIVE: the send path serves stored rows without re-entering
-  // priceLawnCare, so a save-then-gate-off sequence would otherwise publish
-  // a disabled add-on (codex #3272 r2). Same fail-closed rail as pricing.
-  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-    const err = new Error('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before sending.');
+  // A persisted bermuda-suppression or area add-on estimate is only sendable while its gate
+  // is LIVE: the send path serves stored rows without re-entering the pricer, so a
+  // save-then-gate-off sequence would otherwise publish a disabled add-on (codex #3272 r2).
+  // Same fail-closed rail as pricing.
+  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority });
+  if (gatedAddOn) {
+    const err = new Error(gatedAddOn.message);
     err.statusCode = 409;
-    err.code = 'BERMUDA_SUPPRESSION_GATED';
+    err.code = gatedAddOn.code;
     throw err;
   }
   // Estimator-engine YELLOW drafts carry review reasons (fallback sqft

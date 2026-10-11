@@ -25,6 +25,7 @@ const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -115,11 +116,26 @@ async function resolveEligibility(serviceId, knex = db, { strict = false } = {})
   // profiles (project_required / special_project) are likewise excluded:
   // those services must close through their project, and the recap would
   // skip that billing/artifact path entirely.
-  const eligible = profile?.category === PEST_CONTROL_CATEGORY
+  // A visit that carries an area add-on row has work the lightweight flows cannot
+  // record (its product and treated area): it keeps the generic completion form.
+  // A failed read is "has rows" (the full form), never an eligible verdict.
+  const hasAreaAddOnRows = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(knex, serviceId)
+    .catch((err) => {
+      logger.warn(`[pest-recap] area add-on row lookup failed for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+      return true;
+    });
+  // The flag rides on the visit (svc.hasAreaAddOnRows) so every sheet's own ineligible-reason check reads it.
+  return { ok: true, svc: { ...svc, hasAreaAddOnRows }, profile, eligible: !hasAreaAddOnRows && recapEligibleProfile(profile) };
+}
+
+// An area add-on (the web sweep is pest control by family) is generic one-time
+// work: it keeps the generic completion form, never the pest recap.
+function recapEligibleProfile(profile) {
+  return profile?.category === PEST_CONTROL_CATEGORY
     && !profile?.findingsType
     && !profile?.projectBacked
-    && !profile?.requiresProject;
-  return { ok: true, svc, profile, eligible };
+    && !profile?.requiresProject
+    && !isAreaAddOnCatalogKey(profile?.serviceKey);
 }
 
 // "Used most on <line> visits" in the Fast Complete product picker: the
@@ -152,6 +168,8 @@ const COMMON_PRODUCTS_SQL = `
       JOIN products_catalog pc ON pc.id = sp.product_id
      WHERE pc.active = true
        AND sr.status = 'completed'
+       -- An area add-on's product row rides its host's record: it is the add-on's work, never the host line's usual product.
+       AND sp.area_addon_key IS NULL
        AND sr.service_line = ?
        AND sr.service_date BETWEEN ?::date AND ?::date
   ),
@@ -716,6 +734,15 @@ async function submitRecap({
     //     written (no transition, no record, no products, no SMS).
     if (NON_COMPLETABLE_STATUSES.has(lockedStatus)) {
       rejectReason = `service_${lockedStatus}`;
+      return;
+    }
+
+    // 0b2. An area add-on attached after the unlocked eligibility read (Update Details) is work the recap cannot record
+    //      (its product, rate and treated area) or bill through the normal completion: read again UNDER the visit lock,
+    //      and refuse the stale recap as a changed visit. A failed read is "has rows" (the full form), as before the lock.
+    const addOnAttachedUnderLock = await require('./area-addon-visit-rows').visitHasAreaAddOnRows(trx, serviceId).catch(() => true);
+    if (addOnAttachedUnderLock) {
+      rejectReason = 'visit_identity_changed';
       return;
     }
 
@@ -1749,6 +1776,7 @@ async function submitRecap({
 module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
+  recapEligibleProfile,
   sheetRecordFor,
   serviceHasLinkedProject,
   loadServiceWithCustomer,

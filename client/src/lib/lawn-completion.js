@@ -122,56 +122,71 @@ export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {
 // Reconcile each row, not the whole list: an edited total or a removed default
 // must not freeze every other product when the plan or visit area changes.
 // A legacy/manual row has no provenance and stays entirely technician-owned.
+// The fields of a plan-default row the technician owns, and whether the row's calculation is theirs.
+function manualPlanFields(row) {
+  const manual = new Set(row.lawnPlanManualFields || []);
+  const ownCalculation = CALCULATION_INPUTS.some(key => manual.has(key));
+  // Preserve each entered value with its unit on both refresh and withdrawal.
+  if (row.totalAmountManual) manual.add('totalAmount');
+  // A tank calculation is an actual: the technician measured the gallons, so
+  // the rate, its units and the dose they produce belong to this row, and a
+  // refresh must not blank a quantity the plan cannot express (Codex r1 P1).
+  // Marked after `ownCalculation` above so the treated area still follows
+  // the visit.
+  if (isTankCalculation(row)) for (const key of ['rate', 'rateUnit', 'amountUnit', 'totalAmount']) manual.add(key);
+  for (const [field, unit] of [['totalAmount', 'amountUnit'], ['rate', 'rateUnit'], ['areaValue', 'areaUnit']]) {
+    if (manual.has(field)) manual.add(unit);
+  }
+  return { manual, ownCalculation };
+}
+
+// A plan-default row whose product left the plan: dropped when untouched, else kept with only what the technician entered.
+function withdrawnPlanRow(row, manual) {
+  if (!manual.size && row.applicationAreaDefault !== false) return [];
+  return [{
+    ...row,
+    ...Object.fromEntries(PLAN_FIELDS.map(key => [key, manual.has(key) ? row[key] : ''])),
+    lawnAmountReason: 'This product is no longer a plan default. Confirm the actual work.',
+  }];
+}
+
+// A plan-default row refreshed from the plan's fresh row, keeping every field the technician owns.
+function refreshedPlanRow(row, fresh, manual, ownCalculation) {
+  const next = { ...row, lawnPlanDefaults: fresh.lawnPlanDefaults, lawnAmountReason: fresh.lawnAmountReason };
+  // Once a rate, method or treated area is edited, this row's calculation
+  // belongs to that actual application. A visit-wide refresh cannot scale it.
+  for (const key of PLAN_FIELDS) {
+    if (manual.has(key) || ownCalculation) continue;
+    next[key] = fresh[key];
+  }
+  // The plan's amount is in the plan's unit and is never scaled into the
+  // unit the tech chose: a still-derived total stays withdrawn until the
+  // units agree again or the tech enters the actual.
+  if (manual.has('amountUnit') && !manual.has('totalAmount') && next.amountUnit !== fresh.amountUnit) next.totalAmount = '';
+  // Likewise a chosen rate unit: the plan's 3 fl oz per 1,000 sq ft is
+  // never restated as 3 lb. The untouched rate and its derived total stay
+  // withdrawn until the tech enters the actual or the unit matches again.
+  if (manual.has('rateUnit') && !manual.has('rate') && next.rateUnit !== fresh.rateUnit) {
+    next.rate = '';
+    if (!row.totalAmountManual) next.totalAmount = '';
+  }
+  if (fresh.totalAmount === '' && !manual.has('totalAmount')) next.totalAmount = '';
+  if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
+  if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
+  return [next];
+}
+
 export function reconcileLawnPlanSelections(current, defaults, removedIds = []) {
   const byId = new Map(defaults.map(row => [String(row.productId), row]));
   const removed = new Set(removedIds.map(String));
   const rows = current.flatMap((row) => {
+    // An area add-on's row is never a plan default and must not consume the host's default of the same product.
+    if (row.areaAddOnKey) return [row];
     const fresh = byId.get(String(row.productId));
     byId.delete(String(row.productId));
     if (!row.lawnPlanDefaults) return [row];
-    const manual = new Set(row.lawnPlanManualFields || []);
-    const ownCalculation = CALCULATION_INPUTS.some(key => manual.has(key));
-    // Preserve each entered value with its unit on both refresh and withdrawal.
-    if (row.totalAmountManual) manual.add('totalAmount');
-    // A tank calculation is an actual: the technician measured the gallons, so
-    // the rate, its units and the dose they produce belong to this row, and a
-    // refresh must not blank a quantity the plan cannot express (Codex r1 P1).
-    // Marked after `ownCalculation` above so the treated area still follows
-    // the visit.
-    if (isTankCalculation(row)) for (const key of ['rate', 'rateUnit', 'amountUnit', 'totalAmount']) manual.add(key);
-    for (const [field, unit] of [['totalAmount', 'amountUnit'], ['rate', 'rateUnit'], ['areaValue', 'areaUnit']]) {
-      if (manual.has(field)) manual.add(unit);
-    }
-    if (!fresh) {
-      if (!manual.size && row.applicationAreaDefault !== false) return [];
-      return [{
-        ...row,
-        ...Object.fromEntries(PLAN_FIELDS.map(key => [key, manual.has(key) ? row[key] : ''])),
-        lawnAmountReason: 'This product is no longer a plan default. Confirm the actual work.',
-      }];
-    }
-    const next = { ...row, lawnPlanDefaults: fresh.lawnPlanDefaults, lawnAmountReason: fresh.lawnAmountReason };
-    // Once a rate, method or treated area is edited, this row's calculation
-    // belongs to that actual application. A visit-wide refresh cannot scale it.
-    for (const key of PLAN_FIELDS) {
-      if (manual.has(key) || ownCalculation) continue;
-      next[key] = fresh[key];
-    }
-    // The plan's amount is in the plan's unit and is never scaled into the
-    // unit the tech chose: a still-derived total stays withdrawn until the
-    // units agree again or the tech enters the actual.
-    if (manual.has('amountUnit') && !manual.has('totalAmount') && next.amountUnit !== fresh.amountUnit) next.totalAmount = '';
-    // Likewise a chosen rate unit: the plan's 3 fl oz per 1,000 sq ft is
-    // never restated as 3 lb. The untouched rate and its derived total stay
-    // withdrawn until the tech enters the actual or the unit matches again.
-    if (manual.has('rateUnit') && !manual.has('rate') && next.rateUnit !== fresh.rateUnit) {
-      next.rate = '';
-      if (!row.totalAmountManual) next.totalAmount = '';
-    }
-    if (fresh.totalAmount === '' && !manual.has('totalAmount')) next.totalAmount = '';
-    if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
-    if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
-    return [next];
+    const { manual, ownCalculation } = manualPlanFields(row);
+    return fresh ? refreshedPlanRow(row, fresh, manual, ownCalculation) : withdrawnPlanRow(row, manual);
   });
   for (const [id, row] of byId) if (!removed.has(id)) rows.push(row);
   return rows;

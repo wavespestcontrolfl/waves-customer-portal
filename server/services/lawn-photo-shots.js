@@ -42,6 +42,35 @@ function normalizeShotZone(zone) {
   return shotFor(zone)?.key || null;
 }
 
+// GATE_LAWN_PHOTO_LABEL_PICK: the customer-facing label a technician chose for one
+// photo, stored beside it in lawn_assessments.photos as `labelKey` (a shot key). It
+// changes only the words under the photo on the report; the recorded zone (the slot)
+// keeps driving the model's shot guide, pairing and hero order. Pure: no gate read.
+// A pick is kept only when it is a real shot key AND the photo sits in a slot; a pick
+// equal to the slot is no pick at all (the default), so it is never stored.
+function normalizeLabelPick(zone, pick) {
+  const slot = normalizeShotZone(zone);
+  const key = normalizeShotZone(pick);
+  return slot && key && key !== slot ? key : null;
+}
+
+// The pick for each stored photo position (the array or its JSON text), null where
+// none was made or the stored value is not a shot key. Index = photo_order.
+function labelPicksFromStored(stored) {
+  let meta = stored;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return []; }
+  }
+  if (!Array.isArray(meta)) return [];
+  return meta.map((entry) => normalizeShotZone(entry && entry.labelKey));
+}
+
+// The customer label for a pick, or null (no pick, or not a shot key: the slot's own label stands).
+function pickedReportLabel(pick) {
+  const key = normalizeShotZone(pick);
+  return key ? SHOT_REPORT_LABELS[key] : null;
+}
+
 // Zones that pair across visits (the same spot every time) and zones that
 // never do. Derived from the definition so the pairing sets cannot drift.
 const PAIRABLE_SHOT_ZONES = Object.freeze(SHOTS.filter((shot) => shot.pairable).map((shot) => shot.key));
@@ -214,5 +243,5 @@ function missingShotsText(zones = [], definition = DEFINITION) {
 module.exports = {
   PHOTO_VOCABULARY, SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS, MAX_PHOTO_BYTES, MAX_TOTAL_BYTES,
   PAIRABLE_SHOT_ZONES, NON_PAIRABLE_SHOT_ZONES, RECHECK_PAIRABLE_SHOT_ZONES, SHOT_REPORT_LABELS,
-  normalizeShotZone, isDetailShot, supportsNamedCause, shotGuideText, missingShotsText, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, carriesShotListMarker, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
+  normalizeShotZone, normalizeLabelPick, labelPicksFromStored, pickedReportLabel, isDetailShot, supportsNamedCause, shotGuideText, missingShotsText, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, carriesShotListMarker, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
 };

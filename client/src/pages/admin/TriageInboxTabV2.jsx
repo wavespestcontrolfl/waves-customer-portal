@@ -70,6 +70,7 @@ const REASON_LABELS = {
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
   family_account_candidates: "Family caller named an account — confirm, then link",
+  name_spelling_differs: "Caller spelled their name — check it",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -354,6 +355,40 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
   );
 }
 
+// name_spelling_differs (advisory): every spelling the caller gave that differs from the saved name, each
+// with the caller turn it came from. The card text names the first; `also` lists any other field.
+export function NameSpellingEvidence({ payload, openCustomerIds = null }) {
+  const p = parsePayload(payload);
+  if (!p?.spelled_value) return null;
+  const all = [p, ...(Array.isArray(p.also) ? p.also : [])].filter((d) => d && d.spelled_value);
+  // The record the spelling was compared against (the filing-time customer, resolved to its live merge
+  // survivor by the server), never the call's current link.
+  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
+    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
+  const against = p.compared_against?.name
+    ? `${p.compared_against.name} (${p.compared_against.source === "customer" ? "customer record" : "name heard on this call"})`
+    : null;
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Check the name</div>
+      {p.card_text && <div className="text-14 text-zinc-900 mb-1">{p.card_text}</div>}
+      {against && <div className="text-14 text-ink-secondary"><span className="text-ink-tertiary">Compared against:</span> {against}</div>}
+      {all.map((d) => (
+        <div key={`${d.field}-${d.spelled_value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{String(d.field || "name").replace(/_/g, " ")}:</span>{" "}
+          caller spelled {d.spelled_value}; record says {d.saved_value}
+          {d.quote ? ` — “${d.quote}”` : ""}
+        </div>
+      ))}
+      {ids.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 // The shared evidence panel plus the one-tap "Save to notes" (admin, open cards only). The SERVER decides
 // which cards qualify (can_save_contact_note on the list item: one person, not a message recipient or
 // payer, a usable phone or email), so this screen holds no second copy of that rule.
@@ -372,17 +407,17 @@ function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, canSa
 }
 
 // Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
-const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, secondary_contact_captured: SecondContactEvidence };
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence };
 
 // Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
 // /verdict on each). The verdict badge is not shown on them.
 const NO_VERDICT_REASONS = new Set([
   "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
   "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
-  "auto_booking_skipped_after_approval",
+  "auto_booking_skipped_after_approval", "name_spelling_differs",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
-const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";

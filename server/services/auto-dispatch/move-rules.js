@@ -5,12 +5,14 @@
  *
  * Owner 2026-10-09, after a week of 50 moves in which 16 cleared the score
  * bar only on the service-type default time window and some saved no drive:
- *   - A DAY move must save real drive: the visit's modeled detour must drop
- *     by config.minDayMoveDriveSavingMinutes (6). A same-day re-time is not
- *     held to it.
+ *   - A move must save real drive: the visit's modeled detour must drop by
+ *     config.minDayMoveDriveSavingMinutes (6). A same-day re-time is held to
+ *     it too (owner 2026-10-09: a 2 PM pest visit re-timed to 8 AM for the
+ *     default-window credit alone, with no drive saved, is the same
+ *     complaint).
  *   - The default time window (pest early morning, lawn late morning: a time
- *     the customer never chose) counts for a same-day re-time only. A day
- *     move's gain leaves it out on both sides of the comparison.
+ *     the customer never chose) never counts toward the gain of a move, day
+ *     or same-day: it is left out on both sides of the comparison.
  *
  * Two shapes skip the bar and the drive floor, because the visit cannot stay
  * where it is:
@@ -46,21 +48,20 @@ function withoutDefaultTime(score) {
   return score.total_without_default_time ?? (score.total_score - (score.default_time_score || 0));
 }
 
-// Points the candidate gains over the current placement. A day move leaves
-// the default-time credit out of both totals; everything else is the raw
-// difference (the pre-2026-10-09 improvement).
-function moveGain({ service, current, currentScore, cand, candScore }) {
-  const raw = candScore.total_score - currentScore.total_score;
-  if (isUnplacedDueDate(service) || !isDayMove(current, cand)) return round2(raw);
+// Points the candidate gains over the current placement. The default-time
+// credit is left out of both totals, except for an unplaced due-date visit
+// (a first placement: the raw difference, as before 2026-10-09).
+function moveGain({ service, currentScore, candScore }) {
+  if (isUnplacedDueDate(service)) return round2(candScore.total_score - currentScore.total_score);
   return round2(withoutDefaultTime(candScore) - withoutDefaultTime(currentScore));
 }
 
 // Whether a candidate is a legal KIND of move at all, before the score bar:
-// a same-day re-time always is; a day move needs the drive saving.
+// every move, a same-day re-time included, needs the drive saving.
 function meetsDriveFloor({ current, cand, config }) {
   const floor = config.minDayMoveDriveSavingMinutes || 0;
   // 0 turns the floor off: the score bar alone decides, as before.
-  if (floor <= 0 || !isDayMove(current, cand)) return true;
+  if (floor <= 0) return true;
   // The legacy model (GATE_AUTO_DISPATCH_SHARED_MODEL off) measures a grouped
   // visit's current detour against its own co-located siblings, so it reads
   // 0 and no saving could ever be shown: the floor has no number to test
@@ -88,7 +89,7 @@ function mustMove(service, current) {
  * `best` is the candidate the audit describes: the top qualifying one, else
  * the top one by gain (so a no-change row still shows the nearest miss).
  * `ranked` holds every qualifying candidate, best first (the SLOT_TAKEN
- * fallback list). `floorFailed` says the nearest miss was a day move that
+ * fallback list). `floorFailed` says the nearest miss was a move that
  * saved too little drive.
  */
 function rankCandidates({ service, current, currentScore, scored, threshold, config }) {
@@ -132,6 +133,8 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     // a visit with no conflict (Codex #6207 r10 P2).
     ...normalBestOf(conflict, rows),
     ranked: qualifying.map((r) => r.cand),
+    // The same list with each slot's score and gain (road-check.js).
+    rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain })),
   };
 }
 

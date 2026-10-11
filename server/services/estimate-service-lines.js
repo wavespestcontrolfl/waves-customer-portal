@@ -361,6 +361,55 @@ function selectedServiceKeysFromInputs(inputs = {}) {
   return unique(keys);
 }
 
+// Area add-on treatments (GATE_AREA_ADDONS) have no svc* flag and no recurring row, so the input flags and the
+// recurring rows never name them. They contribute their FAMILY (lawn_care -> `lawn`, pest_control -> `pest`: the
+// add-on's own category, never its display name, which reads "Fire Ant Yard Treatment" as pest work) and their
+// own NAME for the readable summary ("Fire Ant Yard Treatment + Web Sweep"; a name carries no price and no brand).
+// The add-ons are the sold rows of the authoritative container (estimate-result-container.js), else the replayable
+// request: inputs.areaAddOns (the form's map), engineRequest.options.areaAddOns or engineInputs.services.areaAddOns
+// (the engine's list). Required at call time and fail-soft: this module is also read by an old migration.
+const ADD_ON_FAMILY_KEY = { lawn_care: 'lawn', pest_control: 'pest' };
+function requestedAreaAddOnKeys(data) {
+  const entryKey = (entry) => (typeof entry === 'string' ? entry : entry && entry.key);
+  const fromInputs = data?.inputs?.areaAddOns;
+  const lists = [
+    fromInputs && typeof fromInputs === 'object' && !Array.isArray(fromInputs) ? Object.keys(fromInputs) : fromInputs,
+    data?.engineRequest?.options?.areaAddOns,
+    data?.engineInputs?.services?.areaAddOns,
+  ];
+  return lists.filter(Array.isArray).flat().map(entryKey);
+}
+function areaAddOnLinesFromData(data, pricingAuthority) {
+  // An enabled, itemized authored proposal that sells no add-on has none, whatever engine rows it retains (the persisted
+  // detector's rule, v1-legacy-mapper estimateDataCarriesAreaAddOns): the estimate list and the follow-up copy read this.
+  if (data && data.proposal && data.proposal.enabled === true
+    && !require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(data, { pricingAuthority })) return [];
+  if (!data || typeof data !== 'object') return [];
+  let items;
+  let rows;
+  try {
+    items = require('./pricing-engine/constants').AREA_ADDONS.items;
+    rows = require('./estimate-result-container').storedAreaAddOnRows(data, { pricingAuthority });
+  } catch { return []; }
+  const known = (key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(items, key);
+  const soldRows = rows.filter((row) => known(row.addOnKey));
+  const keys = new Set((soldRows.length ? soldRows.map((row) => row.addOnKey) : requestedAreaAddOnKeys(data)).filter(known));
+  return Object.keys(items).filter((key) => keys.has(key) && ADD_ON_FAMILY_KEY[items[key].category]).map((key) => ({
+    key: ADD_ON_FAMILY_KEY[items[key].category],
+    summaryLabel: items[key].name,
+    amount: numberOrNull(...soldRows.filter((row) => row.addOnKey === key).map((row) => row.priceAfterDiscount ?? row.price)),
+    amountBasis: 'one_time',
+    areaAddOnKey: key,
+  }));
+}
+
+// The text that names the estimate's services without the add-on names: a stored interest of
+// "Fire Ant Yard Treatment" would otherwise key as pest (its "ant"), the very misread the family above avoids.
+function withoutAddOnNames(parts, addOnLines) {
+  const names = addOnLines.map((line) => line.summaryLabel.toLowerCase());
+  return parts.map((part) => names.reduce((text, name) => text.split(name).join(' '), String(part || '').toLowerCase()));
+}
+
 function fallbackAmountForKey(estimate, key, keyCount) {
   if (keyCount !== 1) return null;
   if (key === 'termite') return getEstimateOnetimeTotal(estimate) || getEstimateMonthlyTotal(estimate);
@@ -386,23 +435,28 @@ function inferEstimateServiceLines(estimate = {}) {
   }
   if (recurringLines.length) return recurringLines;
 
+  // Add-ons only reach the lines here: a recurring estimate (above) keeps its plan's lines and interest.
+  const addOnLines = areaAddOnLinesFromData(data, estimate.pricingAuthority ?? estimate.pricing_authority);
   const inputKeys = selectedServiceKeysFromInputs(data?.inputs || data?.engineInputs || {});
-  const textKeys = serviceKeysFromText(
+  const textKeys = serviceKeysFromText(...withoutAddOnNames([
     estimate.serviceInterest,
     estimate.service_interest,
     data?.inputs?.leadServiceInterest,
     data?.engineInputs?.serviceInterest,
     estimate.description,
     estimate.notes,
-  );
+  ], addOnLines));
   const keys = unique([...inputKeys, ...textKeys]);
 
-  if (!keys.length) return [{ key: 'unknown', amount: null, amountBasis: 'unknown' }];
-  return keys.map((key) => ({
-    key,
-    amount: fallbackAmountForKey(estimate, key, keys.length),
-    amountBasis: key === 'termite' ? 'one_time' : 'monthly',
-  }));
+  if (!keys.length && !addOnLines.length) return [{ key: 'unknown', amount: null, amountBasis: 'unknown' }];
+  return [
+    ...keys.map((key) => ({
+      key,
+      amount: fallbackAmountForKey(estimate, key, keys.length),
+      amountBasis: key === 'termite' ? 'one_time' : 'monthly',
+    })),
+    ...addOnLines,
+  ];
 }
 
 function inferEstimateServiceInterest(estimate = {}) {
@@ -410,7 +464,7 @@ function inferEstimateServiceInterest(estimate = {}) {
   if (explicit) return explicit;
 
   const labels = inferEstimateServiceLines(estimate)
-    .map((line) => SERVICE_LINE_LABELS[line.key])
+    .map((line) => line.summaryLabel || SERVICE_LINE_LABELS[line.key])
     .filter(Boolean);
   return labels.length ? unique(labels).join(' + ') : null;
 }

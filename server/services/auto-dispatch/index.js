@@ -16,7 +16,7 @@ const logger = require('../logger');
 const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const {
-  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit,
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES,
 } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
@@ -32,6 +32,9 @@ const audit = require('./audit');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveRules = require('./move-rules');
+const roadCheck = require('./road-check');
+const moveLimit = require('./move-limit');
+const needsPerson = require('./needs-person-notice');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -160,6 +163,8 @@ function buildPlacementAudit({
     candidate_detour_minutes: candidate.detour_minutes,
     day_move: moveRules.isDayMove(current, candidate),
     drive_saving_minutes: moveRules.driveSavingMinutes(current, candidate),
+    // GATE_AUTO_DISPATCH_ROAD_CHECK: the same saving on real roads, when asked.
+    road: roadCheck.roadResultOf(candidate),
     candidate_total_drive_minutes: candidate.total_drive_minutes,
     stops_that_day: candidate.stops_that_day,
     current_score_breakdown: currentScore,
@@ -248,6 +253,101 @@ function conflictOf(current) {
   return current && current.conflict ? { conflict: current.conflict } : {};
 }
 
+// The conflict an evaluation read for the visit's current placement, on a
+// move or a no_change result alike; null when it read none.
+function conflictIn(evalResult) {
+  return evalResult.conflict || (evalResult.current && evalResult.current.conflict) || null;
+}
+
+// THE NEEDS-A-PERSON LEDGER. `run.conflicts` holds every visit an evaluation
+// (or the move-limit gate) read in conflict; `run.clearedIds` holds the visits
+// read placed and clear with the conflict read ON (gate off, the read never
+// happened, so nothing is proven). Nothing is raised where a decision is
+// logged: settleConflicts decides once, at the run's end, from what is true
+// then. Per-call-site collection missed a path in each of two review rounds
+// (Codex #6253 r1, r2).
+function noteEvaluation(run, service, evalResult, ctx) {
+  const id = String(service.id);
+  const conflict = conflictIn(evalResult);
+  if (conflict) {
+    run.conflicts.set(id, {
+      service, conflict, ctx, reason: evalResult.kind === 'no_change' ? evalResult.reason_code : null,
+    });
+    run.clearedIds.delete(id);
+    return;
+  }
+  run.conflicts.delete(id);
+  if (run.config.conflictMovesEnabled === true && !moveRules.isUnplacedDueDate(service)) run.clearedIds.add(id);
+}
+
+// Why a visit in conflict stayed where it is. It only picks the notice's wording.
+function noteUnmoved(run, service, reasonCode) {
+  const seen = run.conflicts.get(String(service.id));
+  if (seen) seen.reason = reasonCode;
+}
+
+// The visit as it stands now: a move this run (its own, a group's, a partner's)
+// or a person may have changed its slot or freed the stop it overlapped.
+// Returns null when it is no longer an open visit with an arrival time,
+// { clear: true } when it no longer conflicts.
+async function standingConflict(seen, id) {
+  const row = await db('scheduled_services').where({ id }).first('*');
+  if (!row || !VALID_STATUSES.has(row.status) || !row.window_start) return null;
+  const service = { ...seen.service, ...row };
+  // Required lazily, like apply.js's conflict re-read.
+  const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, seen.ctx);
+  return conflict ? { service, conflict } : { clear: true };
+}
+
+// Every visit whose conflict the run must read at its end: the ledger (each
+// visit the run evaluated in conflict), every other loaded visit (a freeze, an inactive plan, a person-placed visit or a
+// missing preference skips it before any conflict read, and an evaluation
+// can fail: Codex #6253 r5 P1), the members a partial group move
+// left behind (a one-time add-on is never loaded by the scan, so it has no
+// ledger entry: Codex #6253 r4 P1), and the visits of the notices still open
+// (a person-placed visit is skipped before the conflict read, so a person's
+// same-day fix would never close its notice: r4 P2). The last kind is
+// `noticeOnly`: it can close a notice, never raise one.
+async function conflictsToSettle(run) {
+  const pending = new Map(run.conflicts);
+  if (run.config.conflictMovesEnabled !== true) return pending;
+  const unseen = (extra) => ({ service: null, conflict: null, ctx: { db, conflictMoves: true }, ...extra });
+  for (const service of run.loaded) {
+    const id = String(service.id);
+    if (!pending.has(id)) pending.set(id, unseen({ service, reason: 'SKIPPED' }));
+  }
+  for (const id of run.strandedIds) if (!pending.has(id)) pending.set(id, unseen({ reason: 'ERROR' }));
+  for (const id of await needsPerson.standingVisitIds()) {
+    if (!pending.has(id)) pending.set(id, unseen({ noticeOnly: true }));
+  }
+  return pending;
+}
+
+// Run end: every visit still in conflict is handed to the notice, whatever
+// path left it there (no slot, a guard, the per-run cap, a failed or partial
+// write, a dry run). Each conflict is read again first, always: this run's
+// own moves, and a person who moved or cancelled the visit while the run
+// worked (Codex #6253 r3), both clear it. A visit that is clear raises
+// nothing and closes its standing notice. A re-read that fails keeps what
+// the run saw (nothing, for a visit it never evaluated). Never throws.
+async function settleConflicts(run) {
+  const pending = await conflictsToSettle(run);
+  // A clear read from earlier in the run is not proof at its end: a person
+  // can create an overlap while the run works (Codex #6253 r6). Only this
+  // final read fills clearedIds.
+  run.clearedIds.clear();
+  for (const [id, seen] of pending) {
+    let now = seen.conflict ? seen : null;
+    try {
+      now = await standingConflict(seen, id);
+    } catch (err) {
+      logger.warn(`[auto-dispatch] conflict re-read failed for ${id}: ${err.message}`);
+    }
+    if (now && now.clear) run.clearedIds.add(id);
+    else if (now && !seen.noticeOnly) needsPerson.collectUnmoved(run.needsPerson, now.service, seen.reason, now.conflict);
+  }
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
     current, candidates, drops, skipped,
@@ -260,6 +360,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       kind: 'no_change',
       reason_code: reason.code,
       reason_description: reason.description,
+      conflict: (current && current.conflict) || null,
       audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current) } },
     };
   }
@@ -283,9 +384,11 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   // fallback list, Codex pre-push P1) passed the same drive floor and score
   // bar — a below-bar or worse-than-current placement never reaches apply.js.
   // Ties keep encounter order.
-  const ranked = moveRules.rankCandidates({
+  // road-check.js then asks real roads about the top slots (gate on, an
+  // ordinary move only): it can drop a slot, never add one.
+  const ranked = await roadCheck.confirmOnRoads(moveRules.rankCandidates({
     service, current, currentScore, scored, threshold, config,
-  });
+  }), { service, current, config, travel: ctx.roadTravel });
   const { best } = ranked;
 
   const {
@@ -302,7 +405,11 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     newPlacement, scores, prefsSnapshot, routeMetrics, constraints,
   };
 
-  if (!ranked.qualifies) return { kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), audit: auditCtx };
+  if (!ranked.qualifies) {
+    return {
+      kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), conflict: current.conflict || null, audit: auditCtx,
+    };
+  }
   return {
     kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
     withoutConflict: ordinaryMoveOf(ranked, { current, currentScore, service, prefs, lockBoundary, ctx, threshold, prefsSnapshot }),
@@ -385,7 +492,7 @@ function wouldMoveDescription(evalResult) {
   return `Would move${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(evalResult.improvement)})`;
 }
 
-// Why the nearest candidate did not move the visit: a day move that cleared
+// Why the nearest candidate did not move the visit: a move that cleared
 // the score bar and saved too little drive, or a gain under the bar.
 function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
   if (ranked.ceilingFailed) {
@@ -394,10 +501,16 @@ function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
       reason_description: `In conflict, but the nearest free slot adds ${-routeMetrics.drive_saving_minutes} drive minutes > ${config.conflictMaxAddedDriveMinutes} allowed; a person must place it`,
     };
   }
+  if (ranked.roadFailed) {
+    return {
+      reason_code: 'NO_ROAD_DRIVE_SAVING',
+      reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${config.minDayMoveDriveSavingMinutes} required`,
+    };
+  }
   if (ranked.floorFailed) {
     return {
       reason_code: 'NO_DRIVE_SAVING',
-      reason_description: `Best day move saves ${routeMetrics.drive_saving_minutes} drive minutes < ${config.minDayMoveDriveSavingMinutes} required`,
+      reason_description: `Best move saves ${routeMetrics.drive_saving_minutes} drive minutes < ${config.minDayMoveDriveSavingMinutes} required`,
     };
   }
   return { reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}` };
@@ -685,6 +798,39 @@ async function logSkip(run, service, { reason_code: reasonCode, reason_descripti
   });
 }
 
+// The move limit (move-limit.js) for one visit, from `counts` (the run's bulk
+// read, or a fresh single-visit read in pass 2). Returns the skip row, or null
+// when the visit may move. A visit that MUST move (an unplaced due date, or in
+// conflict) and is at the limit is not moved, and a person is told instead.
+async function moveLimitGate(service, ctx, run, counts) {
+  const skip = moveLimit.limitSkip(service, counts, run.config);
+  if (!skip) return null;
+  if (!skip.unknown) {
+    // Required lazily, like apply.js's conflict re-read.
+    const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, ctx);
+    // In conflict: the ledger (settleConflicts raises it). A visit with no
+    // arrival time is the recurring-placement alert's (flagUnplacedVisits).
+    if (conflict) run.conflicts.set(String(service.id), { service, conflict, ctx, reason: skip.reason_code });
+    else if (ctx.conflictMoves === true && service.window_start) run.clearedIds.add(String(service.id));
+  }
+  return skip;
+}
+
+// Pass 1's one bulk read of every loaded visit's automatic-move count. A
+// failed read leaves null: every visit then skips, and the run is degraded.
+async function loadRunMoveCounts(run, services) {
+  run.moveCounts = await moveLimit.loadMoveCounts(db, services.map((s) => s.id), run.config);
+  if (!run.moveCounts) run.guardReadDegraded = true;
+}
+
+// Pass 2's recheck: a fresh count for this one visit, so a move another run
+// landed since pass 1 is seen. Returns the skip row or null.
+async function recheckMoveLimit(pm, run) {
+  const counts = await moveLimit.loadMoveCounts(db, [pm.service.id], run.config);
+  if (!counts) run.guardReadDegraded = true;
+  return moveLimitGate(pm.service, pm.ctx, run, counts);
+}
+
 // A day-move guard skip (or a grouped-move refusal), both { code,
 // description }, in the { reason_code, reason_description } shape logged.
 function guardSkipReason(skip) {
@@ -932,12 +1078,19 @@ async function evaluateServiceForRun(service, run) {
     topN: 60,
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
+    // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
+    roadTravel: run.roadTravel,
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
   };
+  // At most N automatic moves per visit: decided before any candidate search.
+  const limited = await moveLimitGate(service, ctx, run, run.moveCounts);
+  if (limited) return logSkip(run, service, limited);
+
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
   totals.evaluated++;
+  noteEvaluation(run, service, evalResult, ctx);
 
   // A grouped move is only as legal as its siblings (Codex #4995 r4 P2) —
   // preview the apply-time member guard now, in every mode (Codex #6055 r2:
@@ -948,6 +1101,7 @@ async function evaluateServiceForRun(service, run) {
     : null;
   const noChange = evalResult.kind === 'no_change' ? evalResult : refusal && guardSkipReason(refusal);
   if (noChange) {
+    noteUnmoved(run, service, noChange.reason_code);
     return audit.logDecision(run.runId, {
       action: 'no_change', service, reason_code: noChange.reason_code, reason_description: noChange.reason_description, ...evalResult.audit,
     });
@@ -1051,11 +1205,18 @@ async function applyPlannedMove(pm, run, attempt) {
   }
   const guardSkip = await recheckPlannedMove(pm, run);
   if (guardSkip) {
+    noteUnmoved(run, pm.service, guardSkip.code);
     return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: guardSkip.code, reason_description: guardSkip.description, ...pm.result.audit });
+  }
+
+  const limited = await recheckMoveLimit(pm, run);
+  if (limited) {
+    return audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: limited.reason_code, reason_description: limited.reason_description, ...pm.result.audit });
   }
 
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
+  noteEvaluation(run, pm.service, fresh, pm.ctx);
   if (fresh.kind !== 'move') {
     // Re-scoring against the live schedule no longer clears the bar (an
     // earlier apply this run captured the gain, or the row changed).
@@ -1067,6 +1228,7 @@ async function applyPlannedMove(pm, run, attempt) {
   const unitSize = await unitMoveSize(pm.service, fresh.best);
   if (totals.changed + unitSize > config.maxChangesPerRun) {
     totals.recommended++; // cap-held but still a valid move — count it in the summary
+    noteUnmoved(run, pm.service, 'MAX_CHANGES_REACHED');
     const grouped = unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
     return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${grouped})`, ...fresh.audit });
   }
@@ -1113,8 +1275,9 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
   run.totals.failed++;
   run.totals.changed += applyErr.movedCount || 0;
   const failedMembers = Array.isArray(applyErr.failedMembers) ? applyErr.failedMembers : [];
-  for (const id of failedMembers) run.quarantinedIds.add(String(id));
+  for (const id of failedMembers) { run.quarantinedIds.add(String(id)); run.strandedIds.add(String(id)); }
   logger.error(`[auto-dispatch] apply failed for ${pm.service.id}: ${applyErr.message}`);
+  noteUnmoved(run, pm.service, 'ERROR');
   try {
     await audit.logDecision(run.runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...failedPlacementAudit(fresh, pm, run.lockBoundary, applyErr), error: applyErr.message });
   } catch (_) { /* swallow */ }
@@ -1198,18 +1361,29 @@ async function runAutoDispatch(opts = {}) {
     plannedMoves: [],
     dryRunOverlaps: [],
     quarantinedIds: new Set(),
+    // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
+    needsPerson: new Map(),
+    moveCounts: new Map(),
     guardReadDegraded: false, // a failed guard read must not report a green run
     // Visits skipped for a missing pin on a live plan this run, and whether
     // pass 1 looked at every visit (their notices close only then).
     pinOkIds: new Set(),
     missingGeoWanted: [], // visits to raise a missing-pin notice for at the run's end
     pass1Complete: false,
+    conflicts: new Map(), // id -> { service, conflict, ctx, reason }: every visit read in conflict (settleConflicts)
+    clearedIds: new Set(), // visits read placed and clear with the conflict read on (notice close)
+    strandedIds: new Set(), // members a partial group move left behind (settleConflicts)
+    loaded: [], // every visit the scan loaded (settleConflicts reads the ones with no clear read)
+    // One road-time reader for the whole run: it keeps every answer, so
+    // pass 2 asks Google nothing twice (road-check.js).
+    roadTravel: config.roadCheckEnabled === true ? roadCheck.createRunTravel(config) : null,
   };
 
   try {
     run.capabilityFor = makeCapabilityFn(await loadCapabilityMap());
     const loadBoundary = resolveLoadBoundary(run.guardMode, nowDate, lockBoundary, today);
     const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
+    run.loaded = services;
 
     // Guard-mode bulk context: reminder-freeze + (tiers') drift anchors or
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
@@ -1217,6 +1391,7 @@ async function runAutoDispatch(opts = {}) {
     // without the check.
     run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate);
     run.guardReadDegraded = run.guardCtx.degraded;
+    await loadRunMoveCounts(run, services);
 
     for (const service of services) {
       try {
@@ -1253,6 +1428,8 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
+  await settleConflicts(run);
+  await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
@@ -1264,7 +1441,7 @@ async function runAutoDispatch(opts = {}) {
       await require('../tech-visit-notifications').pushAutoDispatchSummary({ runId });
     }
   }
-  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts}`);
+  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts} road_legs=${roadCheck.spendOf(run.roadTravel)}`);
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
