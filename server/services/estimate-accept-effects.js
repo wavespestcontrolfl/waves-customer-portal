@@ -143,16 +143,23 @@ function conversionEffect(conversion) {
 // reads $0 and is not listed at its list price.
 // An explicit $0 (manualFinalOneTime: 0, priceAfterDiscount: 0) is comped
 // work the customer was promised: it is listed at $0 with its own
-// consequence, so staff still schedule it; a line with no amount at all is
-// not listed.
+// consequence, so staff still schedule it. A NEGATIVE amount is one of the
+// engine's adjustment rows (a bundle discount the mapper keeps among the
+// items): it is listed as a discount to take off when invoicing, never as
+// work to schedule. A line with no amount at all is not listed.
 const ONE_TIME_AMOUNT_FIELDS = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
 function lineAmount(item) {
   for (const key of ONE_TIME_AMOUNT_FIELDS) {
     if (item?.[key] == null || item[key] === '') continue;
     const n = Number(item[key]);
-    if (Number.isFinite(n)) return n > 0 ? round2(n) : 0;
+    if (Number.isFinite(n)) return round2(n);
   }
   return null;
+}
+function lineConsequence(amount) {
+  if (amount > 0) return 'schedule_and_invoice_by_hand';
+  if (amount < 0) return 'subtract_when_invoicing';
+  return 'schedule_by_hand_comped';
 }
 
 function parseData(value) {
@@ -189,7 +196,7 @@ function oneTimeLineEffects(estimate, converter) {
   const lines = items
     .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: lineAmount(item) }))
     .filter((line) => line.amount != null)
-    .map((line) => ({ kind: 'one_time_line', ...line, consequence: line.amount > 0 ? 'schedule_and_invoice_by_hand' : 'schedule_by_hand_comped' }));
+    .map((line) => ({ kind: 'one_time_line', ...line, consequence: lineConsequence(line.amount) }));
   const fee = membershipFeeLine(data);
   const listed = fee ? [...lines, fee] : lines;
   const discount = pooledDiscountLine(estimate, listed);
@@ -430,14 +437,14 @@ function planPostCommit({
 
 // ── Running the plan ──
 
-// The card promised the bell, so the post is awaited; a failure is a result
-// warning the office finishes by hand (the accept is terminal and the plan
-// never re-runs). Returns true when posted.
+// The card promised the bell, so the post is awaited through the converter's
+// own emitter (the same one its non-deferred accepts use); a failure, or a
+// post that wrote no row, is a result warning the office finishes by hand
+// (the accept is terminal and the plan never re-runs). True when posted.
 async function fireAdminBell(payload, estimateId, label) {
   try {
-    const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin(payload.type, payload.title, payload.body, payload.options);
-    return true;
+    const row = await require('./estimate-converter').sendAcceptBell(payload, `${label} notify for estimate ${estimateId}`);
+    return !!row;
   } catch (err) {
     logger.warn(`[estimate-manual-acceptance] ${label} notify failed for estimate ${estimateId}: ${err.message}`);
     return false;

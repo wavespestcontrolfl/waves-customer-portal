@@ -19,7 +19,7 @@ jest.mock('../services/account-membership-email', () => ({
   ...jest.requireActual('../services/account-membership-email'),
   sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
 }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }) }));
 jest.mock('../services/proposal-win', () => ({
   ensureCustomerForProposalWin: jest.fn(),
   promoteLinkedCustomerForProposalWin: jest.fn(),
@@ -532,6 +532,22 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       ['Rodent Exclusion', 200, 'schedule_and_invoice_by_hand'],
     ]);
   });
+  test('round 17: a negative adjustment row (rodent bundle discount) is a discount to subtract, never comped work to schedule', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: '300.00',
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [{ service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 350 }, { service: 'rodent_bundle_discount', name: 'Rodent bundle discount', price: -50 }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
+      { kind: 'one_time_line', name: 'Rodent Exclusion', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'Rodent bundle discount', amount: -50, consequence: 'subtract_when_invoicing' },
+    ]);
+  });
   test('round 15: a line with no amount field at all is not listed; an explicit $0 is comped work to schedule', async () => {
     const world = makeWorld({
       estimateOverrides: {
@@ -995,6 +1011,19 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     const clean = [];
     await Effects.POST_COMMIT_STEPS.admin_bell.run({ step: 'admin_bell', bell: 'tier_upgrade', target: { estimate_id: 'est-1', bell: 'tier_upgrade' } }, { ...ctx, warnings: clean });
     expect(clean).toEqual([]);
+  });
+  test('round 17: a bell notifyAdmin resolved null for (its insert swallowed) is a result warning, through the converter emitter', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+    const warnings = [];
+    const ctx = { warnings, conversion: { planRateReviewNotification: { type: 'estimate_converted', title: 'Multi-plan rate needs review after re-quote', body: 'x', options: {} } }, acceptedEstimate: { id: 'est-1' }, database: {} };
+    await Effects.POST_COMMIT_STEPS.admin_bell.run({ step: 'admin_bell', bell: 'plan_rate_review', target: { estimate_id: 'est-1', bell: 'plan_rate_review' } }, ctx);
+    expect(warnings).toEqual(['The office notification was not posted ("Multi-plan rate needs review after re-quote"): the post failed after the accept. Tell the office by hand.']);
+    expect(NotificationService.notifyAdmin).toHaveBeenLastCalledWith('estimate_converted', 'Multi-plan rate needs review after re-quote', 'x', {});
+  });
+  test('round 17: the effects file posts no raw notifyAdmin; it goes through the converter emitter', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/estimate-accept-effects'), 'utf8');
+    expect(src).not.toMatch(/notifyAdmin\s*\(/);
+    expect(src).toContain("require('./estimate-converter').sendAcceptBell(");
   });
   test('round 12: a multi-home flip that fails after the commit is a result warning', async () => {
     const refresh = jest.spyOn(Linkage, 'refreshHasMultiHome').mockRejectedValue(new Error('down'));

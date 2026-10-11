@@ -5123,15 +5123,27 @@ async function syncLawnSizeFromEstimate(database, {
 
 // An admin bell of the accept, through the side-effect gate. Never throws: a
 // failed send or setup is logged with the caller's label.
-function dispatchAcceptBell(fx, { target, payload, failLabel }) {
+// The one post for an accept bell: the notification row, or null when it was
+// not written. notification-service swallows its insert and dedupe errors and
+// resolves null, so a falsy result is a failure, not a success; a throw is
+// logged and reads the same. The deferred post-commit caller
+// (estimate-accept-effects, after a manual or carded accept) turns null into
+// a result warning the office finishes by hand.
+async function sendAcceptBell(payload, failLabel) {
   try {
     const NotificationService = require('./notification-service');
-    void fx.run({ type: 'admin_bell', target, detail: payload.title }, () => NotificationService.notifyAdmin(
-      payload.type,
-      payload.title,
-      payload.body,
-      payload.options,
-    ).catch((err) => logger.warn(`[estimate-converter] ${failLabel} failed: ${err.message}`)));
+    const row = await NotificationService.notifyAdmin(payload.type, payload.title, payload.body, payload.options);
+    if (!row) logger.warn(`[estimate-converter] ${failLabel} wrote no notification`);
+    return row || null;
+  } catch (err) {
+    logger.warn(`[estimate-converter] ${failLabel} failed: ${err.message}`);
+    return null;
+  }
+}
+
+function dispatchAcceptBell(fx, { target, payload, failLabel }) {
+  try {
+    void fx.run({ type: 'admin_bell', target, detail: payload.title }, () => sendAcceptBell(payload, failLabel));
   } catch (err) {
     logger.warn(`[estimate-converter] ${failLabel} setup failed: ${err.message}`);
   }
@@ -9029,6 +9041,7 @@ module.exports = EstimateConverter;
 module.exports.reservedAcceptPerVisitSplit = reservedAcceptPerVisitSplit;
 module.exports.autoScheduleUnitPerVisitAmounts = autoScheduleUnitPerVisitAmounts;
 module.exports.unpricedMultiUnitAlertPayload = unpricedMultiUnitAlertPayload;
+module.exports.sendAcceptBell = sendAcceptBell;
 module.exports.isAutoScheduledCombinedInvoiceSibling = isAutoScheduledCombinedInvoiceSibling;
 module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
 module.exports.visitCountAliasValues = visitCountAliasValues;
