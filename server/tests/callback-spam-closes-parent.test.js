@@ -146,7 +146,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
   const insertChild = (s, parentId, overrides = {}) => insertCall(s, {
     direction: 'outbound-api', source: 'admin-callback', from_phone: '+15555550100', to_phone: '+15555550144',
     processing_status: 'spam', processing_generation: 3, processing_token: null, call_outcome: null, answered_by: null,
-    review_status: null, created_at: new Date(), metadata: JSON.stringify({ source: 'admin-callback', relatedCallId: parentId }),
+    review_status: null, created_at: new Date(), metadata: JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: parentId }),
     ...overrides,
   });
   const card = (callLogId, reason, status = 'open') => ({ call_log_id: callLogId, category: 'address_review', reason_code: reason, status, summary: 'fixture' });
@@ -258,6 +258,10 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     // A callback to a different number that merely names this parent.
     await insertChild(FAR_CHILD_SID, plainId, { to_phone: '+15555550199' });
     expect(await close(FAR_CHILD_SID)).toEqual({ applied: false, reason: 'parent_mismatch' });
+    // A technician placed the callback: admin review is never settled by it.
+    await db('call_log').where({ twilio_call_sid: FAR_CHILD_SID }).update({ to_phone: '+15555550177', metadata: JSON.stringify({ source: 'admin-callback', placed_by_role: 'technician', relatedCallId: plainId }) });
+    expect(await close(FAR_CHILD_SID)).toEqual({ applied: false, reason: 'not_admin_placed' });
+    await db('call_log').where({ twilio_call_sid: FAR_CHILD_SID }).update({ metadata: JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: plainId }) });
     // A callback started before the voicemail ended (the inbound call was still underway).
     await db('call_log').where({ twilio_call_sid: FAR_CHILD_SID }).update({ to_phone: '+15555550177', created_at: new Date(Date.now() - 61 * 60 * 1000) });
     expect(await close(FAR_CHILD_SID)).toEqual({ applied: false, reason: 'callback_before_call_end' });
@@ -286,7 +290,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     // callback row then carries relatedCommitmentId. The spam verdict may dismiss
     // such a confirmed card, so the correction must reach it too.
     const [{ id: promiseId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-fixed'), human_state: 'confirmed' }]).returning('id');
-    const childId = await insertChild(FIXED_CHILD_SID, parentId, { to_phone: '+15555550188', metadata: JSON.stringify({ source: 'admin-callback', relatedCallId: parentId, relatedCommitmentId: promiseId }) });
+    const childId = await insertChild(FIXED_CHILD_SID, parentId, { to_phone: '+15555550188', metadata: JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: parentId, relatedCommitmentId: promiseId }) });
     // The promise's overdue reminder (call-commitments-watchdog) is open on the bell.
     const [{ id: bellId }] = await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Callback overdue', body: 'test', metadata: JSON.stringify({ commitment_id: promiseId, dedupeKey: `call-commitment-overdue:${promiseId}` }) }).returning('id');
     expect(await close(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 1, promises: 1, reviewSynced: true });
@@ -371,7 +375,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     await db('triage_items').insert([card(parentId, 'missing_service_address')]);
     const [{ id: p1 }] = await db('call_commitments').insert([promise(parentId, 'cb-one')]).returning('id');
     const [{ id: p2 }] = await db('call_commitments').insert([promise(parentId, 'cb-two')]).returning('id');
-    const link = (commitmentId) => JSON.stringify({ source: 'admin-callback', relatedCallId: parentId, relatedCommitmentId: commitmentId });
+    const link = (commitmentId) => JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: parentId, relatedCommitmentId: commitmentId });
     const childA = await insertChild(SIBLING_CHILD_A_SID, parentId, { to_phone: '+15555550123', metadata: link(p1), created_at: new Date(Date.now() - 5 * 60 * 1000) });
     await insertChild(SIBLING_CHILD_B_SID, parentId, { to_phone: '+15555550123', metadata: link(p2) });
     expect(await close(SIBLING_CHILD_A_SID)).toMatchObject({ applied: true, cards: 1, promises: 1 });
@@ -404,7 +408,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     await db('call_commitments').where({ id: promiseId }).update({ status: 'open', fulfillment: null, human_state: 'confirmed', updated_at: new Date() });
     await db('audit_log').insert({ actor_type: 'technician', action: 'callback_reopen', resource_type: 'call_commitment', resource_id: promiseId, metadata: JSON.stringify({ renewed_at: minutesAgo(5).toISOString() }) });
     // A third callback after the renewal reaches the solicitor again: the renewed promise is dismissed on C.
-    const childC = await insertChild(RENEW_CHILD_C_SID, parentId, { to_phone: '+15555550124', metadata: JSON.stringify({ source: 'admin-callback', relatedCallId: parentId, relatedCommitmentId: promiseId }) });
+    const childC = await insertChild(RENEW_CHILD_C_SID, parentId, { to_phone: '+15555550124', metadata: JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: parentId, relatedCommitmentId: promiseId }) });
     expect(await close(RENEW_CHILD_C_SID)).toMatchObject({ applied: true, cards: 0, promises: 1 });
     expect([(await promiseRow()).status, (await promiseRow()).fulfillment.record_id]).toEqual(['dismissed', childC]);
     // C corrected: A and B still stand for the CARDS (the voicemail's asks), but both predate the renewal,

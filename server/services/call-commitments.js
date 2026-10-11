@@ -2091,6 +2091,8 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     .where("direction", "like", "outbound%")
     .where({ source: "admin-callback", processing_status: "spam" })
     .whereNull("processing_token")
+    // Admin provenance (stamped by the call route from the verified session).
+    .whereRaw("metadata->>'placed_by_role' = 'admin'")
     .where("created_at", ">", after)
     .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
     .whereExists(function parentIsVoicemail() {

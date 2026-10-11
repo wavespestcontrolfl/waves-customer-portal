@@ -1091,8 +1091,11 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
   await lockTriageCall(trx, parentId);
   const childQ = trx('call_log').where({ id: call.id, processing_status: status }).whereNull('processing_token');
   if (procGeneration != null) childQ.where('processing_generation', procGeneration);
-  const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at');
+  const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at', 'metadata');
   if (!child || child.source !== 'admin-callback') return { reason: 'verdict_superseded' };
+  // Admin provenance, stamped by the call route from the verified session: a
+  // technician's callback never settles a voicemail's admin review.
+  if (callMetadataObject(child).placed_by_role !== 'admin') return { reason: 'not_admin_placed' };
   const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
     .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'metadata', 'created_at', 'duration_seconds');
   if (!parent) return { reason: 'parent_not_found' };
@@ -1140,6 +1143,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   const swept = await db('triage_items as ti').join('call_log as p', 'p.id', 'ti.call_log_id')
     .join('call_log as cb', db.raw("cb.metadata->>'relatedCallId' = p.id::text"))
     .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback', 'p.direction': 'inbound' })
+    .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
     .where('cb.direction', 'like', 'outbound%')
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
     // A parent itself reprocessed to spam keeps its cards closed on its own
@@ -1242,6 +1246,7 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
     .whereNull('processing_token')
     .whereNot('id', exceptCallId)
     .whereRaw("metadata->>'relatedCallId' = ?", [String(parent.id)])
+    .whereRaw("metadata->>'placed_by_role' = 'admin'")
     .orderBy('created_at', 'asc')
     // Share-locked for the correction's transaction: a pass that would claim
     // one of these rows (its token write) waits, so a verdict retained or a
