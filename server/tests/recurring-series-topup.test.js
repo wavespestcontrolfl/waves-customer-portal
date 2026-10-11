@@ -1133,6 +1133,25 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
       expect(priced).toMatchObject({ price: 75, linePrice: 100, zero: null });
     });
 
+    test('Codex round 23: an add-on discounted from $100 to $0 on a $0 parent reads discounted and names the add-on gross; all-unpriced lines stay unpriced', async () => {
+      const base = { create_invoice_on_complete: false, estimated_price: null };
+      const freeAddon = { id: 'a9', service_name: 'Mosquito', estimated_price: '0.00', base_price: '100.00', discount_dollars: '100.00', recurring_pattern: null, service_key_snapshot: null };
+      const verdict = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: base, addons: [freeAddon] }).conn, 10);
+      expect(verdict).toMatchObject({ price: 0, linePrice: 100, parentLinePrice: 0, zero: 'discounted', addonLines: [{ name: 'Mosquito', gross: 100 }] });
+      // A legacy add-on row without base_price reads its gross as net + frozen discount dollars.
+      const legacy = { ...freeAddon, base_price: null };
+      expect(await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: base, addons: [legacy] }).conn, 10))
+        .toMatchObject({ linePrice: 100, zero: 'discounted' });
+      // Nothing priced anywhere stays unpriced.
+      const nothing = { id: 'a8', service_name: 'Mosquito', estimated_price: '0.00', base_price: null, discount_dollars: null, recurring_pattern: null, service_key_snapshot: null };
+      expect(await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: base, addons: [nothing] }).conn, 10))
+        .toMatchObject({ price: 0, linePrice: 0, zero: 'unpriced', addonLines: [] });
+      // What the top-up prices is unchanged: the verdict's price IS storedOccurrenceFloorPrice.
+      expect(verdict.price).toBe(0);
+      expect(await seriesNextOccurrencesUnbillable(topupScenario({ parentOverrides: base, addons: [freeAddon] }).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    });
+
     test('Codex round 21: the override zero stays its own kind, and the top-up\'s unbillable verdict is unchanged by the new field', async () => {
       const before = FG.gates.editApptPriceServiceScope;
       try {

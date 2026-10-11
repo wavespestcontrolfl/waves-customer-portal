@@ -336,6 +336,9 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
       ...r,
       price: verdict ? verdict.price : 0,
       linePrice: verdict ? verdict.linePrice || 0 : 0,
+      parentLinePrice: verdict ? verdict.parentLinePrice || 0 : 0,
+      // The add-on lines due on the walked dates, [{ name, gross }].
+      addonLines: verdict ? verdict.addonLines || [] : [],
       unverified: !!(verdict && verdict.unverified),
       // 'override' | 'discounted' | 'unpriced' | null (admin-schedule.js seriesNextOccurrencesPrice).
       zero: verdict ? verdict.zero || null : null,
@@ -400,7 +403,7 @@ function hostsPin(hosts = []) {
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', hostsPin(r.hosts)]);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', hostsPin(r.hosts), (r.addonLines || []).map((a) => `${a.name}=${a.gross}`).join(',')]);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
   return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing, +facts.scopeGate])}`;
@@ -526,9 +529,13 @@ function ongoingRootRefusal(roots) {
   const zeroRoot = roots.find((r) => r.zero === 'override' || r.zero === 'discounted');
   if (zeroRoot) {
     const plan = zeroRoot.service_type || 'recurring';
-    const why = zeroRoot.zero === 'override'
-      ? 'a $0.00 price override on each visit it adds'
-      : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
+    const addon = (zeroRoot.addonLines || [])[0];
+    let why = 'a $0.00 price override on each visit it adds';
+    if (zeroRoot.zero === 'discounted') {
+      why = addon && !(zeroRoot.parentLinePrice > 0)
+        ? `a ${addon.name} add-on of ${money(addon.gross)} that a discount takes to $0.00 on each visit it adds`
+        : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
+    }
     return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
   }
   const pricedRoot = roots.find((r) => r.unverified || r.price > 0);

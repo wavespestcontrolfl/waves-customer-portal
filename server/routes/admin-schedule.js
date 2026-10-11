@@ -4521,17 +4521,36 @@ function storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discount
 }
 
 // The same price plus the LINE price behind it: what the visit's lines come to before any
-// discount, from the same calculation with the discount fields cleared. Tells a root that is
-// unpriced (no line price) from one whose known line price is discounted to $0. Read-only
-// companion for the Intelligence Bar billing type card; storedOccurrenceFloorPrice, and so
-// what the top-up stamps, is unchanged.
+// discount (the parent line's gross AND each due add-on's gross, the add-on set the price itself
+// reads), from the same calculation with every discount cleared. Tells a root that is unpriced
+// (no line price anywhere) from one whose known line price, on the parent or on an add-on, is
+// discounted to $0. An add-on's gross is scheduled_service_addons.base_price, else its net plus
+// its frozen discount dollars (the relation restackStoredVisitFinancials reads it by).
+// Read-only companion for the Intelligence Bar billing type card; storedOccurrenceFloorPrice,
+// and so what the top-up stamps, is unchanged.
 function storedOccurrenceFloorVerdict(parent, dueAddons, allParentAddons, discountScope, discountCaps) {
   const price = storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discountScope, discountCaps);
   const undiscounted = {
     ...parent, discount_type: null, discount_amount: null, discount_max_dollars: null, line_discount_dollars: null,
   };
-  const line = calculateStoredVisitFinancials(undiscounted, dueAddons, allParentAddons, discountScope).price;
-  return { price, linePrice: Number(line) > 0 ? Number(line) : 0 };
+  const grossAddons = (Array.isArray(dueAddons) ? dueAddons : []).map((addon) => {
+    const storedGross = Number(addon?.base_price);
+    const gross = Number.isFinite(storedGross) && storedGross > 0
+      ? storedGross : (Number(addon?.estimated_price) || 0) + (Number(addon?.discount_dollars) || 0);
+    return { ...addon, estimated_price: gross };
+  });
+  // allParentAddons stays as stored: the legacy reconstruction subtracts the add-ons' NET total
+  // from the parent's stored total.
+  const positive = (n) => (Number(n) > 0 ? Number(n) : 0);
+  const line = calculateStoredVisitFinancials(undiscounted, grossAddons, allParentAddons, discountScope).price;
+  const parentLine = calculateStoredVisitFinancials(undiscounted, [], allParentAddons, discountScope).price;
+  return {
+    price,
+    linePrice: positive(line),
+    parentLinePrice: positive(parentLine),
+    addonLines: grossAddons.filter((a) => positive(a.estimated_price) > 0)
+      .map((a) => ({ name: a.service_name || 'add-on', gross: positive(a.estimated_price) })),
+  };
 }
 
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
@@ -6175,13 +6194,16 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
 async function seriesNextOccurrencesPrice(conn, parentId) {
   const walk = await seriesVerdictWalk(conn, parentId);
   if (!walk) return null;
-  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, hosts: [] };
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, hosts: [], parentLinePrice: 0, addonLines: [] };
   const { parent, parentAddons } = walk;
   const verdicts = await seriesExtensionDateVerdicts(conn, {
     ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
   });
   const price = Math.max(0, ...verdicts.map((v) => v.price));
   const linePrice = Math.max(0, ...verdicts.map((v) => v.linePrice));
+  const parentLinePrice = Math.max(0, ...verdicts.map((v) => v.parentLinePrice));
+  // The add-on lines (name, gross) due on any walked date, once each.
+  const addonLines = [...new Map(verdicts.flatMap((v) => v.addonLines).map((a) => [`${a.name}=${a.gross}`, a])).values()];
   // The lawn host dates a rider series would ride (seriesWalkWithRide), each with its own price
   // and zero kind, so the caller can name the date and pin the list.
   const hosts = (walk.rideDates || []).map((date) => {
@@ -6197,7 +6219,7 @@ async function seriesNextOccurrencesPrice(conn, parentId) {
   // Which kind of zero: the override above, a known line price discounted away, or no price at all.
   let zero = null;
   if (price === 0) zero = explicitZero ? 'override' : (linePrice > 0 ? 'discounted' : 'unpriced');
-  return { unverified: false, price, linePrice, zero, explicitZero, hosts };
+  return { unverified: false, price, linePrice, parentLinePrice, addonLines, zero, explicitZero, hosts };
 }
 
 
