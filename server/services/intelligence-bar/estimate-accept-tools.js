@@ -492,7 +492,9 @@ function serviceAndBillLines(preview) {
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
     kind: 'operational',
-    label: `One-time ${l.name} (${money(l.amount)}): this accept does not schedule or invoice it — schedule it and invoice it by hand`,
+    label: l.consequence === 'subtract_when_invoicing'
+      ? `${l.name}: ${money(-l.amount)} off — the lines above are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`
+      : `One-time ${l.name} (${money(l.amount)}): this accept does not schedule or invoice it — schedule it and invoice it by hand`,
   }));
 }
 
@@ -581,7 +583,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     services: converts ? startedServices(estimateData, PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate })) : [],
     bill: converts ? billFromEffects(effects) : null,
     lawn_profile: lawnLine(effects),
-    one_time_lines: effectsOfKind(effects, 'one_time_line').map((l) => ({ name: l.name, amount: l.amount })),
+    one_time_lines: effectsOfKind(effects, 'one_time_line').map((l) => ({ name: l.name, amount: l.amount, consequence: l.consequence })),
     billing_lane: { before: laneBefore && laneLabel(laneBefore), after: laneAfter && laneLabel(laneAfter) },
     tier: { before: before.waveguard_tier ?? null, after: after.waveguard_tier ?? null },
     property_type: { before: before.property_type ?? null, after: after.property_type ?? null },

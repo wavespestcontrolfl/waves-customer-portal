@@ -461,11 +461,35 @@ describe('round 10, finding 1: a partly itemized one-time total refuses; the mem
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unitemized', message: expect.stringContaining('$50.00 is not itemized') });
   });
-  test('lines above the total (a pooled manual discount) do not refuse', () => {
+  test('the refusal is exact in both directions once the lines are built', () => {
     const lines = [{ kind: 'one_time_line', amount: 350 }, { kind: 'one_time_line', amount: 99 }];
-    expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '400.00', estimate_data: '{}' }, lines)).toBeNull();
     expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '449.00', estimate_data: '{}' }, lines)).toBeNull();
     expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '449.02', estimate_data: '{}' }, lines)).toMatchObject({ missing: 0.02 });
+    expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '400.00', estimate_data: '{}' }, lines)).toMatchObject({ code: 'one_time_unitemized', missing: -49 });
+  });
+});
+
+describe('round 11: a discount pooled into the one-time total is its own negative line', () => {
+  const pooled = (total) => makeWorld({
+    estimateOverrides: {
+      monthly_total: '49.00', onetime_total: String(total),
+      estimate_data: JSON.stringify({
+        recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+        result: { oneTime: { total, items: [{ service: 'a', name: 'Flea Treatment', price: 100 }, { service: 'b', name: 'Tick Treatment', price: 100 }] } },
+      }),
+    },
+  });
+  test('two $100 gross lines against a $150 total list a -$50 discount line, so the lines add up to the total', async () => {
+    const world = pooled(150);
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    const lines = effects.filter((e) => e.kind === 'one_time_line');
+    expect(lines.map((l) => [l.name, l.amount])).toEqual([['Flea Treatment', 100], ['Tick Treatment', 100], ['Discount applied to the one-time total', -50]]);
+    expect(lines[2].consequence).toBe('subtract_when_invoicing');
+  });
+  test('lines that already match the total list no discount line', async () => {
+    const world = pooled(200);
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toHaveLength(2);
   });
 });
 

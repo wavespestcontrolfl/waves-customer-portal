@@ -60,6 +60,7 @@ function effectsFingerprint(effects) {
 
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 const money = (n) => `$${round2(n).toFixed(2)}`;
+const UNITEMIZED_TOLERANCE = 0.01;
 const orNull = (v) => (v == null ? null : v);
 
 // ── State snapshots: what the conversion changes, read inside the accept ──
@@ -186,7 +187,22 @@ function oneTimeLineEffects(estimate, converter) {
     .filter((line) => line.amount != null)
     .map((line) => ({ kind: 'one_time_line', ...line, consequence: 'schedule_and_invoice_by_hand' }));
   const fee = membershipFeeLine(data);
-  return fee ? [...lines, fee] : lines;
+  const listed = fee ? [...lines, fee] : lines;
+  const discount = pooledDiscountLine(estimate, listed);
+  return discount ? [...listed, discount] : listed;
+}
+
+// A legacy estimate can hold a manual discount only in the aggregate
+// (oneTime.total) while its items stay gross (v1-legacy-mapper). The card
+// must not tell staff to invoice the gross lines, so the pooled discount is
+// listed as its own negative line and the lines then add up to the total.
+function pooledDiscountLine(estimate, lines) {
+  const total = oneTimeAggregateTotal(estimate);
+  if (total == null || !lines.length) return null;
+  const listed = round2(lines.reduce((sum, line) => sum + Number(line.amount || 0), 0));
+  const pooled = round2(listed - total);
+  if (pooled <= UNITEMIZED_TOLERANCE) return null;
+  return { kind: 'one_time_line', name: 'Discount applied to the one-time total', amount: -pooled, consequence: 'subtract_when_invoicing' };
 }
 
 // The one-time total the estimate carries as a plain number: the row's
@@ -212,18 +228,21 @@ function oneTimeAggregateTotal(estimate) {
 // work staff must schedule and invoice by hand after the accept. Returns the
 // refusal, or null when every one-time dollar is on a listed line.
 //
-// Partial itemization refuses too: when the listed lines (items plus the
-// membership fee) add up to less than the aggregate, the card header would
-// say one amount and the lines another, and staff would invoice only the
-// lines. A line sum ABOVE the aggregate is fine: the engine pools a manual
-// discount into the total without pushing it into the lines.
-const UNITEMIZED_TOLERANCE = 0.01;
+// Partial itemization refuses too: when the listed lines (items, the
+// membership fee and the pooled discount line) do not add up to the
+// aggregate, the card header would say one amount and the lines another,
+// and staff would invoice the lines. A sum above the total is reconciled by
+// the pooled discount line, so after it the only mismatch left is a sum
+// short of the total, and that refuses.
 function unitemizedOneTimeRefusal(estimate, lines) {
   const total = oneTimeAggregateTotal(estimate);
   if (total == null) return null;
   const listed = round2(lines.filter((line) => line.kind === 'one_time_line').reduce((sum, line) => sum + Number(line.amount || 0), 0));
   const missing = round2(total - listed);
-  if (missing <= UNITEMIZED_TOLERANCE) return null;
+  if (Math.abs(missing) <= UNITEMIZED_TOLERANCE) return null;
+  if (missing < 0) {
+    return { message: `This estimate's listed one-time services add up to ${money(listed)} but its one-time total is ${money(total)}, so the bar cannot say what to invoice. Accept it from the estimate page.`, statusCode: 409, code: 'one_time_unitemized', total, listed, missing };
+  }
   const message = listed > 0
     ? `This estimate carries a ${money(total)} one-time charge, but its listed services add up to ${money(listed)}: ${money(missing)} is not itemized, so the bar cannot say what to schedule and invoice after the accept. Accept it from the estimate page.`
     : `This estimate carries a ${money(total)} one-time charge with no itemized service, so the bar cannot say what to schedule and invoice after the accept. Accept it from the estimate page.`;
