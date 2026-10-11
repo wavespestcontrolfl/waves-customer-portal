@@ -317,21 +317,8 @@ async function linkAcceptedEstimateProperty({
     const excludeSelfBooked = sourceRow?.source === 'quote_wizard'
       && !(Array.isArray(onlyServiceIds) && onlyServiceIds.length);
     const approvedScope = Array.isArray(approvedServiceIds);
-    const scopeToActivation = (qb) => {
-      if (approvedScope) qb.whereIn('id', approvedServiceIds);
-      else if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) qb.whereIn('id', onlyServiceIds);
-      else if (excludeSelfBooked) qb.whereNull('self_booking_id');
-    };
-    if (approvedScope) {
-      const strays = await database('scheduled_services')
-        .where({ source_estimate_id: estimateId })
-        .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
-        .whereNotIn('id', approvedServiceIds)
-        .select('id');
-      if (strays.length) {
-        logger.warn(`[estimate-property-linkage] estimate ${estimateId}: target_changed — visit(s) ${strays.map((r) => r.id).join(', ')} linked after the card was approved; left untouched`);
-      }
-    }
+    const scopeToActivation = activationScope({ approvedServiceIds, onlyServiceIds, excludeSelfBooked });
+    if (approvedScope) await logStrayVisits(database, estimateId, approvedServiceIds);
     if (!customerPropertiesGateOn()) {
       // Gate OFF: no customer_properties writes — but a GROUPED accept still
       // stamps its booked visits' service address. service_address_* are
@@ -632,7 +619,7 @@ async function linkAcceptedEstimateProperty({
       // address. Fill the missing address from the property row; rows
       // stamped with an address (any property) stay untouched.
       await database('scheduled_services')
-        .where({ source_estimate_id: estimateId, property_id: propertyId }).modify(approvedScope ? (qb) => qb.whereIn('id', approvedServiceIds) : () => {})
+        .where({ source_estimate_id: estimateId, property_id: propertyId }).modify(approvedIdScope(approvedServiceIds))
         .whereNull('service_address_line1')
         .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
         .update({
@@ -669,8 +656,7 @@ async function linkAcceptedEstimateProperty({
         // anything, so it must never be auto-grouped (codex #3590 r15).
         .whereNotNull('window_start')
         .select('id');
-      if (approvedScope) regroup.whereIn('id', approvedServiceIds);
-      else if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
+      regroup.modify(regroupScope({ approvedServiceIds, onlyServiceIds }));
       // Every linked row, in id order — a cap left rows beyond it with no
       // later regroup pass (codex #3590 r13 P2).
       for (const r of await regroup.orderBy('id', 'asc')) {
@@ -689,10 +675,53 @@ async function linkAcceptedEstimateProperty({
     // (it is not an accept retry anchor), so no update above reaches it.
     // Mirror the stamp onto it or it dispatches to the customer's primary
     // address. Gate-dark, best-effort (package-followup-booking.js).
-    if (!(Array.isArray(approvedServiceIds) && approvedServiceIds.length === 0)) {
-      await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
-    }
+    await mirrorPackageChildren(database, estimateId, approvedServiceIds);
   }
+}
+
+// ── The card path's scoping, out of the linker's own branches ──
+
+const hasIds = (ids) => Array.isArray(ids) && ids.length > 0;
+
+// Which activation rows the linker may touch: the card's exact approved set,
+// else the caller's optional id scope, else (quote-wizard drafts) every row
+// the customer did not self-book.
+function activationScope({ approvedServiceIds, onlyServiceIds, excludeSelfBooked }) {
+  if (Array.isArray(approvedServiceIds)) return (qb) => qb.whereIn('id', approvedServiceIds);
+  if (hasIds(onlyServiceIds)) return (qb) => qb.whereIn('id', onlyServiceIds);
+  if (excludeSelfBooked) return (qb) => qb.whereNull('self_booking_id');
+  return () => {};
+}
+
+// The approved set only, when there is one; otherwise no extra filter.
+function approvedIdScope(approvedServiceIds) {
+  return Array.isArray(approvedServiceIds) ? (qb) => qb.whereIn('id', approvedServiceIds) : () => {};
+}
+
+function regroupScope({ approvedServiceIds, onlyServiceIds }) {
+  if (Array.isArray(approvedServiceIds)) return (qb) => qb.whereIn('id', approvedServiceIds);
+  if (hasIds(onlyServiceIds)) return (qb) => qb.whereIn('id', onlyServiceIds);
+  return () => {};
+}
+
+// A non-terminal row of the estimate the card did not approve is logged
+// target_changed and left alone.
+async function logStrayVisits(database, estimateId, approvedServiceIds) {
+  const strays = await database('scheduled_services')
+    .where({ source_estimate_id: estimateId })
+    .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+    .whereNotIn('id', approvedServiceIds)
+    .select('id');
+  if (strays.length) {
+    logger.warn(`[estimate-property-linkage] estimate ${estimateId}: target_changed — visit(s) ${strays.map((r) => r.id).join(', ')} linked after the card was approved; left untouched`);
+  }
+}
+
+// The package-child mirror touches rows outside the approved set, so a card
+// that approved NO visit skips it.
+async function mirrorPackageChildren(database, estimateId, approvedServiceIds) {
+  if (Array.isArray(approvedServiceIds) && approvedServiceIds.length === 0) return;
+  await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
 }
 
 // Canonical street extraction + normalization for property-scope compares

@@ -430,13 +430,17 @@ function planPostCommit({
 
 // ── Running the plan ──
 
-function fireAdminBell(payload, estimateId, label) {
+// The card promised the bell, so the post is awaited; a failure is a result
+// warning the office finishes by hand (the accept is terminal and the plan
+// never re-runs). Returns true when posted.
+async function fireAdminBell(payload, estimateId, label) {
   try {
     const NotificationService = require('./notification-service');
-    void NotificationService.notifyAdmin(payload.type, payload.title, payload.body, payload.options)
-      .catch((err) => logger.warn(`[estimate-manual-acceptance] ${label} notify failed for estimate ${estimateId}: ${err.message}`));
+    await NotificationService.notifyAdmin(payload.type, payload.title, payload.body, payload.options);
+    return true;
   } catch (err) {
-    logger.warn(`[estimate-manual-acceptance] ${label} notify setup failed for estimate ${estimateId}: ${err.message}`);
+    logger.warn(`[estimate-manual-acceptance] ${label} notify failed for estimate ${estimateId}: ${err.message}`);
+    return false;
   }
 }
 
@@ -475,6 +479,23 @@ const STEP_LABELS = {
   admin_bell: 'The office notification was not posted',
 };
 const SKIPPED_STEP_SUFFIX = ': what it acts on changed after the accept. Complete it by hand.';
+
+// The sender's own vetoes (an opt-out, an address that changed since the
+// card, no address, no customer) are the card's promise NOT to send: the
+// receipt says the email was suppressed and must not be sent by hand. Only a
+// failure to deliver (provider refusal, transient prefs/database error) asks
+// for a hand send.
+const EMAIL_VETO_TEXT = {
+  email_opted_out: 'the customer has email turned off',
+  recipient_changed: 'the address on file changed after the card',
+  missing_email: 'the customer has no email address',
+  customer_not_found: 'the customer record was not found',
+};
+function membershipEmailWarning(result, reason) {
+  const veto = EMAIL_VETO_TEXT[reason] || (result?.skipped === true || result?.blocked === true ? reason : null);
+  if (veto) return `The membership email was suppressed: ${veto}. Do not send it by hand.`;
+  return `${STEP_LABELS.membership_email} (${reason}). Send it by hand.`;
+}
 
 async function warnLeadsNotWon(step, ctx) {
   const ids = step.target.lead_ids;
@@ -608,7 +629,7 @@ const POST_COMMIT_STEPS = {
       if (result?.ok === true || result?.sent === true) return;
       const reason = result?.reason || result?.error || 'not_sent';
       logger.warn(`[estimate-manual-acceptance] membership.started email not sent for estimate ${ctx.acceptedEstimate.id}: ${reason}`);
-      ctx.warnings?.push(`${STEP_LABELS.membership_email} (${reason}). Send it by hand.`);
+      ctx.warnings?.push(membershipEmailWarning(result, reason));
     },
   },
   welcome_sms: {
@@ -654,7 +675,8 @@ const POST_COMMIT_STEPS = {
     },
     async run(step, ctx) {
       const field = BELLS.find(([bell]) => bell === step.bell)[1];
-      fireAdminBell(ctx.conversion[field], ctx.acceptedEstimate.id, BELL_LABELS[step.bell]);
+      const posted = await fireAdminBell(ctx.conversion[field], ctx.acceptedEstimate.id, BELL_LABELS[step.bell]);
+      if (!posted) ctx.warnings?.push(`${STEP_LABELS.admin_bell} ("${String(ctx.conversion[field]?.title || step.bell)}"): the post failed after the accept. Tell the office by hand.`);
     },
   },
 };

@@ -977,6 +977,25 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, { ...ctx, warnings: clean });
     expect(clean).toEqual([]);
   });
+  test('round 16: a sender veto (opt-out, changed address) reads as suppressed, not as a hand-send instruction', async () => {
+    const ctx = { approvedEmail: 'send', conversion: { membershipEmail: { customerId: 'cust-1' } }, acceptedEstimate: { id: 'est-1', customer_id: 'cust-1' }, database: {} };
+    for (const [reason, text] of [['email_opted_out', 'the customer has email turned off'], ['recipient_changed', 'the address on file changed after the card']]) {
+      AccountMembershipEmail.sendMembershipStarted.mockResolvedValueOnce({ ok: false, skipped: true, reason });
+      const warnings = [];
+      await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, { ...ctx, warnings });
+      expect(warnings).toEqual([`The membership email was suppressed: ${text}. Do not send it by hand.`]);
+    }
+  });
+  test('round 16: an admin bell that fails to post after the commit is a result warning; a posted one is not', async () => {
+    NotificationService.notifyAdmin.mockRejectedValueOnce(new Error('bell down'));
+    const warnings = [];
+    const ctx = { warnings, conversion: { tierUpgradeNotification: { type: 'estimate_converted', title: 'WaveGuard Gold activated', body: 'x', options: {} } }, acceptedEstimate: { id: 'est-1' }, database: {} };
+    await Effects.POST_COMMIT_STEPS.admin_bell.run({ step: 'admin_bell', bell: 'tier_upgrade', target: { estimate_id: 'est-1', bell: 'tier_upgrade' } }, ctx);
+    expect(warnings).toEqual(['The office notification was not posted ("WaveGuard Gold activated"): the post failed after the accept. Tell the office by hand.']);
+    const clean = [];
+    await Effects.POST_COMMIT_STEPS.admin_bell.run({ step: 'admin_bell', bell: 'tier_upgrade', target: { estimate_id: 'est-1', bell: 'tier_upgrade' } }, { ...ctx, warnings: clean });
+    expect(clean).toEqual([]);
+  });
   test('round 12: a multi-home flip that fails after the commit is a result warning', async () => {
     const refresh = jest.spyOn(Linkage, 'refreshHasMultiHome').mockRejectedValue(new Error('down'));
     const warnings = [];
