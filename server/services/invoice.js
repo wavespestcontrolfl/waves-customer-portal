@@ -4679,6 +4679,34 @@ async function refuseFailedClaim(invoiceId, current, database, { firstDeliveryOn
   throw invoiceNotSendableError(latest);
 }
 
+// The refusals a claim makes BEFORE it writes anything (each throws; none returns). Split out of claimInvoiceForSend so that
+// function stays under the complexity cap.
+async function refuseUnclaimableInvoice(invoiceId, current, database, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend }) {
+  // A first delivery that finds the row already delivered (round-6 P1 #4131) is refused atomically here, before the
+  // claimable-statuses check: a delivered row can sit at a claimable status (sent/viewed/overdue) and a plain status check
+  // alone would let a first-delivery request re-claim it as an intentional resend. The stale-claim review hold (same call) is
+  // gated on ONE explicit switch — overridesReviewHold — never inferred from operatorInitiated or firstDeliveryOnly.
+  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
+  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
+  // Nothing due on a visit-linked invoice: detect it here (never settle — settleZeroDueBeforeSend is the ONE place that ever
+  // does) and refuse the claim so the caller resolves the real outcome through the chokepoint.
+  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
+  // A live deferred pay-link text (quiet-hours queue) already owns this invoice's delivery — refuse before claiming, unless
+  // this send is authorized to adopt (consume) its own earlier held leg.
+  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend, database });
+  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
+}
+
+// A first send that waited for the visit summary's handoff (which holds this invoice through the pay-link text) finds the
+// claim free only once the text is out. The invoice is stamped after that release, so the summary's own record is read: a link
+// text that started or was accepted means the customer has the link, and this first send is refused, not repeated. Returns the
+// refusal to give back the claim with, or null.
+async function firstSendAfterSummaryRefusal({ invoiceId, invoice, current, database }, firstDeliveryOnly) {
+  if (!firstDeliveryOnly || !current.visit_completion_packet_id) return null;
+  const started = await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link");
+  return started ? invoiceAlreadyDeliveredError(invoice) : null;
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
@@ -4699,19 +4727,7 @@ async function claimInvoiceForSend(invoiceId, {
   await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
   if (allowClaimed) return claimAlreadyHeld(invoiceId, current, { ...options, database });
 
-  // A first delivery that finds the row already delivered (round-6 P1 #4131) is refused atomically here, before the
-  // claimable-statuses check: a delivered row can sit at a claimable status (sent/viewed/overdue) and a plain status check
-  // alone would let a first-delivery request re-claim it as an intentional resend. The stale-claim review hold (same call) is
-  // gated on ONE explicit switch — overridesReviewHold — never inferred from operatorInitiated or firstDeliveryOnly.
-  refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, overridesReviewHold);
-  if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) throw invoiceNotSendableError(current);
-  // Nothing due on a visit-linked invoice: detect it here (never settle — settleZeroDueBeforeSend is the ONE place that ever
-  // does) and refuse the claim so the caller resolves the real outcome through the chokepoint.
-  if (await zeroDueVisitInvoice(current, database)) throw zeroDueDetectedError(invoiceId);
-  // A live deferred pay-link text (quiet-hours queue) already owns this invoice's delivery — refuse before claiming, unless
-  // this send is authorized to adopt (consume) its own earlier held leg.
-  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend, database });
-  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
+  await refuseUnclaimableInvoice(invoiceId, current, database, options);
 
   const token = crypto.randomUUID();
   const [invoice] = await buildClaimFlip(database, invoiceId, current, options)
@@ -4726,12 +4742,8 @@ async function claimInvoiceForSend(invoiceId, {
   const ctx = { invoiceId, invoice, current, expectedVersion, database, token };
   const approvedRefusal = expectedVersion && await runApprovedClaimChecks(ctx);
   if (approvedRefusal) await giveBack(approvedRefusal);
-  // A first send that waited for the visit summary's handoff (which holds this invoice through the pay-link text) finds the
-  // claim free only once the text is out. The invoice is stamped after that release, so the summary's own record is read: a link
-  // text that started or was accepted means the customer has the link, and this first send is refused, not repeated.
-  if (firstDeliveryOnly && current.visit_completion_packet_id && await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link")) {
-    await giveBack(invoiceAlreadyDeliveredError(invoice));
-  }
+  const summaryRefusal = await firstSendAfterSummaryRefusal(ctx, firstDeliveryOnly);
+  if (summaryRefusal) await giveBack(summaryRefusal);
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
   const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, token, adoptsQueuedInvoiceSend, database);
   // The closeout pin is the claim's LAST write: every refusal above (and the ones thrown by the two calls before it) leaves
@@ -8482,6 +8494,7 @@ const InvoiceService = {
           ...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),
           // The Intelligence Bar's approved attachment list (digest), checked once more right before the provider call.
           ...(expectedVersion && expectedVersion.attachments !== undefined ? { expectedAttachments: expectedVersion.attachments } : {}),
+          ...(expectedVersion && expectedVersion.emailDigest !== undefined ? { expectedEmailDigest: expectedVersion.emailDigest } : {}),
           ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
           // The bar's card showed the invoice email only: no other-balance note, no account details.
           ...(expectedVersion ? { plainInvoiceEmail: true } : {}),

@@ -38,7 +38,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint, invoiceSmsDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint, invoiceSmsDigest, invoiceEmailDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../invoice-helpers');
 const { planSendEffects, approvedCloseoutTarget, approvedLeadTargets } = require('./invoice-action-effects');
 
 const CARD_LINES_SHOWN = 4;
@@ -87,16 +87,15 @@ async function customerName(customerId) {
   return [c?.first_name, c?.last_name].filter(Boolean).join(' ') || c?.company_name || null;
 }
 
-// Every line, "description amount": the card shows the first few and the rest under its
-// "Show more" (cardLines); the lines are hashed into the approval, so the operator approves all of them.
+// The lines the customer's PDF lists (pdf/invoice-pdf.js visibleInvoiceLines + invoiceLineParts, the PDF's own filter and numbers),
+// as "description [qty x rate] amount". The card shows the first few and the rest under its "Show more" (cardLines); the lines are
+// hashed into the approval (version_digest covers every line), so the operator approves all of them.
 function lineSummary(raw) {
-  let items = raw;
-  if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
-  if (!Array.isArray(items)) items = [];
-  return items.map((it) => {
-    const label = String(it?.description || it?.name || 'Line').replace(/\s+/g, ' ').trim();
-    const amount = it?.amount ?? (Number(it?.quantity || 1) * Number(it?.unit_price || 0));
-    return `${label} ${money(toCents(amount))}`;
+  const { visibleInvoiceLines, invoiceLineParts } = require('../pdf/invoice-pdf');
+  return visibleInvoiceLines(raw).map((item) => {
+    const { description, qty, rate, amount } = invoiceLineParts(item);
+    const label = String(description || item?.name || 'Line').replace(/\s+/g, ' ').trim();
+    return `${label}${qty !== 1 ? ` (${qty} x ${money(toCents(rate))})` : ''} ${money(toCents(amount))}`;
   });
 }
 
@@ -201,26 +200,40 @@ async function sendRefusal(invoice, dueCents) {
   return null;
 }
 
-// The same recipients the Invoices page shows before Send (GET /:id/recipients):
-// the text goes to the customer's phone, the email to the billing recipient.
-function sendLegs(who, invoice, dueCents, rendered) {
-  const phone = who.primaryContact?.phone || null;
+// The same recipients the Invoices page shows before Send (GET /:id/recipients): the text goes to the customer's phone, the
+// email to the billing recipient. A leg is OFFERED only when it can send: a phone whose text template is switched off sends no
+// text, so it is not a recipient or a channel. `sms` and `emailRender` are the rendered legs (see smsRender, emailRenderFor).
+function sendLegs(who, invoice, dueCents, sms, emailRender) {
+  const rawPhone = who.primaryContact?.phone || null;
+  const phone = rawPhone && sms.body ? rawPhone : null;
   const email = who.emailRecipient?.email ? String(who.emailRecipient.email).trim().toLowerCase() : null;
   // The exact text, from the renderer sendViaSMS sends with; the pay link is minted at send and shown as a token.
-  const text = !phone ? 'No text: no phone on file.'
-    : rendered.body
-      ? `Text to ${maskPhone(phone)}: "${rendered.body}" Not sent if the customer opted out of texts.`
-      : `No text: the invoice text template is switched off, so only the email can go out. Text to ${maskPhone(phone)} was not offered.`;
-  const subject = `Invoice ${invoice.invoice_number} — ${money(dueCents)}`;
+  const text = !rawPhone ? 'No text: no phone on file.'
+    : phone
+      ? `Text to ${maskPhone(rawPhone)}: "${sms.body}" Not sent if the customer opted out of texts.`
+      : `No text: the invoice text template is switched off, so no text goes to ${maskPhone(rawPhone)}.`;
+  // The subject and body the customer gets, rendered from the active invoice.sent template by the sender's own function.
   const emailLine = email
-    ? `Email to ${maskEmail(email)}: the invoice email (template invoice.sent), subject "${subject}", with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).`
+    ? `Email to ${maskEmail(email)}: subject "${emailRender.subject}"${emailRender.templateKey === 'invoice.sent' ? ' (template invoice.sent)' : ' (sent without a template)'}, with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).`
     : 'No email: no billing email on file.';
-  return { phone, email, text, emailLine };
+  const emailBody = email && emailRender.text ? `Email body, as the customer receives it: "${emailRender.text}"` : null;
+  return { phone, email, text, emailLine, emailBody };
 }
 
 // The text exactly as sendViaSMS renders it (invoice.js renderInvoiceSmsBody, base template row, pay link as a token).
 async function smsRender(invoice, customer) {
   return require('../invoice').renderInvoiceSmsBody(invoice, customer || {}, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true, audit: false });
+}
+
+// The email as the sender renders it (invoice-email.js renderInvoiceEmailForApproval), for this invoice's billing recipient.
+function emailRenderFor(invoice, customer, who) {
+  const first = who.emailRecipient?.name || customer?.first_name || 'there';
+  return require('../invoice-email').renderInvoiceEmailForApproval(invoice, { first, payUrl: INVOICE_SMS_PAY_LINK_TOKEN });
+}
+
+// The totals the PDF prints under the lines (pdf/invoice-pdf.js invoiceBreakdownRows), for the card.
+function totalsOf(invoice, customer) {
+  return { totals: require('../pdf/invoice-pdf').invoiceBreakdownRows(invoice, customer) };
 }
 
 function emailContentGates() {
@@ -242,8 +255,18 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   // The customer row is read once: the text renders for it, and the effects plan uses it.
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
   const rendered = await smsRender(invoice, customer);
-  const legs = sendLegs(who, invoice, dueCents, rendered);
-  if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
+  let emailRender = null;
+  if (who.emailRecipient?.email) {
+    try {
+      emailRender = await emailRenderFor(invoice, customer, who);
+    } catch {
+      return refusal('The invoice email cannot be prepared (its template could not be rendered), so the invoice was not offered for sending. Send it from the Invoices page.', 'invoice_email_unrenderable', { invoice_id: invoice.id });
+    }
+  }
+  const legs = sendLegs(who, invoice, dueCents, rendered, emailRender);
+  if (!who.primaryContact?.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
+  // A phone with its text template switched off is not a channel, so it cannot stand in for a missing email.
+  if (!legs.phone && !legs.email) return refusal('Neither a text nor an email can be sent: the invoice text template is switched off and there is no billing email.', 'invoice_no_channel', { invoice_id: invoice.id });
   const copy = customerCopy(invoice);
   if (copy.error) return copy;
   const totalCents = toCents(invoice.total);
@@ -266,6 +289,8 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     channels: [legs.phone && 'text', legs.email && 'email'].filter(Boolean).join(' and '),
     text: legs.text,
     email: legs.emailLine,
+    ...(legs.emailBody ? { email_body: legs.emailBody } : {}),
+    ...totalsOf(invoice, customer),
     // The operator's own words that reach the customer, verbatim (the email and the PDF render them).
     custom_copy: copy.lines,
     effects: cardEffects(planned.effects),
@@ -296,6 +321,9 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       // The text the card shows (template that renders + body, pay link as a token). The text leg re-checks the body it is
       // about to hand the provider against this, so a template edited after the card is not sent.
       sms_text: invoiceSmsDigest(rendered, INVOICE_SMS_PAY_LINK_TOKEN),
+      // The email the card shows (template key, subject and text, pay link as a token); the email leg renders it again at its
+      // provider handoff and refuses a different one.
+      email_text: emailRender ? invoiceEmailDigest(emailRender, INVOICE_SMS_PAY_LINK_TOKEN) : 'none',
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -408,6 +436,8 @@ async function commitSend(input, actionContext) {
         attachments: pinned.attachments,
         // The text the card showed; the text leg refuses a different body at its provider handoff (omitted when no text goes).
         ...(plan.sendRecipients.phone ? { smsDigest: pinned.sms_text } : {}),
+        // The email the card showed; the email leg refuses a different template, subject or text at its provider handoff.
+        ...(plan.sendRecipients.email ? { emailDigest: pinned.email_text } : {}),
         // The visit the card said would close (or none): handed to the send's closeout, and written on the invoice
         // by the claim so the retry sweep keeps to it.
         closeoutTarget: plan._closeout_target,
@@ -441,8 +471,11 @@ function cardLines(toolName, preview) {
       // The first lines on the card itself; every other line rides in full under "Show more".
       ...preview.lines.map((line, index) => ({ kind: 'billing', text: `Line ${index + 1} of ${preview.lines.length}: ${line}`, ...(index >= CARD_LINES_SHOWN ? { more: true } : {}) })),
       ...(preview.lines.length > CARD_LINES_SHOWN ? [{ kind: 'billing', text: `All ${preview.lines.length} invoice lines are listed; lines ${CARD_LINES_SHOWN + 1} on are under "Show more"` }] : []),
+      // What the PDF's totals block prints under the lines (the lines above are the PDF's rows).
+      ...(preview.totals || []).map((text) => ({ kind: 'billing', text })),
       { kind: 'comms', text: preview.text },
       { kind: 'comms', text: preview.email },
+      ...(preview.email_body ? [{ kind: 'comms', text: preview.email_body, more: true }] : []),
       ...(preview.custom_copy || []).map((text) => ({ kind: 'comms', text })),
       ...effects,
     ];

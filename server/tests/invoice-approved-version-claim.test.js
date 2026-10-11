@@ -424,28 +424,38 @@ describe('the closeout pin is the claim\'s last write (a refused claim leaves no
   });
 });
 
-describe('claimInvoiceForSend and the invoice text renderer stay within the complexity cap', () => {
-  test('claimInvoiceForSend is at or below 26; the renderer, the template choice and every helper that owns a decision are at or below 20 (ESLint complexity rule)', async () => {
-    const { Linter } = require('eslint');
-    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
-    const messages = new Linter({ configType: 'flat' }).verify(source, [{
-      languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs' },
-      rules: { complexity: ['warn', 1] },
-    }]);
-    const report = { messages };
-    const complexityOf = (name) => {
-      const hit = report.messages.find((m) => m.ruleId === 'complexity' && m.message.includes(`'${name}'`));
-      const match = hit && /complexity of (\d+)/.exec(hit.message);
-      return match ? Number(match[1]) : null;
-    };
-    expect(complexityOf('claimInvoiceForSend')).toEqual(expect.any(Number));
-    expect(complexityOf('claimInvoiceForSend')).toBeLessThanOrEqual(26);
-    for (const name of ['approvedDigestRefusal', 'approvedEffectsRefusal', 'approvedOwnerRefusal', 'approvedAttachmentRefusal', 'recordApprovedPinOrRefusal',
+function complexityReport(file) {
+  const { Linter } = require('eslint');
+  const source = require('fs').readFileSync(require('path').join(__dirname, file), 'utf8');
+  const messages = new Linter({ configType: 'flat' }).verify(source, [{
+    languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs' },
+    rules: { complexity: ['warn', 1] },
+  }]);
+  return (name) => {
+    const hit = messages.find((m) => m.ruleId === 'complexity' && m.message.includes(`'${name}'`));
+    const match = hit && /complexity of (\d+)/.exec(hit.message);
+    return match ? Number(match[1]) : null;
+  };
+}
+
+describe('claimInvoiceForSend, the invoice text renderer and the closeout sweep stay within the complexity cap (<= 20)', () => {
+  test('every function that owns a decision in invoice.js is at or below 20 (ESLint complexity rule), claimInvoiceForSend included', () => {
+    const complexityOf = complexityReport('../services/invoice.js');
+    for (const name of ['claimInvoiceForSend', 'refuseUnclaimableInvoice', 'firstSendAfterSummaryRefusal',
+      'approvedDigestRefusal', 'approvedEffectsRefusal', 'approvedOwnerRefusal', 'approvedAttachmentRefusal', 'recordApprovedPinOrRefusal',
       'runApprovedClaimChecks', 'claimNeedsOwnerFence', 'claimAlreadyHeld', 'buildClaimFlip', 'refuseFailedClaim',
       'renderInvoiceSmsBody', 'chooseInvoiceSmsTemplate', 'invoiceSmsDateFacts', 'invoicePreServiceCopy']) {
       // A function below the rule's floor of 2 has no message; every one of these has branches, so a miss means a rename.
       expect([name, complexityOf(name)]).toEqual([name, expect.any(Number)]);
-      expect(complexityOf(name)).toBeLessThanOrEqual(20);
+      expect([name, complexityOf(name) <= 20]).toEqual([name, true]);
+    }
+  }, 120000);
+
+  test('retryIssuedInvoiceCloseouts and its steps in invoice-issued-closeout.js are at or below 20', () => {
+    const complexityOf = complexityReport('../services/invoice-issued-closeout.js');
+    for (const name of ['retryIssuedInvoiceCloseouts', 'retryOneIssuedInvoice', 'pinDecisionFor', 'skipByVisitState']) {
+      expect([name, complexityOf(name)]).toEqual([name, expect.any(Number)]);
+      expect([name, complexityOf(name) <= 20]).toEqual([name, true]);
     }
   }, 120000);
 });

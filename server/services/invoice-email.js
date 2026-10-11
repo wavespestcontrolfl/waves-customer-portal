@@ -161,6 +161,49 @@ async function loadInvoiceEmailContext(invoice, options = {}) {
   return { customer, prefs };
 }
 
+// The variables the invoice.sent template renders with: one function for the sender and for the Intelligence Bar's card, so
+// the card shows what the sender sends. details = the optional billing-details block (empty for the bar's plain email).
+function invoiceSentTemplatePayload({ invoice, first, payUrl, amountDue, summaryNote, thankYouNote, previousBalanceNote = '', extraAttachmentCount, details = {} }) {
+  return {
+    first_name: first,
+    invoice_url: payUrl,
+    invoice_number: invoice.invoice_number,
+    amount_due: currency(amountDue),
+    due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
+    service_label: invoice.service_type || '',
+    service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
+    invoice_summary: summaryNote,
+    // The previous-balance sentence rides the existing invoice_message slot so the live template renders it with no
+    // template edit; the operator note (when present) stays first.
+    invoice_message: [thankYouNote, previousBalanceNote].filter(Boolean).join('\n\n'),
+    attachment_note: extraAttachmentCount > 0
+      ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
+      : 'Your PDF invoice is attached.',
+    ...details,
+  };
+}
+
+// The Intelligence Bar's plain invoice email as the customer would get it: the template key, the rendered subject and the
+// rendered text (the pay link given by the caller). With SendGrid configured this renders the ACTIVE invoice.sent template
+// through the library's own resolve + prepare steps (the ones sendTemplate runs), so a template republished after the card is
+// seen. Without SendGrid the SMTP email goes out with its fixed subject and no template. Reads through `database` (a caller
+// holding a transaction passes it: a second pool connection would deadlock at DB_POOL_MAX=2). Throws when the template cannot
+// render; the caller treats that as a refusal.
+async function renderInvoiceEmailForApproval(invoice, { first, payUrl, database = db } = {}) {
+  const amountDue = invoiceAmountDue(invoice);
+  if (!sendgrid.isConfigured()) return { templateKey: 'smtp', subject: `Invoice ${invoice.invoice_number} — ${currency(amountDue)}`, text: '' };
+  const attachments = await loadInvoiceAttachmentRows(database, invoice.id);
+  const payload = invoiceSentTemplatePayload({
+    invoice, first, payUrl, amountDue,
+    summaryNote: clean(invoice.notes).slice(0, 1200),
+    thankYouNote: clean(invoice.email_message).slice(0, 800),
+    extraAttachmentCount: attachments.length,
+  });
+  const { template, version } = await EmailTemplateLibrary.resolveTemplateForSend({ templateKey: 'invoice.sent', database });
+  const { rendered } = EmailTemplateLibrary.prepareTemplateSend({ template, version, payload });
+  return { templateKey: 'invoice.sent', subject: rendered.subject, text: rendered.text };
+}
+
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
@@ -461,6 +504,33 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
               return { ok: false, ...boundaryRefusal };
             }
           }
+          // The Intelligence Bar's approved address, resolved AGAIN here on the locked handle (the first resolution was before
+          // the short link, the PDF, the attachments and the template render, and billing_email can change in that time).
+          if (options.expectedEmail !== undefined) {
+            let freshEmail = null;
+            try {
+              const freshCustomer = await trx('customers').where({ id: current.customer_id })
+                .select('id', 'first_name', 'last_name', 'email', 'phone', 'company_name').first();
+              const freshPrefs = await trx('notification_prefs').where({ customer_id: current.customer_id }).first();
+              freshEmail = invoiceRecipientFor(freshCustomer, freshPrefs, effectiveOverride).recipient?.email || null;
+            } catch { /* keep the fail-closed null */ }
+            if (String(freshEmail || '').trim().toLowerCase() !== String(options.expectedEmail || '')) {
+              boundaryRefusal = { code: 'recipient_changed', reason: 'The billing email is not the one the approval showed; the email was not sent' };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
+          // The email the card showed (template, subject, text), rendered again from the template as it is now.
+          if (options.expectedEmailDigest !== undefined) {
+            let same = false;
+            try {
+              const now = await renderInvoiceEmailForApproval({ ...current }, { first, payUrl, database: trx });
+              same = require('./invoice-helpers').invoiceEmailDigest(now, payUrl) === options.expectedEmailDigest;
+            } catch { same = false; }
+            if (!same) {
+              boundaryRefusal = { code: 'email_text_changed', reason: 'The invoice email is not the one the approval showed; it was not sent' };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
           // Collections DISPUTE hold, re-read at THIS email provider boundary on the locked
           // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
           // rendered still stops the pay link - retryable + deferred, never terminal (savepoint
@@ -554,24 +624,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'invoice.sent',
         to: recipient.email,
-        payload: {
-          first_name: first,
-          invoice_url: payUrl,
-          invoice_number: invoice.invoice_number,
-          amount_due: currency(amountDue),
-          due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
-          service_label: invoice.service_type || '',
-          service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
-          invoice_summary: summaryNote,
-          // The previous-balance sentence rides the existing invoice_message
-          // slot so the live template renders it with no template edit; the
-          // operator note (when present) stays first.
-          invoice_message: [thankYouNote, previousBalanceNote].filter(Boolean).join('\n\n'),
-          attachment_note: extraAttachmentCount > 0
-            ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
-            : 'Your PDF invoice is attached.',
-          ...detailPayload,
-        },
+        payload: invoiceSentTemplatePayload({
+          invoice, first, payUrl, amountDue, summaryNote, thankYouNote, previousBalanceNote, extraAttachmentCount, details: detailPayload,
+        }),
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
         triggerEventId: `invoice_sent:${invoice.id}`,
@@ -610,7 +665,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
         ...evidence };
     } catch (err) {
-      if (!canFallbackFromTemplateEmailError(err)) {
+      // An approved (Intelligence Bar) email is the template email the card showed: no different SMTP email in its place.
+      if (options.expectedEmailDigest !== undefined || !canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
         return { ok: false, error: err.message, recipient: recipientPayload };
       }
@@ -1074,6 +1130,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 
 module.exports = {
   sendInvoiceEmail,
+  renderInvoiceEmailForApproval,
+  invoiceSentTemplatePayload,
   sendReceiptEmail,
   resolveReceiptEmailRecipient,
   loadInvoiceEmailContext,

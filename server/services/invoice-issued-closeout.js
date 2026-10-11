@@ -570,6 +570,82 @@ const NEWEST_DELIVERY_SQL = 'GREATEST(i.sent_at, i.sms_sent_at, i.email_sent_at)
 const ISSUED_AT_SQL = `CASE WHEN i.status IN ('paid', 'prepaid') THEN COALESCE(i.paid_at, ${NEWEST_DELIVERY_SQL}) ELSE ${NEWEST_DELIVERY_SQL} END`;
 const ISSUED_AFTER_SERVICE_DAY_SQL = settledAfterServiceDaySql(ISSUED_AT_SQL);
 
+async function loadRetryCandidates(conn, today, sinceDays) {
+  return conn('invoices as i')
+    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .whereNull('i.payer_statement_id')
+    .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
+    .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
+    .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
+    .orderBy('i.id')
+    .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
+      conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
+}
+
+// Does the visit's own state say this candidate should not be retried? A parked attempt of this closeout is always resumed;
+// otherwise a prepaid-and-nobody-arrived visit is left to a person, and so is one whose latest audit row is a real refusal.
+// An audit lookup that fails skips the row (logged), as the sweep always did.
+async function skipByVisitState(conn, row) {
+  if (row.own_attempt_parked) return false;
+  if (prepaidAndNobodyArrived(row)) return true;
+  try {
+    const last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
+    return Boolean(last) && !refusedForTheMoment(last);
+  } catch (err) {
+    logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+    return true;
+  }
+}
+
+// What the invoice's closeout pin says the sweep may do. A bar send's card named the visit this closeout may close (or none):
+// the sweep keeps to it. The pin covers the send's closeout only, so a settled invoice (trigger 'paid') is retried as the
+// payment rails always do.
+//   { action: 'skip', reason }   close nothing (pin lookup failed, or a pin with no delivery marker and no retirement: the
+//                                sweep cannot tell what the card approved)
+//   { action: 'honor', target }  close only the visit the card named
+//   { action: 'unpinned' }       no pin: the ordinary retry
+async function pinDecisionFor(conn, row, trigger) {
+  if (trigger !== 'sent') return { action: 'unpinned' };
+  let pinned;
+  try {
+    pinned = await approvedCloseoutTargetFor(conn, row.invoice_id);
+  } catch (err) {
+    logger.error(`[invoice-issued-closeout] issued-invoice retry: pin lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+    return { action: 'skip', reason: 'pin_lookup_failed' };
+  }
+  if (pinned?.unbound) return { action: 'skip', reason: 'pin_unbound' };
+  return pinned?.target ? { action: 'honor', target: pinned.target } : { action: 'unpinned' };
+}
+
+// An unbound pin is audited once per sweep that meets it.
+async function recordUnboundPin(row) {
+  logger.warn(`[invoice-issued-closeout] issued-invoice retry: invoice ${row.invoice_id} has an approved closeout pin with no delivery marker; skipped`);
+  try {
+    await require('./audit-log').recordAuditEvent({
+      actor_type: 'system', action: 'invoice.closeout_pin_unbound', resource_type: 'invoices', resource_id: row.invoice_id,
+      metadata: { invoiceId: String(row.invoice_id), visitId: row.visit_id ? String(row.visit_id) : null },
+    });
+  } catch (auditErr) {
+    logger.error(`[invoice-issued-closeout] unbound pin audit failed for invoice ${row.invoice_id}: ${auditErr.message}`);
+  }
+}
+
+// One candidate: the visit-state skip, the pin decision, then the closeout. Returns { retried, closed } (zeros for a skip).
+async function retryOneIssuedInvoice(row, { conn, today }) {
+  const skipped = { retried: 0, closed: 0 };
+  if (await skipByVisitState(conn, row)) return skipped;
+  const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
+  const decision = await pinDecisionFor(conn, row, trigger);
+  if (decision.action === 'skip') {
+    if (decision.reason === 'pin_unbound') await recordUnboundPin(row);
+    return skipped;
+  }
+  const out = await closeOutVisitForIssuedInvoice({
+    invoiceId: row.invoice_id, trigger, conn, today, ...(decision.action === 'honor' ? { approvedTarget: decision.target } : {}),
+  });
+  return { retried: 1, closed: out?.closed ? 1 : 0 };
+}
+
 // THE durable retry for every invoice outside a statement (GitHub r1 P1 and
 // r3 P1 ×2 #5886). Every rail — the Stripe webhook, cash / check / reconcile,
 // the prepaid route, each send path — runs the closeout once, best-effort,
@@ -600,15 +676,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
   if (!isEnabled('invoiceIssuedClosesVisit')) return none;
   let rows = [];
   try {
-    rows = await conn('invoices as i')
-      .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
-      .whereNull('i.payer_statement_id')
-      .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
-      .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
-      .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
-      .orderBy('i.id')
-      .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
+    rows = await loadRetryCandidates(conn, today, sinceDays);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: candidate lookup failed: ${err.message}`);
     return none;
@@ -616,47 +684,9 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
   let retried = 0;
   let closed = 0;
   for (const row of rows) {
-    if (!row.own_attempt_parked) {
-      if (prepaidAndNobodyArrived(row)) continue;
-      let last;
-      try {
-        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
-      } catch (err) {
-        logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
-        continue;
-      }
-      if (last && !refusedForTheMoment(last)) continue;
-    }
-    const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
-    // A bar send's card named the visit this closeout may close (or none): the sweep keeps to it. The pin covers the
-    // send's closeout only, so a settled invoice (trigger 'paid') is retried as the payment rails always do.
-    let approvedTarget = null;
-    if (trigger === 'sent') {
-      let pinned;
-      try {
-        pinned = await approvedCloseoutTargetFor(conn, row.invoice_id);
-      } catch (err) {
-        logger.error(`[invoice-issued-closeout] issued-invoice retry: pin lookup failed for invoice ${row.invoice_id}: ${err.message}`);
-        continue;
-      }
-      if (pinned?.unbound) {
-        // A pin with no delivery marker and no retirement: the sweep cannot tell what the card approved, so it closes nothing.
-        logger.warn(`[invoice-issued-closeout] issued-invoice retry: invoice ${row.invoice_id} has an approved closeout pin with no delivery marker; skipped`);
-        try {
-          await require('./audit-log').recordAuditEvent({
-            actor_type: 'system', action: 'invoice.closeout_pin_unbound', resource_type: 'invoices', resource_id: row.invoice_id,
-            metadata: { invoiceId: String(row.invoice_id), visitId: row.visit_id ? String(row.visit_id) : null },
-          });
-        } catch (auditErr) {
-          logger.error(`[invoice-issued-closeout] unbound pin audit failed for invoice ${row.invoice_id}: ${auditErr.message}`);
-        }
-        continue;
-      }
-      approvedTarget = pinned?.target || null;
-    }
-    retried += 1;
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today, ...(approvedTarget ? { approvedTarget } : {}) });
-    if (out?.closed) closed += 1;
+    const out = await retryOneIssuedInvoice(row, { conn, today });
+    retried += out.retried;
+    closed += out.closed;
   }
   if (retried) logger.info(`[invoice-issued-closeout] issued-invoice retry: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
   return { candidates: rows.length, retried, closed };
@@ -878,6 +908,7 @@ module.exports = {
   closeOutVisitsForStatement,
   retrySettledStatementCloseouts,
   retryIssuedInvoiceCloseouts,
+  pinDecisionFor,
   visitJobTimerRunning,
   OPEN_VISIT_STATUSES,
   ARRIVED_VISIT_STATUSES,

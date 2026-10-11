@@ -2043,6 +2043,7 @@ module.exports = {
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
   resolveTemplateForSend,
+  prepareTemplateSend,
   activeSuppressionsFor,
   isMarketingSend,
   GLOBAL_SUPPRESSION_TYPES,

@@ -43,11 +43,12 @@ const INV = '00000000-0000-4000-8000-0000000000a1';
 const INV2 = '00000000-0000-4000-8000-0000000000a2';
 const ADMIN = { isAdmin: true, technicianId: 'staff-1', operationId: 'op-1' };
 
+const EMAIL_RENDERED = { templateKey: 'invoice.sent', subject: 'Invoice WPC-2099-0001 — $129.00', text: 'Hi Robin, your invoice is ready: [pay link] Thank you.' };
 const SMS_RENDERED = { body: 'Hi Robin, your invoice WPC-2099-0001 is ready: [pay link]', renderedTemplateKey: 'invoice_sent' };
 let state;
 function invoiceRow(overrides = {}) {
   return {
-    id: INV, invoice_number: 'WPC-2099-0001', customer_id: 'cust-1', status: 'draft', total: '129.00', credit_applied: '0.00',
+    id: INV, invoice_number: 'WPC-2099-0001', customer_id: 'cust-1', status: 'draft', subtotal: '129.00', total: '129.00', credit_applied: '0.00',
     payer_id: null, payer_statement_id: null, sent_at: null, updated_at: new Date('2099-01-01T12:00:00Z'),
     line_items: JSON.stringify([{ description: 'Quarterly Pest Control', amount: 99 }, { description: 'Mosquito add-on', amount: 30 }]),
     ...overrides,
@@ -111,6 +112,7 @@ beforeEach(() => {
   CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValue(false);
   // The invoice text as sendViaSMS renders it (the real renderer needs the template tables; its own tests cover it).
   jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue(SMS_RENDERED);
+  jest.spyOn(require('../services/invoice-email'), 'renderInvoiceEmailForApproval').mockResolvedValue(EMAIL_RENDERED);
 });
 afterAll(() => { delete process.env.GATE_IB_INVOICE_ACTIONS; });
 
@@ -148,7 +150,7 @@ describe('registration', () => {
       const contract = buildContract({ toolName: tool, params: { invoice_id: INV }, displayParams: {}, preview: p });
       expect(contract.irreversible).toBe(true);
       expect(contract.notifies_customer).toBe(true);
-      const labels = contract.effects.map((e) => e.label);
+      const labels = [...contract.effects, ...(contract.more_effects || [])].map((e) => e.label);
       for (const line of cardLines(tool, p)) expect(labels).toContain(line.text);
       // Curated: never the generic one-line-per-preview-key dump.
       expect(labels.some((l) => /^Version|^_version|^Note:/i.test(l))).toBe(false);
@@ -198,9 +200,13 @@ describe('send_invoice card', () => {
     // The exact text the customer gets, from the same renderer the send uses (the pay link is minted at send).
     expect(p.text).toBe('Text to ***0100: "Hi Robin, your invoice WPC-2099-0001 is ready: [pay link]" Not sent if the customer opted out of texts.');
     expect(require('../services/invoice').renderInvoiceSmsBody).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), expect.objectContaining({ id: 'cust-1' }), '[pay link]', { noVariants: true, audit: false });
-    expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).');
+    expect(p.email).toBe('Email to r***@example.com: subject "Invoice WPC-2099-0001 — $129.00" (template invoice.sent), with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).');
+    expect(p.email_body).toBe('Email body, as the customer receives it: "Hi Robin, your invoice is ready: [pay link] Thank you."');
+    expect(require('../services/invoice-email').renderInvoiceEmailForApproval).toHaveBeenCalledWith(expect.objectContaining({ id: INV }), { first: 'Robin', payUrl: '[pay link]' });
+    // The totals the PDF prints under its lines.
+    expect(p.totals).toEqual(['Subtotal: $129.00', 'Total: $129.00']);
     const lines = cardLines('send_invoice', p).map((l) => l.text);
-    expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line 1 of 2: Quarterly Pest Control $99.00', p.text, p.email,
+    expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line 1 of 2: Quarterly Pest Control $99.00', p.text, p.email, p.email_body, 'Subtotal: $129.00', 'Total: $129.00',
       ...effectTexts(p),
       'No account credit is applied by this send. If the visit is cancelled before the send runs, nothing is sent and the invoice is held for review (never voided by the bar).']));
     expect(JSON.stringify(p)).not.toContain('9415550100');
@@ -292,7 +298,7 @@ describe('send_invoice commit', () => {
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
         expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' },
-        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), smsDigest: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), smsDigest: expect.stringMatching(/^[0-9a-f]{32}$/), emailDigest: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
       },
     });
     // The exact recipients ride only to the send, never into the result.
@@ -332,6 +338,88 @@ describe('send_invoice commit', () => {
       jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockRestore();
     }
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  describe('the email (round 12): the card shows the rendered email and the handoff re-checks it', () => {
+    const { invoiceEmailDigest } = require('../services/invoice-helpers');
+    const renderer = () => require('../services/invoice-email').renderInvoiceEmailForApproval;
+
+    test('the pin is the digest of the rendered email, and it goes to the send as the email leg\'s expected digest', async () => {
+      Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+      const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      expect(card._version.email_text).toBe(invoiceEmailDigest(EMAIL_RENDERED, '[pay link]'));
+      await run();
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version.emailDigest).toBe(card._version.email_text);
+    });
+
+    test('a template published after the card (subject or text) refuses the confirm as preview_changed and sends nothing', async () => {
+      for (const published of [{ subject: 'Your Waves invoice' }, { text: 'Different words. [pay link]' }, { templateKey: 'smtp' }]) {
+        const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+        renderer().mockResolvedValue({ ...EMAIL_RENDERED, ...published });
+        await expect(run()).resolves.toMatchObject({ preview_changed: true });
+        renderer().mockResolvedValue(EMAIL_RENDERED);
+      }
+      expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+    });
+
+    test('a template that cannot render refuses the card; a card with no billing email pins none and passes no email digest', async () => {
+      renderer().mockRejectedValue(new Error('template disabled'));
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_email_unrenderable' });
+      renderer().mockResolvedValue(EMAIL_RENDERED);
+      Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ emailRecipient: null }));
+      Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true } } });
+      const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      expect(card._version.email_text).toBe('none');
+      await run();
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version).not.toHaveProperty('emailDigest');
+    });
+  });
+
+  describe('deliverable channels (round 12)', () => {
+    test('a phone whose text template is switched off is not a channel: with an email only the email is offered', async () => {
+      require('../services/invoice').renderInvoiceSmsBody.mockResolvedValue({ body: null, renderedTemplateKey: null });
+      const card = await preview('send_invoice', { invoice_id: INV });
+      expect(card.channels).toBe('email');
+      expect(card.text).toMatch(/^No text: the invoice text template is switched off/);
+      Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, email: { ok: true } } });
+      const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      await run();
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.recipients).toEqual({ phone: null, email: 'robin@example.com' });
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version).not.toHaveProperty('smsDigest');
+    });
+
+    test('a phone with no text template and no email is refused as invoice_no_channel', async () => {
+      require('../services/invoice').renderInvoiceSmsBody.mockResolvedValue({ body: null, renderedTemplateKey: null });
+      Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ emailRecipient: null }));
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({
+        code: 'invoice_no_channel', error: expect.stringMatching(/Neither a text nor an email can be sent/),
+      });
+    });
+  });
+
+  describe('the line and totals breakdown (round 12)', () => {
+    test('quantity, rate, discount and tax are shown as the PDF shows them, and hidden discount lines are not rows', async () => {
+      state.invoices[0] = invoiceRow({
+        line_items: JSON.stringify([
+          { description: 'Mosquito barrier', quantity: 2, unit_price: 50, amount: 100 },
+          { description: 'Promo credit', _kind: 'discount', amount: -10 },
+          { description: 'Fire ant mound', amount: 30 },
+        ]),
+        subtotal: '130.00', discount_amount: '10.00', discount_label: 'Spring promo', tax_amount: '7.80', tax_rate: '0.065', total: '127.80',
+      });
+      state.customers[0] = { ...state.customers[0], property_type: 'commercial' };
+      const card = await preview('send_invoice', { invoice_id: INV });
+      expect(card.lines).toEqual(['Mosquito barrier (2 x $50.00) $100.00', 'Fire ant mound $30.00']);
+      expect(card.totals).toEqual(['Subtotal: $130.00', 'Spring promo: − $10.00', 'Tax (6.50%): $7.80', 'Total: $127.80']);
+      const lines = cardLines('send_invoice', card).map((l) => l.text);
+      expect(lines).toEqual(expect.arrayContaining(['Line 1 of 2: Mosquito barrier (2 x $50.00) $100.00', 'Subtotal: $130.00', 'Spring promo: − $10.00', 'Tax (6.50%): $7.80', 'Total: $127.80']));
+    });
+
+    test('tax is not shown for a residential customer (the PDF\'s own rule)', async () => {
+      state.invoices[0] = invoiceRow({ subtotal: '120.00', tax_amount: '9.00', tax_rate: '0.075', total: '129.00' });
+      const card = await preview('send_invoice', { invoice_id: INV });
+      expect(card.totals).toEqual(['Subtotal: $120.00', 'Total: $129.00']);
+    });
   });
 
   describe('the text (round 10): the card shows the rendered text and the handoff re-checks it', () => {
@@ -493,7 +581,7 @@ describe('round 3: lines', () => {
     const shown = contract.effects.map((e) => e.label);
     expect(shown.filter((l) => /^Line \d of 7:/.test(l))).toHaveLength(4);
     expect(shown).toContain('All 7 invoice lines are listed; lines 5 on are under "Show more"');
-    expect(contract.more_effects.map((e) => e.label)).toEqual([5, 6, 7].map((n) => expect.stringContaining(`Line ${n} of 7: Service line number ${n}`)));
+    expect(contract.more_effects.map((e) => e.label)).toEqual([...[5, 6, 7].map((n) => expect.stringContaining(`Line ${n} of 7: Service line number ${n}`)), expect.stringMatching(/^Email body, as the customer receives it/)]);
     // Changing only a hidden line (same total) changes the approved version.
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
     state.invoices[0].line_items = JSON.stringify(items.map((it, i) => (i === 6 ? { ...it, description: 'Other work' } : it)));
@@ -619,7 +707,7 @@ describe('round 6', () => {
     expect(read('../services/invoice.js')).toMatch(/expectedVersion && expectedVersion\.attachments !== undefined \? \{ expectedAttachments: expectedVersion\.attachments \}/);
     const email = read('../services/invoice-email.js');
     expect(email).toMatch(/options\.expectedAttachments !== undefined && attachmentsFingerprintDigest\(attachmentRows\) !== options\.expectedAttachments/);
-    expect(email.indexOf('attachmentsFingerprintDigest(attachmentRows) !== options.expectedAttachments')).toBeLessThan(email.indexOf('sendgrid.isConfigured()'));
+    expect(email.indexOf('attachmentsFingerprintDigest(attachmentRows) !== options.expectedAttachments')).toBeLessThan(email.indexOf('EmailTemplateLibrary.sendTemplate({'));
   });
 });
 

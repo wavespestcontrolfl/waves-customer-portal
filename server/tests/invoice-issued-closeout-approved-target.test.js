@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { recordAuditEvent } = require('../services/audit-log');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
-const { closeOutVisitForIssuedInvoice, retryIssuedInvoiceCloseouts, recordApprovedCloseoutTarget, recordApprovedCloseoutDelivery } = require('../services/invoice-issued-closeout');
+const { closeOutVisitForIssuedInvoice, retryIssuedInvoiceCloseouts, recordApprovedCloseoutTarget, recordApprovedCloseoutDelivery, pinDecisionFor } = require('../services/invoice-issued-closeout');
 
 const rows = {
   invoices: { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: 'paid', scheduled_service_id: 'visit-live', paid_at: '2021-03-01T15:00:00Z' },
@@ -212,5 +212,23 @@ describe('an unbound pin heals once nothing holds it (round 11)', () => {
     expect(held).toMatchObject({ retried: 0, closed: 0 });
     const young = await sweep({ pins: [{ ...pin('claim-young', 'none'), createdAt: fresh }], deliveries: [] });
     expect(young).toMatchObject({ retried: 0, closed: 0 });
+  });
+});
+
+describe('pinDecisionFor (round 12): the sweep\'s one decision about a pin', () => {
+  const row = { invoice_id: 'inv-1', visit_id: 'visit-live' };
+  test('a settled invoice (trigger paid) is unpinned: the pin covers the send\'s closeout only, and no read is made', async () => {
+    const spy = jest.fn(() => { throw new Error('no read expected'); });
+    await expect(pinDecisionFor(spy, row, 'paid')).resolves.toEqual({ action: 'unpinned' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+  test('a delivered pin is honored with its target; none pinned is honored as "none"; no pin is unpinned', async () => {
+    await expect(pinDecisionFor(sweepConn({ pins: [pin('c', 'visit-live')], deliveries: [delivered('c')] }), row, 'sent')).resolves.toEqual({ action: 'honor', target: 'visit-live' });
+    await expect(pinDecisionFor(sweepConn({ pins: [pin('c', 'none')], deliveries: [delivered('c')] }), row, 'sent')).resolves.toEqual({ action: 'honor', target: 'none' });
+    await expect(pinDecisionFor(sweepConn(), row, 'sent')).resolves.toEqual({ action: 'unpinned' });
+  });
+  test('an unbound pin and an unreadable pin are skipped, each with its reason', async () => {
+    await expect(pinDecisionFor(sweepConn({ pins: [pin('c', 'none')] }), row, 'sent')).resolves.toEqual({ action: 'skip', reason: 'pin_unbound' });
+    await expect(pinDecisionFor(sweepConn({ pinReadFails: true, pins: [pin('c', 'none')], deliveries: [delivered('c')] }), row, 'sent')).resolves.toEqual({ action: 'skip', reason: 'pin_lookup_failed' });
   });
 });
