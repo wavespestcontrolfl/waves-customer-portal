@@ -1143,13 +1143,21 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
   // amount_due is the collectible amount: invoice-helpers.js invoiceAmountDue, the charge base
   // every collection path prices from (total less credit_applied), not the gross total.
   const { invoiceAmountDue } = require('./invoice-helpers');
-  const shape = ({ id, total, status, credit_applied: creditApplied }) => ({
-    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied }),
+  // dues_month: the month the stamp names, for wording ('YYYY-MM', null when unreadable).
+  const duesMonthOf = (raw) => {
+    try {
+      const items = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const item = (Array.isArray(items) ? items : []).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+      return item ? String(item[MEMBERSHIP_DUES_LINE_KEY]) : null;
+    } catch { return null; }
+  };
+  const shape = ({ id, total, status, credit_applied: creditApplied, line_items: lineItems }) => ({
+    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied }), dues_month: duesMonthOf(lineItems),
   });
-  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied');
+  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'line_items');
   if (!lock || !rows.length) return rows.map(shape);
   const locked = await dbConn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait()
-    .select('id', 'total', 'status', 'credit_applied', 'customer_id', 'payer_id');
+    .select('id', 'total', 'status', 'credit_applied', 'line_items', 'customer_id', 'payer_id');
   return locked
     .filter((r) => String(r.customer_id) === String(customerId) && r.payer_id == null && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(r.status))
     .map(shape);

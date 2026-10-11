@@ -4948,7 +4948,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // the auto-charge block: an existing open invoice (pre-minted /
     // recovery) must not be auto-charged either when nothing was performed
     // (Codex round-9 P1).
-    const visitPerformed = visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined';
+    const visitPerformed = require('./visit-outcomes').visitWasPerformed(visitOutcome);
     // Billing-lane classification + the completion invoice amount — hoisted
     // from the invoice block below for the same one-derivation reason (fix
     // round 9): the commit-time posture must read the EXACT inputs the mint

@@ -60,6 +60,7 @@
 const db = require('../../models/db');
 const BillingModeRules = require('../billing-mode-rules');
 const { resolveBillingLane } = require('../billing-lane');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('../visit-outcomes');
 const { tryLockCustomerPaymentMethods } = require('../../utils/payment-method-lock');
 
 const BILLING_EDIT_FIELDS = ['billing_mode', 'per_application_fee'];
@@ -306,7 +307,7 @@ async function chargeContext(dbh, customerId, row) {
 //                settles after the lane moves (retry-collectibility.js
 //                findCollectedMonthlyPayment, the cron's own already-collected
 //                predicate, narrowed to processing).
-const NO_FACTS = { roots: [], processing: [] };
+const NO_FACTS = { roots: [], processing: [], openDues: [] };
 
 async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   const ids = await require('../recurring-series-topup').eligibleSeriesParentIds(dbh, { customerId });
@@ -327,16 +328,22 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   return out;
 }
 
+// The two obligation months every dues check here covers: this ET month and the one before
+// (a debit started late last month can still be processing now).
+function duesMonths() {
+  const [year, month] = require('../../utils/datetime-et').etDateString().split('-').map(Number);
+  return [[year, month], month === 1 ? [year - 1, 12] : [year, month - 1]].map(([y, m]) => {
+    const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+    return { monthKey, monthStart: `${monthKey}-01`, monthEnd: `${monthKey}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0')}` };
+  });
+}
+
 async function processingDues(dbh, customerId) {
   const { findCollectedMonthlyPayment } = require('../retry-collectibility');
-  const [year, month] = require('../../utils/datetime-et').etDateString().split('-').map(Number);
   const out = [];
-  for (const [y, m] of [[year, month], month === 1 ? [year - 1, 12] : [year, month - 1]]) {
-    const monthKey = `${y}-${String(m).padStart(2, '0')}`;
-    const monthEnd = `${monthKey}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0')}`;
-    const payment = await findCollectedMonthlyPayment(customerId, { monthKey, monthStart: `${monthKey}-01`, monthEnd },
-      { conn: dbh, statuses: ['processing'], withDuesInvoice: false });
-    if (payment) out.push({ ...payment, monthKey });
+  for (const period of duesMonths()) {
+    const payment = await findCollectedMonthlyPayment(customerId, period, { conn: dbh, statuses: ['processing'], withDuesInvoice: false });
+    if (payment) out.push({ ...payment, monthKey: period.monthKey });
   }
   return out;
 }
@@ -413,8 +420,16 @@ const SIDE_FLOW_CHECKS = [
   // for this ET month's dues, which covers an unresolved invoice-less
   // stripe_orphan_charges row and a failed dues attempt parked with
   // metadata.ambiguous_outcome.
-  async ({ dbh, customerId, laneBefore, laneAfter, facts }) => {
+  async ({ dbh, customerId, laneBefore, laneAfter, facts, openDues }) => {
     if (laneBefore !== 'monthly_membership' || laneAfter === 'monthly_membership') return null;
+    // A stamped dues invoice still in draft is not collected by anything: a draft has no pay
+    // link and the late-payment checker selects sent / viewed / overdue only. So the card
+    // cannot say its follow-ups continue; the office sends or voids it first. Pinned with
+    // the open dues, so a draft that appears after the card refuses at commit.
+    const draft = (openDues || []).find((d) => d.status === 'draft');
+    if (draft) {
+      return refuse(`A dues invoice${draft.dues_month ? ` for ${monthLabel(draft.dues_month)}` : ''} is still a draft. Send it or void it first. Nothing was proposed.`, 'billing_dues_draft');
+    }
     // A dues debit still `processing` (normal ACH: recorded, lock released, settles days
     // later) may yet FAIL, and a failed monthly debit arms the retry that this change would
     // supersede (retry-collectibility.js classifyFailedPaymentRetry: the customer left the
@@ -430,10 +445,12 @@ const SIDE_FLOW_CHECKS = [
     if ((armed || []).some(isMonthlyObligationRow)) {
       return refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed');
     }
-    const monthKey = require('../../utils/datetime-et').etDateString().slice(0, 7);
-    const outcome = await hasUnresolvedSiblingStripeOutcome(customerId, monthKey, dbh);
-    return outcome.blocked
-      ? refuse(`A dues charge for ${monthLabel(monthKey)} is still being reconciled with Stripe; try again after it settles. Nothing was proposed.`, 'dues_outcome_unresolved') : null;
+    // Both months the processing-dues predicate covers, each through the cron's own verdict.
+    for (const { monthKey } of duesMonths()) {
+      const outcome = await hasUnresolvedSiblingStripeOutcome(customerId, monthKey, dbh);
+      if (outcome.blocked) return refuse(`A dues charge for ${monthLabel(monthKey)} is still being reconciled with Stripe; try again after it settles. Nothing was proposed.`, 'dues_outcome_unresolved');
+    }
+    return null;
   },
   // The customer page's save sends the membership welcome email when an edit
   // turns a non-member into a member (admin-customers.js PUT, the
@@ -475,9 +492,13 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   // A completion that committed its record but has not finished billing still
   // holds the billing type it read at entry (and its visit is completed, so no
   // visit check sees it): the durable attempt row is the fence
-  // (completion-attempts.js customerHasCompletionInFlight). Under the commit's
+  // (completion-attempts.js customerCompletionInFlightState). Under the commit's
   // customer lock no new completion can reach that state, so a clear read holds.
-  if (await require('../completion-attempts').customerHasCompletionInFlight(customerId, dbh)) {
+  const inFlight = await require('../completion-attempts').customerCompletionInFlightState(customerId, dbh);
+  if (inFlight === 'pending') {
+    return refuse('A completed visit for this customer still has billing to finish (retry pending). Finish or release it first. Nothing was proposed.', 'billing_completion_pending');
+  }
+  if (inFlight) {
     return refuse('A visit for this customer was just completed and its billing is still being finalized. Try again in a few minutes. Nothing was proposed.', 'billing_completion_pending');
   }
   // The card does not predict per-visit charges (price, tax, surcharge,
@@ -497,7 +518,7 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   if (pageRefusal) return pageRefusal;
   const after = { ...row, ...fields };
   const ctx = {
-    dbh, customerId, row, after, fields, visits, facts,
+    dbh, customerId, row, after, fields, visits, facts, openDues: facts.openDues || [],
     laneBefore: resolveBillingLane(row).mode, laneAfter: resolveBillingLane(after).mode,
   };
   for (const check of SIDE_FLOW_CHECKS) {
@@ -515,7 +536,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 // visit never reaches it.
 const SALES_TAX = 'Sales tax is added where it applies.';
 const LANE_HEAD = {
-  per_application: ({ after }) => `Each completed visit is charged the ${money(after.per_application_fee)} per-application fee. Callbacks and free visit types bill nothing. No monthly dues charge. ${SALES_TAX}`,
+  per_application: ({ after }) => `Each performed application is charged the ${money(after.per_application_fee)} per-application fee. A visit closed out as ${NON_PERFORMED_VISIT_OUTCOMES.map((o) => o.replace(/_/g, ' ')).join(' or ')} performs none and bills nothing, and neither do callbacks and free visit types. No monthly dues charge. ${SALES_TAX}`,
   monthly_membership: ({ after, dues, visits }) => (dues && !dues.eligible
     // Promised only when the dues run really charges this customer
     // (monthly-dues-eligibility.js); a move into monthly is refused unless
@@ -586,8 +607,9 @@ async function billingEditProposal(customerId, updates, dbh = db) {
       'payer_id', 'autopay_enabled', 'autopay_paused_until', dbh.raw('updated_at::text AS version'));
   if (!row) return refuse('No customer matches that id — nothing was proposed.', 'customer_not_found');
   const visits = await upcomingVisits(dbh, customerId);
+  const openDues = await require('../billing-lane').openStampedDuesInvoices(dbh, customerId);
   const facts = await billingFacts(dbh, customerId, row, parsed.fields);
-  const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields, visits, facts);
+  const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields, visits, { ...facts, openDues });
   if (refusal) return refusal;
   const after = { ...row, ...parsed.fields };
   // Already monthly: the move-in check above did not run, so ask the dues
@@ -602,7 +624,6 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     if (e && e.billingUnverified) return refuse(e.billingUnverified.message, e.billingUnverified.code);
     throw e;
   }
-  const openDues = await require('../billing-lane').openStampedDuesInvoices(dbh, customerId);
   return {
     pin: cardPin(row, visits, parsed.fields, charge, openDues, facts),
     version: row.version,
@@ -714,7 +735,7 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   if (cardPin(lockedBefore, visits, fields, charge, openDues, facts) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
-  const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits, facts);
+  const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits, { ...facts, openDues });
   if (refusal) throw changed(refusal.error.replace('Nothing was proposed.', 'Nothing was updated.'));
 }
 

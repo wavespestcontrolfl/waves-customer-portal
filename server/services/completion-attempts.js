@@ -263,21 +263,34 @@ async function hasCommittedCompletionAttempt(serviceId, knex = db) {
 // committed the record still holds the billing type it read at entry, so a
 // billing-type edit landing now would not reach it (the visit is completed, so
 // no visit-based check sees it either). Bounded by the window claimSideEffectsRun
-// itself treats as owned (STALE_SIDE_EFFECTS_MS): after it another run reclaims
-// the attempt and reloads the customer, so an abandoned row never blocks an edit
-// for long. Writers that hold the customer row FOR UPDATE (the Intelligence Bar
+// itself treats as owned (STALE_SIDE_EFFECTS_MS) for a RUNNING row: after it another
+// run reclaims the attempt and reloads the customer, so an abandoned running row never
+// blocks an edit for long. A PENDING row (a released completion) is claimed at any age
+// and resumes with the frozen amount, so it fences until it is finished or released. Writers that hold the customer row FOR UPDATE (the Intelligence Bar
 // billing-type commit) cannot race the transition into this state: the
 // completing transaction holds the customer FOR SHARE from before its first
 // write to its commit.
-async function customerHasCompletionInFlight(customerId, knex = db) {
+async function customerCompletionInFlightState(customerId, knex = db) {
   const cutoff = new Date(Date.now() - STALE_SIDE_EFFECTS_MS);
-  const row = await knex('service_completion_attempts as a')
+  // The window applies to `side_effects_running` only (another run reclaims a stale one).
+  // A `side_effects_pending` row is a released completion: claimSideEffectsRun accepts it
+  // at ANY age and the resume mints the frozen required amount, so it fences at any age.
+  const rows = await knex('service_completion_attempts as a')
     .join('scheduled_services as s', 's.id', 'a.service_id')
     .where('s.customer_id', customerId)
-    .whereIn('a.status', ['side_effects_running', 'side_effects_pending'])
-    .where('a.updated_at', '>=', cutoff)
-    .first('a.id');
-  return Boolean(row);
+    .where(function inFlight() {
+      this.where('a.status', 'side_effects_pending')
+        .orWhere(function running() {
+          this.where('a.status', 'side_effects_running').where('a.updated_at', '>=', cutoff);
+        });
+    })
+    .select('a.status');
+  if (rows.some((r) => r.status === 'side_effects_pending')) return 'pending';
+  return rows.length ? 'running' : null;
+}
+
+async function customerHasCompletionInFlight(customerId, knex = db) {
+  return Boolean(await customerCompletionInFlightState(customerId, knex));
 }
 
 // Read-only status for the panel's lightweight side-effects poll (codex P1
@@ -873,6 +886,7 @@ module.exports = {
   withoutPhotoBytes,
   hasCommittedCompletionAttempt,
   customerHasCompletionInFlight,
+  customerCompletionInFlightState,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency
   // hash and the authorization gate can never disagree about what counts

@@ -12,7 +12,7 @@ jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
     // whereRaw notes the dues stamp, so the open-dues query is told apart from the visits' invoices.
-    q.whereRaw = (sql) => { if (String(sql).includes('membership_dues_month')) q.duesQuery = true; if (String(sql).includes('ambiguous_outcome')) q.ambiguousQuery = true; return q; };
+    q.whereRaw = (sql, args) => { if (String(sql).includes("billed_month' = ?") && Array.isArray(args)) q.billedMonth = args[0]; if (String(sql).includes('membership_dues_month')) q.duesQuery = true; if (String(sql).includes('ambiguous_outcome')) q.ambiguousQuery = true; return q; };
     for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orderBy', 'join']) q[m] = () => q;
     // limit is honoured, so a card that cut the visits at a page size would show it.
     q.limit = (n) => { q.cap = n; return q; };
@@ -35,7 +35,7 @@ jest.mock('../models/db', () => {
       if (table === 'scheduled_services') return mockState.roots[0] || null;
       if (table.startsWith('service_completion_attempts')) return mockState.inFlight ? { id: 'att-1' } : null;
       if (table === 'stripe_orphan_charges') return mockState.orphan;
-      if (table === 'payments') return q.ambiguousQuery ? mockState.ambiguous : (q.statuses && q.statuses.includes('processing') ? mockState.processing : mockState.armed);
+      if (table === 'payments') return q.ambiguousQuery ? (mockState.ambiguous && (!mockState.ambiguous.month || mockState.ambiguous.month === q.billedMonth) ? mockState.ambiguous : null) : (q.statuses && q.statuses.includes('processing') ? mockState.processing : mockState.armed);
       return null;
     };
     q.then = (resolve, reject) => {
@@ -54,6 +54,7 @@ jest.mock('../models/db', () => {
         if (q.nowait && mockState.methodsBusy) return Promise.reject(Object.assign(new Error('could not obtain lock on row'), { code: '55P03' })).then(resolve, reject);
         rows = mockState.methodRows;
       }
+      if (table.startsWith('service_completion_attempts')) rows = mockState.inFlight ? [{ status: mockState.inFlight === 'pending' ? 'side_effects_pending' : 'side_effects_running' }] : [];
       if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
       if (q.cap != null) rows = rows.slice(0, q.cap);
       return Promise.resolve(rows).then(resolve, reject);
@@ -332,7 +333,7 @@ describe('card text', () => {
     const labels = contract.effects.map((e) => e.label);
     expect(labels).toContain('Billing type: billed by monthly membership (dues each month) → billed per application (each visit)');
     expect(labels).toContain('Per-application fee: none on file → $147.00');
-    expect(labels).toContain('Each completed visit is charged the $147.00 per-application fee. Callbacks and free visit types bill nothing. No monthly dues charge. Sales tax is added where it applies.');
+    expect(labels).toContain('Each performed application is charged the $147.00 per-application fee. A visit closed out as inspection only or customer declined performs none and bills nothing, and neither do callbacks and free visit types. No monthly dues charge. Sales tax is added where it applies.');
     expect(labels).toContain('Future charges under this type go to the saved card ending 4242.');
     expect(labels).toContain('Credit-card charges carry the configured card surcharge.');
     // No per-visit amount is projected.
@@ -1035,18 +1036,122 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       })).error).toBeUndefined();
     });
 
-    test('the fence reads the attempt rows the completing transaction writes: running or pending, within the claim\'s own window, for this customer\'s visits', async () => {
-      const calls = [];
-      const q = { join: (...a) => { calls.push(['join', ...a]); return q; }, where: (...a) => { calls.push(['where', ...a]); return q; }, whereIn: (...a) => { calls.push(['whereIn', ...a]); return q; }, first: async () => null };
-      const knex = jest.fn((t) => { calls.push(['table', t]); return q; });
-      expect(await require('../services/completion-attempts').customerHasCompletionInFlight('cust-9', knex)).toBe(false);
-      expect(calls).toContainEqual(['table', 'service_completion_attempts as a']);
-      expect(calls).toContainEqual(['join', 'scheduled_services as s', 's.id', 'a.service_id']);
-      expect(calls).toContainEqual(['where', 's.customer_id', 'cust-9']);
-      expect(calls).toContainEqual(['whereIn', 'a.status', ['side_effects_running', 'side_effects_pending']]);
-      const window = calls.find((c) => c[0] === 'where' && c[1] === 'a.updated_at');
-      expect(window[2]).toBe('>=');
-      expect(Date.now() - window[3].getTime()).toBeGreaterThanOrEqual(require('../services/completion-attempts').STALE_SIDE_EFFECTS_MS - 1000);
+    describe('Codex round 17: the staleness window applies to running rows only', () => {
+      // A tiny in-memory knex that EVALUATES the where clauses the fence builds: a flat list of
+      // terms joined by AND / OR, a function argument being a nested group.
+      const fakeKnex = (rows) => {
+        const leaf = (col, op, val) => (r) => {
+          const x = r[col.replace('a.', '')];
+          return val === undefined ? x === op : (op === '>=' ? x >= val : x === val);
+        };
+        const makeBuilder = (terms) => {
+          const b = {};
+          const add = (conn, c, o, v) => {
+            if (typeof c === 'function') {
+              const inner = [];
+              c.call(makeBuilder(inner));
+              terms.push({ conn, f: (r) => inner.reduce((acc, t, i) => (i === 0 ? t.f(r) : (t.conn === 'or' ? acc || t.f(r) : acc && t.f(r))), true) });
+            } else if (!String(c).startsWith('s.')) terms.push({ conn, f: leaf(c, o, v) });
+            return b;
+          };
+          b.join = () => b;
+          b.where = (c, o, v) => add('and', c, o, v);
+          b.orWhere = (c, o, v) => add('or', c, o, v);
+          b.select = async () => rows.filter((r) => terms.reduce((acc, t, i) => (i === 0 ? t.f(r) : (t.conn === 'or' ? acc || t.f(r) : acc && t.f(r))), true));
+          return b;
+        };
+        const root = makeBuilder([]);
+        return jest.fn(() => root);
+      };
+      const HOURS = (n) => new Date(Date.now() - n * 3600 * 1000);
+      const state = async (rows) => require('../services/completion-attempts').customerCompletionInFlightState('cust-9', fakeKnex(rows));
+
+      test('a 2-hour-old pending row fences; a 2-hour-old running row does not; a fresh running row does', async () => {
+        expect(await state([{ status: 'side_effects_pending', updated_at: HOURS(2) }])).toBe('pending');
+        expect(await state([{ status: 'side_effects_running', updated_at: HOURS(2) }])).toBe(null);
+        expect(await state([{ status: 'side_effects_running', updated_at: HOURS(0.01) }])).toBe('running');
+        expect(await state([{ status: 'side_effects_running', updated_at: HOURS(2) }, { status: 'side_effects_pending', updated_at: HOURS(3) }])).toBe('pending');
+        expect(await state([])).toBe(null);
+      });
+
+      test('the boolean reader is the same answer', async () => {
+        const { customerHasCompletionInFlight } = require('../services/completion-attempts');
+        expect(await customerHasCompletionInFlight('cust-9', fakeKnex([{ status: 'side_effects_pending', updated_at: HOURS(2) }]))).toBe(true);
+        expect(await customerHasCompletionInFlight('cust-9', fakeKnex([{ status: 'side_effects_running', updated_at: HOURS(2) }]))).toBe(false);
+      });
+
+      test('the card words the pending case as a retry that is still owed', async () => {
+        mockState.customer = { ...MONTHLY };
+        mockState.inFlight = 'pending';
+        expect(await propose(LEAVE)).toMatchObject({
+          code: 'billing_completion_pending',
+          error: 'A completed visit for this customer still has billing to finish (retry pending). Finish or release it first. Nothing was proposed.',
+        });
+        mockState.inFlight = true;
+        expect(await propose(LEAVE)).toMatchObject({ code: 'billing_completion_pending', error: expect.stringContaining('just completed') });
+      });
+    });
+  });
+
+  describe('Codex round 17: ambiguity in the prior month, performed applications, draft dues', () => {
+    const ET = require('../utils/datetime-et');
+    const [yy, mm] = ET.etDateString().split('-').map(Number);
+    const prior = mm === 1 ? `${yy - 1}-12` : `${yy}-${String(mm - 1).padStart(2, '0')}`;
+    const monthName = (key) => new Date(`${key}-01T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+    test('a dues attempt parked as ambiguous in the PRIOR month refuses, naming that month; this month still does', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.ambiguous = { id: 'pay-amb', month: prior };
+      expect(await propose(LEAVE)).toMatchObject({
+        code: 'dues_outcome_unresolved',
+        error: `A dues charge for ${monthName(prior)} is still being reconciled with Stripe; try again after it settles. Nothing was proposed.`,
+      });
+      mockState.ambiguous = { id: 'pay-amb', month: ET.etDateString().slice(0, 7) };
+      expect(await propose(LEAVE)).toMatchObject({ code: 'dues_outcome_unresolved' });
+      mockState.ambiguous = { id: 'pay-amb', month: '2001-01' };
+      expect((await propose(LEAVE)).error).toBeUndefined();
+    });
+
+    test('the per-application line says performed applications and discloses the non-performed outcomes from the completion route\'s own list', async () => {
+      mockState.customer = { ...BASE };
+      const lines = (await propose({ billing_mode: 'per_application', per_application_fee: 147 })).display.next_visits.join(' ');
+      expect(lines).toContain('Each performed application is charged the $147.00 per-application fee.');
+      expect(lines).toContain('A visit closed out as inspection only or customer declined performs none and bills nothing');
+      expect(lines).not.toContain('Each completed visit');
+    });
+
+    test('source contract: one list of non-performed outcomes, read by the completion route and the card; the card retypes none', () => {
+      const fs = require('fs');
+      const { NON_PERFORMED_VISIT_OUTCOMES, visitWasPerformed } = require('../services/visit-outcomes');
+      expect(NON_PERFORMED_VISIT_OUTCOMES).toEqual(['inspection_only', 'customer_declined']);
+      expect(visitWasPerformed('completed')).toBe(true);
+      expect(visitWasPerformed('inspection_only')).toBe(false);
+      expect(visitWasPerformed('customer_declined')).toBe(false);
+      const route = fs.readFileSync(require.resolve('../services/complete-scheduled-service.js'), 'utf8');
+      expect(route).toContain("const visitPerformed = require('./visit-outcomes').visitWasPerformed(visitOutcome);");
+      const card = fs.readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
+      expect(card).toContain("require('../visit-outcomes')");
+      expect(card).not.toMatch(/'inspection_only'|'customer_declined'/);
+    });
+
+    test('a stamped dues invoice still in draft refuses a departure, naming its month; a sent one passes; a draft that appears after the card refuses', async () => {
+      const month = ET.etDateString().slice(0, 7);
+      const dues = (status) => [{ id: 'dues-1', total: '55.00', status, customer_id: CUSTOMER_ID, payer_id: null, line_items: [{ membership_dues_month: month }] }];
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      mockState.dues = dues('draft');
+      expect(await propose({ billing_mode: 'per_visit' })).toMatchObject({
+        code: 'billing_dues_draft',
+        error: `A dues invoice for ${monthName(month)} is still a draft. Send it or void it first. Nothing was proposed.`,
+      });
+      mockState.dues = dues('sent');
+      const card = await propose({ billing_mode: 'per_visit' });
+      expect(card.error).toBeUndefined();
+      // The draft appears after the card: the pin differs, so the commit refuses and writes nothing.
+      mockState.dues = dues('draft');
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: { billing_mode: 'per_visit' }, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
     });
   });
 
