@@ -1132,10 +1132,19 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // parent unstamped) and every settled non-spam office callback linked to
   // that parent. A correction reopens the card or stamps a standing
   // callback, so the parent leaves this scan either way.
+  // Only callbacks lockCallbackPair would accept (inbound voicemail parent
+  // with a reported end, same number, placed after that end): an ineligible
+  // callback would be a no-op forever and could fill the batch.
+  const digits = (col) => `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10)`;
   const swept = await db('triage_items as ti').join('call_log as p', 'p.id', 'ti.call_log_id')
     .join('call_log as cb', db.raw("cb.metadata->>'relatedCallId' = p.id::text"))
-    .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback' })
+    .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback', 'p.direction': 'inbound' })
+    .where('cb.direction', 'like', 'outbound%')
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
+    .whereNotNull('p.duration_seconds').whereNull('p.processing_token')
+    .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(COALESCE(p.duration_seconds, 0), 0))")
+    .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
     .whereNotExists(function liveRowForReason() {
       this.select(db.raw('1')).from('triage_items as live').whereRaw('live.call_log_id = ti.call_log_id AND live.reason_code = ti.reason_code').whereIn('live.status', ['open', 'in_progress']);
     })
