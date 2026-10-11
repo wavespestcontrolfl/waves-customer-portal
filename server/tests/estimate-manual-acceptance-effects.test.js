@@ -548,6 +548,29 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       { kind: 'one_time_line', name: 'Rodent bundle discount', amount: -50, consequence: 'subtract_when_invoicing' },
     ]);
   });
+  test('round 19: an engineResult-only container is read, and a row mirrored in result and engineResult is listed once', async () => {
+    const rows = [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }];
+    for (const estimate_data of [
+      { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { oneTime: { items: rows, total: 350 } } },
+      { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, result: { oneTime: { items: [{ ...rows[0] }], total: 350 } }, engineResult: { oneTime: { items: [{ ...rows[0] }] } } },
+    ]) {
+      const world = makeWorld({ estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify(estimate_data) } });
+      const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+      expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
+        { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      ]);
+    }
+  });
+  test('round 19: the nested result.results.oneTime total and membership fee are read when the row total is null', () => {
+    const estimate = { onetime_total: null, estimate_data: JSON.stringify({ result: { results: { oneTime: { total: 449, membershipFee: 99 } } } }) };
+    expect(Effects.oneTimeAggregateTotal(estimate)).toBe(449);
+    const world = makeWorld({ estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify({ recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, result: { results: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }], total: 449, membershipFee: 99 } } } }) } });
+    return markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })).then(({ effects }) => {
+      expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([
+        ['German Roach Cleanout', 350], ['WaveGuard membership fee', 99],
+      ]);
+    });
+  });
   test('round 15: a line with no amount field at all is not listed; an explicit $0 is comped work to schedule', async () => {
     const world = makeWorld({
       estimateOverrides: {

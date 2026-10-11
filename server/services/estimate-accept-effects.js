@@ -179,7 +179,8 @@ function parseData(value) {
 // listed as its own line from the fee field; a line sum that still falls
 // short of the aggregate is refused by unitemizedOneTimeRefusal below.
 const MEMBERSHIP_FEE_PATHS = [
-  ['oneTime', 'membershipFee'], ['result', 'oneTime', 'membershipFee'], ['results', 'oneTime', 'membershipFee'], ['engineResult', 'oneTime', 'membershipFee'],
+  ['oneTime', 'membershipFee'], ['result', 'oneTime', 'membershipFee'], ['results', 'oneTime', 'membershipFee'],
+  ['result', 'results', 'oneTime', 'membershipFee'], ['engineResult', 'oneTime', 'membershipFee'],
 ];
 const readPath = (data, path) => path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), data);
 function membershipFeeLine(data) {
@@ -189,10 +190,28 @@ function membershipFeeLine(data) {
   }
   return null;
 }
+// The parser reads `result` (or the document itself), never `engineResult`:
+// an estimate stored with only an engineResult container, or with a mapped
+// `result` beside a separate engineResult, keeps those rows invisible unless
+// the container is wrapped, exactly as estimate-proposal-generate does. The
+// same row mirrored across containers is collapsed by content identity.
+function oneTimeItemsAcrossContainers(data, converter) {
+  const read = (doc) => converter.estimateOneTimeItemsFromData(doc, { collapseMirrored: true });
+  const engine = data?.engineResult && typeof data.engineResult === 'object' && data.engineResult !== data.result ? data.engineResult : null;
+  const rows = [...read(data), ...(engine ? read({ result: engine }) : [])];
+  const seen = new Set();
+  return rows.filter((item) => {
+    const key = [String(item.service || '').toLowerCase(), String(item.name || item.label || '').trim().toLowerCase(), lineAmount(item)].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function oneTimeLineEffects(estimate, converter) {
   if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return [];
   const data = parseData(estimate.estimate_data);
-  const items = converter.estimateOneTimeItemsFromData(data, { collapseMirrored: true });
+  const items = oneTimeItemsAcrossContainers(data, converter);
   const lines = items
     .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: lineAmount(item) }))
     .filter((line) => line.amount != null)
@@ -221,7 +240,8 @@ function pooledDiscountLine(estimate, lines) {
 // legacy estimate can carry only this aggregate and no priced item, so the
 // lines above are empty while the customer still owes the amount.
 const ONE_TIME_AGGREGATE_PATHS = [
-  ['onetime_total'], ['oneTime', 'total'], ['results', 'oneTime', 'total'], ['result', 'oneTime', 'total'], ['engineResult', 'oneTime', 'total'],
+  ['onetime_total'], ['oneTime', 'total'], ['results', 'oneTime', 'total'], ['result', 'oneTime', 'total'],
+  ['result', 'results', 'oneTime', 'total'], ['engineResult', 'oneTime', 'total'],
 ];
 //
 // An explicit zero is authoritative: the mapper lets a positive item be
