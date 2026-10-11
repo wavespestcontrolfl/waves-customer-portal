@@ -400,6 +400,51 @@ describe('refusals', () => {
     expect((await run(BASE_INPUT)).code).toBeUndefined();
   });
 
+  test('an unlinked commercial proposal on the same phone does not refuse; a linked one does (round 5)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    tables.customers = [memberCustomer({ phone: '+19415550123' })];
+    const proposal = { proposal: { enabled: true } };
+    tables.estimates = [{
+      id: 'est-prop', customer_id: null, status: 'sent', created_at: '2026-10-02T15:00:00Z', estimate_data: proposal, customer_phone: '(941) 555-0123',
+    }];
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer')
+      .mockResolvedValue({ customerId: CUSTOMER_ID, lookupFailed: false });
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+    expect(resolver).not.toHaveBeenCalled();
+    // The same proposal linked by customer_id counts whatever its category.
+    tables.estimates = [{ ...tables.estimates[0], customer_id: CUSTOMER_ID }];
+    expect((await run(BASE_INPUT)).code).toBe('program_open_estimate');
+    // A scaffold proposal is the same lane; a residential unlinked estimate on the phone still refuses.
+    tables.estimates = [{ ...tables.estimates[0], customer_id: null, estimate_data: { proposal: { scaffold: true } } }];
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+    tables.estimates = [{ ...tables.estimates[0], customer_id: null, estimate_data: {} }];
+    expect((await run(BASE_INPUT)).code).toBe('program_open_estimate');
+  });
+
+  test('a sole property missing its ZIP (or street, city, state) refuses at planning, naming the field (round 5)', async () => {
+    tables.customer_properties = [{ id: 'prop-1', address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '' }];
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_property_incomplete');
+    expect(result.error).toContain('missing its ZIP code');
+    tables.customer_properties = [{ id: 'prop-1', address_line1: '', city: ' ', state: 'FL', zip: '34201' }];
+    expect((await run(BASE_INPUT)).error).toContain('missing its street, city');
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+    // The predicate is the booking's own, imported.
+    const Props = require('../services/customer-properties');
+    expect(Props.missingBookingPropertyFields({ address_line1: 'a', city: 'b', state: 'c', zip: 'd' })).toEqual([]);
+  });
+
+  test('a date planner that cannot place all four visits refuses before the card; commit asserts four too (round 5)', async () => {
+    jest.spyOn(Schedule, 'seasonalSafeShift').mockReturnValue(null);
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_dates_unplannable');
+    expect(result.error).toBe('Could not place all four visits around blackout and closed days; book on the calendar. Nothing was proposed.');
+    expect(result.preview).toBeUndefined();
+    Schedule.seasonalSafeShift.mockRestore();
+    const src = require('fs').readFileSync(require.resolve('../services/intelligence-bar/start-program'), 'utf8');
+    expect(src).toContain('if (plan.visitDates.length !== ONGOING_PRESEED) return { ...unplannableDates(), preview_changed: true };');
+  });
+
   test('a retired-for-sale service is refused at the card, before any approval (round 4)', async () => {
     const Library = require('../services/service-library');
     const retired = jest.spyOn(Library, 'retiredServicesNotHeldBy').mockResolvedValue([{ service_key: 'tree_shrub_quarterly', name: 'Tree & Shrub Care (quarterly)' }]);

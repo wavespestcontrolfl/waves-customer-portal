@@ -23,8 +23,8 @@
  *     site updates an existing row), then this lock immediately before the write
  *     (or, for the booking, right before the open-estimate read), after the
  *     transaction's other locks, and take no other lock after it.
- *   - A null customer id locks nothing (an estimate with no customer cannot be
- *     the open estimate of a customer's booking).
+ *   - A null customer id locks nothing; a reopen site whose estimate may have no customer_id uses
+ *     lockCustomerEstimatesForEstimate, which also locks the prospective owner.
  */
 
 async function lockCustomerEstimates(trx, customerId) {
@@ -35,4 +35,26 @@ async function lockCustomerEstimates(trx, customerId) {
   );
 }
 
-module.exports = { lockCustomerEstimates };
+/**
+ * Lock for a REOPEN site, where the estimate may have no customer_id yet (or one that differs from the
+ * customer the accept would land on). Locks the estimate's own customer AND the prospective owner the
+ * accept resolves to (resolveProspectiveAcceptCustomer: the estimate group's owner, then the phone match),
+ * so an unarchive or revival of a phone-matched row cannot race the booking's open-estimate check.
+ * The resolver runs on a copy with customer_id cleared so it reports the prospective owner even for a
+ * linked row. Both ids are locked in sorted order (one order everywhere); a failed lookup logs and locks
+ * what is known. Same leaf rule as lockCustomerEstimates: take it after the row and other locks.
+ */
+async function lockCustomerEstimatesForEstimate(trx, estimate) {
+  const ids = new Set();
+  if (estimate?.customer_id) ids.add(String(estimate.customer_id));
+  try {
+    const { resolveProspectiveAcceptCustomer } = require('../services/recurring-card-on-file');
+    const { customerId } = await resolveProspectiveAcceptCustomer({ ...estimate, customer_id: null }, trx, { authoritative: true });
+    if (customerId) ids.add(String(customerId));
+  } catch (err) {
+    require('../services/logger').warn(`[customer-estimate-lock] prospective owner lookup failed: ${err.message}`);
+  }
+  for (const id of [...ids].sort()) await lockCustomerEstimates(trx, id);
+}
+
+module.exports = { lockCustomerEstimates, lockCustomerEstimatesForEstimate };

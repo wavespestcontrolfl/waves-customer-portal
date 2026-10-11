@@ -3318,7 +3318,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const { DELIVERY_CLAIM_NOT_LIVE_SQL: CLAIM_NOT_LIVE } = require('../utils/estimate-claim-sql');
           // The refresh un-archives the draft (archived_at: null) — a reactivation, so it
           // takes the same per-customer estimate lock as an insert.
-          await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, estFields.customer_id);
+          await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields });
           const refreshedExisting = await trx('estimates').where({ id: existingEst.id }).whereRaw(CLAIM_NOT_LIVE).update({
             ...estFields,
             ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),

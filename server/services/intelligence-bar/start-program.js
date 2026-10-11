@@ -144,6 +144,7 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
 //     owner first, then the phone match) resolves it to this customer;
 //   - it is a member of an estimate group that one of this customer's estimates belongs to (the accept lands
 //     a grouped member on the group's owner, with or without a phone on the member).
+// An unlinked commercial proposal is not matched (its win creates a new commercial profile).
 // A lookup that fails counts as a match: it fails closed.
 async function openEstimateRowsForCustomer(customerId, conn) {
   // The estimate lifecycle's open set (sending included); an archived row keeps
@@ -162,10 +163,15 @@ async function openEstimateRowsForCustomer(customerId, conn) {
       this.whereIn('estimate_group_id', ownGroups);
       if (digits.length >= 10) this.orWhereRaw("regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`]);
     })
-    .select(...columns, 'customer_phone', 'customer_phone_typed', 'estimate_group_id');
+    .select(...columns, 'customer_phone', 'customer_phone_typed', 'estimate_group_id', 'estimate_data');
   const { resolveProspectiveAcceptCustomer } = require('../recurring-card-on-file');
+  const { isCommercialProposalData } = require('../estimate-proposal');
   const matched = [];
   for (const est of unlinked) {
+    // A commercial proposal never lands on an existing residential customer: its win always creates a NEW
+    // commercial profile (proposal-win.js). Only the unlinked, resolver-based match skips that lane; an
+    // estimate linked by customer_id counts whatever its category.
+    if (isCommercialProposalData(est.estimate_data)) continue;
     const { customerId: ownerId, lookupFailed } = await resolveProspectiveAcceptCustomer(est, conn, { authoritative: true });
     if (lookupFailed || String(ownerId || '') === String(customerId)) matched.push(est);
   }
@@ -262,6 +268,13 @@ async function loadProgramCustomer(customerId) {
   // lazy primary), an effect this card does not show.
   if (!(properties || []).length) {
     return refusal('This customer has no saved service address. Add the service address as a property on the customer page first. Nothing was proposed.', 'program_no_property');
+  }
+  // The booking stamps this property and refuses one without a street, city, state and ZIP
+  // (bookingPropertyStamp): the same predicate, so no card is built that always fails.
+  const { missingBookingPropertyFields, BOOKING_PROPERTY_FIELD_LABELS } = require('../customer-properties');
+  const missing = missingBookingPropertyFields(properties[0]);
+  if (missing.length) {
+    return refusal(`The saved service address is missing its ${missing.map((f) => BOOKING_PROPERTY_FIELD_LABELS[f]).join(', ')}. Complete it on the customer page first. Nothing was proposed.`, 'program_property_incomplete');
   }
   // The address the visits anchor to: the sole active property (the
   // handler's soleActivePropertyId), else the customer's own address.
@@ -514,7 +527,13 @@ async function plannedVisitDates(customerId, firstDate, cadence) {
     if (!next || Sched.recurringCandidateTooCloseToAnchor(firstDate, cadence, next) || dates.includes(next)) continue;
     dates.push(next);
   }
-  return dates;
+  return dates.length === ONGOING_PRESEED ? dates : unplannableDates();
+}
+
+// The card promises exactly ONGOING_PRESEED visits. When shifting around blackout and closed days exhausts the
+// attempt cap first, the plan refuses (the same refusal commitProgram asserts before it books).
+function unplannableDates() {
+  return refusal(`Could not place all ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visits around blackout and closed days; book on the calendar. Nothing was proposed.`, 'program_dates_unplannable');
 }
 
 // D3: the Schedule screen's texts. The new-recurring welcome text has no
@@ -955,6 +974,9 @@ async function commitProgram(input, actionContext) {
   if (plan.version !== approved) {
     return { error: 'What this program start would do changed after the card was shown (customer, bill, tier, technician, time or texts). Nothing was booked. Ask again for a fresh card.', preview_changed: true };
   }
+
+  // Defensive: the planner already refuses unless exactly the promised visits were planned.
+  if (plan.visitDates.length !== ONGOING_PRESEED) return { ...unplannableDates(), preview_changed: true };
 
   // Step 1: the series, through the Schedule screen's own handler.
   const booking = await bookSeries(plan, actionContext);

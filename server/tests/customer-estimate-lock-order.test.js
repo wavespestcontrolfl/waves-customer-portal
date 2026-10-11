@@ -9,15 +9,15 @@
 const fs = require('fs');
 
 const read = (rel) => fs.readFileSync(require.resolve(rel), 'utf8');
-const LOCK = 'lockCustomerEstimates(trx';
+const LOCK = 'lockCustomerEstimatesForEstimate(trx';
 const LOCKS_AFTER = /pg_advisory_xact_lock|lockCustomerComms\(|lockInspectionCreditCustomer\(/;
 
 // [name, file, how the estimate row is locked before the leaf lock]
 const SITES = [
-  ['public-quote refresh', '../routes/public-quote', 'lockCustomerEstimates(trx, estFields.customer_id)', /\.forUpdate\(\)/],
+  ['public-quote refresh', '../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', /\.forUpdate\(\)/],
   ['admin unarchive', '../routes/admin-estimates', "where({ id: req.params.id }).forUpdate().first('id');", null],
   ['admin proposal revival', '../routes/admin-estimates', 'if (revivingBid) await require', /const locked = await trx\('estimates'\)\.where\(\{ id: estimate\.id \}\)\.forUpdate\(\)/],
-  ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimates(trx, estimate.customer_id)', /\.forUpdate\(\)/],
+  ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, estimate)', /\.forUpdate\(\)/],
 ];
 
 describe('customer estimate lock order (row lock first, then the leaf lock)', () => {
@@ -83,8 +83,18 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(src.slice(src.indexOf('const existingDraft'), start)).toMatch(/status: 'draft'[\s\S]*whereNull\('archived_at'\)/);
   });
 
-  test('the lock module exports only lockCustomerEstimates', () => {
-    expect(Object.keys(require('../utils/customer-estimate-lock'))).toEqual(['lockCustomerEstimates']);
+  test('the lock module exports only the two lock functions', () => {
+    expect(Object.keys(require('../utils/customer-estimate-lock')).sort()).toEqual(['lockCustomerEstimates', 'lockCustomerEstimatesForEstimate']);
+  });
+
+  test('every reopen site that may hold a null customer_id locks the prospective owner too (round 5)', () => {
+    const sites = [
+      ['../routes/admin-estimates', "lockCustomerEstimatesForEstimate(trx, estimate);", 'unarchive'],
+      ['../routes/admin-estimates', 'lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked })', 'revival'],
+      ['../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, estimate)', 'extend'],
+      ['../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', 'refresh'],
+    ];
+    for (const [rel, anchor] of sites) expect(read(rel)).toContain(anchor);
   });
 
   test('an unlinked estimate insert locks the customer the accept would resolve, before the insert', () => {

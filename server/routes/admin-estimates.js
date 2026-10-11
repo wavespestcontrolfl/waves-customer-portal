@@ -4654,7 +4654,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // Reviving an expired bid makes the estimate open again: take the per-customer estimate
     // lock (a reactivation, like an insert), after this transaction's row locks, so the
     // booking's open-estimate check cannot miss it.
-    if (revivingBid) await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, locked.customer_id || estimate.customer_id);
+    if (revivingBid) await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked });
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
@@ -5089,7 +5089,7 @@ router.post('/:id/unarchive', async (req, res, next) => {
     // refresh: the estimate row first, then the per-customer lock (a leaf).
     const [updated] = await db.transaction(async (trx) => {
       await trx('estimates').where({ id: req.params.id }).forUpdate().first('id');
-      await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, estimate.customer_id);
+      await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, estimate);
       return trx('estimates')
         .where({ id: req.params.id, status: estimate.status })
         // Observed-state guard, mirroring the archive route (codex pre-push

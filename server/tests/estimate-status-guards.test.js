@@ -544,6 +544,27 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
   });
+
+  test('an unlinked, phone-matched estimate: the unarchive takes the lock of the customer the accept resolves to (round 5)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'cust-owner', lookupFailed: false });
+    const estimate = { id: 'e2', customer_id: null, customer_phone: '(941) 555-0123', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    const readBuilder = makeBuilder({ first: estimate });
+    const writeBuilder = makeBuilder({});
+    writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
+    writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
+    const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
+    const trx = jest.fn(() => writeBuilder);
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => freshBuilder);
+    await unarchiveHandler({ params: { id: 'e2' }, body: {} }, makeRes(), jest.fn());
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'e2', customer_id: null }), trx, { authoritative: true });
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-owner']);
+    expect(writeBuilder.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.raw.mock.invocationCallOrder[0]);
+    resolver.mockRestore();
+  });
 });
 
 describe('POST /:id/mark-accepted — converter pricing refusals reach the admin UI with their code (pre-push codex P1 on #3751)', () => {
