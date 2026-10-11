@@ -62,11 +62,12 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
+  SheetHeader, TimeOnSite, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
+import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
 import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { evaluateNeonicCap } from '../../lib/tree-shrub-neonic-cap';
 import { Button, ActionFeedback, cn } from '../ui';
@@ -324,11 +325,13 @@ function contextFrom(data, service) {
     watchList: watchListFrom(data),
     pestCheck: objectOrNull(data?.pestCheck),
     neonicCap: objectOrNull(data?.neonicCap),
+    // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+    wrapUp: data?.wrapUp === true,
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -413,7 +416,7 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
-function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {} }) {
+function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {}, wrapUp = null }) {
   const active = rows.filter((row) => row.active);
   const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
@@ -469,11 +472,9 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
     customerInteraction: form.customerHome,
     techTips: techTipsOf(form, tipsAvailable),
     // Same as the full form (owner ruling): the completion text, the review
-    // ask and the pay link go out the way they do from there.
-    sendCompletionSms: true,
-    requestReview: true,
-    includePayLink: true,
-    reviewTiming: 'auto',
+    // ask and the pay link go out the way they do from there. The Wrap-up
+    // section's choices (GATE_FAST_COMPLETE_WRAP_UP) stand in for these four.
+    ...(wrapUp || { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' }),
   };
 }
 
@@ -607,11 +608,15 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     }
     setCheckingStock(false);
   };
-  const submit = () => {
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section (the clock above the note, the options below the tips).
+  const wrapUp = useWrapUp({ enabled: ctx.wrapUp === true, service, request, base, applicationsRecorded: rows.some((row) => row.active) });
+  const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
+    // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
+    if (wrapUp.enabled && !submission.hasPendingBody() && !(await wrapUp.check())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }), pestCheck.payload),
+      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices, wrapUp: wrapUp.enabled ? wrapUp.fields() : null }), pestCheck.payload),
       `${names || 'Inspection'} · ${inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups)}`,
     );
   };
@@ -625,6 +630,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
+        {wrapUp.enabled && <TimeOnSite since={service?.onSiteAt} />}
         <fieldset className="tech-visit-form" disabled={locked}>
           {ctx.reminders.map((text) => <p key={text} className="tech-visit-muted" role="status">{text}</p>)}
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={dictating.note} serviceId={service?.id} locked={locked} micInside />
@@ -674,6 +680,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip }}
             />
           )}
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>

@@ -178,6 +178,19 @@
 .tech-visit-checkbox:checked { background: var(--tech-accent); border-color: var(--tech-accent); }
 .tech-visit-checkbox:focus { --tw-ring-color: var(--tech-accent); }
 .tech-visit-feedback { color: var(--tech-muted); margin: 8px 0 16px; }
+/* Fast Complete Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the full form's Options and Next scheduled visit. */
+.tech-wrapup .tech-visit-choice { align-items: center; }
+.tech-wrapup-indent { margin-left: 30px; }
+.tech-wrapup-block { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; padding: 12px; border: 0.5px solid var(--tech-border); border-radius: 6px; background: var(--tech-card); }
+.tech-wrapup-block .tech-visit-muted { margin: 0; }
+.tech-wrapup-stepper { display: flex; align-items: center; gap: 8px; }
+.tech-wrapup-stepper-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 14px; }
+.tech-wrapup-stepper-value { color: var(--tech-text); font-size: 16px; }
+.tech-wrapup-stepper .ui-action.tech-visit-action { min-width: 56px; }
+.tech-wrapup-timing { display: grid; gap: 8px; margin-top: 8px; }
+.tech-wrapup-next { margin: 0; font-size: 16px; font-weight: 500; }
+/* The Time on-site clock outside the lawn sheet (the Tree & Shrub Wrap-up); the lawn sheet's own, more specific rule wins there. */
+.tech-visit-on-site-time { margin: 0; font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 500; }
 .tech-visit-feedback[role='alert'] { color: var(--tech-error-text); }
 
 .tech-visit-photo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

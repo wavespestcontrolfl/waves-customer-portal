@@ -62,10 +62,31 @@ import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
-import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
+import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
 import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
+import {
+  MAX_REVIEW_DELAY_MS,
+  REVIEW_TIMING_DEFAULT,
+  REVIEW_TIMING_OPTIONS,
+  completionReviewHint,
+  completionReviewSuppressionReason,
+  completionTimeOnSiteBody,
+  completionWillReview,
+  customReviewTimeProblem,
+  formatReentryStepperMinutes,
+  normalizeReviewTiming,
+  reviewDelayMinutesOf,
+  reviewPreviewSubmitVerdict,
+  reviewScheduledForOf,
+  reviewSendPreviewPath,
+} from "../../lib/completion-review-timing";
+import { completionInvoicePrediction, isCallbackVisit } from "../../lib/completion-invoice-prediction";
+
+// The completion rules the Fast Complete Wrap-up shares live in lib/completion-review-timing.js;
+// these are re-exported for the tests that import them from here.
+export { completionReviewSuppressionReason, completionTimeOnSiteBody, completionWillReview, formatReentryStepperMinutes };
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
@@ -630,210 +651,6 @@ const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "not_home_partial_access", label: "Customer not home — partial access" },
   { value: "customer_specific_concern", label: "Customer had specific concern" },
 ];
-// Completion panel review timing (owner decisions 2026-09-07). "Automatic"
-// is the cadence's smart send window — the server's calculateReviewSendPlan,
-// previewed through /admin/reviews/send-time-preview so the panel shows the
-// decision dispatch will make. "Customer asked for the link" is recorded on
-// the sequence (who/when/source) and goes at the next cadence tick; it is
-// never immediate, and the panel says so. The old "Now" / "In 2 hours"
-// values are gone: saved drafts carrying them fall back to Automatic.
-const REVIEW_TIMING_OPTIONS = [
-  { value: "auto", label: "Automatic (recommended)" },
-  { value: "customer_requested", label: "Customer asked for the link" },
-  { value: "tomorrow_8", label: "Tomorrow at 8 AM" },
-  { value: "custom", label: "Custom time" },
-];
-const REVIEW_TIMING_DEFAULT = "auto";
-function normalizeReviewTiming(value) {
-  return REVIEW_TIMING_OPTIONS.some((o) => o.value === value) ? value : REVIEW_TIMING_DEFAULT;
-}
-// What the chosen timing means, from the server preview (never a client
-// approximation of the smart window).
-function reviewTimingHint(options) {
-  const hint = reviewTimingHintDetails(options);
-  if (options.preview?.schedulerEnabled === true && options.reviewTiming !== "customer_requested") {
-    return `For a new eligible enrollment: ${hint} An existing cadence keeps its schedule.`;
-  }
-  return hint;
-}
-function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
-  // An unpaid completion invoice holds the ask until payment lands (the
-  // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
-  // relative timing is re-derived from the payment time; an absolute one is
-  // kept if it is still ahead (codex #4140 r10 P2).
-  // The master cron gate is dark: nothing automated sends at all — not the
-  // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
-  // Only a link bundled into the completion text itself still goes.
-  // An UNKNOWN gate state (preview still loading, or failed) is not a
-  // promise either: fail closed and say so until the preview succeeds
-  // (codex #4140 r18 P1) — the same rule the Reviews page applies.
-  if (!(reviewTiming === "customer_requested" && bundled)) {
-    if (preview?.schedulerEnabled === false) return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
-    if (preview?.schedulerEnabled !== true) return "Whether automated review texts can send is not known yet (the send-time preview has not loaded). If the scheduler is off nothing sends; the choice is recorded on this visit.";
-  }
-  // Automatic after payment: enrollForPaidInvoice recovers no explicit
-  // delay, so cadence mode computes the smart window from the payment and
-  // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
-  // Customer requested stores a zero delay, so it goes at the next tick.
-  if (awaitsPayment && reviewTiming === "auto") {
-    return preview?.reviewSequencesEnabled
-      ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
-      : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
-  }
-  if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
-  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
-  return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
-}
-function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
-  if (reviewTiming === "auto") {
-    if (!preview?.at) return "Review text goes out separately at the smart send window.";
-    // In cadence mode `at` is a jitter-free eligibility time: enrollment
-    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
-    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
-    // The legacy path has no jitter but its own worker ticks (the */15
-    // scheduler): the row is eligible just after `at` and texts at the next
-    // tick, so name that tick too (codex #4140 r18 P2).
-    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
-    const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
-    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
-    // The legacy +120 lands wherever the completion did — an evening visit's
-    // 9:15 PM tick is refused by the send window and the row is re-queued for
-    // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
-    // fenced inside the window by the server.
-    const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
-    if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
-    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
-  }
-  if (reviewTiming === "customer_requested") {
-    // `bundled` is the panel's own bundling condition (legacy path, completion
-    // text going out) — the same shape as dispatch's shouldBundleReview. No
-    // bounded time is promised: the next cadence tick still waits for the
-    // 8 AM–8 PM send window (codex #4140 r2).
-    return bundled
-      ? "Review link is included in the completion text."
-      : "The request is recorded on this visit. An existing cadence keeps its schedule; otherwise an eligible visit queues a separate review text, subject to the send window.";
-  }
-  if (reviewTiming === "tomorrow_8") {
-    // In cadence mode 8:00 is the eligibility time; the worker's first tick
-    // after it is 8:14 (codex #4140 r6).
-    // The legacy path likewise: the target becomes a whole-minute delay and
-    // the eligibility instant is rebuilt from a later Date.now(), so the row
-    // is eligible just after 8:00 and the */15 scheduler sends at 8:15 (r18 P2).
-    const tick = windowOpenTickISO(addETDays(new Date(), 1), preview, { after: true });
-    return tick ? `Review text goes out separately tomorrow at the first ${tickNoun(preview)} after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
-  }
-  if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
-  return "";
-}
-const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
-// The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
-const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
-// The first cadence tick after the 8 AM send window opens on `day` (an ET
-// date); null with cadences off or when the server did not name the ticks.
-function windowOpenTickISO(day, preview, opts) {
-  const openISO = etDatetimeLocalToISO(`${etDateString(day)}T08:00`);
-  return openISO ? nextCadenceTickISO(openISO, workerTickMinutes(preview), opts) : null;
-}
-// The minutes of the hour the worker that will pick the row up runs on: the
-// cadence ticks (:14/:44) in cadence mode, the legacy scheduler's */15
-// otherwise — both named by the server (codex #4140 r18 P2). Null when it
-// did not name them, so no tick is promised.
-function workerTickMinutes(preview) {
-  if (!preview) return null;
-  return (preview.reviewSequencesEnabled ? preview.cadenceTickMinutesOfHour : preview.legacyTickMinutesOfHour) || null;
-}
-const tickNoun = (preview) => (preview?.reviewSequencesEnabled ? "cadence tick" : "scheduler tick");
-// The worker tick a send at `iso` is held to when it falls outside the
-// 8 AM–8 PM window (8 PM exclusive): the first tick after the window opens
-// that morning, or the next morning after an evening send. Null inside it.
-function heldToWindowOpenISO(iso, preview) {
-  const { hour } = etParts(new Date(iso));
-  if (hour >= 8 && hour < 20) return null;
-  return windowOpenTickISO(addETDays(new Date(iso), hour >= 20 ? 1 : 0), preview);
-}
-// The custom-time mode: the one whose hint parses operator input and has to
-// reconcile it with the send window and the worker's ticks.
-// A spring-forward gap wall clock (2:30 AM on the DST day) does not exist in
-// ET: the client helper and the server's parseETDateTime resolve it to
-// different instants, so the hint would promise a tick an hour off the real
-// send (codex #4140 r24 P2). Reject it instead of guessing.
-const ET_GAP_TIME_MESSAGE = "That time does not exist in Eastern time (clocks spring forward) — choose another time.";
-function etWallClockExists(value, iso) {
-  if (!iso) return false;
-  const [, timePart = ""] = String(value).split("T");
-  const [h, mi] = timePart.split(":").map(Number);
-  const et = etParts(new Date(iso));
-  return et.hour === h && et.minute === mi;
-}
-function customReviewTimingHint(reviewCustomAt, preview) {
-  // The datetime-local value is an ET wall clock (the server parses it with
-  // parseETDateTime) — never `new Date(value)`, which reads it in the
-  // browser's zone (codex #4140 r1).
-  const iso = etDatetimeLocalToISO(reviewCustomAt);
-  if (!iso) return "Choose a time for the review text.";
-  if (!etWallClockExists(reviewCustomAt, iso)) return ET_GAP_TIME_MESSAGE;
-  // The server clamps every review delay to 30 days after completion
-  // (MAX_REVIEW_DELAY_MINUTES): a later date would send ~30 days out, not
-  // on the chosen day. Say so instead of promising the date (codex #4140 r10 P2).
-  if (new Date(iso).getTime() > Date.now() + MAX_REVIEW_DELAY_MS) return `Review times can be at most 30 days after completion (by ${fmtReviewTime(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}) — choose an earlier time.`;
-  // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
-  // outside it is held to the next window (codex #4140 r3) — but only
-  // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
-  // checkSendWindow passes everything, so the copy must not promise a
-  // hold it will not get (codex #4140 r4 P2). The preview says which.
-  const windowOn = preview?.smsSendWindowEnabled === true;
-  const { hour } = etParts(new Date(iso));
-  // In cadence mode the custom time is when the row becomes ELIGIBLE; the
-  // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
-  // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
-  // `after: true`: the server turns the chosen time into a whole-minute delay
-  // and rebuilds the eligibility instant from a later Date.now(), so the row
-  // becomes eligible just AFTER the chosen minute — a time typed exactly on
-  // :14 goes out at :44 (codex #4140 r6).
-  // The legacy */15 scheduler has the same shape (r18 P2).
-  const tick = nextCadenceTickISO(iso, workerTickMinutes(preview), { after: true });
-  // The window is checked on the TICK when there is one: 7:50 PM is inside
-  // the window but its 8:14 PM tick is not, and the validator holds that
-  // send to the next morning (codex #4140 r8). 8:00 PM is exclusive.
-  const sendHour = tick ? etParts(new Date(tick)).hour : hour;
-  if (windowOn && (sendHour < 8 || sendHour >= 20)) {
-    // The window opens at 8:00; in cadence mode the worker's first tick
-    // after that is 8:14 (codex #4140 r7).
-    const openTick = heldToWindowOpenISO(tick || iso, preview);
-    const textHint = openTick
-      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first ${tickNoun(preview)} after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
-      : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
-    if (preview?.reviewSequencesEnabled) {
-      return `${textHint} If the cadence uses email instead, it can send at the next cadence tick${tick ? `, about ${fmtReviewTime(tick)}` : ""}, without waiting for the SMS window.`;
-    }
-    return textHint;
-  }
-  if (tick && tick !== iso) return `Review text goes out separately at the next ${tickNoun(preview)} after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
-  return `Review text goes out separately ${fmtReviewTime(iso)}.`;
-}
-
-// The first worker tick on or after `iso` (ticks are minutes of the hour; every
-// ET offset is a whole hour, so UTC minutes are the same minutes). Null when
-// the server did not name the ticks.
-function nextCadenceTickISO(iso, tickMinutes, { after = false } = {}) {
-  if (!Array.isArray(tickMinutes) || !tickMinutes.length) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  const minute = d.getUTCMinutes();
-  // `after`: the eligibility instant lands strictly after this minute.
-  const pastTheMinute = after || d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
-  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
-  const t = new Date(d.getTime());
-  t.setUTCSeconds(0, 0);
-  if (next != null) t.setUTCMinutes(next);
-  else t.setUTCHours(t.getUTCHours() + 1, tickMinutes[0]);
-  return t.toISOString();
-}
-
-// The key two "Automatic" previews are compared by: the server's `bucket`,
-// the rule behind the time (a relative answer's instant moves every request).
-const reviewPreviewBucket = (preview) => preview?.bucket ?? null;
-
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: "tech_home_spoke_with_them",
   not_home_full: "not_home_full_access",
@@ -1243,17 +1060,6 @@ export function completionReportRulesPrompt(error) {
   return `Heads-up on your edits:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
 }
 
-// Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
-// "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
-export function formatReentryStepperMinutes(min) {
-  const n = Math.max(0, Math.round(Number(min) || 0));
-  if (n === 0) return "No wait";
-  const hr = Math.floor(n / 60);
-  const rem = n % 60;
-  if (!hr) return `${n} min`;
-  return rem ? `${hr} hr ${rem} min` : `${hr} hr`;
-}
-
 const DEFAULT_PEST_RATING_SCALE = ["none", "very low", "low", "moderate", "elevated", "high"];
 
 // "0 = none · 1 = very low · … · 5 = high" from the active labels (the
@@ -1309,35 +1115,6 @@ export function completionPreferencesNeedDraft({
     || reentryInteriorDirty;
 }
 
-// timeOnSite fragment of the completion POST body. The panel's running
-// `elapsed` derives from the visit's ORIGINAL check-in — for a stale on_site
-// row that's days or weeks — and the server books any submitted timeOnSite
-// as explicit operator input (persisted service duration + job-costing
-// labor). Under a backdated closeout only an operator-TYPED positive number
-// of minutes may travel; blank/invalid omits the key so the duration stays
-// unknown. On a live completion the wire contract is TYPE-based: a NUMBER
-// is an admin-typed override of the running timer (validated 1..720 —
-// out-of-range falls back to the elapsed string so a stray value never
-// ships as operator input; handleSubmit blocks it with an alert first), a
-// string is the auto-elapsed timer, recorded exactly as before. A prepared
-// combined-visit form omits only that automatic string so packet save can
-// allocate the shared canonical duration across members; explicit numeric
-// operator input remains attached to its member.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "", preparing = false }) {
-  if (!backfill) {
-    const trimmed = String(adjustedMinutes ?? "").trim();
-    if (trimmed !== "") {
-      const minutes = Math.round(Number(trimmed));
-      if (Number.isFinite(minutes) && minutes >= 1 && minutes <= 720) {
-        return { timeOnSite: minutes };
-      }
-    }
-    return preparing ? {} : { timeOnSite: elapsed };
-  }
-  const minutes = Math.round(Number(typedMinutes));
-  return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
-}
-
 // Restore leg of the draft snapshot for the backdated-closeout choices. A
 // draft that predates these fields restores the panel default (missing ≠
 // false: for a ≥7-days-stale visit the default is CHECKED, and restoring
@@ -1361,41 +1138,6 @@ export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = fa
         ? savedDraft.adjustedTimeOnSite
         : "",
   };
-}
-
-// Why the review ask will not go out for this completion, or null when it
-// follows the operator's toggle. "backfill" mirrors the server forcing
-// requestReview=false under a backdated quiet closeout — with the reason set,
-// the review checkbox shows the suppressed state and the custom-review-time
-// validation never blocks a submit the server would silence anyway.
-export function completionReviewSuppressionReason({
-  isIncompleteVisit = false,
-  backfillQuietCloseout = false,
-  visitOutcome = "completed",
-  customerConcernInteraction = false,
-} = {}) {
-  if (isIncompleteVisit) return "incomplete";
-  if (backfillQuietCloseout) return "backfill";
-  if (visitOutcome === "customer_declined") return "customer_declined";
-  if (visitOutcome === "customer_concern" || customerConcernInteraction) {
-    return "customer_concern";
-  }
-  // NOTE (coverage fix, 2026-07-30): an invoiced completion is deliberately
-  // NOT a client-side suppression anymore. The server owns the invoice rule —
-  // a completion-time ask is blocked only while the invoice is UNPAID
-  // (admin-dispatch effectiveRequestReview), and the paid-invoice webhook
-  // queues the ask when payment lands. The old blanket willInvoice=false here
-  // posted requestReview=false, which killed the ask on BOTH sides — including
-  // completions paid on the spot — and drove review coverage to near zero.
-  return null;
-}
-
-export function completionWillReview({
-  oneTimeRecapOnly = false,
-  requestReview = true,
-  reviewSuppressionReason = null,
-} = {}) {
-  return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
 }
 
 // Durable discard marker: set BEFORE the IndexedDB delete is issued and
@@ -14357,129 +14099,21 @@ export function CompletionPanel({
   ];
   const onSiteTime = onSiteTimeOf(service);
 
-  const svcTypeLower = (service.serviceType || "").toLowerCase();
-  const isCallback =
-    svcTypeLower.includes("re-service") ||
-    svcTypeLower.includes("callback") ||
-    service.isCallback;
+  const isCallback = isCallbackVisit(service);
   const completionPricingPending = visitOutcome === "completed" && !backfillCloseout
     && (completionPricing?.serviceId !== service.id || completionPricing?.ready !== true);
   const reviewedPricing = completionPricing?.serviceId === service.id && completionPricing?.review
     && visitOutcome === "completed" && !backfillCloseout ? completionPricing : null;
   const applyingCompletionDiscounts = reviewedPricing?.apply === true;
   const completionVisitPrice = applyingCompletionDiscounts ? reviewedPricing.amount : service.estimatedPrice;
-  const hasVisitPrice = applyingCompletionDiscounts
-    || (completionVisitPrice != null && Number(completionVisitPrice) > 0);
-  // Callbacks (re-services) are free by definition for recurring/WaveGuard
-  // customers — the server suppresses the monthly_rate fallback for them
-  // (admin-dispatch completion + Charge-now). Mirror that here so the tech UI's
-  // willInvoice / pay-link prediction, AI recap framing, and review suppression
-  // match the report-only/no-invoice completion the server actually performs.
-  // For an unpriced visit, monthlyRate is only ever the right fallback for a
-  // monthly-membership customer — everywhere else (per_application's own
-  // acceptance fee, a plain per_visit/one_time lane, sibling-covered
-  // first-application visits…) the AUTHORITATIVE amount is the schedule
-  // payload's own billingLane.prediction, computed server-side by the exact
-  // same predictCompletionBilling / completionInvoiceAmount (billing-lane.js)
-  // completion itself uses — never re-derived locally, so this can't drift
-  // from what completion actually bills (codex pre-push P1: a local
-  // tier/lane guard either showed the wrong monthlyRate for a legacy
-  // inferred lane, or zeroed a real per-application fee).
-  //
-  // The prediction's `amount` is ALREADY net of prepaidAmount for an
-  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
-  // server-side), and a 'prepaid' kind's amount is what was ALREADY
-  // collected, not a new balance — so `usingUnpricedPrediction` keeps
-  // prepaidCovered below from netting the SAME prepayment a second time
-  // against a figure that's already final (codex pre-push P1: double-
-  // netting misclassified a partially-prepaid visit as fully covered and
-  // suppressed the invoice for its real remaining balance).
-  const predictionKind = service.billingLane?.prediction?.kind || null;
-  const usingUnpricedPrediction = !hasVisitPrice && !isCallback;
-  // Round-8 P1: `billingLane.siblingCoverage` (the server's ONE canonical
-  // per-visit collection verdict — owner decision, narrow + fail closed) in
-  // state 'collect_on_combined_invoice' means completion REUSES that
-  // sibling invoice (complete-scheduled-service.js) exactly like an
-  // existing outstanding invoice — never a fresh mint, but still a real
-  // amount due, a pay link, and a held review — so this panel must not
-  // treat it as `usingUnpricedPrediction`'s ordinary $0/no-invoice path.
-  const siblingCoverage = service.billingLane?.siblingCoverage || null;
-  const collectOnSiblingInvoice = siblingCoverage?.state === 'collect_on_combined_invoice';
-  // Codex pre-push P2: a covering sibling invoice reads `state: 'settled'`
-  // for FIVE distinct reasons (billing-lane.js siblingCoverageForSchedule) —
-  // 'invoice_settled' (literal paid/prepaid), 'invoice_processing' (money in
-  // flight, e.g. a pending ACH debit), 'withdrawn_from_customer' /
-  // 'payer_billed' (draft/sent, but not collectible from this homeowner at
-  // all), and 'credit_applied' (draft/sent, covered by account credit, never
-  // marked literally paid). A technician collects nothing at the door for
-  // any of the five — but complete-scheduled-service.js's own
-  // invoiceBlocksReview holds the review ask for every invoice status
-  // EXCEPT literal 'paid'/'prepaid', which only 'invoice_settled' actually
-  // is. This used to recognize 'invoice_processing' alone (codex round-9
-  // P2's own fix), which correctly held the ask for THAT one reason but
-  // missed the other three draft/sent-but-not-collectible reasons — the
-  // panel promised an immediate review request the server still withheld
-  // pending manual reconciliation. Every reason except the literal
-  // paid/prepaid one now holds the preview the same way.
-  const siblingInvoiceNotYetSettled = siblingCoverage?.state === 'settled'
-    && siblingCoverage?.reason !== 'invoice_settled';
-  const invoiceAmount = hasVisitPrice
-    ? Number(completionVisitPrice)
-    : isCallback
-      ? 0
-      : collectOnSiblingInvoice
-        ? Number(siblingCoverage.amountDue) || 0
-        : (predictionKind === 'prepaid' ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
-  // Codex round-2 P1 (sweep): this used to infer "dues cover it" from
-  // autopayActive + a tier + a positive monthlyRate + no stamped visit
-  // price — the SAME shape as MobileAppointmentDetailSheet's
-  // coveredByMembership bug. A tiered per_application (or per_visit)
-  // customer can have autopay on AND carry a real, positive invoice/
-  // auto_charge prediction for an unpriced row (e.g. the $97.20
-  // acceptance-fee case in this file's own billing-lane-amount test) —
-  // that heuristic never looked at the prediction at all, so it would
-  // report-only a visit completion (and the schedule sheet's own Charge
-  // Now mint) actually bills. `covered_membership` is the ONLY signal
-  // this panel may treat as "dues cover it, no invoice."
-  const autopayCoversVisit = predictionKind === 'covered_membership';
-  const prepaidCovered = usingUnpricedPrediction
-    ? predictionKind === 'prepaid'
-    : (service.prepaidAmount != null &&
-      Number(service.prepaidAmount) > 0 &&
-      Number(service.prepaidAmount) >= invoiceAmount);
-  // paid and prepaid are both settled to the server (invoiceBlocksReview,
-  // report-only completion) — codex #4140 r15 P2.
-  const invoiceAlreadyPaid =
-    ["paid", "prepaid"].includes(service.checkoutInvoiceStatus) ||
-    ["paid", "prepaid"].includes(service.invoiceStatus);
-  const reportOnlyCompletion =
-    prepaidCovered ||
-    invoiceAlreadyPaid ||
-    autopayCoversVisit ||
-    !!service.completionInvoiceAlreadySent;
-  // Typed one-time completions bill by PROFILE: since the billing pre-gate
-  // removal (2026-07-27) the server mints the completion invoice at the row
-  // price for a billingType 'one_time' profile even without the scheduler
-  // flag or a tier. Mirror that conjunction here (row-priced, performed,
-  // non-callback, not an included follow-up) so the SMS preview, pay-link
-  // toggle, and review controls show the completion the server actually
-  // performs.
-  const typedOneTimeBilling =
-    String(service.completionProfile?.billingType || "").toLowerCase() ===
-      "one_time" &&
-    service.followupIncluded !== true &&
-    hasVisitPrice &&
-    !isCallback &&
-    visitOutcome !== "inspection_only" &&
-    visitOutcome !== "customer_declined";
-  const willInvoice =
-    !oneTimeRecapOnly &&
-    !reportOnlyCompletion &&
-    (collectOnSiblingInvoice ||
-      !!service.createInvoiceOnComplete ||
-      !!service.waveguardTier ||
-      typedOneTimeBilling) &&
-    invoiceAmount > 0;
+  const { willInvoice, reviewAwaitsPayment } = completionInvoicePrediction({
+    service,
+    visitPrice: completionVisitPrice,
+    applyingDiscounts: applyingCompletionDiscounts,
+    isCallback,
+    oneTimeRecapOnly,
+    visitOutcome,
+  });
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
   // Payer-billed visits never text the homeowner a pay link (the server
@@ -14519,31 +14153,16 @@ export function CompletionPanel({
   // as it can be known before the completion exists (legacy path AND no
   // service-report-v1 delivery) — not a client re-derivation of one of its
   // predicates (codex #4140 r4 P2). Unknown reads as "not bundled".
-  // The server's invoiceBlocksReview: an UNPAID invoice after completion —
-  // one minted now (willInvoice) or one already sent from dispatch and still
-  // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
-  // paid invoices never hold the ask. A covering sibling invoice awaiting
-  // payment or reconciliation holds it too (siblingInvoiceNotYetSettled
-  // above) — the reused invoice completion actually checks is the
-  // SIBLING's, and invoiceBlocksReview clears only on its literal
-  // 'paid'/'prepaid' status, not this row's own.
-  const reviewAwaitsPayment = willInvoice || siblingInvoiceNotYetSettled
-    || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
-  // An unpaid invoice holds the customer-requested ask server-side
-  // (invoiceBlocksReview gates effectiveRequestReview, so shouldBundleReview
-  // is false) — the preview must not promise the link the timing hint says
-  // waits for payment (codex #4140 r22 P2). The one-time recap path is exempt
-  // server-side (recapReviewOnly) and stays exempt here.
-  const reviewSendsWithCompletionSms =
-    willReview &&
-    effectiveSendSms &&
-    (oneTimeRecapOnly ||
-      (reviewTiming === "customer_requested" &&
-        reviewSendPreview?.bundlesImmediateAsk === true &&
-        !reviewAwaitsPayment));
-  const reviewTimingHintText = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: reviewAwaitsPayment })
-    : "";
+  // The review hint and whether the link rides in the text (lib/completion-review-timing.js).
+  const { text: reviewTimingHintText, bundled: reviewSendsWithCompletionSms } = completionReviewHint({
+    willReview,
+    oneTimeRecapOnly,
+    effectiveSendSms,
+    reviewTiming,
+    reviewCustomAt,
+    preview: reviewSendPreview,
+    reviewAwaitsPayment,
+  });
   const smsPreview = [
     smsRecapPreview(customerRecap),
     !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
@@ -14557,32 +14176,14 @@ export function CompletionPanel({
   // a second LLM call for hidden state. Kept as a const so dependent effects/deps
   // stay inert.
   const canAutoDraftRecap = false;
-  const reviewScheduledFor = () => {
-    if (!willReview || oneTimeRecapOnly) return null;
-    if (reviewTiming === "tomorrow_8") {
-      return `${etDateString(addETDays(new Date(), 1))}T08:00`;
-    }
-    if (reviewTiming === "custom") return reviewCustomAt || null;
-    return null;
-  };
-  const reviewDelayMinutes = () => {
-    if (!willReview) return null;
-    if (oneTimeRecapOnly || reviewTiming === "customer_requested") return 0;
-    if (reviewTiming === "custom") {
-      const target = new Date(reviewCustomAt);
-      return reviewCustomAt && !Number.isNaN(target.getTime()) ? 0 : null;
-    }
-    if (reviewTiming === "tomorrow_8") return 0;
-    // Automatic: no explicit delay — the server picks the smart send window.
-    return undefined;
-  };
+  const reviewScheduledFor = () => reviewScheduledForOf({ willReview, oneTimeRecapOnly, reviewTiming, reviewCustomAt });
+  const reviewDelayMinutes = () => reviewDelayMinutesOf({ willReview, oneTimeRecapOnly, reviewTiming, reviewCustomAt });
   const reviewSendPreviewRef = useRef(null);
   reviewSendPreviewRef.current = reviewSendPreview;
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
   const fetchReviewSendPreview = useCallback(() => {
-    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
-    return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+    return fetch(`${API_BASE}${reviewSendPreviewPath(service?.serviceType)}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
     })
       .then((r) => (r.ok ? r.json() : null))
@@ -18570,23 +18171,11 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
-        alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
-        return;
-      }
-      // The re-check itself failed (codex #4140 r13 P2, r18 P1): a shown
-      // Automatic time can no longer be vouched for, so drop it, and the
-      // scheduler's state is still unknown, so nothing is promised — stop
-      // ONCE and say so. The next submit proceeds: the server computes the
-      // window itself, and the ask is recorded either way. Completion is
-      // never blocked by the preview endpoint for more than one click; a
-      // later successful load re-arms the notice.
-      if (!fresh && !previewFailureNoticedRef.current) {
-        previewFailureNoticedRef.current = true;
-        if (shown) setReviewSendPreview(null);
-        alert(reviewTiming === "auto" && shown
-          ? "The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue."
-          : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.");
+      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current });
+      if (verdict) {
+        if (verdict.noticed) previewFailureNoticedRef.current = true;
+        if (verdict.dropShown) setReviewSendPreview(null);
+        alert(verdict.message);
         return;
       }
     }
@@ -18602,26 +18191,9 @@ export function CompletionPanel({
       willReview &&
       reviewTiming === "custom"
     ) {
-      // The datetime-local value is an ET wall clock, as the server parses
-      // it (parseCompletionReviewDelayMinutes) — never `new Date(value)`,
-      // which reads it in the browser's zone (codex #4140 r13 P1).
-      const targetISO = etDatetimeLocalToISO(reviewCustomAt);
-      const target = new Date(targetISO || NaN);
-      if (
-        !reviewCustomAt ||
-        Number.isNaN(target.getTime()) ||
-        target.getTime() <= Date.now()
-      ) {
-        alert("Choose a future review request time.");
-        return;
-      }
-      if (!etWallClockExists(reviewCustomAt, targetISO)) {
-        alert(ET_GAP_TIME_MESSAGE);
-        return;
-      }
-      // The server clamps to 30 days; a later time would silently move (codex #4140 r10 P2).
-      if (target.getTime() > Date.now() + MAX_REVIEW_DELAY_MS) {
-        alert("The review request time can be at most 30 days after completion.");
+      const reviewTimeProblem = customReviewTimeProblem(reviewCustomAt);
+      if (reviewTimeProblem) {
+        alert(reviewTimeProblem);
         return;
       }
     }
