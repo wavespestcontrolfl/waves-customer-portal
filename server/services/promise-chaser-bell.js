@@ -357,7 +357,14 @@ async function ringForCall(call, now = new Date()) {
   // same call) the instant a later tick crosses into the next ET day. The
   // callback's own timestamp is fixed, so every tick that retries it
   // computes the identical key.
-  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(new Date(call.created_at))}`;
+  //
+  // ...and on the count of AUTOMATIC reopens (a callback-spam dismissal the
+  // processor corrected: call-commitments noteCallbackSpamReopen), which is
+  // not a renewal boundary but is a new owing of the same obligation: the
+  // earlier bell and delivery fact must not silence it. No reopen = the key
+  // every existing row already carries.
+  const reopenVersion = await require('./call-commitments').callbackSpamReopenKeySuffix(db, promise.id);
+  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(new Date(call.created_at))}${reopenVersion}`;
 
   // A bell this callback already has for a DIFFERENT identity — another
   // promise that has since been kept, or an older version of this one — is

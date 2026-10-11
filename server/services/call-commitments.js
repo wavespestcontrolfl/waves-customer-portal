@@ -1754,6 +1754,11 @@ async function returnedOutboundCall(conn, { after, until = null, phone, customer
     .modify((b) => { if (until) b.where("created_at", "<=", until); })
     .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
     .whereRaw("COALESCE(duration_seconds, 0) >= 60")
+    // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
+    // only once SETTLED and not spam: a pass still holding the row's token
+    // may yet write the spam verdict, and a refresh that ran meanwhile would
+    // have recorded a solicitor call as the office keeping its word.
+    .modify(settledNonSpamCallback)
     .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomerWhere(b, "customer_id", customerId); afterCursor(b, "call_log", cursor); })
     .orderBy([{ column: "created_at", order: "asc" }, { column: "id", order: "asc" }])
     .limit(size)
@@ -2049,6 +2054,213 @@ async function evidenceBoundary(conn, commitment, call, { endOf = callEndedAt } 
 // leaving — a merge soft-deletes the duplicate profile while the caller is
 // still a customer on the surviving one.
 const CUSTOMER_LEFT = "customer_left";
+// The office called the voicemail back and reached a solicitor: the callback
+// row the admin "Call back" action wrote (source admin-callback, linked to
+// this promise or to its call) settled as spam. The promise is moot, not
+// kept — refreshFulfillment writes it as a dismissal, like CUSTOMER_LEFT —
+// and it is judged from the evidence boundary like every other proof, so a
+// callback staff renewed after the attempt is never dismissed by it. The
+// callback processor asks for the refresh the moment the verdict lands
+// (closeParentOnCallbackSpam); the watchdog's sweep is the fallback.
+const CALLBACK_SPAM = "callback_spam";
+// Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
+// only once SETTLED and not spam: no pass holds its token, and its status is
+// not spam nor one a later pass may still turn into spam (processing, and
+// pending, and the retry states extraction_failed / no_transcription; a row never
+// processed counts only while it has no recording to process). Otherwise a
+// refresh that ran mid-pass would record a solicitor call as the office
+// keeping its word, and the spam settlement scans open promises only.
+const UNSETTLED_CALLBACK_STATUSES = ["spam", "pending", "processing", "extraction_failed", "no_transcription"];
+// A PARENT voicemail in one of these is not settled either: a pass in flight
+// or a retryable failure (its token cleared, its old markers kept) that a
+// retry may yet read as an answered call. Shared by every settlement site.
+const RETRYABLE_PARENT_STATUSES = ["pending", "processing", "extraction_failed", "no_transcription"];
+// SQL twin over a call_log alias, for the lapse scan (constants inlined: the
+// scan's raw query binds by position).
+// An extraction_failed row the sweep no longer retries (config/call-extraction-retry:
+// attempts at the cap, or older than the window) is SETTLED, not spam: no pass
+// will ever say spam about it, so nothing it settled may wait on one.
+const exhaustedExtractionSql = (t) => {
+  const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require("../config/call-extraction-retry");
+  return `(${t}.processing_status = 'extraction_failed' AND (COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`;
+};
+// POSITIVE proof (the office returned the call, a conversation connected):
+// a genuinely processed call only. An exhausted failure is never evidence of
+// contact: its stale extraction fields say nothing about the last pass.
+const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")})))`;
+// TERMINAL for a correction: the same, plus an exhausted failure, which no
+// pass will revisit, so nothing it settled may wait on one.
+const terminalNonSpamCallbackSql = (t) => `(${settledNonSpamCallbackSql(t)} OR ${exhaustedExtractionSql(t)})`;
+function settledNonSpamCallback(b) {
+  if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
+  b.whereRaw(settledNonSpamCallbackSql("call_log"));
+}
+// The PARENT voicemail, settled: ended (a reported duration), no pass holding
+// its token, not in a retryable state, and no adopted recording still waiting
+// for its pass (status null with a recording_sid). JS and SQL twins; every
+// settlement site (processor, promise proof, sweep) reads one of them.
+function isSettledParentRow(row) {
+  return row?.duration_seconds != null && !row?.processing_token
+    && !RETRYABLE_PARENT_STATUSES.includes(row?.processing_status)
+    && !(row?.processing_status == null && row?.recording_sid);
+}
+const settledParentSql = (t) => `(${t}.duration_seconds IS NOT NULL AND ${t}.processing_token IS NULL AND (${t}.processing_status IS NULL OR ${t}.processing_status NOT IN (${RETRYABLE_PARENT_STATUSES.map((v) => `'${v}'`).join(", ")})) AND NOT (${t}.processing_status IS NULL AND ${t}.recording_sid IS NOT NULL))`;
+// TERMINAL for a correction: settled, or an exhausted extraction failure (a
+// replacement recording's pass that ran out of retries: no pass will revisit
+// it, so an obsolete settlement must not wait on one). Never evidence for a
+// NEW settlement.
+const terminalParentSql = (t) => `(${settledParentSql(t)} OR (${t}.processing_token IS NULL AND ${exhaustedExtractionSql(t)}))`;
+async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
+  if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
+  if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
+  // Both link arms imply an index: relatedCommitmentId its own, relatedCallId
+  // the admin-callback + spam partial index (20261010270000). The promise's
+  // call must be a VOICEMAIL (the processor's and the sweep's eligibility): a
+  // spam callback linked to an answered call says nothing about that call's
+  // promise.
+  const row = await conn("call_log")
+    .where("direction", "like", "outbound%")
+    .where({ source: "admin-callback", processing_status: "spam" })
+    .whereNull("processing_token")
+    // Admin provenance (stamped by the call route from the verified session).
+    .whereRaw("metadata->>'placed_by_role' = 'admin'")
+    .where("created_at", ">", after)
+    .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
+    .whereExists(function parentIsVoicemail() {
+      this.select(conn.raw("1")).from("call_log as parent").where({ "parent.id": commitment.call_log_id, "parent.direction": "inbound" })
+        .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')")
+        // ...and settled (lockCallbackPair's parent_not_settled): without the
+        // duration the boundary reads the call as ended at its start, and a
+        // callback placed while the caller was still recording would count.
+        .whereRaw(settledParentSql("parent"));
+    })
+    .modify((b) => phoneWhere(b, "to_phone", phone))
+    .orderBy("created_at", "asc")
+    // Share-locked: inside the correction's transaction (rejudge) a pass that
+    // would claim this callback waits until the re-pointed dismissal commits;
+    // on a plain connection the lock ends with the statement.
+    .forShare()
+    .first("id", "created_at");
+  return row ? { kind: CALLBACK_SPAM, record_type: "call_log", record_id: row.id, matched_at: row.created_at, strength: "direct", basis: "callback_reached_solicitor" } : null;
+}
+// A callback-spam dismissal settles the callback itself, like a staff action
+// on its card (callback-cards.actOnCallback): the promise's open reminders
+// (the overdue bell, the SLA notice) close with it, done by `callback:spam`,
+// a closer no Reopen undoes; a person's earlier read and done stand. A later
+// correction reopens the promise, and the watchdog's next sweep re-arms it.
+async function closeCallbackReminders(conn, commitmentId) {
+  const notifications = require("./notification-service")._private;
+  const now = new Date();
+  const id = String(commitmentId);
+  // Two shapes name a promise: the overdue bell's metadata.commitment_id and
+  // the promise-chaser alert's metadata.payload.commitmentId (notification-triggers).
+  const closed = await conn("notifications").where({ recipient_type: "admin" })
+    .whereRaw("(metadata->>'commitment_id' = ? OR metadata->'payload'->>'commitmentId' = ?)", [id, id])
+    .modify((q) => notifications.openToCloser(q, "callback:spam"))
+    .update(notifications.doneColumns({ by: "callback:spam", resolution: "Callback reached a solicitor; the voicemail was spam", at: now, keepExisting: true, conn }));
+  // The rolling missed-follow-up list (followup-sla-watcher) names its
+  // members in metadata.missed_commitment_ids and its text lists them. A
+  // list naming this promise closes here, marked emptied with the members
+  // that remain recorded: the watcher's next tick posts an accurate list
+  // of those (its text is composed from rows this file does not load), as
+  // it does for a list whose every promise was followed up.
+  const { ROLLING_KEY } = require("./followup-sla-watcher");
+  const rolling = await conn("notifications").where({ recipient_type: "admin" }).whereNull("done_at")
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
+    // jsonb_exists, not the ? operator: knex reads ? as a binding.
+    .whereRaw("jsonb_exists(metadata->'missed_commitment_ids', ?)", [id])
+    .forUpdate().select("id", "metadata");
+  for (const row of rolling) {
+    const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata || {});
+    const rest = (meta.missed_commitment_ids || []).map(String).filter((v) => v !== id);
+    await conn("notifications").where({ id: row.id }).update({
+      ...notifications.doneColumns({ by: "callback:spam", resolution: rest.length ? "A listed promise was settled; the list is posted again on the next sweep" : "Every listed promise was followed up or settled", at: now, keepExisting: true, conn }),
+      metadata: JSON.stringify({ ...meta, missed_commitment_ids: rest, emptied: true }),
+    });
+  }
+  return closed;
+}
+// The rows a callback's spam verdict dismissed: the same scope the dismissal
+// could reach (refreshableVerdictSql lets this evidence close a callback card
+// staff confirmed or edited, so the correction reaches those too); a card
+// staff dismissed themselves stands.
+function callbackSpamDismissalsQ(conn, callLogId, callbackCallId) {
+  return conn("call_commitments")
+    .where({ call_log_id: callLogId, party: "waves", kind: "callback", status: "dismissed" })
+    .where((q) => q.whereNull("human_state").orWhereIn("human_state", ["confirmed", "edited"]))
+    .whereRaw("fulfillment->>'kind' = ? AND fulfillment->>'record_id' = ?", [CALLBACK_SPAM, String(callbackCallId)]);
+}
+// The correction: that callback reprocessed into anything but spam, and no
+// other spam callback stands. The dismissal it produced is owed again.
+// An automatic reopen is a durable event (audit_log callback_spam_reopen):
+// the promise-chaser bell versions its dedupe key on the count of them, so
+// the obligation owed again can ring again. It is NOT a renewal boundary
+// (obligationRenewedAt reads callback_edit / callback_reopen only): the
+// corrected callback itself, placed before this reopen, may still keep it.
+const CALLBACK_SPAM_REOPEN_ACTION = "callback_spam_reopen";
+async function noteCallbackSpamReopen(conn, commitmentId, fromCallbackCallId) {
+  await conn("audit_log").insert({ actor_type: "system", action: CALLBACK_SPAM_REOPEN_ACTION, resource_type: "call_commitment", resource_id: commitmentId,
+    metadata: JSON.stringify({ from_callback_call_id: fromCallbackCallId || null, reopened_at: new Date().toISOString() }) });
+}
+async function callbackSpamReopenCount(conn, commitmentId) {
+  const row = await conn("audit_log").where({ resource_type: "call_commitment", resource_id: commitmentId, action: CALLBACK_SPAM_REOPEN_ACTION }).count({ n: "*" }).first();
+  return Number(row?.n) || 0;
+}
+// The promise-chaser dedupe key's version segment for those reopens: empty
+// (the key every existing row already carries) until the first one.
+async function callbackSpamReopenKeySuffix(conn, commitmentId) {
+  const n = await callbackSpamReopenCount(conn, commitmentId);
+  return n ? `:r${n}` : "";
+}
+// Inside the correction's transaction: each row read FOR UPDATE and written
+// only as read (status, human state, evidence, version), so a staff edit of
+// the dismissed promise that landed first stands.
+async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
+  const rows = await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).forUpdate().select("id", "human_state", "updated_at");
+  let reopened = 0;
+  for (const row of rows) {
+    const n = await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).where({ id: row.id })
+      .whereRaw("human_state IS NOT DISTINCT FROM ?", [row.human_state ?? null])
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
+      .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+    if (n) await noteCallbackSpamReopen(conn, row.id, callbackCallId);
+    reopened += n;
+  }
+  return reopened;
+}
+// The correction while OTHER spam callbacks may still stand: each dismissal
+// the corrected callback produced is judged again with the FULL proof
+// predicate (callbackReachedSolicitor, from the promise's own evidence
+// boundary: the call's end, or the staff reopen / edit that renewed it, and
+// the proof's linkage rule, so a sibling promise's callback proves nothing).
+// A standing proof keeps the promise dismissed on that callback's evidence,
+// so correcting that one later reopens it; none, and the promise is owed
+// again. The corrected callback no longer reads spam, so it never proves.
+// Runs inside the correction's transaction: each row is read FOR UPDATE and
+// written only while it still is the dismissal that was read (status, human
+// state and evidence re-asserted), so a staff action on the ledger that
+// landed first (a fulfil, a dismissal, an edit, a reopen) stands.
+async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId) {
+  const rows = await callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).forUpdate().select("*");
+  if (!rows.length) return { repointed: 0, reopened: 0 };
+  const call = await conn("call_log").where({ id: callLogId }).first("id", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds");
+  let repointed = 0;
+  let reopened = 0;
+  for (const commitment of rows) {
+    const after = await evidenceBoundary(conn, commitment, call);
+    const proof = after ? await callbackReachedSolicitor(conn, commitment, { after, phone: contactPhoneOf(call) }) : null;
+    const target = callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).where({ id: commitment.id, human_state: commitment.human_state })
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [commitment.updated_at]);
+    if (proof) {
+      repointed += await target.update({ fulfillment: JSON.stringify(storedProof(proof, call.customer_id)), updated_at: new Date() });
+    } else {
+      const n = await target.update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+      if (n) await noteCallbackSpamReopen(conn, commitment.id, fromCallbackCallId);
+      reopened += n;
+    }
+  }
+  return { repointed, reopened };
+}
 async function customerLeftProof(conn, commitment, call) {
   const after = await evidenceBoundary(conn, commitment, call);
   if (!call?.customer_id || !after) return null;
@@ -2176,6 +2388,11 @@ async function cardConnectedCall(conn, commitment, { after, until = null, phone,
     .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
     .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
     .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+    // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
+    // only once SETTLED and not spam: a pass still holding the row's token
+    // may yet write the spam verdict, and a refresh that ran meanwhile would
+    // have recorded a solicitor call as the office keeping its word.
+    .modify(settledNonSpamCallback)
     .modify((b) => { phoneWhere(b, 'to_phone', phone); if (customerId) b.where('customer_id', customerId); })
     .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
 }
@@ -2209,6 +2426,10 @@ async function resolveCallback(ctx) {
   // text-fallback suppressor.
   const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
   const policyBindings = [commitment.id, commitment.call_log_id];
+  // Reaching a solicitor is judged before any connected-call proof: the
+  // same completed customer leg must not read as a kept promise.
+  const solicitor = await callbackReachedSolicitor(conn, commitment, { after, phone });
+  if (solicitor) return solicitor;
   const connected = await cardConnectedCall(conn, commitment, { after, phone, customerId });
   if (connected) {
     // The proof is the completed customer leg, so the promise is kept
@@ -2592,6 +2813,16 @@ async function refreshFulfillment(conn, callLogId, call = null) {
     .where({ call_log_id: callLogId })
     .whereNull("human_state")
     .whereRaw(...autoClosedSql(promiseEvidenceCloseLive()));
+  // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a promise kept on a DIRECT
+  // outbound-call proof is judged again too (the refreshable scope, so a
+  // card's confirmed row included): that call reprocessed to spam is a
+  // solicitor, not the office keeping its word, and the resolvers now refuse
+  // it (settledNonSpamCallback) or read it as callback_spam.
+  const keptOnCall = require("../config/feature-gates").isEnabled("callbackSpamClosesParent")
+    ? await conn("call_commitments").where({ call_log_id: callLogId, status: "fulfilled" }).whereRaw(...refreshableVerdictSql())
+      .whereRaw("fulfillment ->> 'record_type' = 'call_log' AND fulfillment ->> 'kind' = 'outbound_call' AND fulfillment ->> 'strength' = 'direct'")
+      .whereNotIn("id", kept.map((k) => k.id))
+    : [];
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -2624,9 +2855,12 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       continue;
     }
     if (proof.strength === "direct" || closesOnAssociation(c, proof)) {
-      // A customer who left dismisses the promise; every other proof keeps it.
-      const left = proof.kind === CUSTOMER_LEFT;
-      fulfilled += await conn("call_commitments")
+      // A customer who left, or a callback that reached a solicitor,
+      // dismisses the promise; every other proof keeps it.
+      const left = proof.kind === CUSTOMER_LEFT || proof.kind === CALLBACK_SPAM;
+      // The settlement write, on `t`: the caller's transaction, or one of its
+      // own for a callback-spam dismissal (below).
+      const settle = (t) => t("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
         // Proof was computed from the snapshot row: a claim or reopen that
@@ -2641,10 +2875,34 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .modify((q) => {
           if (proof.strength === "direct" && proof.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
-            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+            this.select(t.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        // A callback-spam dismissal is written only while that callback still
+        // reads spam with no live token, under a share lock on its row: the
+        // correction (reopenParentOnCallbackCorrected) locks the callback FOR
+        // UPDATE, so a refresh that judged the row before a reprocess waits
+        // for the correction and then writes nothing.
+        .modify((q) => {
+          if (proof.kind !== CALLBACK_SPAM) return;
+          q.whereExists(function callbackStillSpam() {
+            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof, row.customer_id)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
+      if (proof.kind !== CALLBACK_SPAM) {
+        fulfilled += await settle(conn);
+        continue;
+      }
+      // A callback-spam dismissal and the close of the promise's reminders
+      // are one write: both in the caller's transaction, or in one of their
+      // own, so a reminder can never outlive the settled promise.
+      const dismissSpam = async (t) => {
+        const closed = await settle(t);
+        if (closed > 0) await closeCallbackReminders(t, c.id);
+        return closed;
+      };
+      fulfilled += conn.isTransaction ? await dismissSpam(conn) : await conn.transaction(dismissSpam);
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
@@ -2659,9 +2917,9 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  const rejudged = await rejudgeAutoClosed(conn, kept, row, callLogId);
+  const rejudged = await rejudgeAutoClosed(conn, [...kept, ...keptOnCall], row, callLogId);
   failed += rejudged.failed;
-  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
+  return { checked: open.length + kept.length + keptOnCall.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
 }
 
 // The rows refreshFulfillment re-judges after they closed: a slot booking's
@@ -2718,22 +2976,36 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
     const stored = keeps ? storedProof(keeps, row.customer_id, prior?.closed_at) : null;
     // Same record, judged for the same customer: nothing to write.
     if (stored && SAME_CLOSE_KEYS.every((k) => (stored[k] ?? null) === (prior?.[k] ?? null))) continue;
+    // The row as read: status, human state (NULL for every evidence close;
+    // a callback card's confirmed row only via keptOnCall) and version.
     const unchanged = (q) => q
       .where({ id: c.id, status: c.status })
-      .whereNull("human_state")
+      .whereRaw("human_state IS NOT DISTINCT FROM ?", [c.human_state ?? null])
       .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at]);
     if (keeps) {
       // Kept by another record now (another visit at the slot, a canonical
       // proof, another follow-up): same customer guard as the open-row write.
-      const left = keeps.kind === CUSTOMER_LEFT;
-      await unchanged(conn("call_commitments"))
+      // A callback that reached a solicitor dismisses, as on an open row:
+      // written only while that callback still reads spam (share lock), with
+      // the promise's reminders closed in the same transaction.
+      const left = keeps.kind === CUSTOMER_LEFT || keeps.kind === CALLBACK_SPAM;
+      const settle = (t) => unchanged(t("call_commitments"))
         .modify((q) => {
           if (keeps.strength === "direct" && keeps.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
-            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+            this.select(t.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        .modify((q) => {
+          if (keeps.kind !== CALLBACK_SPAM) return;
+          q.whereExists(function callbackStillSpam() {
+            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": keeps.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(stored), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
+      if (keeps.kind !== CALLBACK_SPAM) { await settle(conn); continue; }
+      const dismissSpam = async (t) => { if ((await settle(t)) > 0) await closeCallbackReminders(t, c.id); };
+      if (conn.isTransaction) await dismissSpam(conn); else await conn.transaction(dismissSpam);
       continue;
     }
     // No longer kept: owed again, carrying whatever hint the facts support.
@@ -2822,7 +3094,36 @@ const cardLegSql = (t) => `(${t}.v2_extraction_status = 'valid'
   AND CASE WHEN ${t}.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (${t}.metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END)`;
 
 async function listLapsedEvidenceClosedCallIds(conn) {
-  if (!promiseEvidenceCloseLive()) return [];
+  const ids = promiseEvidenceCloseLive() ? await listLapsedAssociationCloses(conn) : [];
+  // A promise kept on a DIRECT outbound-call proof (resolveCallback's, no
+  // closed_by marker) whose call is no longer a settled non-spam call: it was
+  // reprocessed to spam, or is back in a pass that may yet say so. Listed so
+  // refreshFulfillment (keptOnCall) judges it again. Partial index
+  // call_commitments_direct_call_proof_index (migration 20261010300000).
+  // Under the callback gate alone: the association kill switch above is
+  // not this proof's.
+  if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) {
+    // Driven from the evidence side: outbound calls changed inside the scan
+    // window (a reprocess rewrites updated_at; call_log_outbound_updated_at_index)
+    // that are not settled non-spam, joined to the promises kept on them
+    // through the partial index's expression. Never a walk of every proof.
+    const direct = await conn.raw(
+      `SELECT DISTINCT cc.call_log_id
+         FROM call_log ev
+         JOIN call_commitments cc ON (cc.fulfillment ->> 'record_id') = ev.id::text
+          AND cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
+          AND (cc.fulfillment ->> 'kind') = 'outbound_call'
+        WHERE ev.direction LIKE 'outbound%' AND ev.updated_at > ?
+          -- IS NOT TRUE, not NOT: a status NULL row with a recording waiting
+          -- (adoption) makes the predicate NULL, and that row is unsettled too.
+          AND (${settledNonSpamCallbackSql("ev")}) IS NOT TRUE`,
+      [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000)],
+    );
+    for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
+  }
+  return ids;
+}
+async function listLapsedAssociationCloses(conn) {
   // The recent automatic closes first (a handful, off the partial index
   // call_commitments_evidence_closed_idx — closed_by inlined as a constant so
   // the planner can match it), then each joined to its visit or customer by
@@ -2900,6 +3201,15 @@ async function listLapsedEvidenceClosedCallIds(conn) {
                   AND (ev.direction IS DISTINCT FROM 'outbound' OR (${personCallBackSql('ev')}) IS NOT TRUE
                     -- ... and still say what the model read (a reprocess re-transcribes).
                     OR md5(COALESCE(ev.transcription, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))))
+          -- A close resting on an outbound call (plain, card, or model-judged)
+          -- whose call has since been reprocessed to spam, or is back in a pass
+          -- that may yet say spam: under GATE_CALLBACK_SPAM_CLOSES_PARENT the
+          -- resolvers would no longer acquire it (settledNonSpamCallback), so
+          -- the close is judged again.
+          ${require("../config/feature-gates").isEnabled("callbackSpamClosesParent")
+    ? `OR ((cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'kind') IN ('outbound_call', '${PERSON_CONTACT_KIND}')
+              AND ev.id IS NOT NULL AND NOT ${settledNonSpamCallbackSql('ev')})`
+    : ''}
           -- ... or on a person's delivered text: gone, relinked to another
           -- customer, or no longer a text a person sent that was delivered.
           OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
@@ -3815,6 +4125,19 @@ module.exports = {
   callbackEditEventMetadata,
   addHumanCommitment,
   obligationRenewedAt,
+  callbackReachedSolicitor,
+  reopenCallbackSpamDismissals,
+  rejudgeCallbackSpamDismissals,
+  RETRYABLE_PARENT_STATUSES,
+  callbackSpamReopenCount,
+  callbackSpamReopenKeySuffix,
+  isSettledParentRow,
+  settledParentSql,
+  settledNonSpamCallbackSql,
+  terminalNonSpamCallbackSql,
+  terminalParentSql,
+  UNSETTLED_CALLBACK_STATUSES,
+  CALLBACK_SPAM,
   renewalBoundaryUnknown,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,

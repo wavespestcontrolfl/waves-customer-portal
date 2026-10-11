@@ -869,6 +869,24 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
 const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
 const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address']);
+// The asks a return call would have answered. When the office's callback to a
+// voicemail reached a solicitor (call_log.metadata.callback_verdict.spam, written
+// by closeParentOnCallbackSpam), these cards are moot on the voicemail: the
+// settlement resolves them, and a later reprocess of the voicemail files none
+// of them again (codex #6271 r3). Cards that judge on-file data, authorization,
+// email or a property role are human verdicts and are not in this set; nor is
+// callback_number_needed: the caller said the inbound number was not theirs,
+// so a callback to that number reaching a solicitor answers nothing (r4 P1).
+// The processor applies this set at its card-filter sites; see
+// callbackVerdictSpam there.
+const CALLBACK_SPAM_MOOT_CODES = new Set([
+  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+  'address_unverified', 'address_validation_unavailable', 'address_not_validated',
+  'missing_first_name', 'missing_last_name', 'missing_required_customer_fields',
+  'not_confirmed', 'quote_promised',
+  'ambiguous_pest_or_service', 'ambiguous_scheduling', 'low_extraction_confidence',
+  'call_dropped_mid_intake',
+]);
 const AUTHORIZED_THIRD_PARTY_RELATIONSHIPS = new Set(['family_member', 'employee']);
 
 function callMakesNoServiceAsk(extraction) {
@@ -3464,6 +3482,7 @@ module.exports = {
   dropUnneededCallCards,
   callEndedWithNothingToDo,
   noActionCallCards,
+  CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
