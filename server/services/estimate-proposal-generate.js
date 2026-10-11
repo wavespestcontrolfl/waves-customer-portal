@@ -180,6 +180,16 @@ const FAMILY_RESPONSIBILITIES = {
   other: [],
 };
 
+// An explicit $0 in ANY sold-net alias is comped scope, never an unpriced
+// row: manualFinalOneTime, priceAfterDiscount, amountAfterDiscount and
+// totalAfterDiscount are each read as the accepted net by the resolvers
+// below, so a zero in any of them must fail the draft the same way (codex
+// #6113 r24), not drop the promised work.
+const NET_ONE_TIME_ALIASES = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
+function explicitZeroNet(row = {}) {
+  return NET_ONE_TIME_ALIASES.some((key) => row[key] === 0 || row[key] === '0');
+}
+
 function num(value) {
   // Null/undefined/blank stay null — Number(null) is 0, and a nullable DB
   // total column must never masquerade as an authoritative explicit zero
@@ -843,7 +853,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     // An EXPLICIT accepted zero stays in so the comped guard below can
     // fail the draft instead of silently dropping promised scope
     // (codex 1A-ii r4).
-    if (line.manualFinalOneTime === 0) return true;
+    if (explicitZeroNet(line)) return true;
     if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
     // Explicit one-time cadence wins outright; otherwise only the
     // explicitly ANNUAL cadence fields count as recurring evidence — a
@@ -888,7 +898,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     }
     // An EXPLICIT accepted zero is comped scope, not an unpriced row
     // (codex 1A-ii r2c) — fail rather than silently lose it.
-    if (item.manualFinalOneTime === 0) {
+    if (explicitZeroNet(item)) {
       comped.push(label);
       continue;
     }
@@ -908,7 +918,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     if (twinEntry) {
       twinEntry.used = true;
       const twin = twinEntry.line;
-      if (twin.manualFinalOneTime === 0) {
+      if (explicitZeroNet(twin)) {
         comped.push(label);
         continue;
       }
@@ -956,7 +966,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   }
   for (const { line, used } of rawPool) {
     if (used) continue;
-    if (line.manualFinalOneTime === 0) {
+    if (explicitZeroNet(line)) {
       comped.push(rawLineLabel(line, 'item'));
       continue;
     }
@@ -1174,6 +1184,7 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
 }
 
 module.exports = {
+  explicitZeroNet,
   deriveProposalDraft,
   derivePrograms,
   deriveCorrectiveWork,

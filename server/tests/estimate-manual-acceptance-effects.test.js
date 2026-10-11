@@ -451,6 +451,21 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     await expect(markEstimateManuallyAccepted(base(short, fakeConverter(short), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unitemized', message: expect.stringContaining('$0.01 is not itemized') });
   });
+  test('round 24: a raw engine line item sold at $0 in any net alias (amountAfterDiscount: 0) refuses as comped, with a null and a zero aggregate', async () => {
+    for (const onetime_total of [null, '0']) {
+      const world = makeWorld({
+        estimateOverrides: {
+          onetime_total,
+          estimate_data: JSON.stringify({
+            recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+            engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, amountAfterDiscount: 0, billingCadence: 'one_time' }] },
+          }),
+        },
+      });
+      await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+        .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*comped/) });
+    }
+  });
   test('round 20: a $0 (comped) row refuses as one_time_unrepresentable instead of being dropped from the card', async () => {
     const world = makeWorld({
       estimateOverrides: {
@@ -611,7 +626,7 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       },
     });
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
-      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringContaining('Wasp Nest Removal is an accepted $0 (comped) row') });
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*comped/) });
   });
   test('round 17: a negative adjustment row (rodent bundle discount) is a discount to subtract, never comped work to schedule', async () => {
     const world = makeWorld({

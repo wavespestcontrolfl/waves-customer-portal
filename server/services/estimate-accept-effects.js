@@ -252,13 +252,21 @@ function canonicalOneTimeLines(estimate, data) {
 // are found with the converter's own item reader over the same containers.
 function unrepresentableRow(data, converter, { hasTotal }) {
   if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return null;
+  const { explicitZeroNet } = require('./estimate-proposal-generate');
   const docs = [data, ...oneTimeContainers(data).filter((c) => c !== data).map((c) => ({ result: c }))];
+  const rowName = (item) => String(item.displayName || item.label || item.display?.name || item.name || item.service || 'a one-time row').trim();
   for (const doc of docs) {
     for (const item of converter.estimateOneTimeItemsFromData(doc)) {
       const amount = lineAmount(item);
-      const name = String(item.name || item.label || item.service || 'a one-time row').trim();
-      if (amount === 0) return `${name} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
-      if (amount != null && amount < 0 && !hasTotal) return `${name} is a discount row with no one-time total to apply it to`;
+      if (amount === 0) return `${rowName(item)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+      if (amount != null && amount < 0 && !hasTotal) return `${rowName(item)} is a discount row with no one-time total to apply it to`;
+    }
+  }
+  // The raw engine line items (the shape the extractor reads beside the
+  // mapped items): an explicit $0 in any sold-net alias is comped scope.
+  for (const container of oneTimeContainers(data)) {
+    for (const line of Array.isArray(container.lineItems) ? container.lineItems : []) {
+      if (explicitZeroNet(line)) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
     }
   }
   return null;
