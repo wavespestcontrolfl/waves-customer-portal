@@ -2720,7 +2720,9 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       // A customer who left, or a callback that reached a solicitor,
       // dismisses the promise; every other proof keeps it.
       const left = proof.kind === CUSTOMER_LEFT || proof.kind === CALLBACK_SPAM;
-      const closed = await conn("call_commitments")
+      // The settlement write, on `t`: the caller's transaction, or one of its
+      // own for a callback-spam dismissal (below).
+      const settle = (t) => t("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
         // Proof was computed from the snapshot row: a claim or reopen that
@@ -2735,7 +2737,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .modify((q) => {
           if (proof.strength === "direct" && proof.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
-            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+            this.select(t.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
           });
         })
         // A callback-spam dismissal is written only while that callback still
@@ -2746,12 +2748,23 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .modify((q) => {
           if (proof.kind !== CALLBACK_SPAM) return;
           q.whereExists(function callbackStillSpam() {
-            this.select(conn.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
+            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof, row.customer_id)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
-      fulfilled += closed;
-      if (proof.kind === CALLBACK_SPAM && closed > 0) await closeCallbackReminders(conn, c.id);
+      if (proof.kind !== CALLBACK_SPAM) {
+        fulfilled += await settle(conn);
+        continue;
+      }
+      // A callback-spam dismissal and the close of the promise's reminders
+      // are one write: both in the caller's transaction, or in one of their
+      // own, so a reminder can never outlive the settled promise.
+      const dismissSpam = async (t) => {
+        const closed = await settle(t);
+        if (closed > 0) await closeCallbackReminders(t, c.id);
+        return closed;
+      };
+      fulfilled += conn.isTransaction ? await dismissSpam(conn) : await conn.transaction(dismissSpam);
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
