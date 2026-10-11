@@ -123,6 +123,8 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
   const targets = conversionApplies
     ? await require('../lead-estimate-link').invoiceSentConversionTargets(invoice.customer_id, database)
     : { reason: 'not_first_delivery', leadIds: [] };
+  // An unread lead lookup is not "no leads": the plan cannot be pinned, so the card (or the claim's recheck) refuses.
+  if (targets.unreadable) throw Object.assign(new Error('The leads this send would mark won could not be read'), { code: 'lead_effects_unverified' });
   const leadIds = targets.leadIds || [];
   const lead = effect('lead_conversion', leadIds.length > 0, leadIds.length ? leadIds.join(',') : (targets.reason || 'none'),
     leadIds.length ? `Sending this invoice also marks ${leadIds.length === 1 ? 'lead' : 'leads'} ${leadIds.map(shortId).join(', ')} won` : null);

@@ -116,7 +116,10 @@ async function messagingHold(customerId) {
 async function planEffectsOrRefuse(run, invoice, whatFailed) {
   try {
     return await run();
-  } catch {
+  } catch (err) {
+    if (err?.code === 'lead_effects_unverified') {
+      return refusal(`This invoice cannot be ${whatFailed} from the bar right now: the leads it would mark won could not be read. Try again in a minute.`, 'lead_effects_unverified', { invoice_id: invoice.id });
+    }
     return refusal(`This invoice cannot be ${whatFailed} from the bar right now: what it would also do could not be checked.`, 'effects_check_failed', { invoice_id: invoice.id });
   }
 }

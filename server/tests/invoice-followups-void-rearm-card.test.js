@@ -47,7 +47,7 @@ jest.mock('../services/pay-combined', () => ({
 
 const db = require('../models/db');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { scheduleForInvoice, planFollowupSequence, voidStopRearmDecision } = require('../services/invoice-followups');
+const { scheduleForInvoice, planFollowupSequence, voidStopRearmDecision, voidStopRearmAnchor } = require('../services/invoice-followups');
 const effects = require('../services/intelligence-bar/invoice-action-effects');
 
 
@@ -135,6 +135,35 @@ describe('the send card and the scheduler agree on a void-stopped sequence', () 
     const seq = voidStoppedSeq({ stopped_by_admin_id: 'admin-1' });
     setupDb({ seq, invoice: sentInvoice });
     expect((await planFollowupSequence(sentInvoice, db)).state).toBe('existing:stopped');
+  });
+
+  test('round 14: with no anchor_at, an old invoice is judged from when it went out on the card AND in the scheduler (one anchor function)', async () => {
+    const oldInvoice = { ...sentInvoice, created_at: '2020-01-01T10:00:00Z', sent_at: '2020-01-02T10:00:00Z', sms_sent_at: null };
+    const seq = voidStoppedSeq({ anchor_at: null, step_index: 1 });
+    const { seqUpdate } = setupDb({ seq, invoice: oldInvoice });
+    const planned = await planFollowupSequence(oldInvoice, db);
+    await scheduleForInvoice('inv-1');
+    // The step's due time is long past: the card names the very time the scheduler writes, not one counted from today.
+    expect(planned.state).toBe('rearm');
+    expect(new Date(planned.nextTouchAt).getFullYear()).toBe(2020);
+    expect(new Date(seqUpdate.mock.calls[0][0].next_touch_at).getTime()).toBe(new Date(planned.nextTouchAt).getTime());
+    // A ladder already finished by that step completes on both sides.
+    const done = voidStoppedSeq({ anchor_at: null, step_index: 99 });
+    const second = setupDb({ seq: done, invoice: oldInvoice });
+    expect((await planFollowupSequence(oldInvoice, db)).state).toBe('completed');
+    await scheduleForInvoice('inv-1');
+    expect(second.seqUpdate.mock.calls[0][0]).toMatchObject({ status: 'completed' });
+  });
+
+  test('round 14: voidStopRearmAnchor is the one anchor: a shifted anchor_at, else sent_at, else sms_sent_at, else created_at; both callers use it', () => {
+    const invoice = { sent_at: 'S', sms_sent_at: 'M', created_at: 'C' };
+    expect(voidStopRearmAnchor({ anchor_at: 'A' }, invoice)).toBe('A');
+    expect(voidStopRearmAnchor({ anchor_at: null }, invoice)).toBe('S');
+    expect(voidStopRearmAnchor({}, { sms_sent_at: 'M', created_at: 'C' })).toBe('M');
+    expect(voidStopRearmAnchor({}, { created_at: 'C' })).toBe('C');
+    const source = require('fs').readFileSync(require.resolve('../services/invoice-followups'), 'utf8');
+    expect(source.match(/anchor: voidStopRearmAnchor\(existing, invoice\),/g)).toHaveLength(2);
+    expect(source).not.toMatch(/anchor: existing\.anchor_at/);
   });
 
   test('the decision is one function: neither caller carries its own copy of the checks', () => {

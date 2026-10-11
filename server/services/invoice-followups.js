@@ -134,6 +134,12 @@ function isSystemVoidStop(existing) {
 //   active / completed  otherwise the cadence resumes from `anchor`: active with the next touch, or completed when every step
 //                 has passed.
 // `planActive` and `holdForAutopay` are async readers so a reader runs only when the checks before it did not decide.
+// Where a re-armed void-stopped sequence's cadence starts: a shifted anchor_at wins, else when the invoice went out
+// (sent_at, sms_sent_at, created_at; never the due date). scheduleForInvoice and the Intelligence Bar's preview both call this.
+function voidStopRearmAnchor(existing, invoice) {
+  return existing.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+}
+
 async function voidStopRearmDecision(existing, { planActive, holdForAutopay, anchor }) {
   const stamp = String(existing.stopped_reason || '');
   if (await planActive()) return { kind: 'payment_plan' };
@@ -572,7 +578,7 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
               return true;
             }
           },
-          anchor: existing.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at,
+          anchor: voidStopRearmAnchor(existing, invoice),
         });
         if (decision.kind === 'payment_plan') return existing;
         const [written] = await trx('invoice_followup_sequences')
@@ -672,8 +678,7 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
   const existing = await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
   if (existing) {
     if (!isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
-    // The same decision scheduleForInvoice makes for a void-stopped sequence. The cadence restarts from the send (the
-    // post-send row is stamped now), unless a shifted anchor_at wins.
+    // The same decision scheduleForInvoice makes for a void-stopped sequence, from the same anchor (voidStopRearmAnchor).
     const decision = await voidStopRearmDecision(existing, {
       planActive: () => activePaymentPlan(database, invoice.id),
       holdForAutopay: async () => {
@@ -684,10 +689,10 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
           return true;
         }
       },
-      anchor: existing.anchor_at || new Date(),
+      anchor: voidStopRearmAnchor(existing, invoice),
     });
     const REARM_STATE = { payment_plan: 'payment_plan', paused: 'paused', autopay_hold: 'autopay_hold', active: 'rearm', completed: 'completed' };
-    return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence };
+    return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence, nextTouchAt: decision.nextTouchAt || null };
   }
   if (await activePaymentPlan(database, invoice.id)) return { arms: false, state: 'payment_plan', cadence };
   try {
@@ -3137,6 +3142,7 @@ async function isDunningStopped(invoiceId, database = db) {
 
 module.exports = {
   voidStopRearmDecision,
+  voidStopRearmAnchor,
   isSystemVoidStop,
   activePaymentPlan,
   adoptOrphanInvoices,

@@ -1804,15 +1804,17 @@ async function resolveConversionLeads(database, {
 }
 
 // The leads an invoice's first send marks won (convertLeadFromEvent source 'invoice_sent' for this
-// customer), resolved read-only by the same resolver. { leadIds } or { reason }.
+// customer), resolved read-only by the same resolver. { leadIds } or { reason }. A lookup that FAILS is { unreadable: true }, never
+// an empty target set: a caller that pins "no leads" on an unread answer would let the send mark them won unseen.
 async function invoiceSentConversionTargets(customerId, database = db) {
   if (!customerId) return { reason: 'no_customer', leadIds: [] };
   try {
     const resolved = await resolveConversionLeads(database, { source: 'invoice_sent', customerId });
     if (resolved.reason) return { reason: resolved.reason, leadIds: [] };
     return { leadIds: resolved.open.map((lead) => String(lead.id)).sort() };
-  } catch {
-    return { reason: 'error', leadIds: [] };
+  } catch (err) {
+    logger.warn(`[lead-estimate-link] invoice-sent lead lookup failed (${String(err.code || err.name || 'error')})`);
+    return { reason: 'unreadable', unreadable: true, leadIds: [] };
   }
 }
 

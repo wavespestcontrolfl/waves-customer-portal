@@ -692,6 +692,27 @@ describe('round 4: one effects plan', () => {
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
   });
 
+  test('send (round 14): a lead lookup that cannot be read refuses the card with lead_effects_unverified; nothing is pinned and nothing is sent', async () => {
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ reason: 'unreadable', unreadable: true, leadIds: [] });
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'lead_effects_unverified', error: expect.stringMatching(/Try again/) });
+    expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('send (round 14): the lead lookup fails after the card: the confirm refuses at re-derivation, and the claim\'s check throws (the claim refuses)', async () => {
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ reason: 'unreadable', unreadable: true, leadIds: [] });
+    await expect(run()).resolves.toMatchObject({ code: 'lead_effects_unverified' });
+    expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+    // At the claim: the verifier throws, and the claim treats a throw as a refusal (invoice-approved-version-claim.test.js).
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [] });
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true } } });
+    const second = await claimedOnce('send_invoice', '_verified_invoice_send_version');
+    await second.run();
+    const { verifyEffects } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ reason: 'unreadable', unreadable: true, leadIds: [] });
+    await expect(verifyEffects({ ...state.invoices[0], status: 'draft' }, db)).rejects.toMatchObject({ code: 'lead_effects_unverified' });
+  });
+
   test('send: the claim\'s effects check recomputes the list on the claimed row and compares it with the card\'s digest', async () => {
     Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
     const { run } = await claimedOnce('send_invoice', '_verified_invoice_send_version');

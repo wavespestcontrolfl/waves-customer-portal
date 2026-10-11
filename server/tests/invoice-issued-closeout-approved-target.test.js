@@ -165,6 +165,50 @@ describe('the retry sweep keeps to the target the bar send pinned (bound to the 
   });
 });
 
+describe('the sweep and a send-only refusal (round 14)', () => {
+  // The audit lookup honors the sweep's own NOT IN filter on the code; the latest row for the visit is the approval mismatch.
+  function mismatchConn(status) {
+    const invoiceRow = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status, send_claim_token: null, scheduled_service_id: 'visit-live', paid_at: '2021-03-01T15:00:00Z', sent_at: SENT_AT };
+    const candidate = { invoice_id: 'inv-1', invoice_status: status, visit_id: 'visit-live', visit_status: 'pending', own_attempt_parked: false, issued_after_service_day: true };
+    const connFor = (table) => {
+      const state = { ignored: [], audit: false };
+      const b = new Proxy({}, {
+        get: (_t, prop) => {
+          if (prop === 'then') return (res, rej) => Promise.resolve(table === 'invoices as i' ? [candidate] : null).then(res, rej);
+          if (prop === 'where') return (arg) => { if (arg && arg.resource_type === 'scheduled_services') state.audit = true; return b; };
+          if (prop === 'whereRaw') return (sql, bindings) => { if (/NOT IN/.test(sql)) state.ignored = bindings; return b; };
+          if (prop === 'first') {
+            return async () => {
+              if (table === 'audit_log') {
+                return state.audit && !state.ignored.includes('approved_target_mismatch')
+                  ? { action: 'visit.completion_on_invoice_issued_refused', metadata: { invoiceId: 'inv-1', trigger: 'sent', code: 'approved_target_mismatch' } } : null;
+              }
+              if (table === 'invoices') return invoiceRow;
+              return rows[table] || null;
+            };
+          }
+          return () => b;
+        },
+      });
+      return b;
+    };
+    connFor.raw = (sql) => sql;
+    return connFor;
+  }
+
+  test('a mismatch row left by a bar send does not block the PAID retry: the paid closeout runs', async () => {
+    const out = await retryIssuedInvoiceCloseouts({ conn: mismatchConn('paid'), today: '2099-01-01' });
+    expect(out).toMatchObject({ retried: 1, closed: 1 });
+    expect(completeScheduledService).toHaveBeenCalledTimes(1);
+  });
+
+  test('the same row still leaves a SENT retry alone (a person decides)', async () => {
+    const out = await retryIssuedInvoiceCloseouts({ conn: mismatchConn('sent'), today: '2099-01-01' });
+    expect(out).toMatchObject({ retried: 0, closed: 0 });
+    expect(completeScheduledService).not.toHaveBeenCalled();
+  });
+});
+
 describe('the pin rows', () => {
   test('the pin is written inside the caller\'s handle with the claim token and names the confirming admin', async () => {
     const trx = jest.fn();

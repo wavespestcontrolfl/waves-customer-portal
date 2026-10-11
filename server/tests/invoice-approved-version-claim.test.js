@@ -444,11 +444,28 @@ describe('claimInvoiceForSend, the invoice text renderer and the closeout sweep 
     for (const name of ['claimInvoiceForSend', 'refuseUnclaimableInvoice', 'firstSendAfterSummaryRefusal',
       'approvedDigestRefusal', 'approvedEffectsRefusal', 'approvedOwnerRefusal', 'approvedAttachmentRefusal', 'recordApprovedPinOrRefusal',
       'runApprovedClaimChecks', 'claimNeedsOwnerFence', 'claimAlreadyHeld', 'buildClaimFlip', 'refuseFailedClaim',
-      'renderInvoiceSmsBody', 'chooseInvoiceSmsTemplate', 'invoiceSmsDateFacts', 'invoicePreServiceCopy']) {
+      'renderInvoiceSmsBody', 'chooseInvoiceSmsTemplate', 'invoiceSmsDateFacts', 'invoicePreServiceCopy',
+      'checkInvoiceDeliveryPreconditions']) {
       // A function below the rule's floor of 2 has no message; every one of these has branches, so a miss means a rename.
       expect([name, complexityOf(name)]).toEqual([name, expect.any(Number)]);
       expect([name, complexityOf(name) <= 20]).toEqual([name, true]);
     }
+  }, 120000);
+
+  test('the delivery preconditions are a table of checks run by a loop, and every check in the table is at or below 20', () => {
+    const { Linter } = require('eslint');
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+    const start = source.slice(0, source.indexOf('const INVOICE_DELIVERY_CHECKS = [')).split('\n').length;
+    const end = source.slice(0, source.indexOf('async function checkInvoiceDeliveryPreconditions(')).split('\n').length;
+    const messages = new Linter({ configType: 'flat' }).verify(source, [{
+      languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs' },
+      rules: { complexity: ['warn', 1] },
+    }]).filter((m) => m.ruleId === 'complexity' && m.line > start && m.line < end);
+    expect(messages.length).toBeGreaterThanOrEqual(6);
+    for (const m of messages) expect([m.line, Number(/complexity of (\d+)/.exec(m.message)[1]) <= 20]).toEqual([m.line, true]);
+    // The names, in run order.
+    expect([...source.slice(source.indexOf('const INVOICE_DELIVERY_CHECKS = ['), source.indexOf('async function checkInvoiceDeliveryPreconditions(')).matchAll(/\{ name: "(\w+)"/g)].map((m) => m[1]))
+      .toEqual(['readable', 'send_claim', 'linked_visit', 'ownership', 'approved_owner', 'recipient', 'collection_hold', 'balance']);
   }, 120000);
 
   test('retryIssuedInvoiceCloseouts and its steps in invoice-issued-closeout.js are at or below 20', () => {

@@ -52,7 +52,8 @@ describe('invoice-followups planFollowupSequence (scheduleForInvoice\'s own pred
   });
 
   test('a sequence a void stopped is re-armed by the resend; an admin\'s own stop is not', async () => {
-    await expect(Followups.planFollowupSequence(invoice(), fakeDb({ sequence: { status: 'stopped', stopped_reason: 'invoice_voided', stopped_by_admin_id: null, step_index: 0 } })))
+    // Every invoice row has created_at; the cadence is anchored on when the invoice went out (the scheduler's own anchor).
+    await expect(Followups.planFollowupSequence(invoice({ created_at: new Date() }), fakeDb({ sequence: { status: 'stopped', stopped_reason: 'invoice_voided', stopped_by_admin_id: null, step_index: 0 } })))
       .resolves.toMatchObject({ arms: true, state: 'rearm' });
     await expect(Followups.planFollowupSequence(invoice(), fakeDb({ sequence: { status: 'stopped', stopped_reason: 'invoice_voided', stopped_by_admin_id: 'admin-1' } })))
       .resolves.toMatchObject({ arms: false, state: 'existing:stopped' });
@@ -83,8 +84,8 @@ describe('invoice leadConversionApplies (convertLeadOnInvoiceSent\'s own test)',
 });
 
 describe('lead-estimate-link invoiceSentConversionTargets (read-only, same resolver as the conversion)', () => {
-  test('no customer, or a read that fails, names no lead', async () => {
+  test('no customer names no lead; a read that fails is UNREADABLE, never an empty target set', async () => {
     await expect(LeadLink.invoiceSentConversionTargets(null)).resolves.toEqual({ reason: 'no_customer', leadIds: [] });
-    await expect(LeadLink.invoiceSentConversionTargets('cust-1', () => { throw new Error('db down'); })).resolves.toEqual({ reason: 'error', leadIds: [] });
+    await expect(LeadLink.invoiceSentConversionTargets('cust-1', () => { throw new Error('db down'); })).resolves.toEqual({ reason: 'unreadable', unreadable: true, leadIds: [] });
   });
 });

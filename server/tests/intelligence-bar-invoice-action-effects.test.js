@@ -114,6 +114,13 @@ describe('planSendEffects', () => {
     await expect(effects.planSendEffects(invoice(), customer, {})).rejects.toThrow('read failed');
   });
 
+  test('a lead lookup that failed is not "no leads": the plan throws lead_effects_unverified instead of pinning none', async () => {
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ reason: 'unreadable', unreadable: true, leadIds: [] });
+    await expect(effects.planSendEffects(invoice(), customer, {})).rejects.toMatchObject({ code: 'lead_effects_unverified' });
+    // Not a first delivery: the lookup is not made, so an unreadable resolver cannot matter.
+    await expect(effects.planSendEffects(invoice({ status: 'sent', sent_at: new Date('2099-01-01T00:00:00Z') }), customer, {})).resolves.toHaveProperty('digest');
+  });
+
   // Round 5 item 1 (the plan half).
   test('the send plan lists the invoice attachments by name and pins their id, name, size and edit time', async () => {
     let plan = await effects.planSendEffects(invoice(), customer, {});

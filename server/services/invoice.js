@@ -3087,6 +3087,79 @@ async function linkedScheduledServiceId(invoice, database = db) {
   return record?.scheduled_service_id || null;
 }
 
+// One blocked outcome. `error` is the field withProviderHandoff's caller (this file) has always read on a blocked outcome
+// (byte-identical to the pre-refactor shape); `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
+// send-customer-message.js's providerPreparationCheck, then billing-channel-email-authority.js's preSendBlock — gets the
+// real reason too, since that path reads `.reason`, not `.error`.
+function deliveryNotSent(code, message, validator) {
+  return { sent: false, blocked: true, deliveryOutcome: "not_sent", code, error: message, reason: message, validator };
+}
+
+// The preconditions, in the order they run. Each `test(ctx)` returns a refusal (a deliveryNotSent outcome, or the hold's
+// own defer outcome) or null. The first refusal wins, so a claim / visit / balance block keeps its code and order
+// whichever leg catches it.
+const INVOICE_DELIVERY_CHECKS = [
+  { name: "readable", test: ({ current }) => (current ? null
+    : deliveryNotSent("INVOICE_UNREADABLE", "Invoice could not be re-read before delivery", "check_invoice_deposit_settlement")) },
+  { name: "send_claim", test: ({ current, sendClaimToken }) => (current.send_claim_token === sendClaimToken
+    && SEND_FINALIZABLE_STATUSES.includes(current.status) ? null
+    : deliveryNotSent("send_claim_lost", "Invoice send claim changed; delivery not attempted", "check_invoice_send_claim")) },
+  { name: "linked_visit", test: async ({ database, current }) => {
+    const terminalVisit = await require("./invoice-helpers")
+      .visitRefusesSettlement(database, await linkedScheduledServiceId(current, database));
+    return terminalVisit
+      ? deliveryNotSent("INVOICE_VISIT_TERMINAL", `Linked visit is ${terminalVisit}; delivery not attempted`, "check_invoice_visit_status")
+      : null;
+  } },
+  { name: "ownership", test: async ({ database, current }) => {
+    const ownership = await require("./invoice-helpers").selfPayAtDispatch(current.id, database)();
+    return ownership.ok === true ? null : deliveryNotSent(ownership.code, ownership.reason, "check_invoice_ownership_boundary");
+  } },
+  // The Intelligence Bar's live owner check (who owes this invoice RIGHT NOW, Bill-To resolved), run on the locked handle
+  // immediately before the provider call. Fail closed: a verifier that throws refuses the send.
+  { name: "approved_owner", test: async ({ database, current, verifyOwner }) => {
+    if (!verifyOwner) return null;
+    let refusal = "The bar could not verify who owes this invoice, so it was not sent.";
+    try { refusal = await verifyOwner({ ...current }, database); } catch { /* keep the fail-closed text */ }
+    return refusal ? deliveryNotSent("approved_version_changed", refusal, "check_invoice_ownership_boundary") : null;
+  } },
+  // The Intelligence Bar's approved phone, read AGAIN on the locked handle right before the provider call: the customer edit
+  // route changes the phone without taking the invoice lock, so a number removed after the early check must not get the pay
+  // link. A read that fails refuses (fail closed).
+  { name: "recipient", test: async ({ database, current, expectedSmsPhone }) => {
+    if (expectedSmsPhone === undefined) return null;
+    let freshDigits = null;
+    try {
+      const row = await database("customers").where({ id: current.customer_id }).first("phone");
+      freshDigits = String(row?.phone || "").replace(/\D/g, "");
+    } catch { /* keep the fail-closed null */ }
+    return expectedSmsPhone && freshDigits !== null && freshDigits === String(expectedSmsPhone) ? null
+      : deliveryNotSent("recipient_changed", "The customer's phone is not the one the approval showed; the text was not sent", "check_invoice_recipient");
+  } },
+  // Collections DISPUTE hold, re-read at the actual provider boundary on the
+  // locked handle (owner ruling 2026-09-30): a hold that committed after the
+  // sender's own up-front check, during claiming, lock waits or message
+  // preparation, still stops the pay link here - retryable and deferred, never
+  // terminal (savepoint read, fail closed). Payer-billed and the explicit
+  // operator/customer exemptions are skipped; no cross-writer locking (the hold
+  // writer never waits - the accepted millisecond window of collection-hold.js).
+  { name: "collection_hold", test: async ({ database, current, holdExempt }) => {
+    if (current.payer_id) return null;
+    const collectionHold = require("./collections/collection-hold");
+    // A trusted operator / customer exemption skips a plain DISPUTE hold only; a wrong-number /
+    // wrong-party fallback hold (an all-channel outreach block) still stops the pay link.
+    const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, database,
+      { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
+    if (!held.held) return null;
+    const defer = collectionHold.holdDeferOutcome(held);
+    return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
+  } },
+  { name: "balance", test: ({ current, sendInvoice }) => (invoiceAmountDue(current) > 0
+    && invoiceAmountDue(current) === invoiceAmountDue(sendInvoice)
+    && isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items)) ? null
+    : deliveryNotSent("INVOICE_BALANCE_CHANGED", "Invoice balance changed while preparing delivery; retry send", "check_invoice_deposit_settlement")) },
+];
+
 // Shared invoice-handoff preconditions: send-claim token/status, linked-visit
 // terminal state, self-pay ownership, and amount-due/line-items unchanged vs
 // the snapshot being sent. Both sendViaSMS's own withProviderHandoff (the
@@ -3104,94 +3177,10 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
 async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null, verifyOwner = null, expectedSmsPhone = undefined }) {
-  // `error` is the field withProviderHandoff's caller (this file) has always
-  // read on a blocked outcome (byte-identical to the pre-refactor shape);
-  // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
-  // send-customer-message.js's providerPreparationCheck, then billing-
-  // channel-email-authority.js's preSendBlock — gets the real reason too,
-  // since that path reads `.reason`, not `.error`.
-  if (!current) {
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "INVOICE_UNREADABLE",
-      error: "Invoice could not be re-read before delivery",
-      reason: "Invoice could not be re-read before delivery",
-      validator: "check_invoice_deposit_settlement" };
-  }
-  if (current.send_claim_token !== sendClaimToken
-    || !SEND_FINALIZABLE_STATUSES.includes(current.status)) {
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "send_claim_lost",
-      error: "Invoice send claim changed; delivery not attempted",
-      reason: "Invoice send claim changed; delivery not attempted",
-      validator: "check_invoice_send_claim" };
-  }
-  const scheduledServiceId = await linkedScheduledServiceId(current, database);
-  const terminalVisit = await require("./invoice-helpers")
-    .visitRefusesSettlement(database, scheduledServiceId);
-  if (terminalVisit) {
-    const message = `Linked visit is ${terminalVisit}; delivery not attempted`;
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "INVOICE_VISIT_TERMINAL", error: message, reason: message,
-      validator: "check_invoice_visit_status" };
-  }
-  const ownership = await require("./invoice-helpers").selfPayAtDispatch(current.id, database)();
-  if (ownership.ok !== true) {
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: ownership.code, error: ownership.reason, reason: ownership.reason,
-      validator: "check_invoice_ownership_boundary" };
-  }
-  // The Intelligence Bar's live owner check (who owes this invoice RIGHT NOW, Bill-To resolved), run on the locked handle
-  // immediately before the provider call. Fail closed: a verifier that throws refuses the send.
-  if (verifyOwner) {
-    let refusal = "The bar could not verify who owes this invoice, so it was not sent.";
-    try { refusal = await verifyOwner({ ...current }, database); } catch { /* keep the fail-closed text */ }
-    if (refusal) {
-      return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-        code: "approved_version_changed", error: refusal, reason: refusal,
-        validator: "check_invoice_ownership_boundary" };
-    }
-  }
-  // The Intelligence Bar's approved phone, read AGAIN on the locked handle right before the provider call: the customer edit
-  // route changes the phone without taking the invoice lock, so a number removed after the early check must not get the pay
-  // link. A read that fails refuses (fail closed).
-  if (expectedSmsPhone !== undefined) {
-    let freshDigits = null;
-    try {
-      const row = await database("customers").where({ id: current.customer_id }).first("phone");
-      freshDigits = String(row?.phone || "").replace(/\D/g, "");
-    } catch { /* keep the fail-closed null */ }
-    if (!expectedSmsPhone || freshDigits === null || freshDigits !== String(expectedSmsPhone)) {
-      const message = "The customer's phone is not the one the approval showed; the text was not sent";
-      return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-        code: "recipient_changed", error: message, reason: message,
-        validator: "check_invoice_recipient" };
-    }
-  }
-  // Collections DISPUTE hold, re-read at the actual provider boundary on the
-  // locked handle (owner ruling 2026-09-30): a hold that committed after the
-  // sender's own up-front check, during claiming, lock waits or message
-  // preparation, still stops the pay link here - retryable and deferred, never
-  // terminal (savepoint read, fail closed). Payer-billed and the explicit
-  // operator/customer exemptions are skipped; no cross-writer locking (the hold
-  // writer never waits - the accepted millisecond window of collection-hold.js).
-  if (!current.payer_id) {
-    const collectionHold = require("./collections/collection-hold");
-    // A trusted operator / customer exemption skips a plain DISPUTE hold only; a wrong-number /
-    // wrong-party fallback hold (an all-channel outreach block) still stops the pay link.
-    const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, database,
-      { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
-    if (held.held) {
-      const defer = collectionHold.holdDeferOutcome(held);
-      return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
-    }
-  }
-  if (invoiceAmountDue(current) <= 0
-    || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
-    || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
-    const message = "Invoice balance changed while preparing delivery; retry send";
-    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-      code: "INVOICE_BALANCE_CHANGED", error: message, reason: message,
-      validator: "check_invoice_deposit_settlement" };
+  const ctx = { database, current, sendClaimToken, sendInvoice, holdExempt, verifyOwner, expectedSmsPhone };
+  for (const check of INVOICE_DELIVERY_CHECKS) {
+    const refusal = await check.test(ctx);
+    if (refusal) return refusal;
   }
   return { ok: true };
 }

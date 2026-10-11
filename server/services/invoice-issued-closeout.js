@@ -365,18 +365,23 @@ function isTransientRefusal(meta) {
 // The latest closeout audit row for this (visit, invoice): `trigger` narrows
 // it to one trigger, null reads any. Returns { action, meta } or null; throws
 // on a failed read (the caller skips the row and the next pass re-reads).
-async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null }) {
+async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null, ignoreCodes = [] }) {
   const query = conn('audit_log')
     .where({ resource_type: 'scheduled_services', resource_id: visitId })
     .whereIn('action', CLOSEOUT_AUDIT_ACTIONS)
     .whereRaw("metadata->>'invoiceId' = ?", [String(invoiceId)]);
   if (trigger) query.whereRaw("metadata->>'trigger' = ?", [trigger]);
+  if (ignoreCodes.length) query.whereRaw(`COALESCE(metadata->>'code', '') NOT IN (${ignoreCodes.map(() => '?').join(', ')})`, ignoreCodes);
   const last = await query.orderBy('created_at', 'desc').first('action', 'metadata');
   if (!last) return null;
   let meta = last.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
   return { action: last.action, meta: meta || {} };
 }
+
+// Refusals that only a bar SEND's approval can produce (the card named a different visit). They say nothing about a settled
+// invoice's closeout, which the pin never covers (pinDecisionFor), so the sweep does not let one block a paid retry.
+const SEND_ONLY_REFUSAL_CODES = ['approved_target_mismatch'];
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
@@ -585,11 +590,11 @@ async function loadRetryCandidates(conn, today, sinceDays) {
 // Does the visit's own state say this candidate should not be retried? A parked attempt of this closeout is always resumed;
 // otherwise a prepaid-and-nobody-arrived visit is left to a person, and so is one whose latest audit row is a real refusal.
 // An audit lookup that fails skips the row (logged), as the sweep always did.
-async function skipByVisitState(conn, row) {
+async function skipByVisitState(conn, row, trigger) {
   if (row.own_attempt_parked) return false;
   if (prepaidAndNobodyArrived(row)) return true;
   try {
-    const last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
+    const last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, ...(trigger === 'paid' ? { ignoreCodes: SEND_ONLY_REFUSAL_CODES } : {}) });
     return Boolean(last) && !refusedForTheMoment(last);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
@@ -630,11 +635,12 @@ async function recordUnboundPin(row) {
   }
 }
 
-// One candidate: the visit-state skip, the pin decision, then the closeout. Returns { retried, closed } (zeros for a skip).
+// One candidate: the trigger the invoice's own state proves, the visit-state skip, the pin decision, then the closeout.
+// Returns { retried, closed } (zeros for a skip).
 async function retryOneIssuedInvoice(row, { conn, today }) {
   const skipped = { retried: 0, closed: 0 };
-  if (await skipByVisitState(conn, row)) return skipped;
   const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
+  if (await skipByVisitState(conn, row, trigger)) return skipped;
   const decision = await pinDecisionFor(conn, row, trigger);
   if (decision.action === 'skip') {
     if (decision.reason === 'pin_unbound') await recordUnboundPin(row);
