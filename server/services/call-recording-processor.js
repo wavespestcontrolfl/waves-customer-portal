@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, isExplicitlyNonOwner } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -4088,6 +4088,130 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
     }));
     return true;
   });
+}
+
+const parseCardPayload = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
+
+// Calls whose spelling is never compared with the linked customer: a third-party caller (family
+// member, agent, tenant, buyer ...), or an applicant / vendor an inbound number prelinked to a
+// customer. An unlinked call still compares against the extracted caller name.
+function nameSpellingCallExcluded({ customerId, relationship, v2Result }) {
+  return !!customerId && (isExplicitlyNonOwner(relationship) || thirdPartyCallNatureFromV2(v2Result));
+}
+
+// An OPEN card is stale when the live stored name now equals the spelling the card itself recorded,
+// or when the caller is now known not to be the account holder. Retired as an auto close; an
+// operator's in_progress card is never touched.
+async function retireStaleNameSpellingCard(trx, callLogId, card, note = 'Superseded — the customer name now matches the spelling.') {
+  await trx('triage_items').where({ id: card.id }).update({
+    status: 'resolved',
+    resolution_source: 'auto',
+    resolution_note: note,
+    resolved_at: new Date(),
+    updated_at: new Date(),
+  });
+  await syncCallReviewStatus(trx, callLogId);
+}
+
+// A reprocess that now classifies a LINKED caller as a third party (not the account holder) retires the
+// open card an earlier pass filed: it would still tell staff to rename the account holder. Same lock
+// order as the writer (customer row, call lock, claim fence). A pass with simply NO usable spelling
+// does not come here and leaves the card alone: inconclusive evidence never retires.
+async function retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken }) {
+  const open = { call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' };
+  if (!(await conn('triage_items').where(open).first('id'))) return false;
+  return conn.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    await lockTriageCall(trx, callLogId);
+    if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+    const card = await trx('triage_items').where(open).forUpdate().first('id');
+    if (!card) return false;
+    await retireStaleNameSpellingCard(trx, callLogId, card, 'Superseded — the caller is not the account holder.');
+    return false; // no card filed
+  });
+}
+
+// The thin writer, inside the card transaction. Lock order is the customer row FIRST, then the
+// per-call triage lock, then the claim fence (a Customer 360 edit locks the row and then the
+// customer's call locks; the reverse order here would deadlock with it). The customer name is read
+// live under that lock, so the card never carries a name the record no longer has.
+async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, relationship = null, procToken }) {
+  const live = customerId ? await trx('customers').where({ id: customerId }).forUpdate().first('first_name', 'last_name') : null;
+  await lockTriageCall(trx, callLogId);
+  if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+  const openCard = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).forUpdate().first('id', 'payload');
+  // A spouse / partner is authorized on the account but is not the account holder: unless the caller's
+  // own name is the record's, their spelling is not compared with it and an earlier card is retired.
+  if (spouseCallerIsNotAccountHolder({ relationship, extracted, live })) {
+    if (openCard) await retireStaleNameSpellingCard(trx, callLogId, openCard, 'Superseded — the caller is not the account holder.');
+    return false;
+  }
+  const { saved, differences, retire } = nameSpellingCardDecision({
+    dictation, live, extracted, openCardPayload: openCard ? parseCardPayload(openCard.payload) : null,
+  });
+  if (retire) await retireStaleNameSpellingCard(trx, callLogId, openCard);
+  if (!differences.length) return false;
+  const filingCustomer = live && customerId ? String(customerId) : null;
+  const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
+    .whereIn('status', ['resolved', 'dismissed']).select('payload');
+  const [top, ...others] = unsettledNameDifferences(differences, settled.map((r) => parseCardPayload(r.payload)), filingCustomer);
+  if (!top) return false;
+  await trx('triage_items')
+    .insert(buildTriageItem({
+      callLogId,
+      flag: 'name_spelling_differs',
+      extraction,
+      severity: 'advisory',
+      extraPayload: nameSpellingCardPayload({ top, others, saved, filingCustomer }),
+    }))
+    .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .merge(['payload', 'summary', 'updated_at'])
+    .where('triage_items.status', 'open');
+  await syncCallReviewStatus(trx, callLogId);
+  return true;
+}
+
+// The caller relationship from a VALID V2 result only; any other status classifies nobody.
+const validV2CallerRelationship = (v2Result) => (v2Result?.status === 'valid' ? v2Result.extraction?.caller?.relationship_to_property : null);
+
+// Work exists when this pass has a caller-turn spelling or the call has an open card to prune.
+async function nameSpellingPassHasWork(conn, callLogId, dictation) {
+  if ((dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return true;
+  return !!(await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).first('id'));
+}
+
+// The name_spelling_differs card (advisory, card-only): the caller spelled their own name
+// and the spelling differs (letters, any case) from the name being saved for the caller
+// (the linked customer's name when linked, else the extracted name). ONE open card per call.
+// Inbound calls only (outbound diarization can swap the speaker labels). Runs under the per-call
+// triage lock and the processing-token fence (a pass that lost its claim files nothing). A
+// reprocess refreshes an OPEN card in place (an operator's in_progress card is never touched);
+// only a discrepancy a HUMAN settled on this call is not re-filed (a recording-swap or auto close
+// does not suppress it). The payload records which customer the spelling was compared against
+// (customer_ids, rendered and merge-survivor-resolved like the other owed-customer cards), or says
+// the comparison was against the name heard on the call. Never writes a name. Fail-open.
+async function fileNameSpellingCard(conn, {
+  callLogId, customerId, extracted = {}, dictation, v2Result = null, procToken = null, isOutbound = false,
+}) {
+  try {
+    if (isOutbound) return false;
+    const extraction = v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } };
+    // Who the caller is comes only from a VALID V2 result: a partial extraction from a failed
+    // normalization or schema check classifies nobody (no exclusion, no spouse veto, no retire).
+    const relationship = validV2CallerRelationship(v2Result);
+    if (nameSpellingCallExcluded({ customerId, relationship, v2Result })) {
+      return await retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken });
+    }
+    // No usable caller spelling in this pass and no open card: nothing to do. With an open card the
+    // writer still prunes it against the live stored name (an entry the office already fixed drops);
+    // inconclusive evidence itself never adds, replaces or retires an entry that still differs.
+    if (!(await nameSpellingPassHasWork(conn, callLogId, dictation))) return false;
+    return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, relationship, procToken }));
+  } catch (err) {
+    logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);
+    return false;
+  }
 }
 
 // Is the call's missing_first_name card still an open task (open or claimed)? Read under
@@ -12889,6 +13013,18 @@ const CallRecordingProcessor = {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
+
+    // Card-only: a spelling the caller gave of their own name that differs from the name saved
+    // for them goes to the office as an advisory card. Nothing is written from it.
+    await fileNameSpellingCard(db, {
+      callLogId: call.id,
+      customerId,
+      extracted,
+      dictation: contactDictation,
+      v2Result,
+      procToken,
+      isOutbound: isOutboundCall(call),
+    });
 
     // Pre-linked calls (call.customer_id set at ring time by the inbound
     // webhook, an operator link, or the transcript-name reconciliation
@@ -23616,6 +23752,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  fileNameSpellingCard,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
