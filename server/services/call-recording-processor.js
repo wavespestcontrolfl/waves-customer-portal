@@ -1094,8 +1094,10 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
   // the inbound call was still underway says nothing about what the
   // voicemail then recorded (same boundary as the promise lifecycle's).
   if (!callbackAfterCallEnd(child, parent)) return { reason: 'callback_before_call_end' };
-  const sameCustomer = !!parent.customer_id && parent.customer_id === child.customer_id;
-  if (!samePhone(parent.from_phone, child.to_phone) && !sameCustomer) return { reason: 'parent_mismatch' };
+  // Phone evidence only: the callback dialed the number the voicemail came
+  // from. A customer link is not evidence; a later relink or unlink of the
+  // parent would take it away with no path back for the closed cards.
+  if (!samePhone(parent.from_phone, child.to_phone)) return { reason: 'parent_mismatch' };
   return { child, parent };
 }
 // The callback promise is NOT written here. It belongs to call-commitments'
@@ -1176,9 +1178,8 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
     .orderBy('created_at', 'asc')
     .select('id', 'to_phone', 'customer_id', 'created_at', trx.raw("metadata->>'relatedCommitmentId' as related_commitment_id"));
   // The same eligibility as the callback being judged: dialed to the
-  // voicemail's number or customer, and placed after the voicemail ended.
-  return rows.filter((c) => callbackAfterCallEnd(c, parent)
-    && (samePhone(parent.from_phone, c.to_phone) || (!!parent.customer_id && parent.customer_id === c.customer_id)));
+  // voicemail's number, and placed after the voicemail ended.
+  return rows.filter((c) => callbackAfterCallEnd(c, parent) && samePhone(parent.from_phone, c.to_phone));
 }
 // The correction: a callback first classified spam, reprocessed into anything
 // that is not spam. The parent's verdict is recomputed from every linked
@@ -1204,14 +1205,15 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
       const hadVerdict = !!callMetadataObject(pair.parent).callback_verdict;
       if (standing.length) {
         // Still settled: the stamp moves to a callback that still stands, and
-        // each promise this callback dismissed is judged again against the
-        // standing ones (a sibling promise's callback keeps nothing).
+        // each promise this callback dismissed is judged again with the full
+        // proof (its own evidence boundary and linkage; a sibling promise's
+        // callback, or one before a staff renewal, keeps nothing).
         await trx('call_log').where({ id: parentId }).update({
           metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
             [JSON.stringify({ spam: true, callback_call_log_id: standing[0].id, at: now.toISOString() })]),
           updated_at: now,
         });
-        const judged = await commitments.rejudgeCallbackSpamDismissals(trx, parentId, call.id, standing);
+        const judged = await commitments.rejudgeCallbackSpamDismissals(trx, parentId, call.id);
         return { applied: true, cards: 0, promises: judged.reopened, standing: true };
       }
       // One canonical card per reason comes back: the newest callback_spam

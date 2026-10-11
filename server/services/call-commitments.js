@@ -2081,6 +2081,19 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     .first("id", "created_at");
   return row ? { kind: CALLBACK_SPAM, record_type: "call_log", record_id: row.id, matched_at: row.created_at, strength: "direct", basis: "callback_reached_solicitor" } : null;
 }
+// A callback-spam dismissal settles the callback itself, like a staff action
+// on its card (callback-cards.actOnCallback): the promise's open reminders
+// (the overdue bell, the SLA notice) close with it, done by `callback:spam`,
+// a closer no Reopen undoes; a person's earlier read and done stand. A later
+// correction reopens the promise, and the watchdog's next sweep re-arms it.
+async function closeCallbackReminders(conn, commitmentId) {
+  const notifications = require("./notification-service")._private;
+  const now = new Date();
+  return conn("notifications").where({ recipient_type: "admin" })
+    .whereRaw("metadata->>'commitment_id' = ?", [String(commitmentId)])
+    .modify((q) => notifications.openToCloser(q, "callback:spam"))
+    .update(notifications.doneColumns({ by: "callback:spam", resolution: "Callback reached a solicitor; the voicemail was spam", at: now, keepExisting: true, conn }));
+}
 // The rows a callback's spam verdict dismissed: the same scope the dismissal
 // could reach (refreshableVerdictSql lets this evidence close a callback card
 // staff confirmed or edited, so the correction reaches those too); a card
@@ -2097,25 +2110,29 @@ async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
   return callbackSpamDismissalsQ(conn, callLogId, callbackCallId)
     .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
 }
-// The correction while OTHER spam callbacks still stand: each dismissal the
-// corrected callback produced is judged again against them with the proof's
-// own linkage rule (callbackReachedSolicitor): a standing callback placed for
-// THIS promise (relatedCommitmentId) or for the call as a whole (no
-// relatedCommitmentId) keeps it dismissed, on that callback's evidence, so
-// correcting that one later reopens it; a callback placed for a SIBLING
-// promise proves nothing about this one, and the promise is owed again.
-// `standing` rows carry { id, related_commitment_id }.
-async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId, standing) {
+// The correction while OTHER spam callbacks may still stand: each dismissal
+// the corrected callback produced is judged again with the FULL proof
+// predicate (callbackReachedSolicitor, from the promise's own evidence
+// boundary: the call's end, or the staff reopen / edit that renewed it, and
+// the proof's linkage rule, so a sibling promise's callback proves nothing).
+// A standing proof keeps the promise dismissed on that callback's evidence,
+// so correcting that one later reopens it; none, and the promise is owed
+// again. The corrected callback no longer reads spam, so it never proves.
+async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId) {
   const rows = await callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).select("id");
+  if (!rows.length) return { repointed: 0, reopened: 0 };
+  const call = await conn("call_log").where({ id: callLogId }).first("id", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds");
   let repointed = 0;
   let reopened = 0;
-  for (const row of rows) {
-    const keeper = standing.find((c) => !c.related_commitment_id || String(c.related_commitment_id) === String(row.id));
-    if (keeper) {
-      repointed += await conn("call_commitments").where({ id: row.id })
-        .update({ fulfillment: conn.raw("jsonb_set(fulfillment, '{record_id}', to_jsonb(?::text), true)", [String(keeper.id)]), updated_at: new Date() });
+  for (const { id } of rows) {
+    const commitment = await conn("call_commitments").where({ id }).first();
+    const after = await evidenceBoundary(conn, commitment, call);
+    const proof = after ? await callbackReachedSolicitor(conn, commitment, { after, phone: contactPhoneOf(call) }) : null;
+    if (proof) {
+      repointed += await conn("call_commitments").where({ id })
+        .update({ fulfillment: JSON.stringify(storedProof(proof, call.customer_id)), updated_at: new Date() });
     } else {
-      reopened += await conn("call_commitments").where({ id: row.id })
+      reopened += await conn("call_commitments").where({ id })
         .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
     }
   }
@@ -2703,7 +2720,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       // A customer who left, or a callback that reached a solicitor,
       // dismisses the promise; every other proof keeps it.
       const left = proof.kind === CUSTOMER_LEFT || proof.kind === CALLBACK_SPAM;
-      fulfilled += await conn("call_commitments")
+      const closed = await conn("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
         // Proof was computed from the snapshot row: a claim or reopen that
@@ -2733,6 +2750,8 @@ async function refreshFulfillment(conn, callLogId, call = null) {
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof, row.customer_id)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });
+      fulfilled += closed;
+      if (proof.kind === CALLBACK_SPAM && closed > 0) await closeCallbackReminders(conn, c.id);
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")

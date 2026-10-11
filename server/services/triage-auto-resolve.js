@@ -1287,8 +1287,9 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
   for (const item of candidates) {
     const parent = parents.get(String(item.call_log_id));
     if (!parent || !voicemail(parent)) continue;
+    // Phone evidence only (the processor's lockCallbackPair rule): a customer link can be relinked away.
     const hit = children.some((c) => String(c.parent_id) === String(item.call_log_id) && afterEnd(c, parent)
-      && ((key(c.to_phone) && key(c.to_phone) === key(parent.from_phone)) || (!!parent.customer_id && parent.customer_id === c.customer_id)));
+      && key(c.to_phone) && key(c.to_phone) === key(parent.from_phone));
     if (hit) flag(item.id, 'callback_spam');
   }
 }
