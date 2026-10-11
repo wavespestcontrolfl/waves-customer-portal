@@ -66,6 +66,12 @@ function flatView(extraction) {
     // Watched by replay variance (FIELD_GROUPS medium).
     caller_id_disclaimed: typeof caller.caller_id_disclaimed === 'boolean' ? caller.caller_id_disclaimed : null,
     phone_note: caller.phone_note || null,
+    // ani_cannot_text / text_phone (schema 1.25.0, owner ruling 2026-10-07) —
+    // the line the caller called from cannot take texts and they gave another
+    // number for texts. NOT caller_id_disclaimed (that means the number is not
+    // theirs). Tri-state like caller_id_disclaimed. Watched by replay variance.
+    ani_cannot_text: typeof caller.ani_cannot_text === 'boolean' ? caller.ani_cannot_text : null,
+    text_phone: caller.text_phone_e164 || null,
     // sms_declined (schema 1.19.0, codex P1 on #5292) — the dedicated
     // explicit-SMS-refusal field, distinct from sms_consent_given=false
     // ("never asked"). Tri-state like caller_id_disclaimed: null (never
