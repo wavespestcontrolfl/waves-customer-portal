@@ -24049,7 +24049,8 @@ const CallRecordingProcessor = {
     //     IS NULL (fresh — gated by a 10-min CDN-settle age window so the cron can't beat
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
-    //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
+    //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly;
+    //     inside the same 7-day created_at fence as extraction_failed)
     //   - processing_status='extraction_failed' with retry budget left (extraction_attempts
     //     < CALL_EXTRACTION_MAX_ATTEMPTS) — 10-min age gate spaces the attempts so a
     //     provider brown-out isn't burned through in one cron tick. 7-day created_at fence:
@@ -24132,7 +24133,15 @@ const CallRecordingProcessor = {
           })
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
-        .orWhere('processing_status', 'no_transcription')
+        // no_transcription: prompt (no age gate) but inside the same 7-day
+        // window as extraction_failed, so the retry lane has an end: past it
+        // a replaced recording that never transcribed is terminal, and a
+        // settlement the old verdict made is retired (codex #6271 r38 P1;
+        // the predicate twin is exhaustedExtractionSql in call-commitments).
+        .orWhere(function () {
+          this.where('processing_status', 'no_transcription')
+            .andWhere('created_at', '>', db.raw(`NOW() - INTERVAL '${EXTRACTION_RETRY_WINDOW_DAYS} days'`));
+        })
         .orWhere(function () {
           this.where('processing_status', 'extraction_failed')
             .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
