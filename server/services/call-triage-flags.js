@@ -823,12 +823,16 @@ const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_a
 // by closeParentOnCallbackSpam), these cards are moot on the voicemail: the
 // settlement resolves them, and a later reprocess of the voicemail files none
 // of them again (codex #6271 r3). Cards that judge on-file data, authorization,
-// email or a property role are human verdicts and are not in this set.
+// email or a property role are human verdicts and are not in this set; nor is
+// callback_number_needed: the caller said the inbound number was not theirs,
+// so a callback to that number reaching a solicitor answers nothing (r4 P1).
+// The processor applies this set at its card-filter sites; see
+// callbackVerdictSpam there.
 const CALLBACK_SPAM_MOOT_CODES = new Set([
   'missing_service_address', 'low_confidence_address', 'address_unverifiable',
   'address_unverified', 'address_validation_unavailable', 'address_not_validated',
   'missing_first_name', 'missing_last_name', 'missing_required_customer_fields',
-  'not_confirmed', 'quote_promised', 'callback_number_needed',
+  'not_confirmed', 'quote_promised',
   'ambiguous_pest_or_service', 'ambiguous_scheduling', 'low_extraction_confidence',
   'call_dropped_mid_intake',
 ]);
@@ -842,13 +846,10 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { canonicalStreet = null, callbackSpam = false } = {}) {
+function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
-  // The voicemail's callback reached a solicitor: a reprocess must not re-file
-  // the asks that verdict already closed.
-  if (callbackSpam) for (const f of CALLBACK_SPAM_MOOT_CODES) dropped.add(f);
   if (has('cancellation_request')) {
     dropped.add('reschedule_or_cancel');
     dropped.add('existing_appointment_coordination');

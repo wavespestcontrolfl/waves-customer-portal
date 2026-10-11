@@ -1104,14 +1104,24 @@ async function closeParentOnCallbackSpam(call, { callSid = null, procGeneration 
           resolved_at: now,
           updated_at: now,
         });
-      const promises = await trx('call_commitments')
+      // The callback promise and its admin reminders close together
+      // (callback-cards closeCallbackReminders, the staff actions' closer).
+      const openPromises = await trx('call_commitments')
         .where({ call_log_id: parentId, party: 'waves', kind: 'callback', status: 'open' })
-        .update({
+        .forUpdate().pluck('id');
+      const promises = openPromises.length
+        ? await trx('call_commitments').whereIn('id', openPromises).update({
           status: 'dismissed',
           fulfillment: JSON.stringify({ closed_by: CALLBACK_SPAM_RULE, closed_at: now.toISOString(), callback_call_log_id: call.id }),
           fulfilled_at: null,
           updated_at: now,
+        })
+        : 0;
+      for (const id of openPromises) {
+        await require('./callback-cards').closeCallbackReminders(trx, id, {
+          by: `callback:${CALLBACK_SPAM_RULE}`, resolution: 'Callback dismissed: the return call reached a solicitor', now,
         });
+      }
       let reviewSynced = false;
       if (cards > 0) reviewSynced = (await syncCallReviewStatus(trx, parentId, 'resolved')) === 'resolved';
       await trx('call_log').where({ id: parentId }).update({
@@ -11803,7 +11813,10 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1, callbackSpam: callbackVerdictSpam(call) }).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          // The voicemail's callback reached a solicitor: a reprocess must not
+          // re-file the asks that verdict already closed (codex #6271 r3).
+          if (callbackVerdictSpam(call)) for (const f of finalFlags) if (CALLBACK_SPAM_MOOT_CODES.has(f)) unneededCards.add(f);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier
@@ -12299,7 +12312,12 @@ const CallRecordingProcessor = {
           // Surface in the Needs Review inbox, which is driven by triage_items
           // rows (admin-triage.js filters by status), not call_log.review_status.
           // Shadow mode does not block the write -> severity 'advisory'.
+          // The same callback-spam verdict the enforce site honors: a
+          // reprocess of a settled voicemail files none of the moot asks
+          // here either (codex #6271 r4).
+          const shadowCallbackSpam = callbackVerdictSpam(call);
           for (const flag of needsConfirmation.slice(0, 10)) {
+            if (shadowCallbackSpam && CALLBACK_SPAM_MOOT_CODES.has(flag)) continue;
             try {
               // Address/email flags carry the correction evidence so the
               // Needs Review card can show "heard X → matched Y" plus the

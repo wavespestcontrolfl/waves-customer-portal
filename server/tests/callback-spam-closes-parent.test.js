@@ -68,12 +68,20 @@ describe('closeParentOnCallbackSpam without a database', () => {
     expect(on.callbackVerdictSpam({ metadata: {} })).toBe(false);
     expect(off.callbackVerdictSpam(stamped)).toBe(false);
   });
+
+  test('the moot set holds the asks a return call answers and none of the human verdicts', () => {
+    const { CALLBACK_SPAM_MOOT_CODES } = require('../services/call-triage-flags');
+    for (const f of ['missing_service_address', 'address_unverifiable', 'missing_last_name', 'not_confirmed', 'quote_promised']) expect(CALLBACK_SPAM_MOOT_CODES.has(f)).toBe(true);
+    // callback_number_needed: the caller said the inbound number was not theirs, so a callback to it answers nothing.
+    for (const f of ['callback_number_needed', 'missing_unit_number', 'on_file_house_number_conflict', 'email_unverified', 'caller_not_authorized', 'out_of_service_area', 'property_role_confirm']) expect(CALLBACK_SPAM_MOOT_CODES.has(f)).toBe(false);
+  });
 });
 
 maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
   let db;
   let processor;
   const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID];
+  const reminderIds = [];
   const readCall = (s) => db('call_log').where({ twilio_call_sid: s }).first();
   const insertCall = async (s, overrides = {}) => {
     const [row] = await db('call_log').insert({
@@ -116,6 +124,7 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
 
   afterAll(async () => {
     delete process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT;
+    if (reminderIds.length) await db('notifications').whereIn('id', reminderIds).del();
     await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del(); // cards and commitments cascade
     await db.destroy();
   });
@@ -135,8 +144,19 @@ maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {
       promise(otherId, 'cb-other'),
     ]);
     const childId = await insertChild(CHILD_SID, parentId);
+    const openPromiseId = (await db('call_commitments').where({ call_log_id: parentId, commitment_key: 'cb-open' }).first('id')).id;
+    const [reminder] = await db('notifications').insert({
+      recipient_type: 'admin', category: 'call_commitment', title: 'fixture: callback overdue',
+      metadata: JSON.stringify({ commitment_id: openPromiseId, dedupeKey: `call-commitment-overdue:${openPromiseId}:fixture` }),
+    }).returning('id');
+    reminderIds.push(reminder.id);
 
     expect(await close(CHILD_SID)).toEqual({ applied: true, cards: 2, promises: 1, reviewSynced: true });
+
+    // The promise's admin reminder closed with it (callback-cards closeCallbackReminders).
+    const bell = await db('notifications').where({ id: reminder.id }).first();
+    expect(bell.done_at).not.toBeNull();
+    expect(bell.done_by).toBe('callback:callback_spam');
 
     const cards = await db('triage_items').where({ call_log_id: parentId }).orderBy('reason_code');
     expect(cards.map((c) => [c.reason_code, c.status, c.resolution_rule])).toEqual([

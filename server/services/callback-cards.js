@@ -122,6 +122,22 @@ async function applyEdit(trx, row, { actorId, description, due_at, note, patch }
   return event;
 }
 
+// The reminder side of settling a callback: every admin reminder for the
+// commitment is closed (done, read kept) in the caller's transaction. Shared
+// by the staff actions above and the automated callback-spam settlement
+// (call-recording-processor closeParentOnCallbackSpam), so a commitment and
+// its bells always close together. `by` is `callback:<who>`, not a bare person
+// id: the settlement closed the callback itself, so this Done is not one
+// Reopen may undo. openToCloser: a reminder a person already marked Done is
+// taken over too, so the settled callback's reminder can't be reopened.
+async function closeCallbackReminders(trx, commitmentId, { by, resolution, now = new Date() }) {
+  const ns = require('./notification-service')._private;
+  return trx('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'commitment_id' = ?", [commitmentId])
+    .modify((q) => ns.openToCloser(q, by))
+    .update(ns.doneColumns({ by, resolution, at: now, keepExisting: true, conn: trx }));
+}
+
 async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, description, due_at, note, now = new Date() } = {}) {
   if (!enabled()) throw error('Callback cards are disabled');
   if (!['claim', 'release', 'snooze', 'fulfill', 'dismiss', 'reopen', 'confirm', 'edit'].includes(action)) throw error('Unknown callback action', 400);
@@ -189,18 +205,9 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     // staff just acted on. The reminder identity is versioned by owner, deadline, snooze and
     // review (call-commitments-watchdog), so a callback left open re-arms
     // the same bell unread at its next due sweep.
-    await trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'commitment_id' = ?", [id])
-      // openToCloser: a reminder a person already marked Done is taken over
-      // too, so the settled callback's reminder can't be reopened.
-      .modify((q) => require('./notification-service')._private.openToCloser(q, `callback:${actorId ?? 'staff'}`))
-      .update(require('./notification-service')._private.doneColumns({
-        // `callback:<staff id>`, not a bare person id: the action settled the
-        // callback itself, so this Done is not one Reopen may undo.
-        by: `callback:${actorId ?? 'staff'}`, resolution: `Callback ${action} by staff`, at: now, keepExisting: true, conn: trx,
-      }));
+    await closeCallbackReminders(trx, id, { by: `callback:${actorId ?? 'staff'}`, resolution: `Callback ${action} by staff`, now });
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });
 }
 
-module.exports = { enabled, loadCalendar, staffedDeadline, prepareCallbackCards, decorateCallbackRows, actOnCallback };
+module.exports = { enabled, loadCalendar, staffedDeadline, prepareCallbackCards, decorateCallbackRows, actOnCallback, closeCallbackReminders };
