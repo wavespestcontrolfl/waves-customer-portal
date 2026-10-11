@@ -193,7 +193,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     // Notifications reference promises in JSON only (no cascade): the fixtures this suite
     // inserts (overdue bells on its promises, the rolling list) go before the calls do.
     const promiseIds = (await db('call_commitments').whereIn('call_log_id', db('call_log').select('id').whereIn('twilio_call_sid', ALL_SIDS)).select('id')).map((r) => String(r.id));
-    if (promiseIds.length) await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'commitment_id' = ANY(?)", [promiseIds]).del();
+    if (promiseIds.length) await db('notifications').where({ recipient_type: 'admin' }).whereRaw("(metadata->>'commitment_id' = ANY(?) OR metadata->'payload'->>'commitmentId' = ANY(?))", [promiseIds, promiseIds]).del();
     await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`${require('../services/followup-sla-watcher').ROLLING_KEY}:fixture`]).del();
     await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del(); // cards and commitments cascade
     await db.destroy();
@@ -487,6 +487,8 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const [{ id: promiseId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-kept', 'callback', 'fulfilled'), human_state: 'confirmed', fulfilled_at: new Date(),
       fulfillment: JSON.stringify({ kind: 'outbound_call', record_type: 'call_log', record_id: childId, strength: 'direct', basis: 'outbound_call_to_caller', matched_at: new Date().toISOString() }) }]).returning('id');
     const [{ id: bellId }] = await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Callback overdue', body: 'test', metadata: JSON.stringify({ commitment_id: promiseId }) }).returning('id');
+    // The promise-chaser alert names the promise at metadata.payload.commitmentId.
+    const [{ id: chaserId }] = await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Still owe them a call', body: 'test', metadata: JSON.stringify({ triggerKey: 'promise_chaser', payload: { commitmentId: promiseId } }) }).returning('id');
     // The callback is then force-reprocessed: it reached a solicitor (spam). The lapse scan lists the call...
     expect(await commitments.listLapsedEvidenceClosedCallIds(db)).toContain(parentId);
     // ...and the refresh judges the kept row again: dismissed on the spam callback, reminder closed.
@@ -494,6 +496,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const p = await db('call_commitments').where({ id: promiseId }).first();
     expect([p.status, p.fulfillment.kind, p.fulfillment.record_id, p.human_state]).toEqual(['dismissed', 'callback_spam', childId, 'confirmed']);
     expect((await db('notifications').where({ id: bellId }).first()).done_by).toBe('callback:spam');
+    expect((await db('notifications').where({ id: chaserId }).first()).done_by).toBe('callback:spam');
     expect(await commitments.listLapsedEvidenceClosedCallIds(db)).not.toContain(parentId);
   });
 
@@ -624,7 +627,8 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const childId = await insertChild(REREAD_CHILD_SID, parentId, { to_phone: '+15555550137' });
     expect(await close(REREAD_CHILD_SID)).toMatchObject({ applied: true, cards: 1, promises: 1 });
     // A replacement recording: the parent is a settled answered call now; the callback still reads spam.
-    await db('call_log').where({ id: parentId }).update({ call_outcome: 'answered', answered_by: null, processing_status: 'processed' });
+    // (adoption clears the markers to NULL, the shape the scan must read as "not a voicemail")
+    await db('call_log').where({ id: parentId }).update({ call_outcome: null, answered_by: null, processing_status: 'processed' });
     const run = await processor.reconcileCorrectedCallbackVerdicts();
     expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1, promises: 1 });
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');

@@ -1946,7 +1946,10 @@ router.post('/call', async (req, res, next) => {
     // admin triage cards only on a callback an ADMIN placed, so a technician
     // who can reach this route cannot settle admin review through it.
     const placedBy = { placed_by: req.technicianId, placed_by_role: req.techRole };
-    const metadata = relatedCommitmentId ? { relatedCommitmentId, ...placedBy } : relatedCallId ? { relatedCallId, ...placedBy } : null;
+    // A commitment callback carries BOTH links: relatedCallId is set from the
+    // promise row (authoritative) once it is locked below, so the spam
+    // settlement and its correction always find the parent voicemail.
+    const metadata = relatedCommitmentId ? { relatedCommitmentId, ...(relatedCallId ? { relatedCallId } : {}), ...placedBy } : relatedCallId ? { relatedCallId, ...placedBy } : null;
     const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
     if (cardPolicy) metadata.callback_policy = 'card';
     // The dial target is persisted canonical so the live-call interlock can

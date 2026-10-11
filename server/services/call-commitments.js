@@ -2141,8 +2141,10 @@ async function closeCallbackReminders(conn, commitmentId) {
   const notifications = require("./notification-service")._private;
   const now = new Date();
   const id = String(commitmentId);
+  // Two shapes name a promise: the overdue bell's metadata.commitment_id and
+  // the promise-chaser alert's metadata.payload.commitmentId (notification-triggers).
   const closed = await conn("notifications").where({ recipient_type: "admin" })
-    .whereRaw("metadata->>'commitment_id' = ?", [id])
+    .whereRaw("(metadata->>'commitment_id' = ? OR metadata->'payload'->>'commitmentId' = ?)", [id, id])
     .modify((q) => notifications.openToCloser(q, "callback:spam"))
     .update(notifications.doneColumns({ by: "callback:spam", resolution: "Callback reached a solicitor; the voicemail was spam", at: now, keepExisting: true, conn }));
   // The rolling missed-follow-up list (followup-sla-watcher) names its

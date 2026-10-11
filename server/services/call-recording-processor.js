@@ -1151,7 +1151,8 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // cards and the dismissal it holds are retired through the same correction
   // (standingSpamCallbacks is empty for a non-voicemail parent).
   const notVoicemail = (q) => q.where('cb.processing_status', 'spam').whereNull('cb.processing_token')
-    .whereRaw("NOT (p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
+    // NULL-safe (adoption clears the markers to NULL): isVoicemailParent's twin.
+    .whereRaw("p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail'")
     .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(settledParentSql('p'));
   const obsoleteStamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(notVoicemail).limit(limit).select('cb.*');
