@@ -2192,7 +2192,7 @@ async function runLegacyAiDraft(ctx) {
     return;
   }
   const {
-    customer, Body, From, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
+    customer, Body, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
   } = ctx;
   try {
     const ContextAggregator = require('../services/context-aggregator');
