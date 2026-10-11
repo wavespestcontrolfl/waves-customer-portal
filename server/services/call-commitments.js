@@ -2181,6 +2181,20 @@ function callbackSpamDismissalsQ(conn, callLogId, callbackCallId) {
 }
 // The correction: that callback reprocessed into anything but spam, and no
 // other spam callback stands. The dismissal it produced is owed again.
+// An automatic reopen is a durable event (audit_log callback_spam_reopen):
+// the promise-chaser bell versions its dedupe key on the count of them, so
+// the obligation owed again can ring again. It is NOT a renewal boundary
+// (obligationRenewedAt reads callback_edit / callback_reopen only): the
+// corrected callback itself, placed before this reopen, may still keep it.
+const CALLBACK_SPAM_REOPEN_ACTION = "callback_spam_reopen";
+async function noteCallbackSpamReopen(conn, commitmentId, fromCallbackCallId) {
+  await conn("audit_log").insert({ actor_type: "system", action: CALLBACK_SPAM_REOPEN_ACTION, resource_type: "call_commitment", resource_id: commitmentId,
+    metadata: JSON.stringify({ from_callback_call_id: fromCallbackCallId || null, reopened_at: new Date().toISOString() }) });
+}
+async function callbackSpamReopenCount(conn, commitmentId) {
+  const row = await conn("audit_log").where({ resource_type: "call_commitment", resource_id: commitmentId, action: CALLBACK_SPAM_REOPEN_ACTION }).count({ n: "*" }).first();
+  return Number(row?.n) || 0;
+}
 // Inside the correction's transaction: each row read FOR UPDATE and written
 // only as read (status, human state, evidence, version), so a staff edit of
 // the dismissed promise that landed first stands.
@@ -2188,10 +2202,12 @@ async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
   const rows = await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).forUpdate().select("id", "human_state", "updated_at");
   let reopened = 0;
   for (const row of rows) {
-    reopened += await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).where({ id: row.id })
+    const n = await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).where({ id: row.id })
       .whereRaw("human_state IS NOT DISTINCT FROM ?", [row.human_state ?? null])
       .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
       .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+    if (n) await noteCallbackSpamReopen(conn, row.id, callbackCallId);
+    reopened += n;
   }
   return reopened;
 }
@@ -2221,7 +2237,9 @@ async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId
     if (proof) {
       repointed += await target.update({ fulfillment: JSON.stringify(storedProof(proof, call.customer_id)), updated_at: new Date() });
     } else {
-      reopened += await target.update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+      const n = await target.update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+      if (n) await noteCallbackSpamReopen(conn, commitment.id, fromCallbackCallId);
+      reopened += n;
     }
   }
   return { repointed, reopened };
@@ -4092,6 +4110,7 @@ module.exports = {
   reopenCallbackSpamDismissals,
   rejudgeCallbackSpamDismissals,
   RETRYABLE_PARENT_STATUSES,
+  callbackSpamReopenCount,
   isSettledParentRow,
   settledParentSql,
   settledNonSpamCallbackSql,

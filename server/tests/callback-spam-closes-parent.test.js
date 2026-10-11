@@ -195,6 +195,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const promiseIds = (await db('call_commitments').whereIn('call_log_id', db('call_log').select('id').whereIn('twilio_call_sid', ALL_SIDS)).select('id')).map((r) => String(r.id));
     if (promiseIds.length) await db('notifications').where({ recipient_type: 'admin' }).whereRaw("(metadata->>'commitment_id' = ANY(?) OR metadata->'payload'->>'commitmentId' = ANY(?))", [promiseIds, promiseIds]).del();
     await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`${require('../services/followup-sla-watcher').ROLLING_KEY}:fixture`]).del();
+    if (promiseIds.length) await db('audit_log').where({ resource_type: 'call_commitment', action: 'callback_spam_reopen' }).whereIn('resource_id', promiseIds).del();
     await db('call_log').whereIn('twilio_call_sid', ALL_SIDS).del(); // cards and commitments cascade
     await db.destroy();
   });
@@ -513,6 +514,8 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
     expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('open');
     expect((await readCall(UNVM_PARENT_SID)).metadata.callback_verdict).toBeUndefined();
+    // The automatic reopen is on record, so the promise-chaser bell keys a new ring for the obligation owed again.
+    expect(await require('../services/call-commitments').callbackSpamReopenCount(db, promiseId)).toBe(1);
   });
 
   test('a settlement whose promise refresh was lost is finished by the watchdog scan; the rolling SLA list drops the promise', async () => {

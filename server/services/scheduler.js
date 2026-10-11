@@ -2161,7 +2161,15 @@ function initScheduledJobs() {
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
-    if (!require('./callback-cards').enabled()) return;
+    if (!require('./callback-cards').enabled()) {
+      // Cards off: the callback-spam settlement still owns a five-minute
+      // reconcile of its own (GATE_CALLBACK_SPAM_CLOSES_PARENT), so a lost
+      // settlement or correction never waits for the daily sweep.
+      if (!isEnabled('callbackSpamClosesParent')) return;
+      await require('../utils/cron-lock').runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
+        .catch((err) => logger.warn(`[callback-verdict-reconcile] tick failed: ${err.message}`));
+      return;
+    }
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
       const result = await runCallCommitmentsWatchdog();
