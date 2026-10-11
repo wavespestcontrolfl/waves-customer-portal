@@ -11,7 +11,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], triage: [], alertedKeys: new Set(), rung: [] };
+const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [] };
 
 // Minimal chainable stand-in for the knex builder: resolves rows per table.
 jest.mock('../models/db', () => {
@@ -22,12 +22,14 @@ jest.mock('../models/db', () => {
       if (table === 'scheduled_services') return mockState.booked;
       if (table === 'triage_items') return mockState.triage;
       if (table === 'notifications') return mockState.rung;
+      if (table === 'customers') return mockState.customers;
       return [];
     };
     const b = {
       where: () => b,
       whereRaw: (_sql, args) => { if (args) ctx.rawArgs.push(...args); return b; },
       whereNotNull: () => b,
+      whereNull: () => b,
       whereIn: () => b,
       whereNotIn: () => b,
       groupByRaw: () => b,
@@ -76,6 +78,7 @@ beforeEach(() => {
   mockState.calls = [missCall()];
   mockState.booked = [];
   mockState.triage = [];
+  mockState.customers = [];
   mockState.alertedKeys = new Set();
   mockState.rung = [];
   NotificationService.notifyAdmin.mockReset();
@@ -134,6 +137,90 @@ describe('booked under another household member', () => {
     mockState.calls = [missCall({ customer_id: null })];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result).toMatchObject({ misses: 1, alerted: 1 });
+  });
+});
+
+// 2026-10-10 call audit: a caller on a number no account carried got a second
+// customer record; the office booked the agreed visit on the account she
+// already had and the pager rang four times for a booked visit.
+describe('booked on another account with the same name', () => {
+  const CALL_AT = '2026-09-28T21:30:00Z';
+  const afterCall = '2026-09-28T22:15:00Z';
+  const namesakeVisit = (over = {}) => ({
+    customer_id: 'cust-first', status: 'pending', sched_date: '2026-10-04', window_start: '11:00:00',
+    created_at: afterCall, source_call_log_id: null, notes: null, ...over,
+  });
+  const twoRecords = () => [
+    { id: 'cust-9', first_name: 'Robin', last_name: 'Example', city: 'Sampleton' },
+    { id: 'cust-first', first_name: ' robin ', last_name: 'EXAMPLE', city: 'Sampleton' },
+  ];
+
+  test('a visit booked after the call on the namesake account clears the miss', async () => {
+    mockState.customers = twoRecords();
+    mockState.booked = [namesakeVisit()];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result.misses).toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('it still rings when the namesake visit predates the call, is cancelled, is on another day, or is far from the agreed time', async () => {
+    mockState.customers = twoRecords();
+    const notEvidence = [
+      namesakeVisit({ created_at: '2026-09-27T15:00:00Z' }),
+      namesakeVisit({ created_at: CALL_AT }),
+      namesakeVisit({ status: 'cancelled' }),
+      namesakeVisit({ sched_date: '2026-10-05' }),
+      namesakeVisit({ window_start: '15:00:00' }),
+      namesakeVisit({ created_at: null }),
+    ];
+    for (const row of notEvidence) {
+      mockState.booked = [row];
+      NotificationService.notifyAdmin.mockClear();
+      const result = await runCallBookingMissWatchdog({ now: NOW });
+      expect(result).toMatchObject({ misses: 1, alerted: 1 });
+    }
+  });
+
+  test('a same-slot visit on an account with a different name never clears', async () => {
+    mockState.customers = [
+      { id: 'cust-9', first_name: 'Robin', last_name: 'Example' },
+      { id: 'cust-other', first_name: 'Robin', last_name: 'Otherwise' },
+    ];
+    mockState.booked = [namesakeVisit({ customer_id: 'cust-other' })];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+  });
+
+  test('an unlinked call is cleared by the same rule, through the name the caller gave', async () => {
+    mockState.calls = [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller: { name_full: 'Robin Example', first_name: 'Robin', last_name: 'Example' } } })];
+    mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton' }];
+    mockState.booked = [namesakeVisit()];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result.misses).toBe(0);
+  });
+
+  test('the bell for an unlinked call names the one account that carries the caller\'s name', async () => {
+    mockState.calls = [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller: { name_full: 'Robin Example', first_name: 'Robin', last_name: 'Example' } } })];
+    mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton' }];
+    await runCallBookingMissWatchdog({ now: NOW });
+    const opts = NotificationService.notifyAdmin.mock.calls[0][3];
+    expect(opts.detail).toMatch(/not linked to any customer\. One account carries this name: Robin Example \(Sampleton\)\. Confirm it is the same person, then link the call\./);
+  });
+
+  test('no account is named when two carry the name, when the caller gave no last name, or when the call is linked', async () => {
+    const unlinked = (caller) => missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller } });
+    const cases = [
+      { calls: [unlinked({ first_name: 'Robin', last_name: 'Example' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example' }, { id: 'b', first_name: 'Robin', last_name: 'Example' }] },
+      { calls: [unlinked({ first_name: 'Robin' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example' }] },
+      { calls: [missCall()], customers: twoRecords() },
+    ];
+    for (const c of cases) {
+      mockState.calls = c.calls;
+      mockState.customers = c.customers;
+      NotificationService.notifyAdmin.mockClear();
+      await runCallBookingMissWatchdog({ now: NOW });
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).not.toMatch(/One account carries this name/);
+    }
   });
 });
 

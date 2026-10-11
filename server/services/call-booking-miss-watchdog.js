@@ -30,6 +30,16 @@
  * customer_id cannot match a booking and is a miss (unattributed AND
  * unbooked; see call-log-relink.js for the attribution side).
  *
+ * One more clearing rule (2026-10-10 call audit): a caller on a number no
+ * account carries gets a second customer record, or no record, and the
+ * office books the agreed visit on the account the person already has. The
+ * pager then rang four times for a booked visit. A visit clears the miss
+ * when it sits under ANOTHER live account with the same first and last name
+ * (the linked customer's name, or the name the unlinked caller gave), on the
+ * agreed ET date, within the window tolerance, active, and created AFTER the
+ * call. An older visit of a namesake never clears. The bell for an unlinked
+ * call also names the one account that carries the caller's name.
+ *
  * ET semantics: confirmed_start_at is parsed with the same wall-clock
  * contract as the booking path's v2IsoToEtWallClock — an ET offset (either
  * season, even the wrong one) or a zone-less stamp means the model encoded
@@ -183,6 +193,20 @@ function rowClearsSlot(row, call, slot) {
   return startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES;
 }
 
+// A visit the office booked after the call on a namesake account (same first
+// and last name as the call's customer or caller): the agreed ET date, an
+// active row, the window tolerance, and created strictly after the call. The
+// created-after fence is what the own-customer rule does not need: a namesake
+// may be another person, and only a booking made after this call answers it.
+function namesakeRowClearsSlot(row, call, slot) {
+  if (row.sched_date !== slot.dateET || INACTIVE_STATUSES.has(row.status)) return false;
+  const startMinutes = windowStartMinutes(row.window_start);
+  if (startMinutes === null || Math.abs(startMinutes - slot.minutes) > WINDOW_MATCH_TOLERANCE_MINUTES) return false;
+  const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
+  const callAt = call.created_at ? new Date(call.created_at).getTime() : NaN;
+  return Number.isFinite(rowAt) && Number.isFinite(callAt) && rowAt > callAt;
+}
+
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
@@ -192,7 +216,10 @@ function rowClearsSlot(row, call, slot) {
 // ANY status: cancelled/rescheduled rows clear only on call provenance
 // (rowClearsSlot; a missing status counts as active). Provenance clears under
 // any customer; the window-proximity fallback only under the call's own.
-function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
+// `namesakes` maps a call id to the ids of the other live accounts that carry
+// the same first and last name (see loadNamesakeAccounts); their rows clear
+// only through namesakeRowClearsSlot.
+function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes = new Map() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const misses = [];
   for (const call of calls) {
@@ -200,14 +227,73 @@ function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
     if (!createdAt || createdAt > graceCutoff) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
+    const sameName = namesakes.get(call.id);
     const cleared = bookedRows.some((row) => (
       rowCarriesCall(row, call)
       || (!!call.customer_id && row.customer_id === call.customer_id && rowClearsSlot(row, call, slot))
+      || (!!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot))
     ));
     if (cleared) continue;
     misses.push({ call, slot, serviceDateET: slot.dateET });
   }
   return misses;
+}
+
+function nameKey(first, last) {
+  const norm = (v) => String(v || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const f = norm(first);
+  const l = norm(last);
+  return f && l ? `${f}|${l}` : null;
+}
+
+function callerNameKey(extractionRaw) {
+  let extraction = extractionRaw;
+  if (typeof extraction === 'string') {
+    try { extraction = JSON.parse(extraction); } catch { return null; }
+  }
+  return nameKey(extraction?.caller?.first_name, extraction?.caller?.last_name);
+}
+
+// The other live accounts that carry each missed call's name: the linked
+// customer's first and last name, or for an unlinked call the name the caller
+// gave. Exact match on trimmed, whitespace-collapsed, lower-cased text; a
+// missing first or last name matches nothing. Returns
+// { namesakes: Map(call id -> Set(customer id)), accounts: Map(customer id -> row) }.
+async function loadNamesakeAccounts(misses) {
+  const namesakes = new Map();
+  const accounts = new Map();
+  const linkedIds = [...new Set(misses.map((m) => m.call.customer_id).filter(Boolean))];
+  const linked = linkedIds.length
+    ? await db('customers').whereIn('id', linkedIds).select('id', 'first_name', 'last_name')
+    : [];
+  const linkedKey = new Map(linked.map((c) => [c.id, nameKey(c.first_name, c.last_name)]));
+  const keyByCall = new Map();
+  for (const m of misses) {
+    const key = m.call.customer_id ? linkedKey.get(m.call.customer_id) : callerNameKey(m.call.ai_extraction_enriched);
+    if (key) keyByCall.set(m.call.id, key);
+  }
+  const keys = [...new Set(keyByCall.values())];
+  if (!keys.length) return { namesakes, accounts };
+  const squash = (col) => `lower(btrim(regexp_replace(COALESCE(${col}, ''), '\\s+', ' ', 'g')))`;
+  const rows = await db('customers')
+    .where('active', true)
+    .whereNull('deleted_at')
+    .whereRaw(`(${squash('first_name')} || '|' || ${squash('last_name')}) = ANY(?)`, [keys])
+    .select('id', 'first_name', 'last_name', 'city');
+  const idsByKey = new Map();
+  for (const r of rows) {
+    accounts.set(r.id, r);
+    const key = nameKey(r.first_name, r.last_name);
+    if (!key) continue;
+    if (!idsByKey.has(key)) idsByKey.set(key, new Set());
+    idsByKey.get(key).add(r.id);
+  }
+  for (const m of misses) {
+    const ids = new Set(idsByKey.get(keyByCall.get(m.call.id)) || []);
+    if (m.call.customer_id) ids.delete(m.call.customer_id);
+    if (ids.size) namesakes.set(m.call.id, ids);
+  }
+  return { namesakes, accounts };
 }
 
 // Has this exact miss already rung the bell (any time in the past)? Same
@@ -280,7 +366,11 @@ async function runInner({ now = new Date() } = {}) {
   if (!provisional.length) {
     return { skipped: false, scanned: calls.length, misses: 0, alerted: 0 };
   }
-  const customerIds = [...new Set(provisional.map((m) => m.call.customer_id).filter(Boolean))];
+  const { namesakes, accounts } = await loadNamesakeAccounts(provisional);
+  const customerIds = [...new Set([
+    ...provisional.map((m) => m.call.customer_id).filter(Boolean),
+    ...[...namesakes.values()].flatMap((ids) => [...ids]),
+  ])];
   const dates = [...new Set(provisional.map((m) => m.serviceDateET))];
   const callIds = provisional.map((m) => m.call.id);
   const sidPatterns = provisional
@@ -293,7 +383,8 @@ async function runInner({ now = new Date() } = {}) {
   // another date, and the office may book the call under another household
   // member, and either row must still be fetched or the watchdog pages a
   // booked visit as missed — PLUS the calls' own customers on the confirmed
-  // dates (window-proximity fallback).
+  // dates (window-proximity fallback) and their namesake accounts on those
+  // dates (namesakeRowClearsSlot).
   const bookedRows = await db('scheduled_services')
     .where(function bookedEvidence() {
       this.whereIn('source_call_log_id', callIds);
@@ -309,7 +400,13 @@ async function runInner({ now = new Date() } = {}) {
       'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes',
       db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
-  const misses = computeBookingMisses(calls, bookedRows, { now });
+  const misses = computeBookingMisses(calls, bookedRows, { now, namesakes });
+  // An unlinked call whose caller's name is on exactly one live account: the
+  // bell names that account, so the office can link the call and book.
+  for (const m of misses) {
+    const ids = m.call.customer_id ? null : namesakes.get(m.call.id);
+    if (ids && ids.size === 1) m.likelyAccount = accounts.get([...ids][0]) || null;
+  }
 
   // Office dismissal and last-ring lookups, only for calls a repeat could
   // reach this tick (slot inside the repeat window).
@@ -356,6 +453,12 @@ async function runInner({ now = new Date() } = {}) {
   return { skipped: false, scanned: calls.length, misses: misses.length, alerted, repeated };
 }
 
+function likelyAccountSentence(account) {
+  if (!account) return '';
+  const name = [account.first_name, account.last_name].map((v) => String(v || '').trim()).filter(Boolean).join(' ');
+  return `One account carries this name: ${name}${account.city ? ` (${String(account.city).trim()})` : ''}. Confirm it is the same person, then link the call. `;
+}
+
 // One bell for one miss. bell:true is an explicit site-level ring: under
 // GATE_ADMIN_BELL_POLICY the 'alert' category is silenced by default, which
 // muted this pager from 2026-08-07 to 2026-09-30 while the job kept
@@ -391,6 +494,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
       detail: `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
         `on a ${m.call.direction || 'unknown-direction'} call at ${callAtET} ET, but the schedule has no matching appointment ` +
         `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
+        likelyAccountSentence(m.likelyAccount) +
         'Book it in dispatch or call back to reset expectations.' +
         (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
       bell: true,
@@ -470,6 +574,9 @@ module.exports = {
   confirmedWallClockET,
   rowClearsSlot,
   rowCarriesCall,
+  namesakeRowClearsSlot,
+  loadNamesakeAccounts,
+  likelyAccountSentence,
   LOOKBACK_HOURS,
   GRACE_MINUTES,
   MAX_ALERTS_PER_RUN,
