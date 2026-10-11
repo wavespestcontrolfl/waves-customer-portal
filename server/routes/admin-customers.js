@@ -3558,6 +3558,7 @@ router.get('/:id', async (req, res, next) => {
         satelliteUrl: c.satellite_url,
         hasLeftGoogleReview: !!c.has_left_google_review,
         reviewMarkedAt: c.review_marked_at,
+        smsPrimaryForSharedPhone: !!c.sms_primary_for_shared_phone,
       },
       accountProperties: accountProperties.map(p => ({
         id: p.id,
@@ -3948,7 +3949,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role', smsPrimaryForSharedPhone: 'sms_primary_for_shared_phone' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
@@ -4083,6 +4084,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
+        else if (v === 'sms_primary_for_shared_phone') { updates[v] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === 1; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
         else if (v === 'billing_mode') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : req.body[k]; }
         else if (v === 'contact_role') { updates[v] = contactRole.value; }

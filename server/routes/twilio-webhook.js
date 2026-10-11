@@ -162,9 +162,57 @@ async function findSingleCustomerByPhone(phone) {
 
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
+    if (require('../config/feature-gates').gateEnvValue('GATE_SMS_SHARED_PHONE_LINK')) {
+      return pickSharedPhoneCustomer(key, phone);
+    }
     logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
   }
   return null;
+}
+
+// GATE_SMS_SHARED_PHONE_LINK (owner 2026-10-10, "link text"): two or more
+// customer rows share the sender's phone. Attach the text to ONE account:
+//   1. exactly one match carries customers.sms_primary_for_shared_phone -> it;
+//   2. none is marked -> the match with the newest sms_log row (either
+//      direction); with no sms_log rows at all, the newest updated_at;
+//   3. more than one is marked -> ambiguous, return null (unlinked, as before).
+// A failed lookup returns null, the same outcome as the gate off.
+async function pickSharedPhoneCustomer(key, phone) {
+  let rows;
+  try {
+    rows = await db('customers')
+      .whereNull('customers.deleted_at')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(customers.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+      .select(
+        'customers.*',
+        db.raw('(SELECT MAX(sl.created_at) FROM sms_log sl WHERE sl.customer_id = customers.id) AS shared_phone_last_sms_at'),
+      )
+      .orderBy('customers.updated_at', 'desc')
+      .limit(25);
+  } catch (err) {
+    logger.warn(`[sms] shared-phone lookup failed for ${maskPhone(phone)}; not auto-linking inbound SMS`, { code: err.code || 'unknown' });
+    return null;
+  }
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  if (rows.length === 1) return rows[0];
+
+  const marked = rows.filter((r) => r.sms_primary_for_shared_phone === true);
+  if (marked.length === 1) {
+    logger.info(`[sms] shared-phone: primary mark; ${rows.length} customers share sender phone ${maskPhone(phone)}, linked ${marked[0].id}`);
+    return marked[0];
+  }
+  if (marked.length > 1) {
+    logger.warn(`[sms] shared-phone: ${marked.length} customers marked primary for sender phone ${maskPhone(phone)}; ambiguous, not auto-linking inbound SMS`);
+    return null;
+  }
+
+  const time = (value) => (value ? new Date(value).getTime() : 0);
+  const ranked = [...rows].sort((a, b) => (
+    time(b.shared_phone_last_sms_at) - time(a.shared_phone_last_sms_at)
+    || time(b.updated_at) - time(a.updated_at)
+  ));
+  logger.info(`[sms] shared-phone: last texted; ${rows.length} customers share sender phone ${maskPhone(phone)}, linked ${ranked[0].id}`);
+  return ranked[0];
 }
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
@@ -2286,6 +2334,7 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 }
 
 router._internals = {
+  findSingleCustomerByPhone,
   hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
