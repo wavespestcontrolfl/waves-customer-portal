@@ -337,9 +337,9 @@ describe('round-8 P1 — the decision-point write is fenced to the processing cl
 
   test('both decision points abandon the pass on a lost claim', () => {
     // #6112: two decision points, the post-customer recovery for a pass whose enforce routing threw,
-    // and the non-workable voicemail terminal branch (r10 P2)
+    // the non-workable voicemail terminal branch (r10 P2) and the tech follow-up short-circuit (r12 P2)
     const sites = src.match(/if \(!\(await armCallbackNumberHoldAtDecision\(\{ cardExtraction: [\w.]+ \}\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);/g) || [];
-    expect(sites).toHaveLength(4);
-    expect(src.match(/await armCallbackNumberHoldAtDecision\(/g)).toHaveLength(4);
+    expect(sites).toHaveLength(5);
+    expect(src.match(/await armCallbackNumberHoldAtDecision\(/g)).toHaveLength(5);
   });
 });

@@ -281,6 +281,16 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(src.indexOf('const fileTextNumberCard = async')).toBeLessThan(branch);
   });
 
+  test('a tech follow-up call that says the dialed line cannot get texts arms the hold + card before the short-circuit (codex r12 P2)', () => {
+    const branch = src.indexOf('    if (isTechFollowUpCall(call)) {\n');
+    const ret = src.indexOf('return finalizeTechFollowUpCall({', branch);
+    const arm = src.indexOf("if (!extracted.is_spam && aniCannotText(noTextSafeExtraction(v2Result)?.caller)) {", branch);
+    expect(arm).toBeGreaterThan(branch);
+    expect(arm).toBeLessThan(ret);
+    expect(src.slice(arm, ret)).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');");
+    expect(src.indexOf('const armCallbackNumberHoldAtDecision = async')).toBeLessThan(branch);
+  });
+
   test('a "Line can get texts" release that lands during the pass is honored: the per-pass blockers go back to the pre-hold SMS verdict', () => {
     const at = src.indexOf('await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });');
     const section = src.slice(at, at + 1500);

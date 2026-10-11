@@ -149,9 +149,11 @@ function cardCarriesNoTextHold(item) {
 // takes SMS, never who owns it, so only that card's own Resolve verifies the number.
 async function disclaimedCardOpen(trx, callLogId) {
   const { OWNERSHIP_DISCLAIMER_CARD_SQL } = require('../services/disclaimed-number-holds');
+  // Open, in progress OR dismissed: Dismiss means no number was verified, so a dismissed ownership
+  // card still blocks "Line can get texts" (codex #6112 r12; same rule as the cross-call release).
   const open = await trx('triage_items')
     .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
-    .whereIn('status', OPEN_STATES)
+    .whereIn('status', [...OPEN_STATES, 'dismissed'])
     .whereRaw(OWNERSHIP_DISCLAIMER_CARD_SQL)
     .first('id');
   return !!open;

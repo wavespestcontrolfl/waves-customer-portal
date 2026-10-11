@@ -10609,83 +10609,7 @@ const CallRecordingProcessor = {
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
 
-    // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
-    // Extraction is final here and no side effect has run yet: the call
-    // keeps its transcript, extraction, summary and commitments, and
-    // nothing of the lead pipeline below touches it.
-    if (isTechFollowUpCall(call)) {
-      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
-    }
-
-    // ── Voicemail routing ──
-    // Voicemail detection is deterministic-first: the voice webhook stamps
-    // answered_by/call_outcome='voicemail' on call_log when the caller hit the
-    // voicemail <Record> path (twilio-voice-webhook.js resolveInboundDialCompletion),
-    // so OR that signal with the model's is_voicemail flag. Model-only detection
-    // was inconsistent — some voicemails slipped through as live calls and minted
-    // partial-data customers, others were dropped entirely.
-    const voicemailChannel = !!(
-      extracted.is_voicemail
-      || call.answered_by === 'voicemail'
-      || call.call_outcome === 'voicemail'
-    );
-    if (voicemailChannel) extracted.is_voicemail = true;
-
-    // A voicemail from a NEW prospect with a callback number and concrete
-    // service intent is a workable lead, not a skip: it continues into the
-    // normal pipeline and lands as a customer-less UNqualified Needs-Review
-    // lead (Step 4b). Customer creation stays hard-off for voicemails (Step 3
-    // create branch gates on !is_voicemail), so a mangled voicemail
-    // transcription can never mint a partial-data customer. Existing-customer
-    // voicemails keep today's behavior: terminal 'voicemail' status, no lead —
-    // a normal missed call the office sees in the comms inbox.
-    // The content veto for voicemails keys on the content TYPE only. A stale
-    // model output can keep the legacy `call_type='voicemail', is_lead=false`
-    // shape even when it extracted a concrete requested service, and that
-    // boolean must not out-vote deterministic service intent on exactly the
-    // channel this path exists to recover (isNonLeadCallContent would veto on
-    // it). Real non-lead content — billing, complaint, existing-customer
-    // scheduling/service, wrong number — still vetoes.
-    const voicemailContentVeto = NON_LEAD_CALL_TYPES.has(
-      String(extracted?.call_type || '').trim().toLowerCase()
-    );
-    let voicemailLeadPath = false;
-    if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
-      const vmPhone = resolveCallContactPhone(call, extracted.phone);
-      // A blocked-caller-ID voicemail (vmPhone null) rides the same
-      // email-backed branch as a live anonymous call: hasWorkableLeadSignal
-      // demands a VALID spoken email when there is no phone, so "call me
-      // back" voicemails with no reachback still terminal-skip. The
-      // quote-link text-back downstream fails closed in the service
-      // (missing_input) — a phone-less voicemail lead is email-reachback
-      // only (codex P1, PR #3275).
-      if (hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
-        const vmCustomer = call.customer_id
-          ? { id: call.customer_id }
-          : (vmPhone ? await findCustomerForCallContact(vmPhone, extracted).catch(() => null) : null);
-        voicemailLeadPath = !vmCustomer;
-      }
-    }
-    if (voicemailLeadPath && extracted.is_lead === false) {
-      // Reconcile the stale legacy shape so every downstream consumer (the
-      // Step 4b nonLeadCall gate, the ai_triage stamp, route decisions) sees
-      // what the deterministic signals decided: channel voicemail + callback
-      // number + concrete service intent IS a lead. Without this, the same
-      // stale boolean that the gate above ignores would re-veto lead creation
-      // via isNonLeadCallContent at shouldCreateLead.
-      extracted.is_lead = true;
-      const staleType = String(extracted.call_type || '').trim().toLowerCase();
-      if (!staleType || staleType === 'voicemail' || staleType === 'other') {
-        extracted.call_type = 'new_inquiry';
-      }
-      // The recurring-intent default keyed off is_lead and ran before this
-      // promotion — a "wasp nest, and I'd like the quarterly package"
-      // voicemail was still is_lead=false then. Re-run it now that the
-      // deterministic signals made this a lead (idempotent, no-op otherwise).
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
-    }
-
-    // (Hold helpers live above the voicemail terminal branch: a no-text voicemail arms the hold too; codex #6112 r10 P2.)
+    // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
     // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
     // the decision point — the same statement that flips the boolean above
     // — before the card is published and before any further awaited work,
@@ -10821,6 +10745,90 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${code}`);
       }
     };
+    // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
+    // Extraction is final here and no side effect has run yet: the call
+    // keeps its transcript, extraction, summary and commitments, and
+    // nothing of the lead pipeline below touches it.
+    if (isTechFollowUpCall(call)) {
+      // A customer who tells the technician on this outbound follow-up that the dialed line cannot get
+      // texts (valid V2 ani_cannot_text): the number-keyed hold and its release card are armed here,
+      // before the short-circuit, so reminders for the linked visit stop (codex #6112 r12 P2). Same
+      // fence and abandon-on-lost-claim as the decision points; spam excluded.
+      if (!extracted.is_spam && aniCannotText(noTextSafeExtraction(v2Result)?.caller)) {
+        noTextHoldArming = true;
+        if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
+      }
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
+    }
+
+    // ── Voicemail routing ──
+    // Voicemail detection is deterministic-first: the voice webhook stamps
+    // answered_by/call_outcome='voicemail' on call_log when the caller hit the
+    // voicemail <Record> path (twilio-voice-webhook.js resolveInboundDialCompletion),
+    // so OR that signal with the model's is_voicemail flag. Model-only detection
+    // was inconsistent — some voicemails slipped through as live calls and minted
+    // partial-data customers, others were dropped entirely.
+    const voicemailChannel = !!(
+      extracted.is_voicemail
+      || call.answered_by === 'voicemail'
+      || call.call_outcome === 'voicemail'
+    );
+    if (voicemailChannel) extracted.is_voicemail = true;
+
+    // A voicemail from a NEW prospect with a callback number and concrete
+    // service intent is a workable lead, not a skip: it continues into the
+    // normal pipeline and lands as a customer-less UNqualified Needs-Review
+    // lead (Step 4b). Customer creation stays hard-off for voicemails (Step 3
+    // create branch gates on !is_voicemail), so a mangled voicemail
+    // transcription can never mint a partial-data customer. Existing-customer
+    // voicemails keep today's behavior: terminal 'voicemail' status, no lead —
+    // a normal missed call the office sees in the comms inbox.
+    // The content veto for voicemails keys on the content TYPE only. A stale
+    // model output can keep the legacy `call_type='voicemail', is_lead=false`
+    // shape even when it extracted a concrete requested service, and that
+    // boolean must not out-vote deterministic service intent on exactly the
+    // channel this path exists to recover (isNonLeadCallContent would veto on
+    // it). Real non-lead content — billing, complaint, existing-customer
+    // scheduling/service, wrong number — still vetoes.
+    const voicemailContentVeto = NON_LEAD_CALL_TYPES.has(
+      String(extracted?.call_type || '').trim().toLowerCase()
+    );
+    let voicemailLeadPath = false;
+    if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
+      const vmPhone = resolveCallContactPhone(call, extracted.phone);
+      // A blocked-caller-ID voicemail (vmPhone null) rides the same
+      // email-backed branch as a live anonymous call: hasWorkableLeadSignal
+      // demands a VALID spoken email when there is no phone, so "call me
+      // back" voicemails with no reachback still terminal-skip. The
+      // quote-link text-back downstream fails closed in the service
+      // (missing_input) — a phone-less voicemail lead is email-reachback
+      // only (codex P1, PR #3275).
+      if (hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
+        const vmCustomer = call.customer_id
+          ? { id: call.customer_id }
+          : (vmPhone ? await findCustomerForCallContact(vmPhone, extracted).catch(() => null) : null);
+        voicemailLeadPath = !vmCustomer;
+      }
+    }
+    if (voicemailLeadPath && extracted.is_lead === false) {
+      // Reconcile the stale legacy shape so every downstream consumer (the
+      // Step 4b nonLeadCall gate, the ai_triage stamp, route decisions) sees
+      // what the deterministic signals decided: channel voicemail + callback
+      // number + concrete service intent IS a lead. Without this, the same
+      // stale boolean that the gate above ignores would re-veto lead creation
+      // via isNonLeadCallContent at shouldCreateLead.
+      extracted.is_lead = true;
+      const staleType = String(extracted.call_type || '').trim().toLowerCase();
+      if (!staleType || staleType === 'voicemail' || staleType === 'other') {
+        extracted.call_type = 'new_inquiry';
+      }
+      // The recurring-intent default keyed off is_lead and ran before this
+      // promotion — a "wasp nest, and I'd like the quarterly package"
+      // voicemail was still is_lead=false then. Re-run it now that the
+      // deterministic signals made this a lead (idempotent, no-op otherwise).
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+    }
+
     // Skip spam and non-workable voicemail
     if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
       // A retry newly classified spam/non-workable must first unlink any

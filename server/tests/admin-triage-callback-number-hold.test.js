@@ -653,6 +653,29 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
+  test('a DISMISSED ownership card still blocks "Line can get texts": Dismiss verified nothing (codex r12 security P2)', async () => {
+    const fx = fixture({ triage_items: [textCard(), cbCard({ status: 'dismissed', payload: {} })] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true });
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.callback_number).toMatchObject({ disclaimed_number_hold: 'kept', release: 'deferred' });
+    });
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
+  });
+
+  test('a RESOLVED ownership card (number verified) does not block the release', async () => {
+    const fx = fixture({ triage_items: [textCard(), cbCard({ status: 'resolved', payload: {} })] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true });
+      expect(res.status).toBe(200);
+      expect((await res.json()).callback_number).toMatchObject({ disclaimed_number_hold: 'cleared' });
+    });
+    expect(numberHold(fx.tables).cleared_at).not.toBeNull();
+  });
+
   test('the card is version-bound: a stale expected_updated_at is refused and nothing changes', async () => {
     const fx = fixture({ triage_items: [textCard()] });
     wireDb(db, { conn: fx.conn });
