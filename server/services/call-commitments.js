@@ -2097,7 +2097,12 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
     .whereExists(function parentIsVoicemail() {
       this.select(conn.raw("1")).from("call_log as parent").where({ "parent.id": commitment.call_log_id, "parent.direction": "inbound" })
-        .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')");
+        .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')")
+        // ...with a reliable end (lockCallbackPair's parent_not_settled): a
+        // reported duration and no pass holding its token. Without the
+        // duration the boundary reads the call as ended at its start, and a
+        // callback placed while the caller was still recording would count.
+        .whereNotNull("parent.duration_seconds").whereNull("parent.processing_token");
     })
     .modify((b) => phoneWhere(b, "to_phone", phone))
     .orderBy("created_at", "asc")
