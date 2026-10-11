@@ -13232,8 +13232,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
-      // follows it (scope: "leave it off on re-services").
-      && !reserviceFixedRecap;
+      // follows it (scope: "leave it off on re-services"). With
+      // GATE_FAST_COMPLETE_WRAP_UP on, a re-service asks for a review by default
+      // (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview,
+      // and the ask goes as its OWN message through enrollPostService below,
+      // never inside the fixed text (shouldBundleReview refuses fixed mode).
+      && require('./reservice-fixed-recap').fixedRecapAllowsReviewAsk({
+        fixedRecap: reserviceFixedRecap,
+        wrapUpGate: require('../config/feature-gates').fastCompleteWrapUpLive(),
+      });
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -13347,6 +13354,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
+      // The fixed re-service text is final as built: a review ask never rides
+      // inside it (it follows as its own message, below).
+      !reserviceFixedRecap &&
       // Only an operator-chosen immediate ask rides inside the completion
       // text. No timing ("Automatic", or a client that sent none) is the
       // legacy 120-minute separate ask that enrollPostService schedules

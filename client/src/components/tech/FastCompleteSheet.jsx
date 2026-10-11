@@ -346,7 +346,7 @@ const NO_CUSTOMER_RECAP_FLAGS = {
   includePayLink: false,
 };
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled, officeNote = '' }) {
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, customerText, officeNote = '' }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -382,9 +382,24 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     ...pestSweepCompletionFields(form.sweptEaves === true),
     // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
     // link. Gate on: the fixed re-service text; the server composes it.
-    ...(recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS),
+    ...customerText,
   };
 }
+
+// The short form's customer text. Without the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) it is today's flags.
+// With it, the tech's choices stand in for them and the fixed-text mode stays (the Wrap-up shows only
+// where GATE_FAST_COMPLETE_RECAP is on): untouched, the one change is requestReview true (owner 2026-10-10).
+function shortFormCustomerText(wrapUp, recapEnabled) {
+  const today = recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS;
+  return wrapUp.enabled ? { ...wrapUp.fields(today), customerRecapMode: today.customerRecapMode } : today;
+}
+
+// The short form's Wrap-up gate: the context says so and the fixed customer text is on. Without that text
+// the customer is sent nothing today, and the Wrap-up must not turn one on, so it is not shown at all.
+const shortFormWrapUpGate = (ctx, service) => ctx.wrapUp === true && service?.recapEnabled === true;
+
+// Whether the short form's products show spray evidence (lib/spray-evidence.js).
+const shortFormSprayEvidence = (rows, form) => rowsShowSpray(rows.filter((row) => row.active), (row) => rowMethod(row, form.method));
 
 // The report flow takes visits the house mix is not for (an initial
 // cleanout), so it seeds only where the recap modal and the full form would;
@@ -409,9 +424,9 @@ function sheetVisitIdentity(visit, reportFlow) {
 // visit with only bait or station rows does not): each row at the method it will be recorded with.
 const pestSprayEvidence = (active, draft) => rowsShowSpray(active, (row) => rowMethod(row, reportSprayMethod(draft?.facts)));
 
-// The Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP) is on for the report flow's regular visits: a
-// re-service (or a callback) keeps its fixed customer text, and the short form has no report step.
-const wrapUpGateOf = (data, visit, reportFlow) => data?.wrapUp === true && reportFlow === true && !isReserviceVisit(visit);
+// The Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP) is on when the server says so: the report flow
+// (a re-service or callback too: owner 2026-10-10) and the short re-service form (see shortFormWrapUpGate).
+const wrapUpGateOf = (data) => data?.wrapUp === true;
 
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
@@ -475,7 +490,7 @@ function useFastCompleteContext({
           traceOnReport: data?.traceOnReport !== false,
           // Step 3 "after sending": book the follow-up a completion suggests.
           followupBooking: data?.followupBooking === true,
-          wrapUp: wrapUpGateOf(data, visit, reportFlow),
+          wrapUp: wrapUpGateOf(data),
           rating: {
             allowed: rates,
             scaleLabels: ratingContract?.scaleLabels || null,
@@ -653,7 +668,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   if (reportFlow) {
     return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} sharedNote={sharedNote} onWrapChecking={onWrapChecking} />;
   }
-  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} onWrapChecking={onWrapChecking} />;
 }
 
 // The products on the sheet: the house mix it opened with, plus what the tech
@@ -714,7 +729,7 @@ const VOICE_SHEET_OPS = {
   activityValues: ACTIVITY_LEVELS.map((level) => level.value),
 };
 
-function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy }) {
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy, onWrapChecking }) {
   const products = useProductRows(ctx, service?.serviceType);
   const { rows, addProduct, clearFollowingRates } = products;
   const [editAmounts, setEditAmounts] = useState(false);
@@ -796,12 +811,19 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     }
     setCheckingStock(false);
   };
-  const submit = () => {
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. A re-service asks for a review by default
+  // (owner 2026-10-10); its fixed text carries no pay link and the short form posted no `reviewTiming`.
+  const wrapUp = useWrapUp({
+    gate: shortFormWrapUpGate(ctx, service), submission, service, request, base: `/admin/dispatch/${serviceId}`, applicationsRecorded: shortFormSprayEvidence(rows, form), omitAutoTiming: true, noPayLink: true, onChecking: onWrapChecking,
+  });
+  const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
+    // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
+    if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
       () => completionBody(form, rows, {
-        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, customerText: shortFormCustomerText(wrapUp, recapOn(service)),
         officeNote: voice.enabled ? voice.officeNote : '',
       }),
       `${names} · ${targetsOf(form).join(', ')}`,
@@ -811,6 +833,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
+        <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
         {/* One mic at a time: the note's mic recording (the upload path is not stopped
             by another tap) holds this one. */}
         <VoiceFillMicBar voice={voice} locked={locked || dictationPending} onPendingChange={setVoiceMicPending} />
@@ -869,11 +892,12 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               mic={{ serviceId, onPendingChange: dictating.tip }}
             />
           )}
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
-        submission={submission}
+        submission={wrapUp.lock(submission)}
         missingReason={missingReason}
         warn={!!stockRow}
         label="Complete re-service"
@@ -1772,7 +1796,7 @@ function ReportFlowForm({
   // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section on the report step. The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
   // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
-  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, onChecking: onWrapChecking });
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, onChecking: onWrapChecking });
   // After the note's read: the best tip for the pests the reader heard and the
   // words of the note. Offered only while the tech has no tip of their own
   // choosing (or has taken this one); never picked for them.

@@ -34,6 +34,13 @@ describe('the Wrap-up body fragment', () => {
     expect(wrapUpFields({ ...base, includePayLink: false, willInvoice: true }).includePayLink).toBe(false);
     expect(wrapUpFields({ ...base, includePayLink: false, willInvoice: true, sendSms: false }).includePayLink).toBe(true);
   });
+
+  test('a sheet whose text carries no pay link (a pest re-service) posts false whatever the choice', () => {
+    expect(wrapUpFields({ ...base, noPayLink: true }).includePayLink).toBe(false);
+    expect(wrapUpFields({ ...base, noPayLink: true, willInvoice: true, includePayLink: true }).includePayLink).toBe(false);
+    expect(wrapUpFields({ ...base, noPayLink: true, sendSms: false }).includePayLink).toBe(false);
+    expect(wrapUpFields({ ...base, noPayLink: false, sendSms: false }).includePayLink).toBe(true);
+  });
 });
 
 describe('the Wrap-up guards', () => {

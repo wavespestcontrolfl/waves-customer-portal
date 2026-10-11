@@ -274,6 +274,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
     lawnSqft: await loadLawnSqft(svc, knex),
     stockAdvisory: await loadStockAdvisory(svc, knex),
     lastVisit,
+    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
+    ...(require('../config/feature-gates').fastCompleteWrapUpLive() && { wrapUp: true }),
   };
 }
 

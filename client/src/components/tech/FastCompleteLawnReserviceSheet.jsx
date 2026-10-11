@@ -42,6 +42,8 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
+import { rowsShowSpray } from '../../lib/spray-evidence';
+import FastCompleteWrapUp, { WrapUpClock, useWrapUp } from './FastCompleteWrapUp';
 import {
   UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
@@ -126,7 +128,9 @@ export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Rec
 // The completion text the full typed form posts by default for this visit
 // (SchedulePage: sendSms starts true; includePayLink is true whenever there is
 // no invoice to link). The review ask is the one flag that differs: the owner
-// kept it off re-services (the pest sheet's rule), so it is false here.
+// kept it off re-services (the pest sheet's rule), so it is false here. With the
+// Wrap-up on (GATE_FAST_COMPLETE_WRAP_UP) a re-service asks for a review by
+// default (owner 2026-10-10) and the section's choices stand in for these.
 const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: false, includePayLink: true };
 
 // A product on the sheet. `last` is the amount the server says the last lawn
@@ -243,7 +247,7 @@ const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', rows: [], products: [], methods: [], lawnSqft: null, stockAdvisory: false, lastVisit: null, customerRequest: null,
-  visitIdentity: null, visit: null,
+  visitIdentity: null, visit: null, wrapUp: false,
 };
 
 // What decides a row's method and area: the server's offered methods and the
@@ -275,6 +279,8 @@ function contextFrom(data, service) {
     lastVisit: data?.lastVisit && typeof data.lastVisit === 'object' ? data.lastVisit : null,
     customerRequest: data?.customerRequest && typeof data.customerRequest === 'object' ? data.customerRequest : null,
     visitIdentity: recapVisitIdentity(data?.service),
+    // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
+    wrapUp: data?.wrapUp === true,
   };
 }
 
@@ -425,7 +431,7 @@ function missingRequirement({ form, rows, ctx, dictationPending, voice = null })
   return reason;
 }
 
-function completionBody({ form, rows, ctx }) {
+function completionBody({ form, rows, ctx, customerText }) {
   return {
     visitOutcome: 'completed',
     ...(ctx.visitIdentity ? { expectedVisit: ctx.visitIdentity } : {}),
@@ -461,7 +467,7 @@ function completionBody({ form, rows, ctx }) {
       },
     },
     technicianNotes: form.note.trim(),
-    ...CUSTOMER_TEXT_FLAGS,
+    ...customerText,
   };
 }
 
@@ -479,31 +485,33 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   // form is another page and carries nothing over, so Full form and "+ Other
   // product" wait for it, like Complete.
   const [dictationPending, setDictationPending] = useState(false);
+  // The Wrap-up's submit-time check of the review send time is reading: the sheet is locked like a submit.
+  const [wrapChecking, setWrapChecking] = useState(false);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
-    if (submitting) return;
+    if (submitting || wrapChecking) return;
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
-  const locked = submissionHolds(submission);
+  const locked = submissionHolds(submission) || wrapChecking;
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
-      <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} />
+      <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting || wrapChecking} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onWrapChecking={setWrapChecking} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, voiceFillEnabled }) {
+function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, voiceFillEnabled, onWrapChecking }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -521,10 +529,10 @@ function SheetBody({ service, request, ctx, submission, locked, dictationPending
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
+  return <LawnForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onWrapChecking={onWrapChecking} />;
 }
 
-function LawnForm({ ctx, service, request, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled = false }) {
+function LawnForm({ ctx, service, request, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled = false, onWrapChecking }) {
   const products = useProductRows(ctx);
   // Clearing a Treating-for chip also clears it as a target on every product
   // row, so picking it again never revives an old per-row choice.
@@ -579,11 +587,19 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
     }
     setCheckingStock(false);
   };
-  const submit = () => {
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. A re-service asks for a review by default
+  // (owner 2026-10-10); this sheet posted no `reviewTiming` before, and its pay link follows the usual
+  // will-invoice rule (a free callback does not invoice, so it shows none).
+  const wrapUp = useWrapUp({
+    gate: ctx.wrapUp, submission, service, request, base: `/admin/dispatch/${service?.id}`, applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => row.method), omitAutoTiming: true, onChecking: onWrapChecking,
+  });
+  const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
+    // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.
+    if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx }),
+      () => completionBody({ form, rows, ctx, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) }),
       [names, inOptionOrder(TURF_ISSUE_OPTIONS, form.issues)].filter(Boolean).join(' · '),
     );
   };
@@ -591,6 +607,7 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
+        <WrapUpClock wrapUp={wrapUp} since={service.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
           <CustomerRequest request={ctx.customerRequest} />
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || voice.filling} onClip={noteClip.onClip} />
@@ -613,11 +630,12 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
               <Chip disabled={locked} key={label} label={label} pressed={form.condition === label} onClick={() => setField('condition', label)} />
             ))}
           </ChoiceSection>
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
-        submission={submission}
+        submission={wrapUp.lock(submission)}
         missingReason={missingReason}
         warn={!!stockRow}
         label="Complete lawn re-service"

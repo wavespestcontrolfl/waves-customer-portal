@@ -167,6 +167,14 @@ function reserviceFixedRecapHonored({ requestedMode, fastCompleteGate, recapGate
     && !NOT_PERFORMED_OUTCOMES.has(visitOutcome);
 }
 
+// Whether a review ask may follow this completion. The fixed text is the ONE text for a re-service, so
+// in fixed mode no review ask goes, unless GATE_FAST_COMPLETE_WRAP_UP is on: then a re-service asks for
+// a review by default (owner 2026-10-10, "show on"), as its own message, never inside the fixed text.
+// Only exactly true lifts it; every other blocker on the ask is the caller's.
+function fixedRecapAllowsReviewAsk({ fixedRecap, wrapUpGate }) {
+  return !fixedRecap || wrapUpGate === true;
+}
+
 // The body the provider is handed, and so the body audited and shown to the
 // tech: sendCustomerMessage removes the https:// scheme and normalizes
 // typographic punctuation for customer SMS (the same two helpers, here).
@@ -263,6 +271,7 @@ module.exports = {
   providerBody,
   buildReserviceFixedRecap,
   reserviceFixedRecapHonored,
+  fixedRecapAllowsReviewAsk,
   loadReserviceFixedRecapFacts,
   customerTextOutcome,
 };

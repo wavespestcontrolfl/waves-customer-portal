@@ -393,6 +393,8 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 // TechHomePage routes the sheet with).
 function lawnReserviceSheetService(row) {
   return {
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    ...wrapUpSheetFields(row),
     id: row.id,
     customerName: row.customer_name || row.customerName,
     serviceType: row.service_type || row.serviceType,

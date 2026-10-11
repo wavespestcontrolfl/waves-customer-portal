@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  MODE, TEMPLATE_KEY, SAFETY_LINE, buildReserviceFixedRecap, isWetMethod, providerBody, reserviceFixedRecapHonored,
+  MODE, TEMPLATE_KEY, SAFETY_LINE, buildReserviceFixedRecap, fixedRecapAllowsReviewAsk, isWetMethod, providerBody, reserviceFixedRecapHonored,
   loadReserviceFixedRecapFacts, customerTextOutcome,
 } = require('../services/reservice-fixed-recap');
 
@@ -231,8 +231,12 @@ describe('complete-scheduled-service wiring', () => {
     expect((src.match(/await sendCustomerMessage\(sendInput\)/g) || []).length).toBe(1);
   });
 
-  test('no review ask rides or follows it', () => {
-    expect(src).toMatch(/&& !suppressTypedCustomerComms\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*&& !reserviceFixedRecap;/);
+  test('no review ask rides it, and none follows it unless the Wrap-up gate is on (owner 2026-10-10)', () => {
+    // The ask is refused in fixed mode by the helper (gate off: always refused) ...
+    expect(src).toMatch(/&& !suppressTypedCustomerComms\s*(?:\/\/[^\n]*\n\s*)+&& require\('\.\/reservice-fixed-recap'\)\.fixedRecapAllowsReviewAsk\(\{\s*fixedRecap: reserviceFixedRecap,\s*wrapUpGate: require\('\.\.\/config\/feature-gates'\)\.fastCompleteWrapUpLive\(\),\s*\}\);/);
+    // ... and it is never bundled into the fixed text: it follows as its own message (enrollPostService).
+    expect(src).toMatch(/!serviceReportV1Delivery &&\s*(?:\/\/[^\n]*\n\s*)+!reserviceFixedRecap &&/);
+    expect(src).toMatch(/if \(effectiveRequestReview && \(svc\.cust_phone \|\| reviewCadenceEnabled\) && !bundledReviewUrl\) \{\s*try \{\s*const ReviewService = require\('\.\.\/services\/review-request'\);\s*await ReviewService\.enrollPostService\(/);
   });
 
   test('the response carries the text outcome only when the sheet asked', () => {
@@ -469,5 +473,29 @@ describe('review fixes (#5363 r6)', () => {
 describe('pre-push fix (#5363 r7)', () => {
   test('a resumed visit still fenced at sending reads as unconfirmed, not "nothing was sent"', () => {
     expect(customerTextOutcome({ honored: true, status: 'sending', body: 'X', deliveryUnverified: true })).toMatchObject({ sent: false, unverified: true, body: 'X' });
+  });
+});
+
+describe('the review ask after the fixed re-service text (GATE_FAST_COMPLETE_WRAP_UP)', () => {
+  test('gate off: fixed mode never asks for a review, as before', () => {
+    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: false })).toBe(false);
+    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: undefined })).toBe(false);
+    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: 'true' })).toBe(false);
+  });
+
+  test('gate on: fixed mode no longer blocks the ask (the body\'s requestReview decides, with every other blocker kept by the caller)', () => {
+    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: true })).toBe(true);
+  });
+
+  test('outside fixed mode the helper changes nothing, gate on or off', () => {
+    expect(fixedRecapAllowsReviewAsk({ fixedRecap: false, wrapUpGate: false })).toBe(true);
+    expect(fixedRecapAllowsReviewAsk({ fixedRecap: false, wrapUpGate: true })).toBe(true);
+  });
+
+  test('the fixed text is the same whether or not a review will be asked: it carries no review line', () => {
+    const facts = { address: '123 Main St', areas: ['Outside'], pests: ['ants'], products: [{ method: 'spot_treatment', targets: ['ants'] }], reportUrl: 'https://example.test/r/abc' };
+    const body = buildReserviceFixedRecap(facts);
+    expect(body).toBe(buildReserviceFixedRecap({ ...facts }));
+    expect(body).not.toMatch(/review|google|feedback/i);
   });
 });

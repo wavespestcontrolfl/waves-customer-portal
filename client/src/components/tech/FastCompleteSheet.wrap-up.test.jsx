@@ -219,26 +219,52 @@ describe('the recurring pest visit with the Wrap-up on', () => {
   });
 });
 
-describe('visits that keep their fixed customer text', () => {
-  test('a re-service in the report flow shows no Wrap-up and sends no pay link and no review ask', async () => {
-    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' } });
-    await openSheet(request, { ...SERVICE, serviceType: 'Pest Control Re-Service' });
+describe('a re-service in the report flow (owner 2026-10-10: the review request is shown and starts on)', () => {
+  const RESERVICE_VISIT = { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' };
+  const RESERVICE_SERVICE = { ...SERVICE, serviceType: 'Pest Control Re-Service' };
+
+  test('gate off: no Wrap-up, and the text, no pay link and no review ask it always posted', async () => {
+    const request = makeRequest({ service: RESERVICE_VISIT, wrapUp: false });
+    await openSheet(request, RESERVICE_SERVICE);
     await generate();
     expect(wrapUpHeading()).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Time on-site' })).toBeNull();
     const body = await send(request);
     expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: false });
-    expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
+    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
   });
 
-  test('a callback booked under a regular service key is a re-service: no Wrap-up', async () => {
+  test('gate on, untouched: the one change is requestReview true; no pay-link row, pay link stays false, no reviewTiming', async () => {
+    const request = makeRequest({ service: { ...RESERVICE_VISIT, estimatedPrice: 95, createInvoiceOnComplete: true } });
+    await openSheet(request, { ...RESERVICE_SERVICE, estimatedPrice: 95, createInvoiceOnComplete: true });
+    await generate();
+    expect(wrapUpHeading()).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: 'Send review request' }).checked).toBe(true);
+    expect(screen.queryByRole('checkbox', { name: /Include payment link/ })).toBeNull();
+    const body = await send(request);
+    expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: true });
+    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+  });
+
+  test('turning the review off posts requestReview false; a timing change rides the body', async () => {
+    const request = makeRequest({ service: RESERVICE_VISIT });
+    await openSheet(request, RESERVICE_SERVICE);
+    await generate();
+    fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'customer_requested' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Send completion text' }));
+    const body = await send(request);
+    expect(body).toMatchObject({ sendCompletionSms: false, includePayLink: false, requestReview: true, reviewTiming: 'customer_requested', reviewDelayMinutes: 0 });
+  });
+
+  test('a callback booked under a regular service key is a re-service too', async () => {
     const request = makeRequest({ service: { ...REGULAR, isCallback: true } });
     await openSheet(request);
     await generate();
-    expect(wrapUpHeading()).toBeNull();
-    expect(await send(request)).toMatchObject({ includePayLink: false, requestReview: false });
+    expect(wrapUpHeading()).toBeTruthy();
+    expect(await send(request)).toMatchObject({ includePayLink: false, requestReview: true });
   });
+});
 
+describe('visits that keep their fixed customer text', () => {
   test('a part of a grouped stop (prepare mode) shows no Wrap-up and hands over the same customer text', async () => {
     const onPrepared = vi.fn();
     const request = makeRequest();
