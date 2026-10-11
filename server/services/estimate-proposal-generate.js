@@ -712,6 +712,126 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
   return { programs: programs.length ? programs : null, warning: null };
 }
 
+// ── One-time row identity, amount and mirror collapse (deriveCorrectiveWork) ──
+// Mapped one-time items (oneTime.items / specItems) and raw engine lineItems
+// are each persisted in up to three containers that mirror the SAME row as
+// distinct objects. A mirror is collapsed by content identity with a
+// max-per-source rule that keeps a legitimate repeat inside one container
+// (codex 1A-ii r4b / r6). The identities deliberately exclude the sold-net
+// aliases: two mirrors whose nets disagree are the SAME charge with two
+// accepted prices, which must fail the draft, not become two lines or a
+// silent first-wins (codex #6113 r27).
+const oneTimeIdentity = (item) => [
+  String(item.service || '').toLowerCase(),
+  String(item.name || item.label || '').toLowerCase(),
+  String(item.price ?? item.amount ?? item.total ?? ''),
+].join('|');
+const rawIdentity = (line) => [
+  String(line.service || line.name || '').toLowerCase(),
+  String(line.price ?? ''), String(line.oneTimePrice ?? ''), String(line.total ?? ''),
+  String(line.installation?.price ?? ''), String(line.manualFinalOneTime ?? ''),
+].join('|');
+// manualFinalOneTime is the operator-ACCEPTED net (the engine keeps `price`
+// gross) — it outranks everything (pre-push codex P0); amountAfterDiscount
+// and totalAfterDiscount are the same sold-net aliases the area add-on
+// limits read (SOLD_AMOUNT_FIELDS), so a row persisted gross with that net
+// drafts the net (codex #6113 r21 / r26).
+const mappedResolvedAmount = (item) => num(item.manualFinalOneTime
+  ?? item.priceAfterDiscount ?? item.amountAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
+  ?? item.installation?.price);
+const rawResolvedAmount = (line) => num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
+  ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
+// Raw engine rows carry their customer-facing copy under label /
+// display.name (priceGermanRoach emits `label`, priceFlea nests
+// display.name) — falling back straight to the internal service key
+// would publish "german_roach" as contractual copy (codex 1A-ii r20).
+const rawLineLabel = (line, fallback) => String(
+  line.displayName || line.label || line.display?.name || line.name || line.service || fallback,
+);
+const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
+// Collapse mirrored rows across sources: each identity is emitted at most as
+// many times as its busiest single source holds it, object-deduped so a row
+// shared by two sources never doubles. A dropped mirror whose resolved
+// amount differs from every kept clone is reported in `conflicted` (by label).
+function collapseMirroredRows(sources, { identity, amount, label }) {
+  const maxPerSource = new Map();
+  for (const list of sources) {
+    const counts = new Map();
+    for (const row of list) counts.set(identity(row), (counts.get(identity(row)) || 0) + 1);
+    for (const [key, count] of counts) maxPerSource.set(key, Math.max(maxPerSource.get(key) || 0, count));
+  }
+  const seen = new Set();
+  const emitted = new Map();
+  const keptAmounts = new Map();
+  const conflicted = [];
+  const rows = sources.flat().filter((row) => {
+    if (seen.has(row)) return false;
+    seen.add(row);
+    const key = identity(row);
+    const already = emitted.get(key) || 0;
+    const resolved = roundCents(amount(row));
+    if (already >= (maxPerSource.get(key) || 0)) {
+      if (!(keptAmounts.get(key) || []).some((kept) => kept === resolved)) conflicted.push(label(row));
+      return false;
+    }
+    emitted.set(key, already + 1);
+    keptAmounts.set(key, [...(keptAmounts.get(key) || []), resolved]);
+    return true;
+  });
+  return { rows, conflicted };
+}
+
+// The draft's verdict once every row is classified: gated and comped rows
+// fail it, an empty draft against a positive stored total fails it, more
+// than 24 lines fail it, and a non-null stored total (zero included) must
+// equal the generated sum to the cent.
+function finishCorrectiveWork(work, { gated, comped, storedOneTime }) {
+  if (gated.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${gated.join(', ')} requires manual review (provisional price). Author the corrective work manually.`,
+    };
+  }
+  if (comped.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${comped.join(', ')} is an accepted zero-priced (comped) item — author the corrective work manually so the promised scope is represented.`,
+    };
+  }
+  if (!work.length) {
+    // A positive stored one-time total with NO representable rows must fail
+    // the draft — programs-mode saving would recompute onetime_total to
+    // zero and erase the charge (pre-push codex P0).
+    if (storedOneTime > 0) {
+      return {
+        correctiveWork: null,
+        warning: `One-time work was not generated: the estimate carries a $${storedOneTime.toFixed(2)} one-time total but no representable one-time items were found. Author the corrective work manually so the charge is fully represented.`,
+      };
+    }
+    return { correctiveWork: null, warning: null };
+  }
+  if (work.length > 24) {
+    // The PUT caps corrective work at 24 items — truncating monetary rows
+    // is never acceptable (pre-push codex P0).
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: the estimate has ${work.length} one-time items and proposals are limited to 24 corrective-work lines. Author the corrective work manually.`,
+    };
+  }
+  // Non-null INCLUDING zero — a deliberately zeroed (quote-required) total
+  // must not accept generated positive work (codex 1A-ii r2c).
+  if (storedOneTime !== null) {
+    const generated = Math.round(work.reduce((acc, w) => acc + w.amount, 0) * 100) / 100;
+    if (Math.round(generated * 100) !== Math.round(storedOneTime * 100)) {
+      return {
+        correctiveWork: null,
+        warning: `One-time work was not generated: the priced one-time items sum to $${generated.toFixed(2)} but the estimate's one-time total is $${storedOneTime.toFixed(2)}. Author the corrective work manually so the one-time charge is fully represented.`,
+      };
+    }
+  }
+  return { correctiveWork: work, warning: null };
+}
+
 // One-time priced work → corrective-work drafts. Programs mode omits the
 // building lines on save and the PUT recomputes onetime_total from
 // corrective work, so a generated draft that ignored priced one-time rows
@@ -748,17 +868,6 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       ? [estimateOneTimeItemsFromData({ result: estimateData.engineResult }, { collapseMirrored: true })]
       : []),
   ];
-  const oneTimeIdentity = (item) => [
-    String(item.service || '').toLowerCase(),
-    String(item.name || item.label || '').toLowerCase(),
-    String(item.price ?? item.amount ?? item.total ?? ''),
-  ].join('|');
-  const maxPerSource = new Map();
-  for (const list of sourceLists) {
-    const counts = new Map();
-    for (const item of list) counts.set(oneTimeIdentity(item), (counts.get(oneTimeIdentity(item)) || 0) + 1);
-    for (const [key, count] of counts) maxPerSource.set(key, Math.max(maxPerSource.get(key) || 0, count));
-  }
   // Mirror-collapse keeps the FIRST clone — if any dropped twin carried a
   // review marker the kept clone lacks, gating below would publish the
   // provisional price (same trap the recurring side closed with
@@ -773,17 +882,10 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       ? estimateOneTimeItemsFromData({ result: estimateData.engineResult })
       : []),
   ].filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
-  const objSeen = new Set();
-  const emittedCounts = new Map();
-  const fromOneTime = sourceLists.flat().filter((item) => {
-    if (objSeen.has(item)) return false;
-    objSeen.add(item);
-    const key = oneTimeIdentity(item);
-    const already = emittedCounts.get(key) || 0;
-    if (already >= (maxPerSource.get(key) || 0)) return false;
-    emittedCounts.set(key, already + 1);
-    return true;
+  const mappedCollapse = collapseMirroredRows(sourceLists, {
+    identity: oneTimeIdentity, amount: mappedResolvedAmount, label: (item) => String(item.label || item.name || item.service || 'item'),
   });
+  const fromOneTime = mappedCollapse.rows;
   // A lineItems row is one-time when it carries NO recurring evidence (no
   // cadence, no monthly/annual dollars) but IS priced — raw engine drafts
   // persist bed-bug/exclusion work as `{ service, price }` without the
@@ -798,34 +900,16 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // Clones of the same row across the two containers are mirrors, not
   // extra charges — collapse by content identity with the max-per-container
   // rule that preserves legitimate in-container repeats (codex 1A-ii r6).
-  const rawIdentity = (line) => [
-    String(line.service || line.name || '').toLowerCase(),
-    String(line.price ?? ''), String(line.oneTimePrice ?? ''), String(line.total ?? ''),
-    String(line.installation?.price ?? ''), String(line.manualFinalOneTime ?? ''),
-  ].join('|');
-  const rawMax = new Map();
-  for (const container of rawContainers) {
-    const counts = new Map();
-    for (const line of container) counts.set(rawIdentity(line), (counts.get(rawIdentity(line)) || 0) + 1);
-    for (const [key, count] of counts) rawMax.set(key, Math.max(rawMax.get(key) || 0, count));
-  }
   // Same clone-marker rule for the raw containers: an ungated result.lineItems
   // row deduped against its engineResult twin that carries
   // requiresMeasurement/quoteRequired must stay gated (codex 1A-ii r14).
   const gatedRawIdentities = new Set(rawContainers.flat()
     .filter((line) => rowIsReviewGated(line))
     .map(rawIdentity));
-  const rawObjSeen = new Set();
-  const rawEmitted = new Map();
-  const lineItemsRows = rawContainers.flat().filter((line) => {
-    if (rawObjSeen.has(line)) return false;
-    rawObjSeen.add(line);
-    const key = rawIdentity(line);
-    const already = rawEmitted.get(key) || 0;
-    if (already >= (rawMax.get(key) || 0)) return false;
-    rawEmitted.set(key, already + 1);
-    return true;
+  const rawCollapse = collapseMirroredRows(rawContainers, {
+    identity: rawIdentity, amount: rawResolvedAmount, label: (line) => rawLineLabel(line, 'item'),
   });
+  const lineItemsRows = rawCollapse.rows;
   const gated = [];
   // Recurring rows can CARRY a one-time installation charge
   // (installation.price on termite-bait lines) — extract it even though
@@ -834,13 +918,6 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     .filter((line) => line.onProg !== true && line.includedOnProgram !== true
       && num(line.installation?.price) > 0
       && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
-  // Raw engine rows carry their customer-facing copy under label /
-  // display.name (priceGermanRoach emits `label`, priceFlea nests
-  // display.name) — falling back straight to the internal service key
-  // would publish "german_roach" as contractual copy (codex 1A-ii r20).
-  const rawLineLabel = (line, fallback) => String(
-    line.displayName || line.label || line.display?.name || line.name || line.service || fallback,
-  );
   const fromLineItems = lineItemsRows.filter((line) => {
     if (rowIsReviewGated(line) || gatedRawIdentities.has(rawIdentity(line))) {
       gated.push(rawLineLabel(line, 'item'));
@@ -866,7 +943,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   });
   const work = [];
   const comped = [];
-  const conflicted = [];
+  const conflicted = [...mappedCollapse.conflicted, ...rawCollapse.conflicted];
   // Mapped estimates persist specialty rows in BOTH oneTime.specItems and
   // root specItems as distinct objects — the canonical extractor dedupes by
   // object identity only, so dedupe here by stable service+amount identity
@@ -879,15 +956,6 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // an explicit taxable flag on EITHER row beats the family default, and
   // mirrors whose amounts disagree with no accepted net fail the draft —
   // a nullable onetime_total gives reconciliation no backstop here.
-  const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
-  // amountAfterDiscount is the same sold-net alias the area add-on limits
-  // read (SOLD_AMOUNT_FIELDS): a row persisted with a gross price and that
-  // net must draft the net (codex #6113 r21).
-  const mappedResolvedAmount = (item) => num(item.manualFinalOneTime
-    ?? item.priceAfterDiscount ?? item.amountAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
-    ?? item.installation?.price);
-  const rawResolvedAmount = (line) => num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
-    ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
   const serviceIdOf = (row) => String(row.service || row.name || '').toLowerCase();
   const rawPool = fromLineItems.map((line) => ({ line, used: false }));
   for (const item of fromOneTime) {
@@ -1032,51 +1100,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       includes: [],
     });
   }
-  if (gated.length) {
-    return {
-      correctiveWork: null,
-      warning: `One-time work was not generated: ${gated.join(', ')} requires manual review (provisional price). Author the corrective work manually.`,
-    };
-  }
-  if (comped.length) {
-    return {
-      correctiveWork: null,
-      warning: `One-time work was not generated: ${comped.join(', ')} is an accepted zero-priced (comped) item — author the corrective work manually so the promised scope is represented.`,
-    };
-  }
-  const storedOneTime = num(estimate.onetime_total);
-  if (!work.length) {
-    // A positive stored one-time total with NO representable rows must fail
-    // the draft — programs-mode saving would recompute onetime_total to
-    // zero and erase the charge (pre-push codex P0).
-    if (storedOneTime > 0) {
-      return {
-        correctiveWork: null,
-        warning: `One-time work was not generated: the estimate carries a $${storedOneTime.toFixed(2)} one-time total but no representable one-time items were found. Author the corrective work manually so the charge is fully represented.`,
-      };
-    }
-    return { correctiveWork: null, warning: null };
-  }
-  if (work.length > 24) {
-    // The PUT caps corrective work at 24 items — truncating monetary rows
-    // is never acceptable (pre-push codex P0).
-    return {
-      correctiveWork: null,
-      warning: `One-time work was not generated: the estimate has ${work.length} one-time items and proposals are limited to 24 corrective-work lines. Author the corrective work manually.`,
-    };
-  }
-  // Non-null INCLUDING zero — a deliberately zeroed (quote-required) total
-  // must not accept generated positive work (codex 1A-ii r2c).
-  if (storedOneTime !== null) {
-    const generated = Math.round(work.reduce((acc, w) => acc + w.amount, 0) * 100) / 100;
-    if (Math.round(generated * 100) !== Math.round(storedOneTime * 100)) {
-      return {
-        correctiveWork: null,
-        warning: `One-time work was not generated: the priced one-time items sum to $${generated.toFixed(2)} but the estimate's one-time total is $${storedOneTime.toFixed(2)}. Author the corrective work manually so the one-time charge is fully represented.`,
-      };
-    }
-  }
-  return { correctiveWork: work, warning: null };
+  return finishCorrectiveWork(work, { gated, comped, storedOneTime: num(estimate.onetime_total) });
 }
 
 function deriveResponsibilities(programs) {

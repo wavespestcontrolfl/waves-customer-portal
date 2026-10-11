@@ -489,6 +489,20 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['German Roach Cleanout', 80]]);
   });
+  test('round 27: mirrored raw rows whose sold nets disagree refuse (two accepted prices for one charge), never first-wins', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, amountAfterDiscount: 80, billingCadence: 'one_time' }] },
+          engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, totalAfterDiscount: 90, billingCadence: 'one_time' }] },
+        }),
+      },
+    });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*mirrored rows with disagreeing amounts/) });
+  });
   test('round 20: a $0 (comped) row refuses as one_time_unrepresentable instead of being dropped from the card', async () => {
     const world = makeWorld({
       estimateOverrides: {
