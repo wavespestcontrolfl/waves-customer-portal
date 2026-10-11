@@ -962,6 +962,25 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
     expect(inserted).toHaveLength(0);
   });
 
+  test('a monthly series after July with a seasonal_feb_oct add-on and a $0 base refuses: every seasonal phase is priced, not the first few dates', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
+    try {
+      const seasonal = { id: 'a3', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
+      const fixture = {
+        parentOverrides: { recurring_pattern: 'monthly', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00' },
+        seriesDates: ['2026-07-15'],
+        addons: [seasonal],
+      };
+      // Aug, Sep and Oct carry the add-on's $60; November through January carry nothing.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      // A base price that stands alone keeps every phase billable.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario({ ...fixture, parentOverrides: { ...fixture.parentOverrides, estimated_price: '120.00' } }).conn, 10, { customerOverride: PER_VISIT }))
+        .toBeNull();
+    } finally { jest.useRealTimers(); }
+  });
+
   test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
     const flat = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' } });
     expect(await seriesNextOccurrencesUnbillable(flat.conn, 10, { customerOverride: PER_VISIT })).toBeNull();

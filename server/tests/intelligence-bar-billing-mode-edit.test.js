@@ -5,13 +5,15 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], invoiceBusy: false, autopayUnreadable: false, unbillableSeries: new Set(), covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, unbillableSeries: new Set(), covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
-    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereRaw', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
+    // whereRaw notes the dues stamp, so the open-dues query is told apart from the visits' invoices.
+    q.whereRaw = (sql) => { if (String(sql).includes('membership_dues_month')) q.duesQuery = true; return q; };
+    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
     // limit is honoured, so a card that cut the visits at a page size would show it.
     q.limit = (n) => { q.cap = n; return q; };
     // where(fn) runs its callback (the live-visit clause is built that way).
@@ -42,7 +44,8 @@ jest.mock('../models/db', () => {
       }
       if (table === 'invoices') {
         if (q.nowait && mockState.invoiceBusy) return Promise.reject(Object.assign(new Error('could not obtain lock on row'), { code: '55P03' })).then(resolve, reject);
-        rows = mockState.invoices;
+        // The locked re-read is by id: every invoice row the mock holds.
+        rows = q.duesQuery ? mockState.dues : (q.byId ? [...mockState.invoices, ...mockState.dues] : mockState.invoices);
       }
       if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
       if (q.cap != null) rows = rows.slice(0, q.cap);
@@ -127,6 +130,7 @@ beforeEach(() => {
   mockState.prepayBusy = false;
   mockState.roots = [];
   mockState.invoices = [];
+  mockState.dues = [];
   mockState.unbillableSeries = new Set();
   mockState.invoiceBusy = false;
   mockState.autopayUnreadable = false;
@@ -831,6 +835,51 @@ describe('Codex round 7 on #6118', () => {
     expect((await propose(LEAVE)).pin).toBe(before.pin);
   });
 
+  test('P2: an open membership-dues invoice is named instead of the flat promise, pinned, and a new one refuses the commit; none keeps the old line', async () => {
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [];
+    const stop = async () => (await propose({ billing_mode: 'per_visit' })).display.next_visits;
+    expect((await stop()).some((l) => l.startsWith('Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run.'))).toBe(true);
+    const none = await propose({ billing_mode: 'per_visit' });
+    mockState.dues = [{ id: 'dues-1', total: '55.00', status: 'sent', customer_id: CUSTOMER_ID, payer_id: null }, { id: 'dues-2', total: '55.00', status: 'overdue', customer_id: CUSTOMER_ID, payer_id: null }];
+    const withDues = await propose({ billing_mode: 'per_visit' });
+    const lines = withDues.display.next_visits.join(' ');
+    expect(lines).toContain('2 open membership-dues invoices ($110.00) stay collectible: their pay links and follow-ups continue');
+    expect(lines).not.toContain('any retry of a failed dues charge no longer run');
+    expect(withDues.pin).not.toBe(none.pin);
+    // A dues invoice that appeared after the card (the pin has none) refuses; with the matching pin it commits.
+    const commit = (pin) => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: { billing_mode: 'per_visit' }, _ib_customer_version: 'v1', _ib_billing_pin: pin });
+    expect(await commit(none.pin)).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    mockState.customer = { ...MONTHLY };
+    expect((await commit(withDues.pin)).error).toBeUndefined();
+  });
+
+  test('P2: each visit with an invoice reads what completion decides: a live one is reused, a refunded one (alone or beside a live one) is parked for the office', async () => {
+    mockState.customer = { ...MONTHLY };
+    const visit = (n) => ({ id: `ov${n}`, status: 'confirmed', scheduled_date: `2099-06-0${n}`, estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null });
+    mockState.visits = [visit(1), visit(2), visit(3), visit(4)];
+    mockState.invoices = [
+      { id: 'live-1', scheduled_service_id: 'ov1', total: '100.00', status: 'sent' },
+      { id: 'ref-2', scheduled_service_id: 'ov2', total: '100.00', status: 'refunded' },
+      { id: 'ref-3', scheduled_service_id: 'ov3', total: '100.00', status: 'refunded' },
+      { id: 'live-3', scheduled_service_id: 'ov3', total: '100.00', status: 'paid' },
+    ];
+    const card = await propose(LEAVE);
+    const text = card.display.next_visits.join(' ');
+    expect(text).toContain('1 visit already has an invoice ($100.00 in all) and is billed through it, not charged again');
+    expect(text).toContain('2 visits are parked: a refunded invoice sits on them, completion will not bill them, bill by hand');
+    // Only the visit with no invoice is a new charge.
+    expect(card.display.next_visits.filter((l) => l.startsWith('Priced visit'))).toEqual(
+      ['Priced visit on 2099-06-04 (Pest Control): $100.00 scheduled — charged to the saved card at completion.'],
+    );
+    // A live invoice that is refunded after the card changes the outcome, so the pin refuses.
+    mockState.invoices = mockState.invoices.map((r) => (r.id === 'live-1' ? { ...r, status: 'refunded' } : r));
+    const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+    expect(stale).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+  });
+
   test('P2: the commit locks the visits\' invoices last (customers, claim, visits, invoices), re-reads them locked, and a retotal refuses', async () => {
     mockState.customer = { ...MONTHLY };
     const visit = { id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null };
@@ -855,7 +904,7 @@ describe('Codex round 7 on #6118', () => {
     mockState.invoiceBusy = true;
     const busy = await commit();
     expect(busy).toMatchObject({ preview_changed: true });
-    expect(busy.error).toMatch(/invoice on an upcoming visit is being changed right now/);
+    expect(busy.error).toMatch(/invoice on this customer is being changed right now/);
     expect(customerWrites()).toHaveLength(0);
   });
 

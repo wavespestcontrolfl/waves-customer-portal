@@ -108,7 +108,7 @@ async function monthlyDuesVerdict(dbh, customerId, { overrides = {}, now = new D
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     const today = etDateString(now);
     const [covered, pending] = await Promise.all([
-      AnnualPrepayRenewals.getActivelyCoveredCustomerIds(today, dbh),
+      AnnualPrepayRenewals.getActivelyCoveredCustomerIds(today, dbh, { throwOnError: true }),
       AnnualPrepayRenewals.getPaymentPendingCustomerIds(today, dbh, { throwOnError: true }),
     ]);
     const prepay = prepayGuard(customer, covered, pending);

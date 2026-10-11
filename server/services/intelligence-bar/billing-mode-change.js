@@ -150,19 +150,29 @@ const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'pri
 // totals. Past this many the card is refused instead of read in part.
 const VISIT_HARD_LIMIT = 2000;
 
-// A visit that already carries an invoice is billed through it: completion
-// reuses that invoice (or parks a refunded one) and mints nothing new
-// (completion-invoice-candidate.js). Each visit gets the newest such invoice's
-// id and total, read with the completion path's own status rules, so the card
-// predicts no new charge for it and the pin changes when an invoice appears.
+// A visit that already carries an invoice is not minted a new one: completion
+// reuses the live invoice, or parks the visit for the office when a refunded
+// invoice sits on it (completion-invoice-candidate.js, whose reconciliation
+// decides). Each visit gets that outcome and the deciding invoice's id, total
+// and status, so the card predicts no new charge, says which of the two it is,
+// and the pin changes when an invoice appears or its outcome moves.
 async function withVisitInvoices(dbh, visits, { lock = false } = {}) {
-  const { completionInvoicesOnVisits } = require('../completion-invoice-candidate');
+  const { completionInvoicesOnVisits, completionInvoiceOutcome } = require('../completion-invoice-candidate');
   const rows = await completionInvoicesOnVisits(dbh, visits.map((v) => v.id), { lock });
-  const newest = new Map();
-  for (const r of rows) if (!newest.has(String(r.scheduled_service_id))) newest.set(String(r.scheduled_service_id), r);
+  const byVisit = new Map();
+  for (const r of rows) {
+    const key = String(r.scheduled_service_id);
+    byVisit.set(key, [...(byVisit.get(key) || []), r]);
+  }
   return visits.map((v) => {
-    const inv = newest.get(String(v.id));
-    return { ...v, invoice_id: inv ? inv.id : null, invoice_total: inv ? inv.total : null };
+    const { outcome, row } = completionInvoiceOutcome(byVisit.get(String(v.id)));
+    return {
+      ...v,
+      invoice_outcome: outcome === 'mint_new' ? null : outcome,
+      invoice_id: row ? row.id : null,
+      invoice_total: row ? row.total : null,
+      invoice_status: row ? row.status : null,
+    };
   });
 }
 
@@ -191,7 +201,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   return ordered();
 }
 
-const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_id', 'invoice_total'];
+const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_outcome', 'invoice_id', 'invoice_total', 'invoice_status'];
 
 function visitsPin(visits) {
   return JSON.stringify((visits || []).map((v) => PIN_COLUMNS.map((c) => {
@@ -237,10 +247,12 @@ async function chargeContext(dbh, customerId, row) {
 const dayOf = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10));
 
 const ALREADY_INVOICED = { kind: 'existing_invoice', amount: 0, grossAmount: 0 };
+const PARKED = { kind: 'parked_manual', amount: 0, grossAmount: 0 };
 
 function visitPrediction(customer, v, charge = NO_CHARGE_CONTEXT) {
-  // Completion reuses the visit's existing invoice and mints nothing new.
-  if (v.invoice_id) return ALREADY_INVOICED;
+  // Completion reuses the visit's live invoice, or parks it for the office.
+  if (v.invoice_outcome === 'parked_manual') return PARKED;
+  if (v.invoice_outcome === 'reuse_invoice') return ALREADY_INVOICED;
   return predictCompletionBilling({
     lane: resolveBillingLane(customer).mode,
     billingMode: customer.billing_mode || null,
@@ -306,9 +318,10 @@ function balanceChanges(row, fields, visits, charge) {
 
 // `fields` (the edit) and `charge` make the pin carry those balances and the
 // collection method too.
-function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT) {
+function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = []) {
   const balances = balanceChanges(row, fields, visits, charge).map((b) => [b.id, b.before, b.after]);
-  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}|${+charge.autopayActive}${+charge.gate}`;
+  const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status]);
+  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}|${+charge.autopayActive}${+charge.gate}|${JSON.stringify(dues)}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -415,9 +428,13 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits) {
 // the fee; a prepayment is netted and covers the visit only when it covers the
 // whole amount; callbacks, free visit types and $0 bill nothing.
 function perApplicationVisitCounts(rows, fee) {
-  const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0, invoiced: 0, invoicedTotal: 0 };
+  const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0, invoiced: 0, invoicedTotal: 0, parked: 0 };
   for (const r of rows) {
-    if (r.invoice_id) {
+    if (r.invoice_outcome === 'parked_manual') {
+      counts.parked += 1;
+      continue;
+    }
+    if (r.invoice_outcome === 'reuse_invoice') {
       counts.invoiced += 1;
       counts.invoicedTotal += Number(r.invoice_total) || 0;
       continue;
@@ -475,6 +492,7 @@ const feeCountLines = ({ after, visits }) => {
     c.partly && `${plural(c.partly, 'visit is', 'visits are')} partly prepaid (the rest is charged)`,
     c.none && `${plural(c.none, 'visit bills', 'visits bill')} nothing`,
     c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
+    c.parked && `${plural(c.parked, 'visit is', 'visits are')} parked: a refunded invoice sits on ${c.parked === 1 ? 'it' : 'them'}, completion will not bill ${c.parked === 1 ? 'it' : 'them'}, bill by hand`,
     c.invoiced && `${plural(c.invoiced, 'visit already has', 'visits already have')} an invoice (${money(c.invoicedTotal)} in all) and ${c.invoiced === 1 ? 'is' : 'are'} billed through it, not charged again`,
   ].filter(Boolean);
   return [parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.'];
@@ -500,7 +518,16 @@ const LANE_DETAILS = {
 
 const DUES_STOP = 'Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.';
 
-function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT) {
+// An open membership-dues invoice (a completion-minted one on an already
+// completed visit, or a cron one) stays collectible after the lane moves, so the
+// flat "dues stop" promise names it instead.
+const duesStopLine = (openDues) => {
+  if (!openDues.length) return DUES_STOP;
+  const total = openDues.reduce((n, d) => n + (Number(d.total) || 0), 0);
+  return `Monthly dues stop: no new monthly dues charge runs. ${plural(openDues.length, 'open membership-dues invoice', 'open membership-dues invoices')} (${money(total)}) stay${openDues.length === 1 ? 's' : ''} collectible: their pay links and follow-ups continue. Dues already paid for this month are not refunded.`;
+};
+
+function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = []) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
   // one_time and any other explicit lane bill like per_visit.
@@ -515,7 +542,7 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
     LANE_HEAD[key](ctx),
     ...(LANE_DETAILS[key] || []).flatMap((build) => build(ctx)),
     ...balanceLines(ctx),
-    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [DUES_STOP] : []),
+    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
   ];
 }
 
@@ -547,13 +574,14 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     if (e && e.autopayUnverified) return refuse(AUTOPAY_UNVERIFIED, 'billing_autopay_unverified');
     throw e;
   }
+  const openDues = await require('../billing-lane').openStampedDuesInvoices(dbh, customerId);
   return {
-    pin: cardPin(row, visits, parsed.fields, charge),
+    pin: cardPin(row, visits, parsed.fields, charge, openDues),
     version: row.version,
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge),
+      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues),
     },
   };
 }
@@ -615,12 +643,15 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   // upcoming visit's billing fields the card's projection was built from,
   // read with the visits locked FOR UPDATE (see upcomingVisits).
   let visits;
+  let openDues;
   try {
     visits = await upcomingVisits(trx, customerId, { lock: true });
+    // The customer's open membership-dues invoices, locked after the visits' invoices (same NOWAIT rule).
+    openDues = await require('../billing-lane').openStampedDuesInvoices(trx, customerId, { lock: true });
   } catch (e) {
     // NOWAIT on an invoice another transaction holds (an edit, void or refund
     // in flight): refuse, never wait with the customer row held.
-    if (e && e.code === '55P03') throw changed('An invoice on an upcoming visit is being changed right now — nothing was updated. Try again in a minute.');
+    if (e && e.code === '55P03') throw changed('An invoice on this customer is being changed right now — nothing was updated. Try again in a minute.');
     throw e;
   }
   let charge;
@@ -630,7 +661,7 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
     if (e && e.autopayUnverified) throw changed(AUTOPAY_UNVERIFIED);
     throw e;
   }
-  if (cardPin(lockedBefore, visits, fields, charge) !== pin) {
+  if (cardPin(lockedBefore, visits, fields, charge, openDues) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
   const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits);

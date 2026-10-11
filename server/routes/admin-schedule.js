@@ -6031,9 +6031,14 @@ async function seriesExtensionUnbillable(conn, {
   });
 }
 
+// Bounds on the verdict's cadence walk: dates examined, and cadence steps tried
+// (steps skipped as past or too close do not count as dates).
+const SERIES_VERDICT_MAX_DATES = 60;
+const SERIES_VERDICT_MAX_ATTEMPTS = 400;
+
 // The billable-amount verdict (seriesExtensionUnbillable, the one the nightly
-// top-up asks per candidate date) for the next `occurrences` visits the top-up
-// would mint on series `parentId`, optionally under billing fields the customer
+// top-up asks per candidate date) for every visit the top-up would mint
+// within its horizon on series `parentId`, optionally under billing fields the customer
 // does not have yet (`customerOverride`: a pending lane edit). Inputs are
 // gathered exactly as extendSeriesOnceLocked gathers them: the root with its
 // series template overlaid, the latest live visit's anchor, the cadence walk
@@ -6042,7 +6047,7 @@ async function seriesExtensionUnbillable(conn, {
 // create-invoice stamp. Dates are the cadence dates only: occupancy clashes
 // move a visit, not its price. Read-only (the legacy cap freeze the extension
 // writes is skipped). Null when the series has nothing to extend or bills.
-async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null, occurrences = 3 } = {}) {
+async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (!parent || !parent.is_recurring || !parent.recurring_pattern) return null;
@@ -6058,9 +6063,16 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
   const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
   const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
   const blackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
+  // Every cadence date the top-up would mint inside its horizon (the same
+  // RECURRING_TOPUP_HORIZON_DAYS the nightly loop fills to), so every seasonal
+  // phase of an add-on is priced, not only the first few dates. Capped so a
+  // daily cadence stays bounded.
+  const { horizonDaysFromEnv } = require('../services/recurring-series-topup');
+  const horizonEnd = etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), horizonDaysFromEnv()));
   const dates = [];
-  for (let attempt = 1; attempt <= 12 && dates.length < occurrences; attempt += 1) {
+  for (let attempt = 1; attempt <= SERIES_VERDICT_MAX_ATTEMPTS && dates.length < SERIES_VERDICT_MAX_DATES; attempt += 1) {
     const candidate = seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, blackoutDates);
+    if (candidate && candidate > horizonEnd) break;
     if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate) || candidate <= etDateString()) continue;
     dates.push(candidate);
   }

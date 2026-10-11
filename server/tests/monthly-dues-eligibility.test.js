@@ -56,3 +56,28 @@ test('retry-collectibility exports its monthly classifier', () => {
   expect(isMonthlyObligationRow({ description: 'Gold WaveGuard Monthly — A B' })).toBe(true);
   expect(isMonthlyObligationRow({ description: 'Pest Control — A B' })).toBe(false);
 });
+
+describe('Codex round 9 on #6118: a schema-probe error is unreadable, not "nobody covered"', () => {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const cohortConn = (hasTable) => {
+    const q = { where: () => q, whereNull: () => q, first: async () => ({ ...MEMBER, ach_status: null }) };
+    return Object.assign(jest.fn(() => q), { schema: { hasTable } });
+  };
+
+  test('the dues verdict refuses as unreadable when the covered-terms probe errors', async () => {
+    const pending = jest.spyOn(AnnualPrepayRenewals, 'getPaymentPendingCustomerIds').mockResolvedValue(new Set());
+    try {
+      const verdict = await Dues.monthlyDuesVerdict(cohortConn(jest.fn().mockRejectedValue(new Error('schema probe unreachable'))), 'c1');
+      expect(verdict).toMatchObject({ eligible: false, reason: 'unreadable' });
+    } finally { pending.mockRestore(); }
+  });
+
+  test('strict read rethrows the probe error; the default read for other callers still answers an empty set', async () => {
+    const failing = cohortConn(jest.fn().mockRejectedValue(new Error('schema probe unreachable')));
+    await expect(AnnualPrepayRenewals.getActivelyCoveredCustomerIds('2099-01-01', failing, { throwOnError: true }))
+      .rejects.toThrow('schema probe unreachable');
+    // Default: annualPrepayTableExists swallows its own probe failure (here the mocked db has no schema).
+    const covered = await AnnualPrepayRenewals.getActivelyCoveredCustomerIds('2099-01-01', failing);
+    expect(covered).toEqual(new Set());
+  });
+});

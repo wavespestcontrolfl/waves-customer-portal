@@ -1120,6 +1120,35 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   return (await invoiceQuery.first('id', 'status', 'scheduled_service_id', 'invoice_number')) || null;
 }
 
+// Every open membership-dues invoice a customer has, any month: the invoices
+// carrying the completion/cron dues stamp (MEMBERSHIP_DUES_LINE_KEY in
+// line_items, the one findLiveStampedDuesInvoice reads) that can still be
+// collected (not paid, prepaid, processing, void, refunded or canceled:
+// invoice-helpers INVOICE_UNCOLLECTIBLE_STATUSES) and are the customer's own
+// (payer_id IS NULL). Rows: id, total, status, ordered by id. `lock` takes them
+// FOR UPDATE NOWAIT (id order) and reads them again from the locked rows, so a
+// total or status moved by an invoice edit is seen as committed; a busy row
+// fails with Postgres 55P03 instead of waiting.
+async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}) {
+  const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
+  const stamped = `CASE WHEN jsonb_typeof(line_items::jsonb) = 'array'
+    THEN EXISTS (SELECT 1 FROM jsonb_array_elements(line_items::jsonb) AS li(item) WHERE jsonb_exists(li.item, '${MEMBERSHIP_DUES_LINE_KEY}'))
+    ELSE false END`;
+  const placeholders = INVOICE_UNCOLLECTIBLE_STATUSES.map(() => '?').join(', ');
+  const open = (q) => q
+    .where({ customer_id: customerId })
+    .whereRaw(stamped)
+    .whereRaw(`status NOT IN (${placeholders})`, [...INVOICE_UNCOLLECTIBLE_STATUSES])
+    .whereRaw('payer_id IS NULL');
+  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status');
+  if (!lock || !rows.length) return rows;
+  const locked = await dbConn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait()
+    .select('id', 'total', 'status', 'customer_id', 'payer_id');
+  return locked
+    .filter((r) => String(r.customer_id) === String(customerId) && r.payer_id == null && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(r.status))
+    .map(({ id, total, status }) => ({ id, total, status }));
+}
+
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
 // free visit: nothing bills only because no number is on the account.
 // 'callback' / 'always_free_service_type' / 'annual_renewal_owned' are the
@@ -1853,6 +1882,7 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   findLiveStampedDuesInvoice,
+  openStampedDuesInvoices,
   findCollectedDuesPayment,
   tryAcquireMembershipDuesMonthLock,
   acquireMembershipDuesMonthLockBounded,
