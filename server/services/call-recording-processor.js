@@ -1207,7 +1207,25 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
         .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
     })
     .modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
-  const callbacks = new Map([...stamped, ...dismissed, ...obsoleteStamped, ...obsoleteDismissed, ...swept].map((cb) => [cb.id, cb]));
+  // ...and the same sweep-closed cards when the PARENT stopped being a
+  // voicemail (a replaced recording read as an answered call) while the
+  // callback still reads spam: no stamp, no dismissal, so neither obsolete
+  // source sees it (codex #6271 r40 P1). Same correction; standingSpamCallbacks
+  // is empty for a non-voicemail parent, so the card reopens for good.
+  const sweptObsolete = await db('triage_items as ti').join('call_log as p', 'p.id', 'ti.call_log_id')
+    .join('call_log as cb', db.raw("cb.metadata->>'relatedCallId' = p.id::text"))
+    .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback', 'p.direction': 'inbound' })
+    .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
+    .where('cb.direction', 'like', 'outbound%')
+    .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
+    .whereNotExists(function newerRowForReason() {
+      this.select(db.raw('1')).from('triage_items as later')
+        .whereRaw('later.call_log_id = ti.call_log_id AND later.reason_code = ti.reason_code AND later.id <> ti.id')
+        .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
+    })
+    .modify(recentParent).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
+  const callbacks = new Map([...stamped, ...dismissed, ...obsoleteStamped, ...obsoleteDismissed, ...swept, ...sweptObsolete].map((cb) => [cb.id, cb]));
   // The FORWARD half: a settlement whose promise refresh was lost (the cards
   // closed and the stamp written, the callback still settled spam, a callback
   // promise still open). Recent stamps only (7 days), judged again by
@@ -1250,7 +1268,10 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .where({ 'cb.source': 'admin-callback', 'cb.processing_status': 'spam' }).whereNull('cb.processing_token').modify((q) => whereNotSandboxCall(q, 'cb.source'))
     .where('cb.direction', 'like', 'outbound%')
     .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
-    .whereRaw("cb.created_at > now() - interval '7 days'")
+    // Bounded by the VERDICT write, not the call's age: an admin reprocess of
+    // an old callback that newly reads spam is as recent a settlement as any
+    // (codex #6271 r40 P2; the outbound updated_at index carries it).
+    .whereRaw("cb.updated_at > now() - interval '7 days'")
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
     .where({ 'p.direction': 'inbound' }).whereRaw(settledParentSql('p'))
     .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
@@ -10218,8 +10239,11 @@ const CallRecordingProcessor = {
           // seconds instead of the intended 10-minute spacing, or keep poking a
           // row already at the cap. Enforce both atomically at claim time.
           // Admin Reprocess (force=true) takes the other branch and is exempt.
+          // no_transcription shares the cap and the spacing (codex #6271 r40
+          // P1): a recording-status callback must not reclaim a row the sweep
+          // treats as terminal and push its count past the cap.
           .where(function () {
-            this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
+            this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed' AND processing_status IS DISTINCT FROM 'no_transcription'")
               .orWhere(function () {
                 this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
                   .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));

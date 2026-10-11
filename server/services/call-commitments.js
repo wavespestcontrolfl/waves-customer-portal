@@ -2892,6 +2892,14 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // for the correction and then writes nothing.
         .modify((q) => {
           if (proof.kind !== CALLBACK_SPAM) return;
+          // ...and the parent is still a settled voicemail AT THE WRITE (an
+          // adoption or reprocess since callbackReachedSolicitor read it makes
+          // this write skip; codex #6271 r40 P1), as the sweep's card write does.
+          q.whereExists(function parentStillSettledVoicemail() {
+            this.select(t.raw("1")).from("call_log as p").where({ "p.id": callLogId }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "p.source"))
+              .whereRaw(settledParentSql("p"))
+              .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')");
+          });
           q.whereExists(function callbackStillSpam() {
             this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "cb.source")).whereNull("cb.processing_token").forShare();
           });

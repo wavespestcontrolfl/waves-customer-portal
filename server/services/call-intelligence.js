@@ -64,11 +64,16 @@ function describeProcessing(call) {
       phase = 'complete';
       detail = status === 'spam' ? 'Classified as spam; no lead or customer was created.' : 'Voicemail lane: no live conversation to extract from.';
       break;
-    case 'no_transcription':
-      phase = 'failed_retrying';
-      retryable = true;
-      detail = 'Transcription produced nothing; the sweep retries automatically.';
+    case 'no_transcription': {
+      const attempts = Number(call.extraction_attempts || 0);
+      const exhausted = attempts >= CALL_EXTRACTION_MAX_ATTEMPTS;
+      phase = exhausted ? 'failed' : 'failed_retrying';
+      retryable = !exhausted;
+      detail = exhausted
+        ? `Transcription produced nothing ${attempts} times; automatic retries are exhausted — Reprocess to try again.`
+        : `Transcription produced nothing (attempt ${attempts || 1}); the sweep retries automatically.`;
       break;
+    }
     case 'extraction_failed': {
       const attempts = Number(call.extraction_attempts || 0);
       const createdAt = call.created_at ? new Date(call.created_at) : null;
