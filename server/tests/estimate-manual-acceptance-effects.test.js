@@ -205,7 +205,7 @@ describe('a dry run', () => {
     expect(effect(effects, 'conversion')).toMatchObject({ recurring: true, billing_lane: 'per_application', manual_recurring_scheduling: false });
     expect(effect(effects, 'add_on_classification')).toMatchObject({ add_on_base: 55, split_by_service: true });
     expect(effect(effects, 'post_commit').plan.map((s) => s.step)).toEqual([
-      'group_followup_transfer', 'property_link', 'lead_won', 'membership_email', 'termite_agreement',
+      'group_followup_transfer', 'property_link', 'multi_home', 'lead_won', 'membership_email', 'termite_agreement',
     ]);
   });
 
@@ -240,7 +240,7 @@ describe('the real run against the pinned list', () => {
     expect(world.state.committed).toBe(1);
     expect(result.estimate.status).toBe('accepted');
     expect(transferSpy).toHaveBeenCalledTimes(1);
-    expect(linkSpy).toHaveBeenCalledWith({ estimateId: 'est-1', customerId: 'cust-1' });
+    expect(linkSpy).toHaveBeenCalledWith({ estimateId: 'est-1', customerId: 'cust-1', refreshMultiHome: false });
     expect(leads.markLinkedLeadEstimateAccepted).toHaveBeenCalledTimes(1);
     expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledTimes(1);
   });
@@ -316,7 +316,8 @@ describe('finding 1: the approved email decision rides through delivery', () => 
     const world = makeWorld();
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(planStep(effects, 'membership_email')).toEqual({
-      step: 'membership_email', attempt: true, will_send: true, reason: null, to: 'l***@example.com', recipient_key: Effects.recipientKey('lena.synthetic@example.com'),
+      step: 'membership_email', attempt: true, will_send: true, reason: null, to: 'l***@example.com',
+      target: { customer_id: 'cust-1', recipient_key: Effects.recipientKey('lena.synthetic@example.com') },
     });
   });
 
@@ -418,6 +419,19 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       ['Rodent Exclusion', 200],
     ]);
   });
+
+  test('the operator-approved net (manualFinalOneTime) wins over the discounted and list prices: $250 beats $300', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 300, priceAfterDiscount: 280, manualFinalOneTime: 250 }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => e.amount)).toEqual([250]);
+  });
 });
 
 describe('finding 6: the bells come from the conversion through the post-commit plan', () => {
@@ -425,9 +439,9 @@ describe('finding 6: the bells come from the conversion through the post-commit 
     const world = makeWorld();
     const converterOpts = { planRateBell: true, tierBell: true };
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world, converterOpts), { dryRun: true }));
-    expect(effect(effects, 'post_commit').plan.filter((s) => s.step === 'admin_bell')).toEqual([
-      { step: 'admin_bell', bell: 'tier_upgrade', title: 'WaveGuard Gold activated: review existing plan rates' },
-      { step: 'admin_bell', bell: 'plan_rate_review', title: 'Multi-plan rate needs review after re-quote' },
+    expect(effect(effects, 'post_commit').plan.filter((s) => s.step === 'admin_bell')).toMatchObject([
+      { step: 'admin_bell', bell: 'tier_upgrade', title: 'WaveGuard Gold activated: review existing plan rates', target: { bell: 'tier_upgrade' } },
+      { step: 'admin_bell', bell: 'plan_rate_review', title: 'Multi-plan rate needs review after re-quote', target: { bell: 'plan_rate_review' } },
     ]);
     const key = Effects.effectsFingerprint(effects);
     const real = makeWorld();
@@ -529,11 +543,29 @@ describe('finding 4: the approved recipient rides through delivery', () => {
   });
 });
 
+describe('round 7, finding 1: every grouped estimate is refused under the estimate row lock', () => {
+  test('a group created after the card (the `ungrouped` pin) refuses as preview_changed, with nothing committed', async () => {
+    const world = makeWorld({ estimateOverrides: { estimate_group_id: 'group-1' } });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { expected: { estimateStatus: 'sent', ungrouped: true } })))
+      .rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(world.state.committed).toBe(0);
+  });
+
+  test('an ungrouped estimate passes the pin; the page (no pins) still accepts a grouped one', async () => {
+    const plain = makeWorld();
+    await markEstimateManuallyAccepted(base(plain, fakeConverter(plain), { expected: { estimateStatus: 'sent', ungrouped: true } }));
+    expect(plain.state.committed).toBe(1);
+    const grouped = makeWorld({ estimateOverrides: { estimate_group_id: 'group-1' } });
+    await markEstimateManuallyAccepted(base(grouped, fakeConverter(grouped)));
+    expect(grouped.state.committed).toBe(1);
+  });
+});
+
 describe('finding 7: a grouped estimate lists its follow-up transfer', () => {
   test('the plan carries the group follow-up transfer for a grouped estimate', async () => {
     const world = makeWorld({ estimateOverrides: { estimate_group_id: 'group-1' } });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
-    expect(planStep(effects, 'group_followup_transfer')).toEqual({ step: 'group_followup_transfer', grouped: true });
+    expect(planStep(effects, 'group_followup_transfer')).toMatchObject({ step: 'group_followup_transfer', grouped: true, target: { owner_id: 'est-1' } });
   });
 });
 
@@ -607,7 +639,7 @@ describe('the post-commit plan (pure)', () => {
 
   test('lists the steps in the page\'s own order', () => {
     expect(Effects.planPostCommit({ billingTerm: 'standard', acceptedEstimate: accepted, conversion }).map((s) => s.step)).toEqual([
-      'group_followup_transfer', 'property_link', 'lead_won', 'membership_email', 'welcome_sms', 'termite_agreement',
+      'group_followup_transfer', 'property_link', 'multi_home', 'lead_won', 'membership_email', 'welcome_sms', 'termite_agreement',
     ]);
   });
 
@@ -645,5 +677,153 @@ describe('the page button is unchanged', () => {
     expect(linkSpy).toHaveBeenCalledTimes(1);
     expect(leads.markLinkedLeadEstimateAccepted).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-1', customerId: 'cust-1', monthlyValue: 90 }));
     expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Round 7: every post-commit step acts only on its pinned target ──
+describe('round 7: every post-commit step resolves its target in the dry run and runs only against it', () => {
+  const logger = require('../services/logger');
+  const resolvingLeads = (...answers) => {
+    const resolveLinkedLeadWon = jest.fn();
+    for (const a of answers) resolveLinkedLeadWon.mockResolvedValueOnce(a);
+    resolveLinkedLeadWon.mockResolvedValue(answers[answers.length - 1]);
+    return { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue(), resolveLinkedLeadWon };
+  };
+  const targetChangedLogged = (stepName) => logger.warn.mock.calls.some((c) => String(c[0]).includes('target_changed') && String(c[0]).includes(stepName));
+  async function dryThenReal({ dryLeads, realLeads, worldArgs = {}, converterOpts = {}, world = makeWorld(worldArgs) }) {
+    const dryWorld = makeWorld(worldArgs);
+    const dry = await markEstimateManuallyAccepted(base(dryWorld, fakeConverter(dryWorld, converterOpts), { dryRun: true, leadLinkService: dryLeads }));
+    const key = Effects.effectsFingerprint(dry.effects);
+    const result = await markEstimateManuallyAccepted(base(world, fakeConverter(world, converterOpts), { expected: { effectsKey: key, membershipEmail: 'send' }, leadLinkService: realLeads }));
+    await settle();
+    return { dry, result, world };
+  }
+  beforeEach(() => { logger.warn.mockClear(); });
+
+  const ALL_STEPS_INPUT = {
+    billingTerm: 'standard',
+    acceptedEstimate: { id: 'est-1', customer_id: 'cust-1', estimate_group_id: 'group-1' },
+    conversion: {
+      membershipEmail: { billingLane: 'per_application' }, welcomeSms: { customer: { id: 'cust-1' } },
+      commercialScheduleNotification: { title: 'a' }, perApplicationFeeNotification: { title: 'b' },
+      tierUpgradeNotification: { title: 'c' }, planRateReviewNotification: { title: 'd' },
+    },
+    termiteProgram: true,
+  };
+
+  test('plan-level: every step the plan can list declares resolveTarget and run, and the table has no other step', () => {
+    const names = [...new Set(Effects.planPostCommit(ALL_STEPS_INPUT).map((s) => s.step))].sort();
+    expect(names).toEqual(Object.keys(Effects.POST_COMMIT_STEPS).sort());
+    for (const name of names) {
+      expect(typeof Effects.POST_COMMIT_STEPS[name].resolveTarget).toBe('function');
+      expect(typeof Effects.POST_COMMIT_STEPS[name].run).toBe('function');
+    }
+  });
+
+  test('plan-level: the dry run pins a target on every step it lists', async () => {
+    const world = makeWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world, { planRateBell: true, tierBell: true }), { dryRun: true, leadLinkService: resolvingLeads(['lead-aaaaaa']) }));
+    const plan = effect(effects, 'post_commit').plan;
+    expect(plan.length).toBeGreaterThan(4);
+    for (const step of plan) expect(step.target).toEqual(expect.any(Object));
+    expect(planStep(effects, 'lead_won').target).toEqual({ estimate_id: 'est-1', lead_ids: ['lead-aaaaaa'] });
+  });
+
+  test('plan-level: runPostCommit passes the pinned target into the step, and skips a step whose target changed', async () => {
+    const run = jest.spyOn(Effects.POST_COMMIT_STEPS.termite_agreement, 'run').mockResolvedValue();
+    const ctx = { acceptedEstimate: { id: 'est-1', customer_id: 'cust-1' }, proposalCustomer: null, conversion: {}, database: {} };
+    const pinned = { step: 'termite_agreement', applies: true, target: { estimate_id: 'est-1', customer_id: 'cust-1' } };
+    await Effects.runPostCommit([pinned], ctx);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][0].target).toEqual({ estimate_id: 'est-1', customer_id: 'cust-1' });
+    await Effects.runPostCommit([{ ...pinned, target: { estimate_id: 'est-1', customer_id: 'cust-OTHER' } }], ctx);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(targetChangedLogged('termite_agreement')).toBe(true);
+    run.mockRestore();
+  });
+
+  test('lead won: the dry run pins the lead id; the run passes it, and skips when the fallback now picks another lead', async () => {
+    const matching = resolvingLeads(['lead-aaaaaa']);
+    await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: matching });
+    expect(matching.markLinkedLeadEstimateAccepted).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-1', onlyLeadIds: ['lead-aaaaaa'] }));
+
+    logger.warn.mockClear();
+    // The dry run and the settle inside the real run both see lead A; after the commit the fallback sees lead B.
+    const drifting = resolvingLeads(['lead-aaaaaa'], ['lead-bbbbbb']);
+    const { result } = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: drifting });
+    expect(result.estimate.status).toBe('accepted');
+    expect(drifting.markLinkedLeadEstimateAccepted).not.toHaveBeenCalled();
+    expect(targetChangedLogged('lead_won')).toBe(true);
+  });
+
+  test('multi-home: the flip is listed and pinned; the run flips it only while the predicate still holds', async () => {
+    const pending = jest.spyOn(Linkage, 'multiHomeFlipPending');
+    const refresh = jest.spyOn(Linkage, 'refreshHasMultiHome').mockResolvedValue(true);
+    pending.mockResolvedValue(true);
+    const world = makeWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(planStep(effects, 'multi_home')).toMatchObject({ target: { customer_id: 'cust-1', flips: true } });
+
+    await dryThenReal({ dryLeads: leadLinkService(), realLeads: leadLinkService() });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(linkSpy).toHaveBeenLastCalledWith(expect.objectContaining({ refreshMultiHome: false }));
+
+    refresh.mockClear();
+    logger.warn.mockClear();
+    // true for the dry run and the settle, false after the commit.
+    pending.mockReset();
+    pending.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
+    await dryThenReal({ dryLeads: leadLinkService(), realLeads: leadLinkService() });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(targetChangedLogged('multi_home')).toBe(true);
+    pending.mockRestore();
+    refresh.mockRestore();
+  });
+
+  test('group follow-up: the owner sibling is pinned; the transfer runs for that owner only', async () => {
+    const owner = jest.spyOn(EstimatePublic, 'groupFollowupOwnerId');
+    owner.mockResolvedValue('sib-1');
+    await dryThenReal({ dryLeads: leadLinkService(), realLeads: leadLinkService(), worldArgs: { estimateOverrides: { estimate_group_id: 'group-1' } } });
+    expect(transferSpy).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'est-1' }), { ownerId: 'sib-1' });
+
+    transferSpy.mockClear();
+    owner.mockReset();
+    owner.mockResolvedValueOnce('sib-1').mockResolvedValueOnce('sib-1').mockResolvedValue('sib-2');
+    await dryThenReal({ dryLeads: leadLinkService(), realLeads: leadLinkService(), worldArgs: { estimateOverrides: { estimate_group_id: 'group-1' } } });
+    expect(transferSpy).not.toHaveBeenCalled();
+    owner.mockRestore();
+  });
+
+  test('group follow-up (the transfer itself): a different owner under the group lock moves nothing', async () => {
+    transferSpy.mockRestore();
+    const modelDb = require('../models/db');
+    const updates = [];
+    const rowsFor = (rows) => {
+      const q = {};
+      for (const m of ['where', 'whereNot', 'whereIn', 'whereNull', 'orderBy']) q[m] = () => q;
+      q.select = async () => rows;
+      q.first = async () => rows[0] || null;
+      q.update = async (patch) => { updates.push(patch); return 1; };
+      return q;
+    };
+    const trx = jest.fn(() => rowsFor([{ id: 'sib-2', followup_unviewed_sent: true, followup_viewed_sent: true, followup_final_sent: true, followup_expiring_sent: true }]));
+    trx.raw = jest.fn();
+    trx.fn = { now: () => 'NOW' };
+    modelDb.mockImplementation(() => rowsFor([{ followup_unviewed_sent: true, followup_viewed_sent: true, followup_final_sent: true, followup_expiring_sent: true }]));
+    modelDb.transaction = jest.fn(async (fn) => fn(trx));
+    await EstimatePublic.transferGroupFollowupOwnership({ id: 'est-1', estimate_group_id: 'group-1' }, { ownerId: 'sib-1' });
+    expect(updates).toEqual([]);
+    expect(targetChangedLogged('group group-1')).toBe(true);
+    modelDb.mockReset();
+  });
+
+  test('membership email: an address that changed after the commit is a target_changed skip, not a send to the new address', async () => {
+    const changing = resolvingLeads(['lead-aaaaaa']);
+    changing.markLinkedLeadEstimateAccepted.mockImplementation(async () => { changing.world.tables.customers[0].email = 'someone.else@example.com'; });
+    const world = makeWorld();
+    changing.world = world;
+    await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: changing, world });
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
+    expect(targetChangedLogged('membership_email')).toBe(true);
   });
 });

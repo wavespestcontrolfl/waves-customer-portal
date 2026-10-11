@@ -41,7 +41,7 @@ const ESTIMATE_ACCEPT_TOOLS = [
     name: 'accept_estimate',
     description: `Mark ONE sent or viewed estimate accepted from the bar — exactly what the estimate page's "Mark accepted" does for a verbal yes. Use it when the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"); it is also how a customer's FIRST program starts. Never fake an acceptance with update_customer or create_appointment.
 The first call is a PREVIEW and changes nothing. The confirmation card shows the estimate (customer, tier, totals), each service the plan starts with its visits a year and monthly price, the monthly bill before and after line by line, the billing lane and tier change, each one-time service the quote sells (the accept does not schedule or invoice it), which visits it books (none — book them on the calendar after), every office bell it rings and every message the customer gets. Confirm marks the estimate accepted, locks its price, makes the customer an active customer, starts the plan's billing, marks a linked lead won and may email the customer a "membership started" email. No text and no invoice. It cannot be undone from the bar.
-Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program or commercial recurring work (accepted on the estimate page), an estimate that is part of a group (accept it from the estimate page), an estimate with visits already booked from it, a quote that also re-prices the customer's existing services, a per-visit charge the converter cannot resolve, and (with customer properties on) an estimate not linked to an existing property. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
+Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program or commercial recurring work (accepted on the estimate page), any estimate that is part of a group (accept it from the estimate page), an estimate with visits already booked from it, a quote that also re-prices the customer's existing services, a per-visit charge the converter cannot resolve, and (with customer properties on) an estimate not linked to an existing property. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
 Use for: "Pat accepted the lawn quote", "mark her estimate accepted", "he said yes, set him up from the estimate".`,
     input_schema: {
       type: 'object',
@@ -152,19 +152,15 @@ function termiteProgramRefusal(estimateData) {
   return refuse('Accept termite programs on the estimate page, where the agreement is handled.', 'termite_program');
 }
 
-// A grouped estimate (estimate_group_id with another sent or viewed sibling):
-// accepting it hands the group's follow-up messages to a sibling
-// (transferGroupFollowupOwnership) and bypasses the per-service bill split.
-// The bar does not take that on; the estimate page shows the group.
-async function groupRefusal(estimate) {
+// Every grouped estimate (estimate_group_id set) is refused, whatever the
+// state of its siblings: accepting one hands the group's follow-up messages to
+// a sibling (transferGroupFollowupOwnership) and bypasses the per-service bill
+// split, and a sibling can be sent between the card and Confirm. The estimate
+// page shows the group. The card pins `grouped: false`, and the accept checks
+// it again under the estimate row lock.
+function groupRefusal(estimate) {
   if (!estimate.estimate_group_id) return null;
-  const sibling = await db('estimates')
-    .where({ estimate_group_id: estimate.estimate_group_id })
-    .whereNot({ id: estimate.id })
-    .whereIn('status', ['sent', 'viewed'])
-    .whereNull('archived_at')
-    .first('id');
-  return sibling ? refuse('This estimate is part of a group. Accept it from the estimate page, where the group is shown.', 'grouped_estimate') : null;
+  return refuse('This estimate is part of a group. Accept it from the estimate page, where the group is shown.', 'grouped_estimate');
 }
 
 // Everything the estimate page itself refuses, with its own words.
@@ -225,7 +221,7 @@ async function loadTarget(input) {
   const refusal = await ownerRefusal(estimate, customerId, label)
     || statusRefusal(estimate, label)
     || termiteProgramRefusal(estimateData)
-    || await groupRefusal(estimate)
+    || groupRefusal(estimate)
     || await pageRefusal(estimate, estimateData);
   return refusal || { estimate, estimateData, label, customerId };
 }
@@ -394,6 +390,12 @@ const EMAIL_SKIP_TEXT = {
 };
 
 // The customer messages, from the post-commit plan's membership email step.
+// The lead(s) the accept will mark won, as short ids (the plan pins the full ids).
+function leadsWonFrom(plan) {
+  const ids = plan.find((s) => s.step === 'lead_won')?.target?.lead_ids || [];
+  return ids.map((id) => `#${String(id).slice(-6)}`);
+}
+
 function messagesFromPlan({ plan, converts }) {
   const messages = [];
   const email = plan.find((s) => s.step === 'membership_email');
@@ -519,9 +521,13 @@ function cardLines(preview) {
     {
       kind: 'operational',
       label: preview.converts
-        ? 'Marks the estimate accepted and locks its price; the customer becomes an active customer; a linked lead is marked won'
-        : "Marks the estimate accepted and locks its price; a linked lead is marked won; the customer's status and plan stay as they are",
+        ? 'Marks the estimate accepted and locks its price; the customer becomes an active customer'
+        : "Marks the estimate accepted and locks its price; the customer's status and plan stay as they are",
     },
+    ...(preview.leads_won.length
+      ? preview.leads_won.map((lead) => ({ kind: 'operational', label: `Marks lead ${lead} won` }))
+      : [{ kind: 'operational', label: 'No lead is marked won' }]),
+    ...(preview.marks_multi_home ? [{ kind: 'operational', label: 'Marks the customer as multi-home (two active properties)' }] : []),
     ...preview.row_changes.map((label) => ({ kind: 'operational', label })),
     ...preview.admin_bells.map((title) => ({ kind: 'operational', label: `Admin bell: ${title}` })),
     ...preview.customer_messages.map((m) => ({ kind: 'comms', label: `Message: ${m.text}` })),
@@ -549,6 +555,7 @@ async function cardPins({ estimate, customer, converts }) {
     lawn_profile: bill?.lawn_profile ?? null,
     plan_rows: bill?.plan_rows ?? null,
     no_linked_visits: true,
+    grouped: false,
   };
 }
 
@@ -581,6 +588,8 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     visits: { books_new: false },
     per_application: perApplicationLine({ conv, cust, monthlyRate, laneAfter }),
     admin_bells: plan.filter((s) => s.step === 'admin_bell').map((s) => s.title),
+    leads_won: leadsWonFrom(plan),
+    marks_multi_home: plan.some((s) => s.step === 'multi_home' && s.target?.flips === true),
     row_changes: rowChangeNotes(effects),
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
@@ -638,6 +647,7 @@ function expectedFrom(approved) {
     lawnProfile: approved.pins.lawn_profile,
     planRows: approved.pins.plan_rows,
     noLinkedVisits: approved.pins.no_linked_visits === true,
+    ungrouped: approved.pins.grouped === false,
     // The approved effect list and the approved email decision: the accept
     // refuses when its own list differs, and never sends an email the card
     // said it would not.

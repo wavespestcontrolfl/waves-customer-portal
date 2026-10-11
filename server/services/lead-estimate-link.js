@@ -1019,6 +1019,10 @@ async function markLinkedLeadEstimateAccepted({
   waveguardTier,
   leadAttributionService = leadAttribution,
   database = db,
+  // The leads the Intelligence Bar card pinned (resolveLinkedLeadWon). When
+  // set, a lead outside this list is never converted: the fallback resolved
+  // to a different lead than the one the operator approved.
+  onlyLeadIds = null,
 }) {
   if (!estimateId) return;
 
@@ -1043,6 +1047,10 @@ async function markLinkedLeadEstimateAccepted({
   // customer_id at all, so the row's existing link is preserved rather
   // than written NULL (codex #3883 r1 P1).
   const convert = async (lead, claim, extra = {}) => {
+    if (Array.isArray(onlyLeadIds) && !onlyLeadIds.includes(String(lead.id))) {
+      logger.warn(`[lead-estimate-link] estimate ${estimateId} acceptance: target_changed — lead ${lead.id} is not the approved lead; not marked won`, { estimateId, leadId: lead.id, approved: onlyLeadIds });
+      return false;
+    }
     let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
@@ -2179,6 +2187,26 @@ async function attributeSelfBooking({
   }
 }
 
+class LeadPlanRollback extends Error {}
+
+// The lead(s) markLinkedLeadEstimateAccepted would mark won right now, found by
+// running it (direct link, wizard lead, or contact fallback) in a savepoint
+// that records each conversion instead of writing it, then rolls back. The
+// Intelligence Bar card pins these ids and the accept converts only them.
+async function resolveLinkedLeadWon({ estimateId, customerId, database = db }) {
+  const ids = [];
+  const recorder = { markConverted: async (leadId) => { ids.push(String(leadId)); return true; } };
+  try {
+    await database.transaction(async (savepoint) => {
+      await markLinkedLeadEstimateAccepted({ estimateId, customerId, leadAttributionService: recorder, database: savepoint });
+      throw new LeadPlanRollback('plan only');
+    });
+  } catch (err) {
+    if (!(err instanceof LeadPlanRollback)) throw err;
+  }
+  return [...new Set(ids)].sort();
+}
+
 module.exports = {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
@@ -2191,6 +2219,7 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  resolveLinkedLeadWon,
   followDuplicateLink,
   settleRepeatFunnelRow,
   stampFirstResponseByContact,

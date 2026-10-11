@@ -240,12 +240,27 @@ function parseEstimateAddress(raw) {
  * an admin who hand-set the flag for a customer whose second property isn't
  * in the table yet must not be un-flagged by an accept.
  */
-async function refreshHasMultiHome(customerId, database = db) {
-  if (!customerId) return false;
+async function hasTwoActiveProperties(customerId, database = db) {
   const [{ count } = {}] = await database('customer_properties')
     .where({ customer_id: customerId, active: true })
     .count('id as count');
-  const multi = Number(count) >= 2;
+  return Number(count) >= 2;
+}
+
+// Would refreshHasMultiHome flip customers.has_multi_home right now? The same
+// predicate it uses (two active properties) while the flag is still off, and
+// only under the customer-properties gate, the only place the accept refreshes
+// it. The Intelligence Bar card lists and pins this answer.
+async function multiHomeFlipPending(database, customerId) {
+  if (!customerId || !customerPropertiesGateOn()) return false;
+  if (!(await hasTwoActiveProperties(customerId, database))) return false;
+  const customer = await database('customers').where({ id: customerId }).first('has_multi_home');
+  return !!customer && customer.has_multi_home !== true;
+}
+
+async function refreshHasMultiHome(customerId, database = db) {
+  if (!customerId) return false;
+  const multi = await hasTwoActiveProperties(customerId, database);
   if (multi) {
     await database('customers')
       .where({ id: customerId })
@@ -270,7 +285,7 @@ async function linkedAcceptPropertyId(database, estimate, customerId) {
   return linked && String(linked.customer_id) === String(customerId) && linked.active !== false ? linked.id : null;
 }
 
-async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null }) {
+async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null, refreshMultiHome = true }) {
   try {
     if (!estimateId || !customerId) return null;
     // Optional id scope (codex #3504 r10 hook P0): quote-wizard drafts are
@@ -612,7 +627,9 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         });
     }
 
-    const hasMultiHome = await refreshHasMultiHome(customerId, database);
+    // refreshMultiHome false: the caller runs the has_multi_home flip as its own
+    // pinned step (estimate-accept-effects 'multi_home').
+    const hasMultiHome = refreshMultiHome ? await refreshHasMultiHome(customerId, database) : false;
     logger.info(`[estimate-property-linkage] estimate ${estimateId} linked to property ${propertyId} (customer ${customerId}${hasMultiHome ? ', multi-home' : ''})`);
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r10): rows
     // stamped with their property here may now share a stop with existing
@@ -904,6 +921,7 @@ module.exports = {
   samePropertyKey,
   estimateQuotesCustomerAddress,
   refreshHasMultiHome,
+  multiHomeFlipPending,
   linkAcceptedEstimateProperty,
   linkedAcceptPropertyId,
   customerPropertiesGateOn,

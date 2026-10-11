@@ -5043,6 +5043,215 @@ async function parkTermiteAnnualPlanAccept({
   }
 }
 
+// The plan-rate ledger write of an accept (owner ruling 2026-08-06): applies
+// this accept's slices and returns the scalar the ledger decided, the advisory
+// echo and the review flag. Under scalar authority a failure aborts the accept.
+async function applyPlanRateLedgerForAccept(database, {
+  customerId, estimateId, estimateData, monthlyRate, effectiveCustomer, addOnContext, addOnPreservedRateBase,
+  ledgerScalar, ledgerAdvisoryScalar, planRateReviewNeeded,
+}) {
+  try {
+    const PlanRateLedger = require('./plan-rate-ledger');
+    const slices = PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate });
+    // The customer row lock was taken BEFORE classification above
+    // (codex r3/r5) — it serializes concurrent accepts and the
+    // pre-flip backfill, and every derived figure below reads the
+    // LOCKED snapshot (effectiveCustomer), never the pre-lock row.
+    const ledgerOutcome = await database.transaction((sp) => PlanRateLedger.applyAcceptToLedger(sp, {
+      customerId,
+      estimateId,
+      slices,
+      previousScalar: Number(effectiveCustomer.monthly_rate) || 0,
+      addOnBase: addOnPreservedRateBase,
+      hadOtherLiveFamilies: addOnContext.hadOtherLiveFamilies,
+      customerIsLive: ['active_customer', 'won', 'at_risk'].includes(effectiveCustomer.pipeline_stage),
+    }));
+    // ZERO is a legitimate authoritative scalar (codex #3245 r8): a
+    // fully comped recurring accept deletes every component and must
+    // write 0, not fall back to a legacy figure over live components.
+    // But NULL is the no-slices sentinel, not a zero (codex #3245 r22
+    // — Number(null) coerces to 0): treating it as authoritative would
+    // clear the scalar while stale components survive, AND its
+    // non-null advisory echo would block the unsliced_accept ledger
+    // reset below from reconciling them.
+    if (ledgerOutcome && ledgerOutcome.scalar != null && Number.isFinite(Number(ledgerOutcome.scalar))) {
+      ledgerAdvisoryScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;
+    }
+    if (PlanRateLedger.planRateLedgerEnabled() && ledgerAdvisoryScalar != null && ledgerAdvisoryScalar >= 0) {
+      ledgerScalar = ledgerAdvisoryScalar;
+      planRateReviewNeeded = ledgerOutcome.reviewNeeded === true;
+    }
+  } catch (ledgerErr) {
+    ledgerScalar = null;
+    // With the gate ON the ledger has scalar authority — the ACCEPT
+    // ABORTS (codex #3245 r12): falling back to legacy whole-scalar
+    // replacement for a seeded multi-plan customer is the exact
+    // underbilling the ledger exists to prevent, and it would commit
+    // with no review signal. The customer gets a retryable error.
+    // Gate OFF, the write is advisory — log and proceed.
+    const PlanRateLedger = require('./plan-rate-ledger');
+    if (PlanRateLedger.planRateLedgerEnabled()) {
+      logger.error(`[estimate-converter] plan-rate ledger apply failed for customer ${customerId} under scalar authority — aborting acceptance: ${ledgerErr.message}`);
+      throw ledgerErr;
+    }
+    logger.warn(`[estimate-converter] advisory plan-rate ledger apply failed for customer ${customerId}: ${ledgerErr.message}`);
+  }
+  return { ledgerScalar, ledgerAdvisoryScalar, planRateReviewNeeded };
+}
+
+// 1c of the accept: the estimate's confirmed lawn size wins over a stored one
+// (lawn-size-sync decides). Fail-soft: a skipped or failed write never breaks
+// the acceptance.
+async function syncLawnSizeFromEstimate(database, {
+  writesLawnSize, customerId, estimate, estimateData, estimateId,
+}) {
+  try {
+    if (writesLawnSize) {
+      const lawnSize = await require('./lawn-size-sync').applyEstimateLawnSqft(database, {
+        customerId, estimate, estimateData, trigger: 'acceptance',
+      });
+      if (lawnSize.status === 'written') {
+        logger.info?.(`[estimate-converter] lawn size ${lawnSize.before.turf_lawn_sqft ?? 'none'} -> ${lawnSize.sqft} sq ft set from estimate ${estimateId} for customer ${customerId}`);
+      } else if (lawnSize.status === 'skipped' && lawnSize.reason === 'other_property') {
+        logger.info?.(`[estimate-converter] lawn size ${lawnSize.sqft} sq ft NOT written for customer ${customerId}: estimate ${estimateId} is for another property (target property ${lawnSize.targetPropertyId || 'unlinked'}, its property_sqft ${lawnSize.targetPropertySqft ?? 'none'})`);
+      }
+    }
+  } catch (lawnErr) {
+    logger.warn?.(`[estimate-converter] lawn size from estimate skipped for customer ${customerId}: ${lawnErr.message}`);
+  }
+}
+
+// An admin bell of the accept, through the side-effect gate. Never throws: a
+// failed send or setup is logged with the caller's label.
+function dispatchAcceptBell(fx, { target, payload, failLabel }) {
+  try {
+    const NotificationService = require('./notification-service');
+    void fx.run({ type: 'admin_bell', target, detail: payload.title }, () => NotificationService.notifyAdmin(
+      payload.type,
+      payload.title,
+      payload.body,
+      payload.options,
+    ).catch((err) => logger.warn(`[estimate-converter] ${failLabel} failed: ${err.message}`)));
+  } catch (err) {
+    logger.warn(`[estimate-converter] ${failLabel} setup failed: ${err.message}`);
+  }
+}
+
+// Dispatch-or-defer: an in-transaction caller (opts.deferCommercialScheduleNotification)
+// gets the payload back and sends it after commit, so a rolled-back accept
+// cannot page staff; every other caller sends now and gets null.
+function dispatchOrDeferAcceptBell(fx, opts, bell) {
+  if (opts.deferCommercialScheduleNotification === true) return bell.payload;
+  dispatchAcceptBell(fx, bell);
+  return null;
+}
+
+// The office bell for a combined-tier upgrade (owner case 2026-08-05) or an
+// applied/parked existing-service extension: the title, the body and the
+// metadata, from the accept's figures. Pure.
+function buildTierReviewPayload({
+  customer, customerId, estimateId, tier, discount, extension, extensionApplied, effectiveCustomer,
+  estimateQualifyingKeys, priorQualifyingKeys, combinedServiceCount,
+}) {
+  const discountPct = Math.round((discount || 0) * 100);
+  const appliedClauses = extensionApplied
+    ? [
+      extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
+      extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
+      extension.monthlyRateReviewNeeded
+        ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`
+        : '',
+      [...extension.reviewFamilies, ...extension.skippedFamilies].length
+        ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
+        : '',
+    ].filter(Boolean)
+    : [];
+  // Review copy names the SPECIFIC parked work when a frozen plan
+  // produced any (codex #3338 r10 sibling) — "review whether to
+  // extend" alone would undersell an accept whose card already
+  // promised the extension.
+  const reviewClauses = !extensionApplied && extension
+    ? [...extension.reviewFamilies, ...extension.skippedFamilies]
+    : [];
+  const tierReviewPayload = {
+    type: 'estimate_converted',
+    title: extensionApplied
+      ? `WaveGuard ${tier} activated: existing services extended`
+      : `WaveGuard ${tier} activated: review existing plan rates`,
+    body: extensionApplied
+      ? `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. ${appliedClauses.join(' ')}`
+      : `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-application prices — review whether to extend the ${discountPct}% tier discount to them.${reviewClauses.length ? ` Needs manual attention: ${reviewClauses.join('; ')}.` : ''}`,
+    options: {
+      icon: '⭐',
+      link: `/admin/customers?customerId=${customerId}`,
+      bell: true,
+      metadata: {
+        estimateId,
+        customerId,
+        tier,
+        priorQualifyingKeys,
+        combinedServiceCount,
+        ...(extensionApplied
+          ? {
+            extensionApplied: true,
+            extensionFamilies: extension.families,
+            extensionRepricedRowCount: extension.repricedRowCount,
+            extensionCreditAmount: extension.creditAmount,
+          }
+          : {}),
+      },
+    },
+  };
+  return tierReviewPayload;
+}
+
+// The office bell for a re-quote on the un-splittable plan-rate path (owner
+// ruling 2026-08-06). Pure.
+function buildPlanRateReviewPayload({ customer, customerId, estimateId, convertedMonthlyRate, effectiveCustomer }) {
+  return {
+    type: 'estimate_converted',
+    title: 'Multi-plan rate needs review after re-quote',
+    body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`,
+    options: {
+      icon: '💵',
+      link: `/admin/customers?customerId=${customerId}`,
+      bell: true,
+      metadata: { estimateId, customerId, convertedMonthlyRate },
+    },
+  };
+}
+
+// The new-recurring welcome text of an accept, or null when it is not sent. Pure.
+function buildWelcomeSmsPayload({ send, customerId, customer, firstScheduledServiceId, recurringPattern }) {
+  if (!send) return null;
+  return {
+    customer: {
+      id: customerId,
+      first_name: customer.first_name,
+      last_name: customer.last_name,
+      phone: customer.phone,
+    },
+    scheduledServiceId: firstScheduledServiceId,
+    recurringPattern,
+    entryPoint: 'estimate_converter_welcome',
+  };
+}
+
+// The office bell for a commercial recurring accept whose cadence the seeder
+// does not schedule. Pure.
+function buildCommercialSchedulePayload({ customer, customerId, estimateId, scheduleNote }) {
+  return {
+    type: 'estimate_converted',
+    title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
+    body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
+    // bell: true — an accepted estimate needing a commercial schedule must
+    // ring even under GATE_ADMIN_BELL_POLICY. Covers both dispatch paths:
+    // the direct notify below and the deferred post-commit send in
+    // estimate-manual-acceptance (both pass these options through).
+    options: { icon: '\u{1F4C5}', link: '/admin/dispatch', bell: true, metadata: { estimateId, customerId } },
+  };
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -5552,52 +5761,10 @@ const EstimateConverter = {
       });
     }
     if (!suppressRecurringConversion && !groupedEstimateAccept) {
-      try {
-        const PlanRateLedger = require('./plan-rate-ledger');
-        const slices = PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate });
-        // The customer row lock was taken BEFORE classification above
-        // (codex r3/r5) — it serializes concurrent accepts and the
-        // pre-flip backfill, and every derived figure below reads the
-        // LOCKED snapshot (effectiveCustomer), never the pre-lock row.
-        const ledgerOutcome = await database.transaction((sp) => PlanRateLedger.applyAcceptToLedger(sp, {
-          customerId,
-          estimateId,
-          slices,
-          previousScalar: Number(effectiveCustomer.monthly_rate) || 0,
-          addOnBase: addOnPreservedRateBase,
-          hadOtherLiveFamilies: addOnContext.hadOtherLiveFamilies,
-          customerIsLive: ['active_customer', 'won', 'at_risk'].includes(effectiveCustomer.pipeline_stage),
-        }));
-        // ZERO is a legitimate authoritative scalar (codex #3245 r8): a
-        // fully comped recurring accept deletes every component and must
-        // write 0, not fall back to a legacy figure over live components.
-        // But NULL is the no-slices sentinel, not a zero (codex #3245 r22
-        // — Number(null) coerces to 0): treating it as authoritative would
-        // clear the scalar while stale components survive, AND its
-        // non-null advisory echo would block the unsliced_accept ledger
-        // reset below from reconciling them.
-        if (ledgerOutcome && ledgerOutcome.scalar != null && Number.isFinite(Number(ledgerOutcome.scalar))) {
-          ledgerAdvisoryScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;
-        }
-        if (PlanRateLedger.planRateLedgerEnabled() && ledgerAdvisoryScalar != null && ledgerAdvisoryScalar >= 0) {
-          ledgerScalar = ledgerAdvisoryScalar;
-          planRateReviewNeeded = ledgerOutcome.reviewNeeded === true;
-        }
-      } catch (ledgerErr) {
-        ledgerScalar = null;
-        // With the gate ON the ledger has scalar authority — the ACCEPT
-        // ABORTS (codex #3245 r12): falling back to legacy whole-scalar
-        // replacement for a seeded multi-plan customer is the exact
-        // underbilling the ledger exists to prevent, and it would commit
-        // with no review signal. The customer gets a retryable error.
-        // Gate OFF, the write is advisory — log and proceed.
-        const PlanRateLedger = require('./plan-rate-ledger');
-        if (PlanRateLedger.planRateLedgerEnabled()) {
-          logger.error(`[estimate-converter] plan-rate ledger apply failed for customer ${customerId} under scalar authority — aborting acceptance: ${ledgerErr.message}`);
-          throw ledgerErr;
-        }
-        logger.warn(`[estimate-converter] advisory plan-rate ledger apply failed for customer ${customerId}: ${ledgerErr.message}`);
-      }
+      ({ ledgerScalar, ledgerAdvisoryScalar, planRateReviewNeeded } = await applyPlanRateLedgerForAccept(database, {
+        customerId, estimateId, estimateData, monthlyRate, effectiveCustomer, addOnContext, addOnPreservedRateBase,
+        ledgerScalar, ledgerAdvisoryScalar, planRateReviewNeeded,
+      }));
     }
     // Provisional figure for the audit outputs below — the WRITE itself is
     // ledger-derived (gate on) or an atomic in-database increment (legacy
@@ -5949,20 +6116,9 @@ const EstimateConverter = {
     //     property is written (lawn-size-sync.js decides; an AI/lot estimate
     //     or another property writes nothing). It reprices no one: it writes
     //     the size plus an audit row and nothing else.
-    try {
-      if (lawnWrites.writesLawnSize) {
-        const lawnSize = await require('./lawn-size-sync').applyEstimateLawnSqft(database, {
-          customerId, estimate, estimateData, trigger: 'acceptance',
-        });
-        if (lawnSize.status === 'written') {
-          logger.info?.(`[estimate-converter] lawn size ${lawnSize.before.turf_lawn_sqft ?? 'none'} -> ${lawnSize.sqft} sq ft set from estimate ${estimateId} for customer ${customerId}`);
-        } else if (lawnSize.status === 'skipped' && lawnSize.reason === 'other_property') {
-          logger.info?.(`[estimate-converter] lawn size ${lawnSize.sqft} sq ft NOT written for customer ${customerId}: estimate ${estimateId} is for another property (target property ${lawnSize.targetPropertyId || 'unlinked'}, its property_sqft ${lawnSize.targetPropertySqft ?? 'none'})`);
-        }
-      }
-    } catch (lawnErr) {
-      logger.warn?.(`[estimate-converter] lawn size from estimate skipped for customer ${customerId}: ${lawnErr.message}`);
-    }
+    await syncLawnSizeFromEstimate(database, {
+      writesLawnSize: lawnWrites.writesLawnSize, customerId, estimate, estimateData, estimateId,
+    });
 
     // 2. Create scheduled_services for recurring services — but ONLY if
     //    the accept path didn't already create one via slot reservation
@@ -8564,51 +8720,22 @@ const EstimateConverter = {
         ? 'No visits were auto-scheduled — set up the full commercial visit schedule (including the first visit) manually.'
         : 'Initial visit scheduled — set up the remaining recurring commercial visits manually.';
       logger.warn(`[estimate-converter] Commercial recurring estimate ${estimateId} (customer ${customerId}) accepted — ${scheduleNote} (commercial cadence auto-scheduling not yet supported).`);
-      const notificationPayload = {
-        type: 'estimate_converted',
-        title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
-        body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
-        // bell: true — an accepted estimate needing a commercial schedule must
-        // ring even under GATE_ADMIN_BELL_POLICY. Covers both dispatch paths:
-        // the direct notify below and the deferred post-commit send in
-        // estimate-manual-acceptance (both pass these options through).
-        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', bell: true, metadata: { estimateId, customerId } },
-      };
-      if (opts.deferCommercialScheduleNotification === true) {
-        // In-transaction callers (public accept, manual Mark Won) dispatch this
-        // post-commit from the returned payload — notifyAdmin writes through the
-        // GLOBAL pool, so firing it here would alert staff about a commercial
-        // schedule even when the outer transaction rolls the acceptance back.
-        commercialScheduleNotification = notificationPayload;
-      } else {
-        try {
-          const NotificationService = require('./notification-service');
-          void fx.run({ type: 'admin_bell', target: 'commercial_schedule', detail: notificationPayload.title }, () => NotificationService.notifyAdmin(
-            notificationPayload.type,
-            notificationPayload.title,
-            notificationPayload.body,
-            notificationPayload.options
-          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`)));
-        } catch (err) {
-          logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
-        }
-      }
+      const notificationPayload = buildCommercialSchedulePayload({ customer, customerId, estimateId, scheduleNote });
+      // In-transaction callers (public accept, manual Mark Won) dispatch this
+      // post-commit from the returned payload — notifyAdmin writes through the
+      // GLOBAL pool, so firing it here would alert staff about a commercial
+      // schedule even when the outer transaction rolls the acceptance back.
+      commercialScheduleNotification = dispatchOrDeferAcceptBell(fx, opts, {
+        target: 'commercial_schedule', payload: notificationPayload, failLabel: 'commercial-schedule admin notify',
+      });
     }
 
     // Per-application fee park (DATA-001) — same dispatch-or-defer contract
     // as the commercial-schedule bell above.
     if (perApplicationFeeNotification && opts.deferCommercialScheduleNotification !== true) {
-      try {
-        const NotificationService = require('./notification-service');
-        void fx.run({ type: 'admin_bell', target: 'per_application_fee', detail: perApplicationFeeNotification.title }, () => NotificationService.notifyAdmin(
-          perApplicationFeeNotification.type,
-          perApplicationFeeNotification.title,
-          perApplicationFeeNotification.body,
-          perApplicationFeeNotification.options
-        ).catch((err) => logger.warn(`[estimate-converter] per-application fee admin notify failed: ${err.message}`)));
-      } catch (err) {
-        logger.warn(`[estimate-converter] per-application fee admin notify setup failed: ${err.message}`);
-      }
+      dispatchAcceptBell(fx, {
+        target: 'per_application_fee', payload: perApplicationFeeNotification, failLabel: 'per-application fee admin notify',
+      });
       perApplicationFeeNotification = null; // fired — nothing to defer
     }
 
@@ -8698,70 +8825,13 @@ const EstimateConverter = {
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
       && (extensionApplied || extensionNeedsReview || isMembershipTierUpgrade(effectiveCustomer.waveguard_tier, tier))) {
-      const discountPct = Math.round((discount || 0) * 100);
-      const appliedClauses = extensionApplied
-        ? [
-          extension.familyLines.length ? `Applied automatically: ${extension.familyLines.join('; ')}.` : '',
-          extension.creditLines.length ? `Prepaid-term credit issued: ${extension.creditLines.join('; ')}.` : '',
-          extension.monthlyRateReviewNeeded
-            ? `Monthly-billed member — extend the ${discountPct}% to their monthly rate manually (current rate $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`
-            : '',
-          [...extension.reviewFamilies, ...extension.skippedFamilies].length
-            ? `Still needs review: ${[...extension.reviewFamilies, ...extension.skippedFamilies].join(', ')}.`
-            : '',
-        ].filter(Boolean)
-        : [];
-      // Review copy names the SPECIFIC parked work when a frozen plan
-      // produced any (codex #3338 r10 sibling) — "review whether to
-      // extend" alone would undersell an accept whose card already
-      // promised the extension.
-      const reviewClauses = !extensionApplied && extension
-        ? [...extension.reviewFamilies, ...extension.skippedFamilies]
-        : [];
-      const tierReviewPayload = {
-        type: 'estimate_converted',
-        title: extensionApplied
-          ? `WaveGuard ${tier} activated: existing services extended`
-          : `WaveGuard ${tier} activated: review existing plan rates`,
-        body: extensionApplied
-          ? `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. ${appliedClauses.join(' ')}`
-          : `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-application prices — review whether to extend the ${discountPct}% tier discount to them.${reviewClauses.length ? ` Needs manual attention: ${reviewClauses.join('; ')}.` : ''}`,
-        options: {
-          icon: '⭐',
-          link: `/admin/customers?customerId=${customerId}`,
-          bell: true,
-          metadata: {
-            estimateId,
-            customerId,
-            tier,
-            priorQualifyingKeys,
-            combinedServiceCount,
-            ...(extensionApplied
-              ? {
-                extensionApplied: true,
-                extensionFamilies: extension.families,
-                extensionRepricedRowCount: extension.repricedRowCount,
-                extensionCreditAmount: extension.creditAmount,
-              }
-              : {}),
-          },
-        },
-      };
-      if (opts.deferCommercialScheduleNotification === true) {
-        tierUpgradeNotification = tierReviewPayload;
-      } else {
-        try {
-          const NotificationService = require('./notification-service');
-          void fx.run({ type: 'admin_bell', target: 'tier_upgrade', detail: tierReviewPayload.title }, () => NotificationService.notifyAdmin(
-            tierReviewPayload.type,
-            tierReviewPayload.title,
-            tierReviewPayload.body,
-            tierReviewPayload.options,
-          ).catch((err) => logger.warn(`[estimate-converter] tier-upgrade admin notify failed: ${err.message}`)));
-        } catch (err) {
-          logger.warn(`[estimate-converter] tier-upgrade admin notify setup failed: ${err.message}`);
-        }
-      }
+      const tierReviewPayload = buildTierReviewPayload({
+        customer, customerId, estimateId, tier, discount, extension, extensionApplied, effectiveCustomer,
+        estimateQualifyingKeys, priorQualifyingKeys, combinedServiceCount,
+      });
+      tierUpgradeNotification = dispatchOrDeferAcceptBell(fx, opts, {
+        target: 'tier_upgrade', payload: tierReviewPayload, failLabel: 'tier-upgrade admin notify',
+      });
     }
 
     // Persist the extension OUTCOME onto the frozen snapshot (codex #3338
@@ -8823,32 +8893,10 @@ const EstimateConverter = {
     // post-commit mechanics as the tier alert above.
     let planRateReviewNotification = null;
     if (planRateReviewNeeded) {
-      const planReviewPayload = {
-        type: 'estimate_converted',
-        title: 'Multi-plan rate needs review after re-quote',
-        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(effectiveCustomer.monthly_rate) || 0).toFixed(2)}/mo).`,
-        options: {
-          icon: '💵',
-          link: `/admin/customers?customerId=${customerId}`,
-          bell: true,
-          metadata: { estimateId, customerId, convertedMonthlyRate },
-        },
-      };
-      if (opts.deferCommercialScheduleNotification === true) {
-        planRateReviewNotification = planReviewPayload;
-      } else {
-        try {
-          const NotificationService = require('./notification-service');
-          void fx.run({ type: 'admin_bell', target: 'plan_rate_review', detail: planReviewPayload.title }, () => NotificationService.notifyAdmin(
-            planReviewPayload.type,
-            planReviewPayload.title,
-            planReviewPayload.body,
-            planReviewPayload.options,
-          ).catch((err) => logger.warn(`[estimate-converter] plan-rate review notify failed: ${err.message}`)));
-        } catch (err) {
-          logger.warn(`[estimate-converter] plan-rate review notify setup failed: ${err.message}`);
-        }
-      }
+      const planReviewPayload = buildPlanRateReviewPayload({ customer, customerId, estimateId, convertedMonthlyRate, effectiveCustomer });
+      planRateReviewNotification = dispatchOrDeferAcceptBell(fx, opts, {
+        target: 'plan_rate_review', payload: planReviewPayload, failLabel: 'plan-rate review notify',
+      });
     }
 
     // Welcome SMS for new recurring signups — unified across every accept
@@ -8859,19 +8907,10 @@ const EstimateConverter = {
     // guard), so it won't double-send if the admin-schedule path also runs.
     // wasNewRecurringSignup gates it to genuinely new customers; all tiers are
     // included (Bronze too).
-    const welcomeSms = (opts.skipWelcomeSms !== true && !suppressRecurringConversion && wasNewRecurringSignup && !commercialOnlyRecurring)
-      ? {
-          customer: {
-            id: customerId,
-            first_name: customer.first_name,
-            last_name: customer.last_name,
-            phone: customer.phone,
-          },
-          scheduledServiceId: firstScheduledServiceId,
-          recurringPattern: acceptedPlanFrequency || inferredFrequencyKey || null,
-          entryPoint: 'estimate_converter_welcome',
-        }
-      : null;
+    const welcomeSms = buildWelcomeSmsPayload({
+      send: opts.skipWelcomeSms !== true && !suppressRecurringConversion && wasNewRecurringSignup && !commercialOnlyRecurring,
+      customerId, customer, firstScheduledServiceId, recurringPattern: acceptedPlanFrequency || inferredFrequencyKey || null,
+    });
 
     // Only send inline when we own the connection. When a caller runs the
     // conversion inside its own transaction (opts.database), the customer /

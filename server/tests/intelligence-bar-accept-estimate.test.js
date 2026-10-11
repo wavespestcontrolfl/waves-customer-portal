@@ -191,7 +191,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       'Accepts estimate addonquo for Lena Synthetic: $0.00 a month, $350.00 one-time',
       'Bill: unchanged — a one-time estimate only changes status here. Schedule and invoice the work by hand',
       'One-time German Roach Cleanout ($350.00): this accept does not schedule or invoice it — schedule it and invoice it by hand',
-      "Marks the estimate accepted and locks its price; a linked lead is marked won; the customer's status and plan stay as they are",
+      "Marks the estimate accepted and locks its price; the customer's status and plan stay as they are",
       'Message: No email or text: a one-time estimate only changes status here',
     ]));
     expect(lines.some((l) => /becomes an active customer|^Starts |^Bill line/.test(l))).toBe(false);
@@ -301,6 +301,24 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     ]));
     dryEffects = () => addOnEffects();
     expect((await cardFor()).some((l) => l.startsWith('Admin bell:'))).toBe(false);
+  });
+
+  test('the card names the lead it marks won (masked) and the multi-home flip, both pinned in the plan', async () => {
+    dryEffects = () => addOnEffects({
+      postCommit: postCommit([
+        emailStep(),
+      ]),
+    }).map((e) => (e.kind === 'post_commit'
+      ? { ...e, plan: e.plan.map((s) => (s.step === 'lead_won' ? { ...s, target: { estimate_id: 'e', lead_ids: ['0f0f0f0f-aaaa-bbbb-cccc-123456abcdef'] } }
+        : s.step === 'property_link' ? { ...s, target: { customer_id: 'c', property_id: 'p' } } : s)).concat([{ step: 'multi_home', target: { customer_id: 'c', flips: true } }]) }
+      : e));
+    const lines = await cardFor();
+    expect(lines).toContain('Marks lead #abcdef won');
+    expect(lines).toContain('Marks the customer as multi-home (two active properties)');
+    dryEffects = () => addOnEffects();
+    const plain = await cardFor();
+    expect(plain).toContain('No lead is marked won');
+    expect(plain.some((l) => l.includes('multi-home'))).toBe(false);
   });
 
   test('the bill note says when the accept is not split by service', async () => {
@@ -526,7 +544,7 @@ describe('refusals before any card', () => {
     expect(result.error).toBe('Accept commercial work on the estimate page. Nothing was changed.');
   });
 
-  test('a grouped estimate (another sent or viewed sibling in its group) is refused before any card or dry run', async () => {
+  test('a grouped estimate is refused before any card or dry run', async () => {
     seed({ estimate: { estimate_group_id: 'group-1' }, siblings: [{ id: 'sibling-1' }] });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('grouped_estimate');
@@ -534,9 +552,16 @@ describe('refusals before any card', () => {
     expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
   });
 
-  test('a group whose other estimates are all closed is not a grouped accept', async () => {
+  test('a grouped estimate is refused even when every other estimate in its group is closed', async () => {
     seed({ estimate: { estimate_group_id: 'group-1' }, siblings: [] });
-    expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).preview).toBe(true);
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('grouped_estimate');
+    expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+  });
+
+  test('an ungrouped estimate carries the `grouped: false` pin, and Confirm sends it for the lock check', async () => {
+    const card = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(card.pins.grouped).toBe(false);
   });
 
   describe('with customer properties on', () => {
@@ -605,6 +630,7 @@ describe('Confirm', () => {
         planRows: '',
         lawnProfile: '|||',
         noLinkedVisits: true,
+        ungrouped: true,
         effectsKey: approved.effects_key,
         membershipEmail: 'send',
       },

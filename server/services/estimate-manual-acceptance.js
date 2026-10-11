@@ -5,7 +5,7 @@ const EstimateConverter = require('./estimate-converter');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 const AcceptEffects = require('./estimate-accept-effects');
 const AcceptSnapshot = require('./estimate-accept-snapshot');
-const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
+const { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon } = require('./lead-estimate-link');
 const { normalizeProposal } = require('./estimate-proposal');
 const proposalWin = require('./proposal-win');
 const {
@@ -534,7 +534,7 @@ function customerBillingPin(customer = {}) {
 // customer row order. A pin the card did not send is skipped.
 const CARD_PIN_READS = {
   estimate: async (trx, { estimateId }) => {
-    const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('updated_at', 'status', 'customer_id');
+    const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('updated_at', 'status', 'customer_id', 'estimate_group_id');
     return row && { row };
   },
   customer: async (trx, { estimate }) => {
@@ -552,6 +552,8 @@ const CARD_PIN_CHECKS = [
     holds: ({ row, expected }) => versionText(row.updated_at) === expected.estimateVersion
       && row.status === expected.estimateStatus && String(row.customer_id || '') === String(expected.customerId || ''),
   },
+  // Never part of a group: accepting one hands the group's follow-ups to a sibling.
+  { phase: 'estimate', key: 'ungrouped', holds: ({ row }) => !row.estimate_group_id },
   { phase: 'customer', key: 'customerVersion', holds: ({ customer, expected }) => versionText(customer.updated_at) === expected.customerVersion },
   { phase: 'customer', key: 'customerBilling', holds: ({ customer, expected }) => customerBillingPin(customer) === expected.customerBilling },
   {
@@ -1155,9 +1157,12 @@ async function planPostCommitSteps(trx, ctx, outcome) {
       termiteProgram = require('./termite-program-agreement').collectTermiteFacts(parseEstimateData(acceptedEstimate.estimate_data))?.hasProgram === true;
     } catch { termiteProgram = null; }
   }
-  return AcceptEffects.planPostCommit({
+  const plan = AcceptEffects.planPostCommit({
     billingTerm: ctx.billingTerm, acceptedEstimate, conversion, proposalCustomer, emailInputs, termiteProgram,
   });
+  // A carded accept pins each step's concrete target (resolved here, under the
+  // locks); the page's own accept has no card and keeps the unpinned plan.
+  return collecting ? AcceptEffects.pinPostCommitTargets(plan, trx, { acceptedEstimate, conversion, proposalCustomer, leadLinkService: ctx.leadLinkService }) : plan;
 }
 
 // The end of the transaction: list the one-time lines and the post-commit
@@ -1242,6 +1247,7 @@ async function runPostCommitWork(claim, ctx, { leadLinkService, warnings }) {
     asMoneyOrNull,
     warnings,
     approvedEmail: ctx.expected?.membershipEmail || null,
+    database: ctx.database,
   });
 }
 
@@ -1297,7 +1303,7 @@ async function markEstimateManuallyAccepted({
   // back and return them. Nothing commits and nothing is sent.
   dryRun = false,
   database = db,
-  leadLinkService = { markLinkedLeadEstimateAccepted },
+  leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
   estimateConverter = EstimateConverter,
 } = {}) {
   if (!estimateId) throw httpError('estimateId is required', 400);
@@ -1306,7 +1312,7 @@ async function markEstimateManuallyAccepted({
     estimateId, adminUserId, source, billingTerm: normalizedBillingTerm,
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
-    expected, dryRun: dryRun === true, estimateConverter,
+    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService,
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };

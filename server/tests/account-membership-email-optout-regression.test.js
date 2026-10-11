@@ -167,6 +167,23 @@ describe('sendMembershipStarted with an approved recipient', () => {
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
   });
 
+  test('the address checked is the address mailed, even if the customer row changes between the check and the send', async () => {
+    jest.clearAllMocks();
+    const queues = {
+      customers: [chain({ first: customer() }), chain({ first: customer({ email: 'changed.in.between@example.com' }) })],
+      customer_interactions: [chain(), chain(), chain()],
+      notification_prefs: [chain({ first: null })],
+    };
+    db.mockImplementation((table) => {
+      const q = queues[table];
+      if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
+      return q.shift();
+    });
+    await AccountMembershipEmail.sendMembershipStarted({ ...base, recipientKey: recipientKey('taylor@example.com') });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].to).toBe('taylor@example.com');
+  });
+
   test('no recipient key (the page button): sent to the address on file, as before', async () => {
     setup({ onFile: customer({ email: 'someone.else@example.com' }) });
     await AccountMembershipEmail.sendMembershipStarted(base);

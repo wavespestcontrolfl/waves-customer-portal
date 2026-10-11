@@ -231,3 +231,26 @@ describe('ensureEstimateGroupId', () => {
     ).rejects.toMatchObject({ statusCode: 400 });
   });
 });
+
+describe('round 7: multiHomeFlipPending (the flip the Intelligence Bar card lists and pins)', () => {
+  const { multiHomeFlipPending } = require('../services/estimate-property-linkage');
+  const fakeDb = ({ count, flag }) => (table) => {
+    const q = {};
+    q.where = () => q;
+    q.count = async () => [{ count }];
+    q.first = async () => (table === 'customers' ? { has_multi_home: flag } : null);
+    return q;
+  };
+  afterEach(() => { delete process.env.GATE_CUSTOMER_PROPERTIES; });
+
+  test('true only with the gate on, two active properties and the flag still off', async () => {
+    process.env.GATE_CUSTOMER_PROPERTIES = 'true';
+    expect(await multiHomeFlipPending(fakeDb({ count: '2', flag: false }), 'cust-1')).toBe(true);
+    expect(await multiHomeFlipPending(fakeDb({ count: '1', flag: false }), 'cust-1')).toBe(false);
+    expect(await multiHomeFlipPending(fakeDb({ count: '2', flag: true }), 'cust-1')).toBe(false);
+  });
+
+  test('false with the gate off (the accept does not refresh the flag then)', async () => {
+    expect(await multiHomeFlipPending(fakeDb({ count: '2', flag: false }), 'cust-1')).toBe(false);
+  });
+});

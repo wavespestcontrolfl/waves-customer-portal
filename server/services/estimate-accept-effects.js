@@ -134,11 +134,12 @@ function conversionEffect(conversion) {
 
 // ── The sold one-time lines ──
 
-// What the customer pays for the line: the amount AFTER the estimate's
-// discount (the field the engine totals from) when the line carries one, else
-// the list price. The first field that holds a number decides, so a line
-// discounted to $0 reads $0 and is not listed at its list price.
-const ONE_TIME_AMOUNT_FIELDS = ['priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
+// What the customer pays for the line: the operator-approved net
+// (manualFinalOneTime) when the line carries one, else the amount AFTER the
+// estimate's discount (the field the engine totals from), else the list price.
+// The first field that holds a number decides, so a line discounted to $0
+// reads $0 and is not listed at its list price.
+const ONE_TIME_AMOUNT_FIELDS = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
 function positiveAmount(item) {
   for (const key of ONE_TIME_AMOUNT_FIELDS) {
     if (item?.[key] == null || item[key] === '') continue;
@@ -285,7 +286,10 @@ async function readEmailInputs(trx, customerId) {
   let prefs = null;
   let prefsReadable = true;
   try {
-    prefs = await trx.transaction((sp) => sp('notification_prefs').where({ customer_id: customerId }).first());
+    // Inside the accept's transaction the read runs in a savepoint; on the pool it is a plain read.
+    prefs = trx.isTransaction
+      ? await trx.transaction((sp) => sp('notification_prefs').where({ customer_id: customerId }).first())
+      : await trx('notification_prefs').where({ customer_id: customerId }).first();
   } catch {
     prefsReadable = false;
   }
@@ -311,7 +315,7 @@ function membershipEmailStep({ conversion, billingTerm, emailInputs }) {
   if (!require('./account-membership-email').isEmailLike(emailInputs.email)) return refused('invalid_address', true);
   if (!emailInputs.emailOn) return refused('email_off', true);
   return {
-    step: 'membership_email', attempt: true, will_send: true, reason: null, to: maskEmail(emailInputs.email), recipient_key: recipientKey(emailInputs.email),
+    step: 'membership_email', attempt: true, will_send: true, reason: null, to: maskEmail(emailInputs.email),
   };
 }
 
@@ -324,7 +328,7 @@ function planPostCommit({
   const customerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
   const steps = [
     { step: 'group_followup_transfer', grouped: !!acceptedEstimate.estimate_group_id },
-    ...(customerId ? [{ step: 'property_link' }] : []),
+    ...(customerId ? [{ step: 'property_link' }, { step: 'multi_home' }] : []),
     { step: 'lead_won' },
   ];
   if (billingTerm !== 'prepay_annual' && conversion?.membershipEmail) steps.push(membershipEmailStep({ conversion, billingTerm, emailInputs }));
@@ -355,81 +359,198 @@ const BELL_LABELS = {
   plan_rate_review: 'plan-rate review',
 };
 
-const POST_COMMIT_RUNNERS = {
-  async group_followup_transfer(_step, ctx) {
-    try {
-      await require('../routes/estimate-public').transferGroupFollowupOwnership(ctx.acceptedEstimate);
-    } catch (e) {
-      logger.warn(`[manual-acceptance] follow-up ownership transfer failed for estimate ${ctx.acceptedEstimate.id}: ${e.message}`);
-    }
+// ── The rule for every step: a pinned target ──
+//
+// Each step names the concrete thing it acts on, `resolveTarget(database,
+// facts)`. The dry run resolves it inside the accept's transaction and the
+// plan carries it (step.target) into the approved list. runPostCommit
+// resolves it again at run time, and when the answer differs from the pinned
+// target the step is SKIPPED with a logged `target_changed` reason; a step
+// never picks a new target on its own. `run(step, ctx)` acts only on
+// step.target. A plan with no targets (the page's own accept, which has no
+// card) runs each step as it always did.
+
+const customerIdOf = ({ acceptedEstimate, proposalCustomer }) => acceptedEstimate.customer_id || proposalCustomer?.id || null;
+const idText = (v) => (v == null ? null : String(v));
+
+const POST_COMMIT_STEPS = {
+  group_followup_transfer: {
+    // The sibling that takes over the group's follow-up messages.
+    async resolveTarget(database, facts) {
+      const owner = await require('../routes/estimate-public').groupFollowupOwnerId(database, facts.acceptedEstimate);
+      return { estimate_id: idText(facts.acceptedEstimate.id), owner_id: idText(owner) };
+    },
+    async run(step, ctx) {
+      try {
+        await require('../routes/estimate-public').transferGroupFollowupOwnership(
+          ctx.acceptedEstimate, step.target ? { ownerId: step.target.owner_id } : undefined,
+        );
+      } catch (e) {
+        logger.warn(`[manual-acceptance] follow-up ownership transfer failed for estimate ${ctx.acceptedEstimate.id}: ${e.message}`);
+      }
+    },
   },
-  async property_link(_step, ctx) {
-    await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
-      estimateId: ctx.acceptedEstimate.id,
-      customerId: ctx.acceptedEstimate.customer_id || ctx.proposalCustomer?.id || null,
-    });
-  },
-  async lead_won(_step, ctx) {
-    const { acceptedEstimate } = ctx;
-    try {
-      await ctx.leadLinkService.markLinkedLeadEstimateAccepted({
-        estimateId: acceptedEstimate.id,
-        customerId: acceptedEstimate.customer_id || null,
-        monthlyValue: ctx.asMoneyOrNull(acceptedEstimate.monthly_total),
-        initialServiceValue: ctx.asMoneyOrNull(acceptedEstimate.onetime_total),
-        waveguardTier: acceptedEstimate.waveguard_tier || null,
+  property_link: {
+    // The customer and the property the estimate is already linked to.
+    async resolveTarget(database, facts) {
+      const Linkage = require('./estimate-property-linkage');
+      const customerId = customerIdOf(facts);
+      const property = Linkage.customerPropertiesGateOn() ? await Linkage.linkedAcceptPropertyId(database, facts.acceptedEstimate, customerId) : null;
+      return { customer_id: idText(customerId), property_id: idText(property) };
+    },
+    async run(step, ctx) {
+      await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
+        estimateId: ctx.acceptedEstimate.id,
+        customerId: step.target ? step.target.customer_id : customerIdOf(ctx),
+        // A pinned plan runs the has_multi_home flip as its own pinned step.
+        refreshMultiHome: !step.target,
       });
-    } catch (err) {
-      logger.warn(`[estimate-manual-acceptance] linked lead conversion failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-      ctx.warnings.push('Linked lead was not marked won automatically.');
-    }
+    },
   },
-  async membership_email(step, ctx) {
-    // The card approved "no email" (opted out, no address): that decision
-    // rides through delivery. A fresh opt-out still vetoes a planned send in
-    // the sender itself.
-    if (ctx.approvedEmail === 'skip') return;
-    const AccountMembershipEmail = require('./account-membership-email');
-    // The approved recipient rides through delivery: the sender compares it
-    // with the address on file when it sends, and sends nothing if the
-    // address changed since the card (a fresh opt-out still vetoes there too).
-    const payload = step.recipient_key ? { ...ctx.conversion.membershipEmail, recipientKey: step.recipient_key } : ctx.conversion.membershipEmail;
-    void AccountMembershipEmail.sendMembershipStarted(payload)
-      .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
+  multi_home: {
+    // Whether the customer is flipped to multi-home (two active properties).
+    async resolveTarget(database, facts) {
+      const customerId = customerIdOf(facts);
+      return { customer_id: idText(customerId), flips: await require('./estimate-property-linkage').multiHomeFlipPending(database, customerId) };
+    },
+    async run(step, ctx) {
+      if (!step.target || step.target.flips !== true) return;
+      try {
+        await require('./estimate-property-linkage').refreshHasMultiHome(step.target.customer_id, ctx.database);
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] multi-home refresh failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`);
+      }
+    },
   },
-  async welcome_sms(_step, ctx) {
-    // Conversion runs inside the accept transaction, so the converter defers
-    // the new-recurring welcome SMS. Idempotent.
-    const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
-    void sendNewRecurringWelcome(ctx.conversion.welcomeSms)
-      .catch((err) => logger.warn(`[estimate-manual-acceptance] welcome SMS failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
+  lead_won: {
+    // The lead(s) markLinkedLeadEstimateAccepted would mark won.
+    async resolveTarget(database, facts) {
+      const resolve = facts.leadLinkService?.resolveLinkedLeadWon;
+      const ids = resolve ? await resolve({ estimateId: facts.acceptedEstimate.id, customerId: facts.acceptedEstimate.customer_id || null, database }) : [];
+      return { estimate_id: idText(facts.acceptedEstimate.id), lead_ids: ids.map(String) };
+    },
+    async run(step, ctx) {
+      const { acceptedEstimate } = ctx;
+      try {
+        await ctx.leadLinkService.markLinkedLeadEstimateAccepted({
+          estimateId: acceptedEstimate.id,
+          customerId: acceptedEstimate.customer_id || null,
+          monthlyValue: ctx.asMoneyOrNull(acceptedEstimate.monthly_total),
+          initialServiceValue: ctx.asMoneyOrNull(acceptedEstimate.onetime_total),
+          waveguardTier: acceptedEstimate.waveguard_tier || null,
+          ...(step.target ? { onlyLeadIds: step.target.lead_ids } : {}),
+        });
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] linked lead conversion failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+        ctx.warnings.push('Linked lead was not marked won automatically.');
+      }
+    },
   },
-  async termite_agreement(_step, ctx) {
-    const { acceptedEstimate } = ctx;
-    const agreementCustomerId = acceptedEstimate.customer_id || ctx.proposalCustomer?.id || null;
-    try {
-      const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
-      const { formatDisplayDate } = require('../utils/date-only');
-      const agreementStartLabel = ctx.agreementStartDate ? (formatDisplayDate(ctx.agreementStartDate, { fallback: '' }) || null) : null;
-      void maybeCreateTermiteProgramAgreement({
-        estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: ctx.billingTerm,
-        startDateLabel: agreementStartLabel, startDateRaw: ctx.agreementStartDate,
-      }).catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
-    } catch (err) {
-      logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
-    }
+  membership_email: {
+    // The customer and a key of the address on file (never the address).
+    async resolveTarget(database, facts) {
+      const customerId = facts.conversion?.membershipEmail?.customerId || customerIdOf(facts);
+      const inputs = await readEmailInputs(database, customerId);
+      return { customer_id: idText(customerId), recipient_key: inputs.email ? recipientKey(inputs.email) : null };
+    },
+    async run(step, ctx) {
+      // The card approved "no email" (opted out, no address): that decision
+      // rides through delivery. A fresh opt-out still vetoes a planned send in
+      // the sender itself.
+      if (ctx.approvedEmail === 'skip') return;
+      const AccountMembershipEmail = require('./account-membership-email');
+      // The approved recipient rides through delivery: the sender compares it
+      // with the address on file when it sends, and sends nothing if the
+      // address changed since the card (a fresh opt-out still vetoes there too).
+      const key = step.target?.recipient_key;
+      const payload = key ? { ...ctx.conversion.membershipEmail, recipientKey: key } : ctx.conversion.membershipEmail;
+      void AccountMembershipEmail.sendMembershipStarted(payload)
+        .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
+    },
   },
-  async admin_bell(step, ctx) {
-    const field = BELLS.find(([bell]) => bell === step.bell)[1];
-    fireAdminBell(ctx.conversion[field], ctx.acceptedEstimate.id, BELL_LABELS[step.bell]);
+  welcome_sms: {
+    // The customer and a key of the phone on file (never the number).
+    async resolveTarget(database, facts) {
+      const customerId = facts.conversion?.welcomeSms?.customer?.id || customerIdOf(facts);
+      const row = customerId ? await database('customers').where({ id: customerId }).first('phone') : null;
+      return { customer_id: idText(customerId), phone_key: row?.phone ? recipientKey(row.phone) : null };
+    },
+    async run(_step, ctx) {
+      // Conversion runs inside the accept transaction, so the converter defers
+      // the new-recurring welcome SMS. Idempotent.
+      const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+      void sendNewRecurringWelcome(ctx.conversion.welcomeSms)
+        .catch((err) => logger.warn(`[estimate-manual-acceptance] welcome SMS failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
+    },
+  },
+  termite_agreement: {
+    // The estimate and customer the agreement is prepared for.
+    async resolveTarget(_database, facts) {
+      return { estimate_id: idText(facts.acceptedEstimate.id), customer_id: idText(customerIdOf(facts)) };
+    },
+    async run(step, ctx) {
+      const { acceptedEstimate } = ctx;
+      const agreementCustomerId = step.target ? step.target.customer_id : customerIdOf(ctx);
+      try {
+        const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
+        const { formatDisplayDate } = require('../utils/date-only');
+        const agreementStartLabel = ctx.agreementStartDate ? (formatDisplayDate(ctx.agreementStartDate, { fallback: '' }) || null) : null;
+        void maybeCreateTermiteProgramAgreement({
+          estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: ctx.billingTerm,
+          startDateLabel: agreementStartLabel, startDateRaw: ctx.agreementStartDate,
+        }).catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+      }
+    },
+  },
+  admin_bell: {
+    // The estimate and the bell.
+    async resolveTarget(_database, facts) {
+      return { estimate_id: idText(facts.acceptedEstimate.id), bell: facts.step.bell };
+    },
+    async run(step, ctx) {
+      const field = BELLS.find(([bell]) => bell === step.bell)[1];
+      fireAdminBell(ctx.conversion[field], ctx.acceptedEstimate.id, BELL_LABELS[step.bell]);
+    },
   },
 };
 
+const sameTarget = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+// Resolve every step's target (the dry run, inside the accept's transaction)
+// and return the plan with each target attached. `facts` carries the
+// accepted row, the conversion, the proposal customer and leadLinkService.
+async function pinPostCommitTargets(plan, database, facts) {
+  const pinned = [];
+  for (const step of plan) {
+    pinned.push({ ...step, target: await POST_COMMIT_STEPS[step.step].resolveTarget(database, { ...facts, step }) });
+  }
+  return pinned;
+}
+
 // Execute the plan in order. `ctx` carries the committed accept (acceptedEstimate,
-// conversion, proposalCustomer), the page's inputs and `approvedEmail`
-// ('skip' when the approved card said no email).
+// conversion, proposalCustomer), the page's inputs, `database` and
+// `approvedEmail` ('skip' when the approved card said no email). A step with a
+// pinned target runs only when its target resolves to the pinned one now.
 async function runPostCommit(plan, ctx) {
-  for (const step of plan) await POST_COMMIT_RUNNERS[step.step](step, ctx);
+  for (const step of plan) {
+    const def = POST_COMMIT_STEPS[step.step];
+    if (step.target !== undefined) {
+      let current;
+      try {
+        current = await def.resolveTarget(ctx.database, { ...ctx, step });
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] ${step.step} skipped for estimate ${ctx.acceptedEstimate.id}: target_changed (target unreadable: ${err.message})`);
+        continue;
+      }
+      if (!sameTarget(current, step.target)) {
+        logger.warn(`[estimate-manual-acceptance] ${step.step} skipped for estimate ${ctx.acceptedEstimate.id}: target_changed`, { pinned: step.target, current });
+        continue;
+      }
+    }
+    await def.run(step, ctx);
+  }
 }
 
 module.exports = {
@@ -443,7 +564,9 @@ module.exports = {
   readEmailInputs,
   membershipEmailStep,
   planPostCommit,
+  pinPostCommitTargets,
   runPostCommit,
+  POST_COMMIT_STEPS,
   maskEmail,
   recipientKey,
   maskPhone,
