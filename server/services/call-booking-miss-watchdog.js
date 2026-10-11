@@ -296,6 +296,24 @@ async function loadNamesakeAccounts(misses) {
   return { namesakes, accounts };
 }
 
+// Whose visits the booking lookup reads: each call's own customer and its
+// namesake accounts.
+function evidenceCustomerIds(misses, namesakes) {
+  return [...new Set([
+    ...misses.map((m) => m.call.customer_id).filter(Boolean),
+    ...[...namesakes.values()].flatMap((ids) => [...ids]),
+  ])];
+}
+
+// An unlinked call whose caller's name is on exactly one live account: the
+// bell names that account, so the office can link the call and book.
+function nameLikelyAccounts(misses, namesakes, accounts) {
+  for (const m of misses) {
+    const ids = m.call.customer_id ? null : namesakes.get(m.call.id);
+    if (ids && ids.size === 1) m.likelyAccount = accounts.get([...ids][0]) || null;
+  }
+}
+
 // Has this exact miss already rung the bell (any time in the past)? Same
 // notifications metadata dedupeKey pattern as call-ingest-watchdog —
 // restart-safe, no new table.
@@ -367,10 +385,7 @@ async function runInner({ now = new Date() } = {}) {
     return { skipped: false, scanned: calls.length, misses: 0, alerted: 0 };
   }
   const { namesakes, accounts } = await loadNamesakeAccounts(provisional);
-  const customerIds = [...new Set([
-    ...provisional.map((m) => m.call.customer_id).filter(Boolean),
-    ...[...namesakes.values()].flatMap((ids) => [...ids]),
-  ])];
+  const customerIds = evidenceCustomerIds(provisional, namesakes);
   const dates = [...new Set(provisional.map((m) => m.serviceDateET))];
   const callIds = provisional.map((m) => m.call.id);
   const sidPatterns = provisional
@@ -401,12 +416,7 @@ async function runInner({ now = new Date() } = {}) {
       db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
   const misses = computeBookingMisses(calls, bookedRows, { now, namesakes });
-  // An unlinked call whose caller's name is on exactly one live account: the
-  // bell names that account, so the office can link the call and book.
-  for (const m of misses) {
-    const ids = m.call.customer_id ? null : namesakes.get(m.call.id);
-    if (ids && ids.size === 1) m.likelyAccount = accounts.get([...ids][0]) || null;
-  }
+  nameLikelyAccounts(misses, namesakes, accounts);
 
   // Office dismissal and last-ring lookups, only for calls a repeat could
   // reach this tick (slot inside the repeat window).
