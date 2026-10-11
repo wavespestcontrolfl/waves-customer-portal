@@ -81,6 +81,27 @@ describe('resolveConversionLeads strategy table', () => {
     await expect(LeadLink.CONVERSION_STRATEGIES[2]({ database: jest.fn(), phone: null, email: null })).resolves.toBeNull();
   });
 
+  test('round 8: an event pinned to a lead set converts only that set; any other set converts nothing', async () => {
+    const markConverted = jest.fn(async () => undefined);
+    const helpers = require('../services/invoice-helpers');
+    const event = (expectedLeadSet) => LeadLink.convertLeadFromEvent({
+      source: 'invoice_sent', customerId: 'cust-1', database: jest.fn(), leadAttributionService: { markConverted }, expectedLeadSet,
+    });
+    const found = (...ids) => [async () => ({ candidates: ids.map((id) => lead(id)), resolution: 'estimate' })];
+    await withStrategies(found('l-1', 'l-2'), async () => {
+      // The approved set (order does not matter) converts.
+      await expect(event(helpers.leadSetDigest(['l-2', 'l-1']))).resolves.toMatchObject({ converted: true, count: 2 });
+      expect(markConverted).toHaveBeenCalledTimes(2);
+      markConverted.mockClear();
+      // A lead appeared after the card, or the approved set is a different one: nothing converts.
+      await expect(event(helpers.leadSetDigest(['l-1']))).resolves.toEqual({ converted: false, reason: 'approved_leads_changed' });
+      await expect(event(helpers.leadSetDigest(['l-1', 'l-3']))).resolves.toEqual({ converted: false, reason: 'approved_leads_changed' });
+      expect(markConverted).not.toHaveBeenCalled();
+      // No pin (every other caller): unchanged.
+      await expect(event(null)).resolves.toMatchObject({ converted: true, count: 2 });
+    });
+  });
+
   test('no function in the resolver is over the complexity limit of 20', async () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/lead-estimate-link.js'), 'utf8');
     const messages = new Linter().verify(source, [{ files: ['**/*.js'], languageOptions: { ecmaVersion: 2023, sourceType: 'commonjs' }, rules: { complexity: ['error', 20] } }], 'lead-estimate-link.js');

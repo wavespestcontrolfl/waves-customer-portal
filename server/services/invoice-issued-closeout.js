@@ -380,17 +380,26 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
-// The visit an Intelligence Bar send's card said would be closed (a visit id) or 'none', kept as an audit row on
-// the INVOICE (no new column), written inside the send claim. The send's own closeout is handed the target
-// directly; this row lets the retry sweep, which re-enters with no caller, enforce the same target. The row also
-// records the newest delivery stamp the invoice had at claim time: a claim that delivered nothing leaves the stamps
-// where they were, and the sweep then ignores that row (the pin belongs to the delivery that followed it).
+// The visit an Intelligence Bar send's card said would be closed (a visit id) or 'none', kept as audit rows on the
+// INVOICE (no new column). The send's own closeout is handed the target directly; these rows let the retry sweep, which
+// re-enters with no caller, enforce the same target. Two rows make a pin:
+//   - the PIN, written inside the send claim, carries the claim token and the target;
+//   - the DELIVERY row, written when that claim's delivery finalized, carries the same token and the newest delivery
+//     stamp the delivery left on the invoice.
+// The sweep honors a pin only when its delivery row exists and the invoice's newest delivery stamp is still the one the
+// delivery row recorded. A claim that ended without a delivery has no delivery row, and any later send (a page send, a
+// second bar send) moves the stamp or carries its own token, so the pin never reaches another send's episode.
 const CLOSEOUT_PIN_ACTION = 'invoice.send_closeout_target_approved';
+const CLOSEOUT_PIN_DELIVERED_ACTION = 'invoice.send_closeout_target_delivered';
 const newestDeliveryMs = (row) => {
   const stamps = [row?.sent_at, row?.sms_sent_at, row?.email_sent_at].filter(Boolean).map((v) => new Date(v).getTime());
   return stamps.length ? Math.max(...stamps) : null;
 };
-async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = db, priorInvoice = null, actorTechnicianId = null } = {}) {
+const parseMeta = (meta) => {
+  if (typeof meta !== 'string') return meta || {};
+  try { return JSON.parse(meta); } catch { return {}; }
+};
+async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = db, claimToken = null, actorTechnicianId = null } = {}) {
   const { recordAuditEvent } = require('./audit-log');
   await recordAuditEvent({
     actor_type: actorTechnicianId ? 'admin' : 'system',
@@ -398,24 +407,46 @@ async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = 
     action: CLOSEOUT_PIN_ACTION,
     resource_type: 'invoices',
     resource_id: invoiceId,
-    metadata: { invoiceId: String(invoiceId), approvedTarget, priorDeliveredAtMs: newestDeliveryMs(priorInvoice) },
+    metadata: { invoiceId: String(invoiceId), approvedTarget, claimToken: claimToken ? String(claimToken) : null },
     critical: true,
     trx: conn,
   });
 }
 
-// The pinned target for an invoice whose delivery followed the pin, or null. Throws on a failed read (the sweep
-// skips the row and the next pass re-reads).
+// The claim's delivery finalized: the pin written under this claim token is now the invoice's delivery episode.
+async function recordApprovedCloseoutDelivery(invoiceId, claimToken, { conn = db, actorTechnicianId = null } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  const stamps = await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at');
+  await recordAuditEvent({
+    actor_type: actorTechnicianId ? 'admin' : 'system',
+    actor_id: actorTechnicianId,
+    action: CLOSEOUT_PIN_DELIVERED_ACTION,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+    metadata: { invoiceId: String(invoiceId), claimToken: claimToken ? String(claimToken) : null, deliveredAtMs: newestDeliveryMs(stamps) },
+    critical: true,
+    trx: conn,
+  });
+}
+
+// The pinned target for an invoice's CURRENT delivery episode, or null: the newest delivery row whose recorded stamp is
+// still the invoice's newest stamp names the claim token that delivered it, and the pin written under that token carries
+// the target. A pin whose claim never delivered, or an episode a later send replaced, matches no delivery row and is
+// ignored. Throws on a failed read (the sweep skips the row and the next pass re-reads).
 async function approvedCloseoutTargetFor(conn, invoiceId) {
-  const last = await conn('audit_log').where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_ACTION })
+  const current = newestDeliveryMs(await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at'));
+  if (current === null) return null;
+  const deliveries = await conn('audit_log')
+    .where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_DELIVERED_ACTION })
+    .orderBy('created_at', 'desc').limit(5).select('metadata');
+  const episode = (deliveries || []).map((row) => parseMeta(row.metadata)).find((meta) => meta.claimToken && meta.deliveredAtMs === current);
+  if (!episode) return null;
+  const pin = await conn('audit_log')
+    .where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_ACTION })
+    .whereRaw("metadata->>'claimToken' = ?", [String(episode.claimToken)])
     .orderBy('created_at', 'desc').first('metadata');
-  if (!last) return null;
-  let meta = last.metadata;
-  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
-  if (!meta?.approvedTarget) return null;
-  const delivered = newestDeliveryMs(await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at'));
-  const prior = meta.priorDeliveredAtMs;
-  return delivered !== null && (prior === null || prior === undefined || delivered > prior) ? meta.approvedTarget : null;
+  const meta = pin ? parseMeta(pin.metadata) : null;
+  return meta?.approvedTarget || null;
 }
 
 // The sweeps' PREFILTER for the prepayment rule (issuedCloseoutVisitRefusal,
@@ -808,4 +839,5 @@ module.exports = {
   closeOutVisitForIssuedInvoice,
   issuedCloseoutTarget,
   recordApprovedCloseoutTarget,
+  recordApprovedCloseoutDelivery,
 };

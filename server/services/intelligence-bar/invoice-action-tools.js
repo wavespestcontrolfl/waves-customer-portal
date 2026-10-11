@@ -39,7 +39,7 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint } = require('../invoice-helpers');
-const { planSendEffects, approvedCloseoutTarget } = require('./invoice-action-effects');
+const { planSendEffects, approvedCloseoutTarget, approvedLeadTargets } = require('./invoice-action-effects');
 
 const CARD_LINES_SHOWN = 4;
 
@@ -247,6 +247,7 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     // The visit the closeout effect named (or 'none'). Kept out of the approval fingerprint (`_` key): the effects digest in
     // _version already pins the closeout's state, and the confirmed run hands the send this re-derived target.
     _closeout_target: approvedCloseoutTarget(planned.effects),
+    _lead_targets: approvedLeadTargets(planned.effects),
     _version: {
       invoice_id: invoice.id,
       status: invoice.status,
@@ -365,7 +366,10 @@ async function commitSend(input, actionContext) {
         // The visit the card said would close (or none): handed to the send's closeout, and written on the invoice
         // by the claim so the retry sweep keeps to it.
         closeoutTarget: plan._closeout_target,
-        // Run by the send claim on the claimed row: who owes the invoice must still be the customer.
+        // The leads the card said this send marks won (or none): the conversion after delivery touches those and no others.
+        leadTargets: plan._lead_targets,
+        // Run by the send claim on the claimed row, and again at each provider handoff (text and email): who owes the
+        // invoice must still be the customer.
         verifyOwner: (claimed, database) => ownerRefusalText(claimed, database),
         // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
         verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,

@@ -135,6 +135,24 @@ describe('planSendEffects', () => {
     issuedCloseoutTarget.mockResolvedValue(null);
     expect(effects.approvedCloseoutTarget((await effects.planSendEffects(invoice(), customer, {})).effects)).toBe('none');
   });
+
+  test('round 8: the approved lead targets are an opaque digest of the planned lead set (order-free, no ids), or none', async () => {
+    const { leadSetDigest } = require('../services/invoice-helpers');
+    const OTHER = '99999999-2222-4333-8444-555555555555';
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [LEAD, OTHER] });
+    const planned = (await effects.planSendEffects(invoice(), customer, {})).effects;
+    const pinned = effects.approvedLeadTargets(planned);
+    expect(pinned).toBe(leadSetDigest([OTHER, LEAD]));
+    expect(pinned).not.toContain(LEAD);
+    // A different set pins differently.
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [LEAD] });
+    expect(effects.approvedLeadTargets((await effects.planSendEffects(invoice(), customer, {})).effects)).not.toBe(pinned);
+    // No lead, or a resend (no conversion): none.
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [] });
+    expect(effects.approvedLeadTargets((await effects.planSendEffects(invoice(), customer, {})).effects)).toBe('none');
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [LEAD] });
+    expect(effects.approvedLeadTargets((await effects.planSendEffects(invoice({ sent_at: '2099-01-01T00:00:00Z' }), customer, {})).effects)).toBe('none');
+  });
 });
 
 // ── source contract: the handlers' side-effect calls are all named in the plan ──

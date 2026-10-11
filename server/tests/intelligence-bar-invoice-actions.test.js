@@ -256,7 +256,7 @@ describe('send_invoice commit', () => {
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
         expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' },
-        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
       },
     });
     // The exact recipients ride only to the send, never into the result.
@@ -590,5 +590,19 @@ describe('round 7: who owes the invoice, and the closeout target', () => {
     run = (await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version')).run;
     await run();
     expect(Invoices.sendInvoiceFromBar.mock.calls[1][0].approvedSend.version.closeoutTarget).toBe('visit-9');
+  });
+
+  test('round 8: the leads the card named are handed to the send as an opaque set digest (or none), never as ids', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+    let run = (await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version')).run;
+    await run();
+    expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version.leadTargets).toBe('none');
+    const LEAD = 'aaaaaaaa-0000-4000-8000-000000000001';
+    LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [LEAD] });
+    run = (await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version')).run;
+    await run();
+    const { leadTargets } = Invoices.sendInvoiceFromBar.mock.calls[1][0].approvedSend.version;
+    expect(leadTargets).toBe(require('../services/invoice-helpers').leadSetDigest([LEAD]));
+    expect(leadTargets).not.toContain(LEAD);
   });
 });

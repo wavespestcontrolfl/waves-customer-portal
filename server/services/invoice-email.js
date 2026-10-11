@@ -451,6 +451,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
             if (ownership.ok !== true) return ownership;
           }
+          // The Intelligence Bar's live owner check (Bill-To resolved now), on the locked handle right before the provider
+          // call. Fail closed: a verifier that throws refuses the email.
+          if (options.verifyOwner) {
+            let refusal = 'The bar could not verify who owes this invoice, so it was not sent.';
+            try { refusal = await options.verifyOwner({ ...current }, trx); } catch { /* keep the fail-closed text */ }
+            if (refusal) {
+              boundaryRefusal = { code: 'approved_version_changed', reason: refusal };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
           // Collections DISPUTE hold, re-read at THIS email provider boundary on the locked
           // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
           // rendered still stops the pay link - retryable + deferred, never terminal (savepoint

@@ -45,6 +45,7 @@ const SEND_CALL_COVERAGE = {
   convertLeadOnInvoiceSent: { effect: 'lead_conversion' },
   scheduleForInvoice: { effect: 'followups' },
   closeOutVisitForIssuedInvoice: { effect: 'closeout' },
+  recordApprovedCloseoutDelivery: { effect: null, why: 'an audit row on the invoice that binds the closeout pin to this delivery; nothing the customer sees' },
   enrollReviewAfterInvoiceDelivery: { effect: 'review' },
   autoApplyAccountCreditIfEnabled: { effect: 'credit' },
   reverseAppliedCredit: { effect: 'credit' },
@@ -144,6 +145,13 @@ function approvedCloseoutTarget(effects) {
   return closeout && closeout.applies ? String(closeout.state).split(':')[0] : 'none';
 }
 
+// The leads the approved plan would mark won, as an opaque digest of the id set (convertLeadFromEvent's expectedLeadSet; the
+// card never carries full ids), or 'none': what the send hands its lead conversion so it converts those leads and no others.
+function approvedLeadTargets(effects) {
+  const lead = (effects || []).find((e) => e.key === 'lead_conversion');
+  return lead && lead.applies ? require('../invoice-helpers').leadSetDigest(String(lead.state).split(',')) : 'none';
+}
+
 function finish(effects) {
   return { effects, digest: effectsDigest(effects) };
 }
@@ -151,6 +159,7 @@ function finish(effects) {
 module.exports = {
   planSendEffects,
   approvedCloseoutTarget,
+  approvedLeadTargets,
   effectsDigest,
   closeoutLine,
   SEND_CALL_COVERAGE,

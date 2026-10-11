@@ -154,6 +154,37 @@ describe('sendInvoiceEmail service summary', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  describe('round 8: the Intelligence Bar\'s live owner check runs at the email provider boundary', () => {
+    const atBoundary = async (options) => {
+      mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original', payer_id: null }));
+      const dispatch = jest.fn(async () => ({ sent: true }));
+      EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+        const verdict = await withProviderHandoff(dispatch);
+        return { sent: verdict.ok, reason: verdict.reason, code: verdict.code };
+      });
+      const result = await sendInvoiceEmail('inv-1', { claimToken: 'original', ...options });
+      return { result, dispatch };
+    };
+
+    test('a payer who now owns the invoice stops the email before the provider call, on the locked handle', async () => {
+      const verifyOwner = jest.fn(async () => 'This invoice is billed to a payer, not the customer.');
+      const { result, dispatch } = await atBoundary({ verifyOwner });
+      expect(result).toMatchObject({ ok: false, code: 'approved_version_changed', error: 'This invoice is billed to a payer, not the customer.' });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(verifyOwner).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1', status: 'sending' }), db);
+    });
+
+    test('a verifier that throws fails closed; a customer-owned invoice goes through; no verifier (a page send) is unchanged', async () => {
+      const thrown = await atBoundary({ verifyOwner: async () => { throw new Error('resolver down'); } });
+      expect(thrown.result).toMatchObject({ ok: false, code: 'approved_version_changed' });
+      expect(thrown.dispatch).not.toHaveBeenCalled();
+      const customer = await atBoundary({ verifyOwner: async () => null });
+      expect(customer.dispatch).toHaveBeenCalledTimes(1);
+      const page = await atBoundary({});
+      expect(page.dispatch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('preserves the legacy tokenless email boundary until that caller owns cleanup', async () => {
     mockDb(invoiceRow({ scheduled_service_id: 'svc-cancelled' }));
     const visitGuard = jest.spyOn(require('../services/invoice-helpers'), 'visitRefusesSettlement');

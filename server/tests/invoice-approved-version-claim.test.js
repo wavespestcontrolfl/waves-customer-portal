@@ -186,8 +186,9 @@ describe('claimInvoiceForSend with an approved version', () => {
   test('the approved closeout target is written inside the claim; a pin that cannot be written hands the claim back; no target writes nothing', async () => {
     const row = baseRow();
     makeDb(row);
-    await claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), closeoutTarget: 'none' } });
-    expect(recordApprovedCloseoutTarget).toHaveBeenCalledWith(INVOICE_ID, 'none', expect.objectContaining({ priorInvoice: expect.objectContaining({ status: 'sent' }) }));
+    // The pin carries the claim's own token (it binds the pin to this send) and names the confirming admin.
+    const claimed = await claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), closeoutTarget: 'none', actorTechnicianId: 'admin-1' } });
+    expect(recordApprovedCloseoutTarget).toHaveBeenLastCalledWith(INVOICE_ID, 'none', expect.objectContaining({ claimToken: claimed.invoice.send_claim_token, actorTechnicianId: 'admin-1' }));
     recordApprovedCloseoutTarget.mockClear();
     makeDb(row);
     await claimInvoiceForSend(INVOICE_ID, { expectedVersion: approved(row) });
@@ -198,6 +199,121 @@ describe('claimInvoiceForSend with an approved version', () => {
       .rejects.toMatchObject({ code: 'approved_version_changed' });
     expect(failed.currentRow().status).toBe('sent');
     expect(failed.currentRow().send_claim_token).toBeNull();
+  });
+
+  test('round 8: the bar\'s claim holds the customer row FOR SHARE before it judges the owner, inside one transaction; the lock is gone before any provider call', async () => {
+    const row = baseRow({ customer_id: 'cust-1' });
+    const log = [];
+    makeDb(row);
+    const invoicesImpl = db.getMockImplementation();
+    const customers = { where: jest.fn(() => customers), forShare: jest.fn(() => { log.push('customer FOR SHARE'); return customers; }), first: jest.fn(async () => ({ id: 'cust-1' })) };
+    db.mockImplementation((table) => (table === 'customers' ? customers : invoicesImpl(table)));
+    db.transaction.mockClear();
+    const verifyOwner = jest.fn(async () => { log.push('verifyOwner'); return null; });
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), verifyOwner } })).resolves.toMatchObject({ claimed: true });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(log).toEqual(['customer FOR SHARE', 'verifyOwner']);
+    // A caller with no owner check takes no transaction and no lock.
+    makeDb(row);
+    db.transaction.mockClear();
+    await claimInvoiceForSend(INVOICE_ID, { expectedVersion: approved(row) });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('round 8: an attachment upload that reserved the invoice and has not inserted yet refuses the bar\'s send claim; a card with no attachment list is unaffected', async () => {
+    const helpers = require('../services/invoice-helpers');
+    const row = baseRow();
+    const inFlight = jest.spyOn(helpers, 'attachmentUploadInFlight');
+    inFlight.mockResolvedValueOnce(true);
+    const blocked = makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), attachments: 'digest' } }))
+      .rejects.toMatchObject({ code: 'approved_version_changed', message: expect.stringMatching(/attachment upload is still in progress/) });
+    expect(blocked.currentRow().status).toBe('sent');
+    expect(blocked.currentRow().send_claim_token).toBeNull();
+    // A read that fails is treated as an upload in flight (fail closed).
+    inFlight.mockRejectedValueOnce(new Error('audit read failed'));
+    makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), attachments: 'digest' } })).rejects.toMatchObject({ code: 'approved_version_changed' });
+    // No reservation: the claim stands.
+    inFlight.mockResolvedValueOnce(false);
+    makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), attachments: 'digest' } })).resolves.toMatchObject({ claimed: true });
+    inFlight.mockClear();
+    makeDb(row);
+    await claimInvoiceForSend(INVOICE_ID, { expectedVersion: approved(row) });
+    expect(inFlight).not.toHaveBeenCalled();
+    inFlight.mockRestore();
+  });
+
+  test('round 8: the lead conversion after delivery keeps to the leads the card named: none converts nothing, a pinned set converts only that set, a drifted set is skipped and audited', async () => {
+    const LeadLink = require('../services/lead-estimate-link');
+    const audit = require('../services/audit-log');
+    const convert = jest.spyOn(LeadLink, 'convertLeadFromEvent');
+    const record = jest.spyOn(audit, 'recordAuditEvent').mockResolvedValue(true);
+    const send = (approvedLeadSet) => InvoiceService._convertLeadOnInvoiceSent({ invoiceId: INVOICE_ID, customerId: 'cust-1', priorStatus: 'draft', approvedLeadSet });
+    // "none": the call is not made at all, even if a lead exists now.
+    await send('none');
+    expect(convert).not.toHaveBeenCalled();
+    // A pinned set is handed to the conversion, which converts that set only.
+    convert.mockResolvedValueOnce({ converted: true, count: 1 });
+    await send('set-digest');
+    expect(convert).toHaveBeenLastCalledWith({ source: 'invoice_sent', customerId: 'cust-1', expectedLeadSet: 'set-digest' });
+    expect(record).not.toHaveBeenCalled();
+    // Drift: skipped and audited on the invoice.
+    convert.mockResolvedValueOnce({ converted: false, reason: 'approved_leads_changed' });
+    await send('set-digest');
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'invoice.send_lead_conversion_skipped', resource_type: 'invoices', resource_id: INVOICE_ID,
+      metadata: expect.objectContaining({ approvedLeadSet: 'set-digest', reason: 'approved_leads_changed' }),
+    }));
+    // No pin (the Invoices page): unchanged, resolved by customer as before.
+    convert.mockResolvedValueOnce({ converted: false, reason: 'no_open_lead' });
+    await send(null);
+    expect(convert).toHaveBeenLastCalledWith({ source: 'invoice_sent', customerId: 'cust-1' });
+    convert.mockRestore();
+    record.mockRestore();
+  });
+
+  describe('round 8: the text leg\'s provider-boundary check asks the live owner verifier on the locked handle', () => {
+    const helpers = require('../services/invoice-helpers');
+    const hold = require('../services/collections/collection-hold');
+    const current = { id: INVOICE_ID, customer_id: 'cust-1', status: 'sending', send_claim_token: 'tok', payer_id: null, total: '129.00', credit_applied: '0.00', line_items: JSON.stringify(LINES) };
+    const handle = jest.fn();
+    beforeEach(() => {
+      jest.spyOn(helpers, 'visitRefusesSettlement').mockResolvedValue(null);
+      jest.spyOn(helpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+      jest.spyOn(hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: false });
+    });
+    afterEach(() => jest.restoreAllMocks());
+    const check = (verifyOwner) => InvoiceService._checkInvoiceDeliveryPreconditions(handle, current, { sendClaimToken: 'tok', sendInvoice: current, verifyOwner });
+
+    test('a payer who now owns the invoice stops the text before the provider call; a verifier that throws fails closed; a customer passes', async () => {
+      const verifyOwner = jest.fn(async () => 'This invoice is billed to a payer, not the customer.');
+      await expect(check(verifyOwner)).resolves.toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'approved_version_changed', reason: 'This invoice is billed to a payer, not the customer.' });
+      expect(verifyOwner).toHaveBeenCalledWith(expect.objectContaining({ id: INVOICE_ID }), handle);
+      await expect(check(async () => { throw new Error('resolver down'); })).resolves.toMatchObject({ blocked: true, code: 'approved_version_changed' });
+      await expect(check(async () => null)).resolves.toEqual({ ok: true });
+      // No verifier (every other sender): unchanged.
+      await expect(check(null)).resolves.toEqual({ ok: true });
+    });
+
+    test('source contract: both legs of the bar\'s send hand the verifier to their provider boundary', () => {
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+      // The text leg: the shared precondition check is given it on both of its routes (the locked handoff and the email authority's pre-send check).
+      expect(source.match(/sendClaimToken: invoice\.send_claim_token, sendInvoice, holdExempt, verifyOwner,/g)).toHaveLength(2);
+      // The wrapper passes the version's verifier to the text leg and to the email leg.
+      expect(source.match(/\.\.\.\(expectedVersion\?\.verifyOwner \? \{ verifyOwner: expectedVersion\.verifyOwner \} : \{\}\),/g)).toHaveLength(2);
+    });
+  });
+
+  test('round 8 (source contract): the confirming admin rides the version into the claim\'s pin, and the delivery row is written before the send\'s own closeout', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+    expect(source).toMatch(/if \(expectedVersion && actorTechnicianId && expectedVersion\.actorTechnicianId === undefined\) \{\s*expectedVersion = \{ \.\.\.expectedVersion, actorTechnicianId \};/);
+    expect(source).toMatch(/claimToken: freshClaimToken, actorTechnicianId: expectedVersion\.actorTechnicianId \|\| null/);
+    const delivery = source.indexOf('recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token');
+    const closeout = source.indexOf('issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent"');
+    expect(delivery).toBeGreaterThan(0);
+    expect(closeout).toBeGreaterThan(delivery);
   });
 
   test('a caller that passes no version is unchanged', async () => {

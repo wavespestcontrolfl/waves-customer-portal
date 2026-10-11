@@ -5,6 +5,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
+const Helpers = require('./invoice-helpers');
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_ATTACHMENT_TOTAL_BYTES = 25 * 1024 * 1024;
@@ -177,6 +178,17 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
     contentType: validateAttachmentFile(file),
   }));
 
+  // The reservation comes BEFORE the first storage write: the Intelligence Bar's send claim refuses while it is live, and the
+  // insert below refuses when the invoice's send episode moved since. Taken under the invoice row lock, so it is serialized
+  // with a send claim (a claim that already holds the row refuses the upload here).
+  const reservation = await db.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoice.id }).forUpdate()
+      .first('id', 'status', 'sent_at', 'sms_sent_at', 'email_sent_at');
+    if (!locked) throw attachmentError('Invoice not found', 404);
+    assertNotBeingSent(locked);
+    return Helpers.reserveAttachmentUpload(trx, locked, { uploadedByTechId });
+  });
+  let reservationReleased = false;
   const uploadedObjects = [];
   try {
     for (const { file, contentType } of validatedFiles) {
@@ -200,19 +212,27 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
       });
     }
 
-    return await db.transaction(async (trx) => {
+    const insertedRows = await db.transaction(async (trx) => {
       // customer_id comes from the LOCKED row, never the pre-lock read
       // (Codex #3109 r25): a merge-undo can repoint the invoice while this
       // upload waits on the FOR UPDATE — inserting the stale pre-lock
       // owner would split the attachment from the invoice it belongs to.
-      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first('id', 'customer_id', 'status');
+      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate()
+        .first('id', 'customer_id', 'status', 'sent_at', 'sms_sent_at', 'email_sent_at');
       if (!lockedInvoice) throw attachmentError('Invoice not found', 404);
       assertNotBeingSent(lockedInvoice);
+      // The send episode moved since the reservation (a delivery landed while the files were being stored), or the
+      // reservation ran out: the files are not part of anything a send approved. Nothing is inserted; the objects are removed.
+      if (Helpers.invoiceDeliveryEpoch(lockedInvoice) !== reservation.epoch || Date.now() > reservation.expiresAtMs) {
+        const err = attachmentError('This invoice was sent while the files were uploading; upload them again', 409);
+        err.code = 'invoice_sent_during_upload';
+        throw err;
+      }
 
       const lockedExisting = await attachmentUsage(invoice.id, trx);
       assertAttachmentBudget(lockedExisting, uploadedObjects.map((object) => object.file));
 
-      return trx('invoice_attachments').insert(uploadedObjects.map((object) => ({
+      const inserted = await trx('invoice_attachments').insert(uploadedObjects.map((object) => ({
         invoice_id: invoice.id,
         customer_id: lockedInvoice.customer_id || null,
         file_name: object.fileName,
@@ -221,9 +241,18 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
         s3_key: object.key,
         uploaded_by_tech_id: uploadedByTechId || null,
       }))).returning(['id', 'invoice_id', 'file_name', 'mime_type', 'file_size_bytes', 'created_at']);
+      await Helpers.releaseAttachmentUpload(trx, reservation);
+      return inserted;
     });
+    reservationReleased = true;
+    return insertedRows;
   } catch (err) {
     await cleanupUploadedObjects(uploadedObjects);
+    if (!reservationReleased) {
+      try { await Helpers.releaseAttachmentUpload(db, reservation); } catch (releaseErr) {
+        logger.warn(`[invoice-attachments] upload reservation release failed for invoice ${invoice.id}: ${releaseErr.message}`);
+      }
+    }
     throw err;
   }
 }

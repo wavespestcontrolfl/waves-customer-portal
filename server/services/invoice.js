@@ -3102,7 +3102,7 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // same on its transaction before its caller re-reads it and passes it in).
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
-async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null }) {
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null, verifyOwner = null }) {
   // `error` is the field withProviderHandoff's caller (this file) has always
   // read on a blocked outcome (byte-identical to the pre-refactor shape);
   // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
@@ -3138,6 +3138,17 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
     return { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: ownership.code, error: ownership.reason, reason: ownership.reason,
       validator: "check_invoice_ownership_boundary" };
+  }
+  // The Intelligence Bar's live owner check (who owes this invoice RIGHT NOW, Bill-To resolved), run on the locked handle
+  // immediately before the provider call. Fail closed: a verifier that throws refuses the send.
+  if (verifyOwner) {
+    let refusal = "The bar could not verify who owes this invoice, so it was not sent.";
+    try { refusal = await verifyOwner({ ...current }, database); } catch { /* keep the fail-closed text */ }
+    if (refusal) {
+      return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+        code: "approved_version_changed", error: refusal, reason: refusal,
+        validator: "check_invoice_ownership_boundary" };
+    }
   }
   // Collections DISPUTE hold, re-read at the actual provider boundary on the
   // locked handle (owner ruling 2026-09-30): a hold that committed after the
@@ -4539,8 +4550,23 @@ async function claimInvoiceForSend(invoiceId, {
   // showed. Null = unchanged for every other caller.
   expectedVersion = null,
   database = db,
+  // Internal-only: set by the owner-fence re-entry below.
+  _ownerFenced = false,
 } = {}) {
   assertFirstDeliveryNotAnOverride(firstDeliveryOnly, overridesReviewHold, "claimInvoiceForSend");
+  // The Intelligence Bar's claim judges who owes the invoice (verifyOwner below), so it holds the customer (and the linked
+  // visit) FOR SHARE from before that judgment until the claim commits, exactly as the packet and renewal claims do: a payer
+  // assignment (its writer takes these rows FOR UPDATE) either commits first and is seen by the verifier, or waits for the
+  // claim and then finds the invoice 'sending' (packetInvoiceSendInFlight) and refuses. The lock ends at commit, before any
+  // provider call: the claim row itself is the fence through the delivery.
+  if (expectedVersion?.verifyOwner && !_ownerFenced && !database.isTransaction && typeof database.transaction === "function") {
+    return database.transaction(async (trx) => {
+      const owner = await trx("invoices").where({ id: invoiceId }).first("customer_id", "scheduled_service_id");
+      if (owner?.customer_id) await trx("customers").where({ id: owner.customer_id }).forShare().first("id");
+      if (owner?.scheduled_service_id) await trx("scheduled_services").where({ id: owner.scheduled_service_id }).forShare().first("id");
+      return claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion, database: trx, _ownerFenced: true });
+    });
+  }
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
   await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
@@ -4676,11 +4702,23 @@ async function claimInvoiceForSend(invoiceId, {
       throw approvedClaimRefusal(ownerRefusal);
     }
   }
+  if (expectedVersion && expectedVersion.attachments !== undefined) {
+    // The card listed the invoice's attachments. An upload that reserved the invoice before this claim and has not
+    // inserted yet would change that list after delivery: the send waits for it (the upload refuses once this claim holds the row).
+    let uploading = true;
+    try { uploading = await require("./invoice-helpers").attachmentUploadInFlight(database, invoiceId); } catch { uploading = true; }
+    if (uploading) {
+      await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+      throw approvedClaimRefusal("An attachment upload is still in progress on this invoice, so it was not sent. Try again when the upload finishes.");
+    }
+  }
   if (expectedVersion?.closeoutTarget) {
     // The visit the card said this send closes (or none), written on the invoice inside the claim: the send's own closeout
     // is handed it, and the retry sweep reads it back. A pin that cannot be written hands the claim back.
     try {
-      await require("./invoice-issued-closeout").recordApprovedCloseoutTarget(invoiceId, expectedVersion.closeoutTarget, { conn: database, priorInvoice: current });
+      await require("./invoice-issued-closeout").recordApprovedCloseoutTarget(invoiceId, expectedVersion.closeoutTarget, {
+        conn: database, claimToken: freshClaimToken, actorTechnicianId: expectedVersion.actorTechnicianId || null,
+      });
     } catch {
       await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
       throw approvedClaimRefusal("The approved visit closeout could not be recorded, so the invoice was not sent.");
@@ -5101,11 +5139,21 @@ function priorDeliveredForLeadConversion(invoice) {
       && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_PLANNED_ERROR)));
 }
 
-async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false }) {
+async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, priorDelivered = false, approvedLeadSet = null }) {
   if (!leadConversionApplies({ customerId, priorStatus, priorDelivered })) return;
+  // The Intelligence Bar's card named the leads this send marks won (or none). 'none': nothing is converted. Ids: only
+  // those leads, and a different set converts nothing and is audited.
+  if (approvedLeadSet === "none") return;
   try {
     const { convertLeadFromEvent } = require("./lead-estimate-link");
-    await convertLeadFromEvent({ source: "invoice_sent", customerId });
+    const result = await convertLeadFromEvent({ source: "invoice_sent", customerId, ...(approvedLeadSet ? { expectedLeadSet: approvedLeadSet } : {}) });
+    if (approvedLeadSet && result?.reason === "approved_leads_changed") {
+      logger.warn(`[invoice] lead conversion skipped for ${invoiceId}: the leads changed after the approval`);
+      await require("./audit-log").recordAuditEvent({
+        actor_type: "system", action: "invoice.send_lead_conversion_skipped", resource_type: "invoices", resource_id: invoiceId,
+        metadata: { invoiceId: String(invoiceId), approvedLeadSet, reason: "approved_leads_changed" },
+      });
+    }
   } catch (leadErr) {
     logger.warn(`[invoice] lead conversion on send failed (${invoiceId}): ${leadErr.message}`);
   }
@@ -7107,6 +7155,8 @@ const InvoiceService = {
     // Intelligence Bar send_invoice only (via sendViaSMSAndEmail): the phone digits
     // its card showed, or null when the card showed no text. Undefined = unchanged.
     expectedSmsPhone = undefined,
+    // Intelligence Bar send_invoice only: its live owner check, run at this leg's provider boundary.
+    verifyOwner = null,
   } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
@@ -7167,7 +7217,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, verifyOwner,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -7602,13 +7652,13 @@ const InvoiceService = {
           }
           const current = await database("invoices").where({ id: invoiceId }).first();
           return checkInvoiceDeliveryPreconditions(database, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner,
           });
         },
         withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
           invoiceId,
           (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner,
           }),
           dispatch,
         ),
@@ -7953,6 +8003,10 @@ const InvoiceService = {
       expectedVersion = null,
     } = {},
   ) {
+    // The confirming admin rides the version so the claim's closeout pin names them.
+    if (expectedVersion && actorTechnicianId && expectedVersion.actorTechnicianId === undefined) {
+      expectedVersion = { ...expectedVersion, actorTechnicianId };
+    }
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
@@ -8173,6 +8227,7 @@ const InvoiceService = {
           // the nested claim must not adopt it a second time.
           adoptsQueuedInvoiceSend: false,
           ...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),
+          ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.settled_zero_due) {
@@ -8425,6 +8480,7 @@ const InvoiceService = {
           ...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),
           // The Intelligence Bar's approved attachment list (digest), checked once more right before the provider call.
           ...(expectedVersion && expectedVersion.attachments !== undefined ? { expectedAttachments: expectedVersion.attachments } : {}),
+          ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;
@@ -8616,7 +8672,7 @@ const InvoiceService = {
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: priorDeliveredForLeadConversion(claim.invoice) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: priorDeliveredForLeadConversion(claim.invoice), approvedLeadSet: expectedVersion?.leadTargets ?? null });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -8715,6 +8771,16 @@ const InvoiceService = {
     let issuedCloseout = null;
     if (ownedDeliveryFinalized) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+      // The pin written under this claim becomes the invoice's delivery episode now that this claim delivered: the retry
+      // sweep honors it only while this delivery is still the invoice's newest. Best-effort; without the row the sweep
+      // ignores the pin (the send's own closeout below still keeps to the card).
+      if (expectedVersion?.closeoutTarget) {
+        try {
+          await require("./invoice-issued-closeout").recordApprovedCloseoutDelivery(invoiceId, claim.invoice.send_claim_token, { actorTechnicianId });
+        } catch (pinErr) {
+          logger.error(`[invoice] approved closeout delivery record failed for ${invoiceId}: ${pinErr.message}`);
+        }
+      }
       // The Intelligence Bar's card named the visit this send closes (or none): the closeout runs for that visit only.
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId, approvedTarget: expectedVersion?.closeoutTarget || null });
     }
@@ -13630,6 +13696,8 @@ module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
+module.exports._convertLeadOnInvoiceSent = convertLeadOnInvoiceSent;
+module.exports._checkInvoiceDeliveryPreconditions = checkInvoiceDeliveryPreconditions;
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;

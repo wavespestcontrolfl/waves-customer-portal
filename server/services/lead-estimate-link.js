@@ -1573,6 +1573,9 @@ async function convertLeadFromEvent({
   booking = null,
   database = db,
   leadAttributionService = leadAttribution,
+  // Intelligence Bar send_invoice: leadSetDigest() of the leads its card named. The leads this event resolves must be
+  // exactly those; any other set converts nothing ({ reason: 'approved_leads_changed' }).
+  expectedLeadSet = null,
 }) {
   try {
     const assessmentEvent = !!booking
@@ -1652,6 +1655,9 @@ async function convertLeadFromEvent({
     });
     if (resolved.reason) return { converted: false, reason: resolved.reason };
     const { open, resolution } = resolved;
+    if (expectedLeadSet !== null && require('./invoice-helpers').leadSetDigest(open.map((lead) => lead.id)) !== String(expectedLeadSet)) {
+      return { converted: false, reason: 'approved_leads_changed' };
+    }
     resolvedPhone = resolved.phone;
     resolvedEmail = resolved.email;
 
