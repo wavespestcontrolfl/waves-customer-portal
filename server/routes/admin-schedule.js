@@ -6099,12 +6099,24 @@ const SERIES_VERDICT_UNVERIFIED = {
 async function seriesWalkWithRide(conn, walk, latest, horizonEnd) {
   const { parent, cols } = walk;
   if (!(cols.rides_parent_id && parent.rides_parent_id)) return walk;
-  const ride = await rideLawnCandidate({
-    conn, parent, parentId: parent.id, cols, latest, opts: { maxDate: horizonEnd }, existingDates: await loadActiveSeriesDates(conn, parent.id),
-  });
-  if (!ride) return walk;
-  if (ride.unanswered) return SERIES_VERDICT_UNVERIFIED;
-  return { ...walk, dates: [...new Set([...walk.dates, ride.date])] };
+  // Every host date the top-up would ride in one run, not only the first: it re-selects a host
+  // after each insert (up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN), and each insert becomes the
+  // latest visit and an occupied date for the next pick. The same read-only selector is asked
+  // for each, with the inserts it would have made so far.
+  const existingDates = new Set(await loadActiveSeriesDates(conn, parent.id));
+  let anchor = latest;
+  const rideDates = [];
+  for (;;) {
+    const ride = await rideLawnCandidate({
+      conn, parent, parentId: parent.id, cols, latest: anchor, opts: { maxDate: horizonEnd }, existingDates,
+    });
+    if (!ride) break;
+    if (ride.unanswered || rideDates.length >= TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN) return SERIES_VERDICT_UNVERIFIED;
+    rideDates.push(ride.date);
+    existingDates.add(ride.date);
+    anchor = { ...anchor, scheduled_date: ride.date };
+  }
+  return rideDates.length ? { ...walk, dates: [...new Set([...walk.dates, ...rideDates])], rideDates } : walk;
 }
 
 async function seriesVerdictWalk(conn, parentId) {
@@ -6163,13 +6175,19 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
 async function seriesNextOccurrencesPrice(conn, parentId) {
   const walk = await seriesVerdictWalk(conn, parentId);
   if (!walk) return null;
-  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false };
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, hosts: [] };
   const { parent, parentAddons } = walk;
   const verdicts = await seriesExtensionDateVerdicts(conn, {
     ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
   });
   const price = Math.max(0, ...verdicts.map((v) => v.price));
   const linePrice = Math.max(0, ...verdicts.map((v) => v.linePrice));
+  // The lawn host dates a rider series would ride (seriesWalkWithRide), each with its own price
+  // and zero kind, so the caller can name the date and pin the list.
+  const hosts = (walk.rideDates || []).map((date) => {
+    const v = verdicts[walk.dates.indexOf(date)];
+    return { date, price: v.price, linePrice: v.linePrice };
+  });
   // An explicit $0 template override (written only by the price/service scope lane) stays an
   // authoritative $0 on every visit the top-up mints (applyStoredVisitFinancials, same gate and
   // same condition: the lines price to nothing and the override is exactly 0), so those visits
@@ -6179,7 +6197,7 @@ async function seriesNextOccurrencesPrice(conn, parentId) {
   // Which kind of zero: the override above, a known line price discounted away, or no price at all.
   let zero = null;
   if (price === 0) zero = explicitZero ? 'override' : (linePrice > 0 ? 'discounted' : 'unpriced');
-  return { unverified: false, price, linePrice, zero, explicitZero };
+  return { unverified: false, price, linePrice, zero, explicitZero, hosts };
 }
 
 
@@ -21218,25 +21236,18 @@ async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
 }
 
 // Which of a customer's ongoing roots (eligibleSeriesParentIds, the coarse recurring_ongoing
-// selector) would the nightly top-up actually extend? Runs the top-up's own two skip rules:
-// the customer rules (topupCustomerSkipReason: deleted, held, inactive, churned) and each
-// root's series rules (topupSeriesSkipReason: annual prepay, plan hold, duplicate series),
-// the same calls topUpRecurringSeriesLocked makes. Read-only; used by billing checks that ask
-// "what would the next visit be" (billing-mode-rules.js unpricedOngoingSeries, the
-// Intelligence Bar billing type card).
-// A skip is PERMANENT (deleted or churned or inactive customer, annual prepay, duplicate
-// series: nothing resumes it) or REVERSIBLE (a plan hold or a customer service hold: the daily
-// hold lifecycle resumes the series with its terms intact), so a reversible skip is reported as
-// `held` and callers keep checking the root's real terms.
-// Returns { extend: [id], held: [{ id, reason }], skipped: [{ id, reason }] }.
-const TOPUP_REVERSIBLE_SKIP_REASONS = new Set(['plan_hold', 'customer_service_held']);
+// selector) would the nightly top-up extend NOW? Runs the top-up's own two skip rules: the
+// customer rules (topupCustomerSkipReason: deleted, held, inactive, churned) and each root's
+// series rules (topupSeriesSkipReason: annual prepay, plan hold, duplicate series), the same
+// calls topUpRecurringSeriesLocked makes. Read-only. A skip is a state of the moment, not a
+// verdict on the root: any of them can clear later (a hold lifts, a customer reactivates, a
+// duplicate closes, a term ends), so callers keep checking a skipped root's real terms and
+// only report and pin the skip. There is deliberately no list of "permanent" reasons.
+// Returns { extend: [id], skipped: [{ id, reason }] }.
 async function splitRootsByTopupSkip(conn, customerId, ids) {
-  const out = { extend: [], held: [], skipped: [] };
+  const out = { extend: [], skipped: [] };
   if (!ids.length) return out;
-  const place = (id, reason) => {
-    if (!reason) out.extend.push(id);
-    else (TOPUP_REVERSIBLE_SKIP_REASONS.has(reason) ? out.held : out.skipped).push({ id, reason });
-  };
+  const place = (id, reason) => (reason ? out.skipped.push({ id, reason }) : out.extend.push(id));
   const customer = await conn('customers').where({ id: customerId }).first(...SERIES_CUSTOMER_COLUMNS);
   const customerSkip = topupCustomerSkipReason(customer);
   if (customerSkip) {

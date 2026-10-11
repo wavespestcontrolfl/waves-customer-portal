@@ -53,8 +53,8 @@ async function unpricedFutureBillableVisits(dbh, customerId, { customerOverride 
   } catch { return []; }
 }
 
-// Ongoing recurring plans (the series root with recurring_ongoing = true) the
-// nightly top-up would still extend, whose next visits would be minted with no
+// Ongoing recurring plans (the series root with recurring_ongoing = true), including ones
+// the nightly top-up skips right now (a skip can clear), whose next visits would be minted with no
 // billable amount under the lane being set: their next visits would complete
 // unbilled even when no live occurrence is left today. The selector is the
 // top-up's own (recurring-series-topup.js eligibleSeriesParentIds), narrowed to
@@ -67,12 +67,10 @@ async function unpricedFutureBillableVisits(dbh, customerId, { customerOverride 
 async function unpricedOngoingSeries(dbh, customerId, alreadyListed, customerOverride) {
   try {
     const { eligibleSeriesParentIds } = require('./recurring-series-topup');
-    const { seriesNextOccurrencesUnbillable, splitRootsByTopupSkip } = require('../routes/admin-schedule');
-    // Only the roots the nightly top-up would extend (its own customer and series skip rules),
-    // plus the ones it skips only while a hold lasts: they resume with their terms intact.
-    const listed = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
-    const split = await splitRootsByTopupSkip(dbh, customerId, listed);
-    const ids = [...split.extend, ...split.held.map((h) => h.id)];
+    const { seriesNextOccurrencesUnbillable } = require('../routes/admin-schedule');
+    // Every ongoing root, whether or not the nightly top-up skips it right now: a skip (hold,
+    // inactive customer, duplicate series, ...) can clear, and the root keeps its terms.
+    const ids = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
     const out = [];
     for (const id of ids) {
       // Any verdict blocks: no billable amount, or a plan that could not be verified.

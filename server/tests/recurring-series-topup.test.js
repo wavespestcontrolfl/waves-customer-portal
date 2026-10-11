@@ -946,7 +946,7 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
   // customer into per_visit / one_time: the SAME seriesExtensionUnbillable the
   // top-up consults, for the next occurrences with their cadence-filtered
   // add-ons, under the billing fields the customer would have.
-  const { seriesNextOccurrencesUnbillable } = require('../routes/admin-schedule');
+  const { seriesNextOccurrencesUnbillable, seriesNextOccurrencesPrice } = require('../routes/admin-schedule');
   const PER_VISIT = { billing_mode: 'per_visit', monthly_rate: 0 };
 
   test('a root priced only by an add-on that is due on the anchor date alone refuses; the top-up refuses the same series', async () => {
@@ -1062,6 +1062,26 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
       expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
     });
 
+    test('Codex round 22: every host date the top-up would ride in a run is walked, not only the first', async () => {
+      process.env.RECURRING_TOPUP_HORIZON_DAYS = '400';
+      const twoHosts = {
+        reasons: [], insert: ['2026-10-21', '2027-01-20'], planFloor: '2026-07-23',
+        hostRows: [
+          { id: 'host-1', scheduled_date: '2026-10-21', window_start: '09:00', technician_id: null },
+          { id: 'host-2', scheduled_date: '2027-01-20', window_start: '09:00', technician_id: null },
+        ],
+      };
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(twoHosts));
+      // The first host date is priced by the Feb-Oct add-on; the second (Jan) is not, so the walk refuses.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      const verdict = await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10);
+      expect(verdict.hosts.map((h) => [h.date, h.price])).toEqual([['2026-10-21', 60], ['2027-01-20', 0]]);
+      // One planned host only: only that date is a host.
+      spies[1].mockResolvedValue({ ...twoHosts, insert: ['2026-10-21'] });
+      expect((await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10)).hosts.map((h) => h.date)).toEqual(['2026-10-21']);
+    });
+
     test('a rider mechanism that cannot answer refuses as unverified; a series that rides nothing is untouched', async () => {
       spies.push(jest.spyOn(Preview, 'previewRiderPair').mockRejectedValue(new Error('preview down')));
       expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
@@ -1074,6 +1094,7 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
       const code = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
       const walk = code.slice(code.indexOf('async function seriesWalkWithRide'), code.indexOf('async function seriesVerdictWalk'));
       expect(walk).toContain('rideLawnCandidate(');
+      expect(walk).toContain('TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN');
       expect(walk).not.toMatch(/previewRiderPair|hostRows/);
       const ride = code.slice(code.indexOf('async function rideLawnExtension'), code.indexOf('async function joinOwnStopExtension'));
       expect(ride).toContain('rideLawnCandidate(ctx)');
@@ -1082,24 +1103,24 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
   });
 
   describe('Codex round 19: splitRootsByTopupSkip and the explicit $0 override', () => {
-    const { splitRootsByTopupSkip, seriesNextOccurrencesPrice } = require('../routes/admin-schedule');
+    const { splitRootsByTopupSkip } = require('../routes/admin-schedule');
     const FG = require('../config/feature-gates');
 
     test('the top-up\'s own customer and series rules decide: churned customer, annual-prepay series skip; an active series is extended', async () => {
       expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { pipeline_stage: 'churned' } }).conn, 5, [10]))
-        .toEqual({ extend: [], held: [], skipped: [{ id: 10, reason: 'customer_churned' }] });
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'customer_churned' }] });
       expect(await splitRootsByTopupSkip(topupScenario({ colsOverrides: { annual_prepay_term_id: {} }, stampedAnnualTermId: true }).conn, 5, [10]))
-        .toEqual({ extend: [], held: [], skipped: [{ id: 10, reason: 'annual_prepay_series' }] });
-      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [10])).toEqual({ extend: [10], held: [], skipped: [] });
-      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [])).toEqual({ extend: [], held: [], skipped: [] });
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'annual_prepay_series' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [10])).toEqual({ extend: [10], skipped: [] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [])).toEqual({ extend: [], skipped: [] });
     });
 
-    test('Codex round 21: a plan hold and a customer service hold are REVERSIBLE (held), not permanent skips', async () => {
+    test('Codex round 22: every skip reason is reported as skipped, with no static permanent / reversible split', async () => {
       familyOfServiceRow.mockReturnValue('lawn_care');
       expect(await splitRootsByTopupSkip(topupScenario({ activeHold: true }).conn, 5, [10]))
-        .toEqual({ extend: [], held: [{ id: 10, reason: 'plan_hold' }], skipped: [] });
-      expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { service_paused_at: new Date(), service_paused_reason: 'customer_request' } }).conn, 5, [10]))
-        .toEqual({ extend: [], held: [{ id: 10, reason: 'customer_service_held' }], skipped: [] });
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'plan_hold' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { active: false } }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'customer_inactive' }] });
     });
 
     test('Codex round 21: the price verdict tells an unpriced root, a discounted-to-zero line and a priced one apart', async () => {

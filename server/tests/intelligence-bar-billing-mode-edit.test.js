@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, linePrices: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, linePrices: {}, hosts: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -113,6 +113,8 @@ jest.mock('../routes/admin-schedule', () => ({
     // The real one needs the price/service scope gate on AND an exact $0 override for 'override';
     // mockState.zeroKinds = { rootId: 'discounted' } gives a discounted line (mockState.linePrices).
     linePrice: mockState.linePrices[String(id)] || 0,
+    // mockState.hosts = { rootId: [{ date, price, linePrice }] }: the rider plan's lawn host dates.
+    hosts: mockState.hosts[String(id)] || [],
     zero: (mockState.rootPrices[String(id)] || 0) > 0 ? null
       : (mockState.zeroRoots.has(String(id)) && require('../config/feature-gates').gates.editApptPriceServiceScope === true ? 'override'
         : ((mockState.linePrices[String(id)] || 0) > 0 ? 'discounted' : 'unpriced')),
@@ -120,8 +122,7 @@ jest.mock('../routes/admin-schedule', () => ({
   // The top-up's own two skip rules, driven by state: mockState.topupSkips = { rootId: reason }.
   splitRootsByTopupSkip: jest.fn(async (conn, customerId, ids) => ({
     extend: ids.filter((id) => !mockState.topupSkips[String(id)]),
-    held: ids.filter((id) => ['plan_hold', 'customer_service_held'].includes(mockState.topupSkips[String(id)])).map((id) => ({ id, reason: mockState.topupSkips[String(id)] })),
-    skipped: ids.filter((id) => mockState.topupSkips[String(id)] && !['plan_hold', 'customer_service_held'].includes(mockState.topupSkips[String(id)])).map((id) => ({ id, reason: mockState.topupSkips[String(id)] })),
+    skipped: ids.filter((id) => mockState.topupSkips[String(id)]).map((id) => ({ id, reason: mockState.topupSkips[String(id)] })),
   })),
 }));
 // The collections hold the cron's own charge guard reads (collections/collection-hold.js).
@@ -186,6 +187,7 @@ beforeEach(() => {
   mockState.methodsAdvisoryBusy = false;
   mockState.rootPrices = {};
   mockState.linePrices = {};
+  mockState.hosts = {};
   mockState.zeroRoots = new Set();
   mockState.topupSkips = {};
   mockState.unverifiedRoots = new Set();
@@ -1337,13 +1339,13 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.rootPrices = { 'root-1': 500 };
     };
 
-    test('a root the top-up skips (churned customer, annual prepay) does not refuse and is listed as not extended; an active priced root still refuses', async () => {
+    test('a skipped root keeps its terms: it is listed as not extended now, the skip reason is pinned, and a skip that clears after the card refuses', async () => {
       setup();
-      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced' });
+      mockState.rootPrices = {};
       mockState.topupSkips = { 'root-1': 'customer_churned' };
       const churned = await propose(PER_APP);
       expect(churned.error).toBeUndefined();
-      expect(churned.display.next_visits).toContain('Not extended: the Pest Control plan (customer churned); the nightly top-up adds no visits to it, so this change does not reach it.');
+      expect(churned.display.next_visits).toContain('Not extended now: the Pest Control plan (customer churned); the nightly top-up adds no visits to it today. It has no price and no Bill-To payer, so this change applies to it if it resumes.');
       mockState.topupSkips = { 'root-1': 'annual_prepay_series' };
       const prepay = await propose(PER_APP);
       expect(prepay.error).toBeUndefined();
@@ -1355,14 +1357,17 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(customerWrites()).toHaveLength(0);
     });
 
-    test('a permanently skipped root does not carry a payer refusal either', async () => {
-      setup();
-      mockState.rootPrices = {};
-      mockState.roots = [{ ...ROOT, payer_id: 7 }];
-      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_payer_owned' });
-      mockState.topupSkips = { 'root-1': 'annual_prepay_series' };
-      expect((await propose(PER_APP)).error).toBeUndefined();
-    });
+    test.each([['customer_inactive'], ['customer_churned'], ['duplicate_series'], ['annual_prepay_series'], ['customer_deleted'], ['plan_hold'], ['customer_service_held']])(
+      'no skip reason (%s) erases the root\'s terms: a $500 template refuses, a Bill-To payer refuses',
+      async (reason) => {
+        setup();
+        mockState.topupSkips = { 'root-1': reason };
+        expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced', error: expect.stringContaining('a price of $500.00') });
+        mockState.rootPrices = {};
+        mockState.roots = [{ ...ROOT, payer_id: 7 }];
+        expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_payer_owned' });
+      },
+    );
 
     test('source contract: the split runs the top-up\'s own two skip predicates, and both callers use it', () => {
       const fs = require('fs');
@@ -1376,7 +1381,10 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(topUp).toContain('topupCustomerSkipReason(customer)');
       expect(topUp).toContain('topupSeriesSkipReason(conn, parent, parentId, cols)');
       expect(fs.readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8')).toContain('splitRootsByTopupSkip(');
-      expect(fs.readFileSync(require.resolve('../services/billing-mode-rules.js'), 'utf8')).toContain('splitRootsByTopupSkip(');
+      // The customer-page rule checks every ongoing root: no skip erases a root's terms.
+      expect(fs.readFileSync(require.resolve('../services/billing-mode-rules.js'), 'utf8')).not.toContain('splitRootsByTopupSkip');
+      // And there is no static list of "permanent" or "reversible" skip reasons.
+      expect(split).not.toMatch(/REVERSIBLE|PERMANENT|held:/);
     });
 
     describe('explicit $0 override', () => {
@@ -1422,7 +1430,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
     });
   });
 
-  describe('Codex round 21: discounted-to-zero lines, held roots, per-visit copy', () => {
+  describe('Codex round 21: discounted-to-zero lines, per-visit copy', () => {
     const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
     const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
     const setup = () => {
@@ -1454,40 +1462,14 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(customerWrites()).toHaveLength(0);
     });
 
-    test('a root on a plan hold keeps its real terms: a Bill-To payer refuses', async () => {
-      setup();
-      mockState.roots = [{ ...ROOT, payer_id: 7 }];
-      mockState.topupSkips = { 'root-1': 'plan_hold' };
-      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_payer_owned' });
-    });
-
-    test('a customer service hold keeps real terms too: a $500 template refuses', async () => {
-      setup();
-      mockState.rootPrices = { 'root-1': 500 };
-      mockState.topupSkips = { 'root-1': 'customer_service_held' };
-      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced', error: expect.stringContaining('a price of $500.00') });
-    });
-
-    test('a held discounted-to-zero root refuses as well', async () => {
+    test('a skipped discounted-to-zero root refuses as well', async () => {
       setup();
       mockState.linePrices = { 'root-1': 100 };
-      mockState.topupSkips = { 'root-1': 'plan_hold' };
+      mockState.topupSkips = { 'root-1': 'customer_inactive' };
       expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced' });
     });
 
-    test('a held unpriced root is listed as on hold and pinned: a resume after the card refuses at commit', async () => {
-      setup();
-      mockState.topupSkips = { 'root-1': 'plan_hold' };
-      const card = await propose(PER_APP);
-      expect(card.error).toBeUndefined();
-      expect(card.display.next_visits).toContain('On hold: the Pest Control plan (plan hold); it has no price and no Bill-To payer, so this change applies to it when it resumes.');
-      expect(card.display.next_visits.join(' ')).not.toContain('Not extended');
-      mockState.topupSkips = {};
-      expect(await commit(PER_APP, card.pin)).toMatchObject({ preview_changed: true });
-      expect(customerWrites()).toHaveLength(0);
-    });
-
-    test('a hold that starts after the card refuses at commit', async () => {
+    test('a skip that starts after the card refuses at commit', async () => {
       setup();
       const card = await propose(PER_APP);
       mockState.topupSkips = { 'root-1': 'plan_hold' };
@@ -1507,6 +1489,51 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(head).not.toContain('completed visit');
       const { NON_PERFORMED_VISIT_OUTCOMES } = require('../services/visit-outcomes');
       NON_PERFORMED_VISIT_OUTCOMES.forEach((o) => expect(head).toContain(o.replace(/_/g, ' ')));
+    });
+  });
+
+  describe('Codex round 22: a rider plan\'s lawn host dates', () => {
+    const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
+    const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
+    const setup = () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [];
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [ROOT];
+      mockState.rootPrices = {};
+    };
+    const HOSTS = [{ date: '2026-08-04', price: 0, linePrice: 0 }, { date: '2026-10-13', price: 0, linePrice: 0 }];
+
+    test('a later host date that carries a $500 add-on refuses, naming the date and the price', async () => {
+      setup();
+      mockState.rootPrices = { 'root-1': 500 };
+      mockState.hosts = { 'root-1': [HOSTS[0], { date: '2026-10-13', price: 500, linePrice: 500 }] };
+      expect(await propose(PER_APP)).toMatchObject({
+        code: 'billing_visits_priced',
+        error: expect.stringContaining('a price of $500.00 on the visit it adds on 2026-10-13'),
+      });
+    });
+
+    test('all-unpriced host dates pass and are pinned; a host that changes after the card refuses at commit', async () => {
+      setup();
+      mockState.hosts = { 'root-1': HOSTS };
+      const card = await propose(PER_APP);
+      expect(card.error).toBeUndefined();
+      expect(card.pin).toContain('2026-08-04=0/0,2026-10-13=0/0');
+      const run = (pin) => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: pin });
+      // A host date moves.
+      mockState.hosts = { 'root-1': [HOSTS[0], { date: '2026-10-20', price: 0, linePrice: 0 }] };
+      expect(await run(card.pin)).toMatchObject({ preview_changed: true });
+      // A host gains a line price (still $0 after discount).
+      mockState.hosts = { 'root-1': [HOSTS[0], { date: '2026-10-13', price: 0, linePrice: 100 }] };
+      expect(await run(card.pin)).toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('a walk that cannot finish refuses as unverified', async () => {
+      setup();
+      mockState.unverifiedRoots = new Set(['root-1']);
+      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced', error: expect.stringContaining('a schedule too long to check') });
     });
   });
 

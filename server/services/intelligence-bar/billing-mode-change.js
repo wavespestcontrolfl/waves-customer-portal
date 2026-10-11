@@ -317,15 +317,13 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   // eligibleSeriesParentIds is the coarse selector; the nightly writer also skips a root for a
   // deleted / held / inactive / churned customer and for an annual-prepay, plan-hold or
   // duplicate series. Those roots are asked of the top-up's own two skip rules (admin-schedule.js
-  // splitRootsByTopupSkip). A PERMANENT skip (churned or deleted customer, annual prepay,
-  // duplicate series) is kept out of the price, zero and payer checks and listed on the card. A
-  // REVERSIBLE one (plan hold, customer service hold) resumes with its terms intact, so that root
-  // keeps its real payer and price, goes through every check an ongoing root does, and is listed
-  // as on hold.
+  // splitRootsByTopupSkip). A skip is a state of the moment: any of them can clear, so NO skip
+  // erases a root's payer or price. Every root goes through the payer, price, zero and unbillable
+  // checks; a skipped one is also listed on the card as not extended now, and its skip reason is
+  // pinned (a skip that clears or starts after the card refuses as preview_changed).
   const { seriesNextOccurrencesPrice, splitRootsByTopupSkip } = require('../../routes/admin-schedule');
-  const { skipped, held } = await splitRootsByTopupSkip(dbh, customerId, rows.map((r) => r.id));
+  const { skipped } = await splitRootsByTopupSkip(dbh, customerId, rows.map((r) => r.id));
   const skipReason = new Map(skipped.map((x) => [String(x.id), x.reason]));
-  const heldReason = new Map(held.map((x) => [String(x.id), x.reason]));
   // The price the top-up would copy onto each visit it mints from the root (its own
   // resolver, admin-schedule.js seriesNextOccurrencesPrice: extension price template +
   // due add-on lines, read after the root lock). A priced template is billing the new
@@ -333,10 +331,6 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   // per-application fee.
   const out = [];
   for (const r of rows) {
-    if (skipReason.has(String(r.id))) {
-      out.push({ ...r, payer_id: null, price: 0, linePrice: 0, unverified: false, zero: null, skipped: skipReason.get(String(r.id)), held: null });
-      continue;
-    }
     const verdict = await seriesNextOccurrencesPrice(dbh, r.id);
     out.push({
       ...r,
@@ -345,8 +339,9 @@ async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
       unverified: !!(verdict && verdict.unverified),
       // 'override' | 'discounted' | 'unpriced' | null (admin-schedule.js seriesNextOccurrencesPrice).
       zero: verdict ? verdict.zero || null : null,
-      skipped: null,
-      held: heldReason.get(String(r.id)) || null,
+      // The lawn host dates a rider plan would ride: [{ date, price, linePrice }].
+      hosts: verdict ? verdict.hosts || [] : [],
+      skipped: skipReason.get(String(r.id)) || null,
     });
   }
   return out;
@@ -397,10 +392,15 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 // the billing fields, every upcoming visit's billing columns and invoices, the
 // count of visits that carry billing (always 0 on a card that was shown), the
 // collection context, and the open membership-dues invoices.
+// A rider plan's lawn host dates with their price classes, as one pin string.
+function hostsPin(hosts = []) {
+  return hosts.map((h) => `${h.date}=${h.price}/${h.linePrice}`).join(',');
+}
+
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', r.held || '']);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.zero && r.zero !== 'unpriced' ? `${r.zero}:${r.linePrice}` : '', r.skipped || '', hostsPin(r.hosts)]);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
   return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing, +facts.scopeGate])}`;
@@ -432,7 +432,7 @@ const SIDE_FLOW_CHECKS = [
   // every visit it mints, so the new lane would meet a payer-owned visit.
   ({ row, visits, facts }) => {
     if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer');
-    return facts.roots.some((r) => r.payer_id && !r.skipped)
+    return facts.roots.some((r) => r.payer_id)
       ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'billing_visits_payer_owned') : null;
   },
   // A move INTO monthly membership needs a customer the dues run would really
@@ -520,6 +520,29 @@ async function customerPageRefusal(dbh, customerId, row, fields) {
   return message ? refuse(`${message}${message.endsWith('.') ? '' : '.'} Nothing was proposed.`, 'billing_mode_rule') : null;
 }
 
+// The ongoing recurring roots (skipped or not: a skip can clear) whose next visits would carry a
+// price, a $0 that bills nothing, or a schedule too long to check.
+function ongoingRootRefusal(roots) {
+  const zeroRoot = roots.find((r) => r.zero === 'override' || r.zero === 'discounted');
+  if (zeroRoot) {
+    const plan = zeroRoot.service_type || 'recurring';
+    const why = zeroRoot.zero === 'override'
+      ? 'a $0.00 price override on each visit it adds'
+      : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
+    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
+  }
+  const pricedRoot = roots.find((r) => r.unverified || r.price > 0);
+  if (pricedRoot) {
+    // A price that only a rider plan's lawn host date carries is named by that date.
+    const host = (pricedRoot.hosts || []).find((h) => h.price > 0 && h.price === pricedRoot.price);
+    let what = `a price of ${money(pricedRoot.price)} on each visit it adds`;
+    if (host) what = `a price of ${money(host.price)} on the visit it adds on ${host.date}`;
+    if (pricedRoot.unverified) what = 'a schedule too long to check';
+    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+  }
+  return null;
+}
+
 /**
  * The refusal for applying `fields` to the customer `row`, or null. Runs at
  * proposal and again at commit under the row lock (dbh = that transaction).
@@ -548,19 +571,8 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   // prepayment, invoices, dues coverage all move completion's amount): a visit
   // that carries any of them keeps the change on the customer page, which shows
   // each visit's charge.
-  const zeroRoot = facts.roots.find((r) => r.zero === 'override' || r.zero === 'discounted');
-  if (zeroRoot) {
-    const plan = zeroRoot.service_type || 'recurring';
-    const why = zeroRoot.zero === 'override'
-      ? 'a $0.00 price override on each visit it adds'
-      : `a ${money(zeroRoot.linePrice)} line price that a discount takes to $0.00 on each visit it adds`;
-    return refuse(`This customer's ongoing ${plan} plan has ${why}; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
-  }
-  const pricedRoot = facts.roots.find((r) => r.unverified || r.price > 0);
-  if (pricedRoot) {
-    const what = pricedRoot.unverified ? 'a schedule too long to check' : `a price of ${money(pricedRoot.price)} on each visit it adds`;
-    return refuse(`This customer's ongoing ${pricedRoot.service_type || 'recurring'} plan has ${what}. The bar changes the billing type only when no upcoming visit carries a price; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
-  }
+  const rootRefusal = ongoingRootRefusal(facts.roots);
+  if (rootRefusal) return rootRefusal;
   const priced = pricedVisitCount(visits);
   if (priced > 0) {
     return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
@@ -645,8 +657,7 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
     head,
     ...tenderLines(laneAfter, charge),
     ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
-    ...facts.roots.filter((r) => r.held).map((r) => `On hold: the ${r.service_type || 'recurring'} plan (${r.held.replace(/_/g, ' ')}); it has no price and no Bill-To payer, so this change applies to it when it resumes.`),
-    ...facts.roots.filter((r) => r.skipped).map((r) => `Not extended: the ${r.service_type || 'recurring'} plan (${r.skipped.replace(/_/g, ' ')}); the nightly top-up adds no visits to it, so this change does not reach it.`),
+    ...facts.roots.filter((r) => r.skipped).map((r) => `Not extended now: the ${r.service_type || 'recurring'} plan (${r.skipped.replace(/_/g, ' ')}); the nightly top-up adds no visits to it today. It has no price and no Bill-To payer, so this change applies to it if it resumes.`),
   ];
 }
 
