@@ -244,6 +244,9 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     // A callback to a different number that merely names this parent.
     await insertChild(FAR_CHILD_SID, plainId, { to_phone: '+15555550199' });
     expect(await close(FAR_CHILD_SID)).toEqual({ applied: false, reason: 'parent_mismatch' });
+    // A callback started before the voicemail ended (the inbound call was still underway).
+    await db('call_log').where({ twilio_call_sid: FAR_CHILD_SID }).update({ to_phone: '+15555550177', created_at: new Date(Date.now() - 61 * 60 * 1000) });
+    expect(await close(FAR_CHILD_SID)).toEqual({ applied: false, reason: 'callback_before_call_end' });
 
     expect((await db('triage_items').where({ call_log_id: plainId }).first()).status).toBe('open');
     const parent = await readCall(PLAIN_PARENT_SID);
@@ -284,8 +287,13 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const parent = await readCall(FIXED_PARENT_SID);
     expect(parent.review_status).toBe('open');
     expect(parent.metadata.callback_verdict).toBeUndefined();
-    // Nothing left to undo; running again writes nothing.
-    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 0, promises: 0, standing: false });
+    // Nothing left to undo: a callback that never settled anything leaves the parent's aggregate alone.
+    await db('call_log').where({ id: parentId }).update({ review_status: 'dismissed' });
+    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'no_verdict' });
+    expect((await readCall(FIXED_PARENT_SID)).review_status).toBe('dismissed');
+    // The parent itself force-reprocessed to spam: its asks stay closed whatever the callback says.
+    await db('call_log').where({ id: parentId }).update({ processing_status: 'spam' });
+    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'parent_spam' });
   });
 
   test('two spam callbacks: correcting one keeps the parent settled on the other (promise re-pointed); correcting both gives everything back, one card per reason', async () => {

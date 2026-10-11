@@ -2073,7 +2073,7 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     .where("created_at", ">", after)
     .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
     .whereExists(function parentIsVoicemail() {
-      this.select(conn.raw("1")).from("call_log as parent").where("parent.id", commitment.call_log_id)
+      this.select(conn.raw("1")).from("call_log as parent").where({ "parent.id": commitment.call_log_id, "parent.direction": "inbound" })
         .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')");
     })
     .modify((b) => phoneWhere(b, "to_phone", phone))
@@ -2701,6 +2701,17 @@ async function refreshFulfillment(conn, callLogId, call = null) {
           if (proof.strength === "direct" && proof.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
             this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        // A callback-spam dismissal is written only while that callback still
+        // reads spam with no live token, under a share lock on its row: the
+        // correction (reopenParentOnCallbackCorrected) locks the callback FOR
+        // UPDATE, so a refresh that judged the row before a reprocess waits
+        // for the correction and then writes nothing.
+        .modify((q) => {
+          if (proof.kind !== CALLBACK_SPAM) return;
+          q.whereExists(function callbackStillSpam() {
+            this.select(conn.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(storedProof(proof, row.customer_id)), fulfilled_at: left ? null : proof.matched_at || new Date(), updated_at: new Date() });

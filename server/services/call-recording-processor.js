@@ -1053,6 +1053,14 @@ function callMetadataObject(call) {
     return {};
   }
 }
+function callEndOf(row) {
+  const started = new Date(row?.created_at || 0).getTime();
+  return started + Math.max(0, Number(row?.duration_seconds) || 0) * 1000;
+}
+function callbackAfterCallEnd(child, parent) {
+  const at = new Date(child?.created_at || 0).getTime();
+  return Number.isFinite(at) && at > callEndOf(parent);
+}
 function isVoicemailParent(row) {
   return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
 }
@@ -1075,12 +1083,16 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
   await lockTriageCall(trx, parentId);
   const childQ = trx('call_log').where({ id: call.id, processing_status: status }).whereNull('processing_token');
   if (procGeneration != null) childQ.where('processing_generation', procGeneration);
-  const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source');
+  const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at');
   if (!child || child.source !== 'admin-callback') return { reason: 'verdict_superseded' };
   const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
-    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'metadata');
+    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'metadata', 'created_at', 'duration_seconds');
   if (!parent) return { reason: 'parent_not_found' };
   if (!isVoicemailParent(parent)) return { reason: 'parent_not_voicemail' };
+  // The callback must postdate the voicemail's end: a callback started while
+  // the inbound call was still underway says nothing about what the
+  // voicemail then recorded (same boundary as the promise lifecycle's).
+  if (!callbackAfterCallEnd(child, parent)) return { reason: 'callback_before_call_end' };
   const sameCustomer = !!parent.customer_id && parent.customer_id === child.customer_id;
   if (!samePhone(parent.from_phone, child.to_phone) && !sameCustomer) return { reason: 'parent_mismatch' };
   return { child, parent };
@@ -1179,9 +1191,13 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
     const undone = await db.transaction(async (trx) => {
       const pair = await lockCallbackPair(trx, call, parentId, { status, procGeneration });
       if (!pair.parent) return { applied: false, reason: pair.reason };
+      // The parent's OWN verdict: force-reprocessed to spam since, its asks
+      // are moot on their own and stay closed whatever the callbacks say.
+      if (pair.parent.processing_status === 'spam') return { applied: false, reason: 'parent_spam' };
       const now = new Date();
       const standing = await standingSpamCallbacks(trx, pair.parent, call.id);
       const commitments = require('./call-commitments');
+      const hadVerdict = !!callMetadataObject(pair.parent).callback_verdict;
       if (standing.length) {
         // Still settled: the stamp and the promise's dismissal move to the
         // callback that still stands, so correcting THAT one later reopens.
@@ -1208,9 +1224,13 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
             .whereIn('live.status', ['open', 'in_progress']);
         })
         .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now });
-      await syncCallReviewStatus(trx, parentId, 'resolved');
-      await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
+      // Only a settlement that existed is undone: a first-time non-spam
+      // callback with nothing to give back leaves the parent's aggregate
+      // review_status and metadata exactly as they were.
+      if (cards > 0) await syncCallReviewStatus(trx, parentId, 'resolved');
+      if (hadVerdict) await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
       const promises = await commitments.reopenCallbackSpamDismissals(trx, parentId, call.id);
+      if (!hadVerdict && !cards && !promises) return { applied: false, reason: 'no_verdict' };
       return { applied: true, cards, promises, standing: false };
     });
     if (undone.applied) logger.info(`[call-proc] callback ${maskSid(callSid)} is not spam after all (${status}): parent voicemail ${undone.standing ? 'stays settled on another spam callback' : 'reopened'} (${undone.cards} card(s), ${undone.promises} promise(s))`);
