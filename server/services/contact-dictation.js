@@ -439,17 +439,32 @@ function nameSpellingCardDecision({ dictation = null, live = null, extracted = {
     : (extracted?.[f] || null)]));
   const differences = nameSpellingDifferences({ dictation, saved });
   const recorded = openCardPayload ? [openCardPayload, ...(Array.isArray(openCardPayload.also) ? openCardPayload.also : [])] : [];
-  // A refresh keeps every unresolved entry the open card already carries (its live stored value still
-  // differs from the recorded spelling) for a field this pass has no new evidence for; an entry whose
-  // live value now matches is dropped. Evidence from this pass replaces the card's entry for its field.
-  const carried = differences.length
-    ? recorded.filter((d) => d && NAME_FIELDS.includes(d.field) && d.spelled_value && saved[d.field]
-      && !differences.some((n) => n.field === d.field) && nameKey(saved[d.field]) !== nameKey(d.spelled_value))
-      .map((d) => ({ field: d.field, spelled_value: d.spelled_value, saved_value: saved[d.field], quote: d.quote ?? null, confidence: d.confidence ?? null }))
-    : [];
-  const retire = !differences.length && recorded.length > 0 && recorded.every((d) => d && NAME_FIELDS.includes(d.field)
-    && d.spelled_value && saved[d.field] && nameKey(saved[d.field]) === nameKey(d.spelled_value));
-  return { saved, differences: [...differences, ...carried], retire };
+  // The open card's own entries are judged against the live stored name, with or without new evidence:
+  // an entry whose live value now matches is dropped; one still different is kept (its stored value
+  // refreshed). Evidence from this pass replaces the card's entry for the same field.
+  const matches = (d) => !!(d && saved[d.field] && d.spelled_value && nameKey(saved[d.field]) === nameKey(d.spelled_value));
+  const unresolved = recorded.filter((d) => d && NAME_FIELDS.includes(d.field) && d.spelled_value && saved[d.field] && !matches(d))
+    .map((d) => ({ field: d.field, spelled_value: d.spelled_value, saved_value: saved[d.field], quote: d.quote ?? null, confidence: d.confidence ?? null }));
+  if (differences.length) {
+    return { saved, differences: [...differences, ...unresolved.filter((d) => !differences.some((n) => n.field === d.field))], retire: false };
+  }
+  // No new evidence: every entry matching retires the card; fewer unresolved entries than recorded is a
+  // refresh with only those; nothing changed writes nothing.
+  const retire = recorded.length > 0 && !unresolved.length && recorded.every(matches);
+  return { saved, differences: unresolved.length && unresolved.length < recorded.length ? unresolved : [], retire };
+}
+
+/**
+ * Whether a spouse / partner caller is NOT the account holder: identity is separate from authorization,
+ * so a spouse spelling their own, differently named, first and last name must not be compared with the
+ * account holder's record. The caller is the account holder only when the extracted caller name equals
+ * the record's name (first + last, letters only). Any other relationship returns false. Pure.
+ */
+function spouseCallerIsNotAccountHolder({ relationship = null, extracted = {}, live = null } = {}) {
+  if (relationship !== 'spouse_partner' || !live) return false;
+  const full = (n) => nameKey(`${n?.first_name || ''}${n?.last_name || ''}`);
+  const callerName = full(extracted);
+  return !callerName || callerName !== full(live);
 }
 
 /**
@@ -478,7 +493,7 @@ function nameSpellingCardPayload({ top, others = [], saved = {}, filingCustomer 
  * payload objects. Pure.
  */
 function unsettledNameDifferences(differences, settledPayloads, filingCustomer) {
-  const key = (d, who) => `${who}|${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
+  const key = (d, who) => `${who}|${d?.field}|${nameKey(d?.spelled_value)}|${nameKey(d?.saved_value)}`;
   const seen = new Set((settledPayloads || []).flatMap((o) => {
     const who = String((Array.isArray(o?.customer_ids) && o.customer_ids[0]) || 'unlinked');
     return [o, ...(Array.isArray(o?.also) ? o.also : [])].map((d) => key(d, who));
@@ -545,6 +560,7 @@ module.exports = {
   applyEmailDictationPolicy,
   nameSpellingDifferences,
   nameSpellingCardDecision,
+  spouseCallerIsNotAccountHolder,
   nameSpellingCardText,
   unsettledNameDifferences,
   nameSpellingCardPayload,

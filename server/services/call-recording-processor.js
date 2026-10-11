@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -4141,6 +4141,12 @@ async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, di
   if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
   const openCard = await trx('triage_items')
     .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).forUpdate().first('id', 'payload');
+  // A spouse / partner is authorized on the account but is not the account holder: unless the caller's
+  // own name is the record's, their spelling is not compared with it and an earlier card is retired.
+  if (spouseCallerIsNotAccountHolder({ relationship: extraction?.caller?.relationship_to_property, extracted, live })) {
+    if (openCard) await retireStaleNameSpellingCard(trx, callLogId, openCard, 'Superseded — the caller is not the account holder.');
+    return false;
+  }
   const { saved, differences, retire } = nameSpellingCardDecision({
     dictation, live, extracted, openCardPayload: openCard ? parseCardPayload(openCard.payload) : null,
   });
@@ -4185,9 +4191,11 @@ async function fileNameSpellingCard(conn, {
     if (nameSpellingCallExcluded({ customerId, extraction, v2Result })) {
       return await retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken });
     }
-    // No usable caller spelling in this pass: nothing to compare, and inconclusive evidence neither
-    // refreshes nor retires a card an earlier pass filed.
-    if (!(dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return false;
+    // No usable caller spelling in this pass and no open card: nothing to do. With an open card the
+    // writer still prunes it against the live stored name (an entry the office already fixed drops);
+    // inconclusive evidence itself never adds, replaces or retires an entry that still differs.
+    if (!(dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)
+      && !(await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).first('id'))) return false;
     return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, procToken }));
   } catch (err) {
     logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);

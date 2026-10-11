@@ -413,6 +413,16 @@ describe('spelled names — card-only', () => {
     });
   });
 
+  describe('settled-card dedupe key', () => {
+    test('a cosmetic change of the stored value does not re-file a settled discrepancy', () => {
+      const settled = [{ customer_ids: [], field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' }];
+      const diff = (savedValue, spelled = 'Serov') => [{ field: 'last_name', spelled_value: spelled, saved_value: savedValue }];
+      expect(unsettledNameDifferences(diff('SIROV'), settled, null)).toEqual([]);
+      expect(unsettledNameDifferences(diff("Si-rov", 'SEROV'), settled, null)).toEqual([]);
+      expect(unsettledNameDifferences(diff('Sorov'), settled, null)).toHaveLength(1);
+    });
+  });
+
   describe('nameSpellingDifferences', () => {
     const saved = { first_name: 'Quentrell', last_name: 'Sirov' };
 

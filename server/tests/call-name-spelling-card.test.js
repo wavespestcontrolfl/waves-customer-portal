@@ -293,6 +293,47 @@ describe('fileNameSpellingCard', () => {
     expect(quiet.writes).toEqual([]);
   });
 
+  test('a spouse spelling their OWN different name is not compared with the account holder; a spouse whose name is the account name is', async () => {
+    const spouse = { extraction: { caller: { relationship_to_property: 'spouse_partner' }, meta: { call_summary: 'x' } } };
+    const record = { first_name: 'Quentrell', last_name: 'Sirov' };
+    const other = makeConn({ customer: record });
+    expect(await file(other, { customerId: 'cust-1', v2Result: spouse, extracted: { first_name: 'Marta', last_name: 'Sirov' } })).toBe(false);
+    expect(other.writes).toEqual([]);
+    // An earlier card for the same call is retired, not left directing a rename.
+    const openCard = { id: 'card-1', payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } };
+    const retired = makeConn({ customer: record, openCard });
+    await file(retired, { customerId: 'cust-1', v2Result: spouse, extracted: { first_name: 'Marta', last_name: 'Sirov' } });
+    expect(retired.retired).toHaveLength(1);
+    // No extracted name at all: identity is unknown, so no comparison either.
+    expect(await file(makeConn({ customer: record }), { customerId: 'cust-1', v2Result: spouse, extracted: {} })).toBe(false);
+    // The account holder's own name (letters only, any case) is compared as before.
+    const same = makeConn({ customer: record });
+    expect(await file(same, { customerId: 'cust-1', v2Result: spouse, extracted: { first_name: 'QUENTRELL', last_name: 'Sirov' } })).toBe(true);
+  });
+
+  test('a quiet reprocess prunes an open two-field card to the entry that is still wrong', async () => {
+    const cardPayload = {
+      field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell',
+      also: [{ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', quote: TURN, confidence: 0.9 }],
+    };
+    const quiet = { emails: [], addresses: [], names: [] };
+    // Staff corrected the first name: the card is rewritten with only the last-name entry as headline.
+    const conn = makeConn({ customer: { first_name: 'Kwentrell', last_name: 'Sirov' }, openCard: { id: 'card-1', payload: cardPayload } });
+    expect(await file(conn, { customerId: 'cust-1', dictation: quiet })).toBe(true);
+    const payload = JSON.parse(conn.writes[0].row.payload);
+    expect(payload).toMatchObject({ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' });
+    expect(payload.also).toEqual([]);
+    // Nothing changed: no write, no retire.
+    const same = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard: { id: 'card-1', payload: cardPayload } });
+    expect(await file(same, { customerId: 'cust-1', dictation: quiet })).toBe(false);
+    expect(same.writes).toEqual([]);
+    expect(same.retired).toEqual([]);
+    // Both corrected: retired.
+    const both = makeConn({ customer: { first_name: 'Kwentrell', last_name: 'Serov' }, openCard: { id: 'card-1', payload: cardPayload } });
+    expect(await file(both, { customerId: 'cust-1', dictation: quiet })).toBe(false);
+    expect(both.retired).toHaveLength(1);
+  });
+
   test('a reprocess with a conflicting pair and an unchanged stored name leaves the open card open', async () => {
     const openCard = { id: 'card-1', payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } };
     const src = 'Caller: my last name is S-E-R-O-V or maybe S-E-R-A-V';
