@@ -11,7 +11,6 @@
  * A read that cannot be completed is { unavailable: true }; callers refuse rather than guess.
  */
 const crypto = require('crypto');
-const db = require('../models/db');
 
 const digits10 = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 const uniqueSorted = (list) => [...new Set(list.filter(Boolean))].sort();

@@ -716,6 +716,11 @@ async function buildProgramPlan(input, actionContext) {
   };
 }
 
+// The masked confirmation and welcome recipient lines, from the pinned contact state.
+function contactLines(plan) {
+  return require('../booking-contact-state').contactCardLines(plan.contact.state, { sendTexts: plan.sendTexts, welcome: plan.welcomeCandidate });
+}
+
 // The card, as ordered lines per kind. The contract sorts lines by kind and
 // then by text, so the bill lines carry "n of m" to keep their order.
 function cardLines(plan) {
@@ -775,7 +780,7 @@ function cardLines(plan) {
   } else {
     add('comms', 'Texts: no booking confirmation is sent (send texts is off)');
   }
-  for (const text of require('../booking-contact-state').contactCardLines(plan.contact.state, { sendTexts: plan.sendTexts, welcome: plan.welcomeCandidate })) add('comms', text);
+  contactLines(plan).forEach((text) => add('comms', text));
   add('comms', plan.welcomeCandidate
     ? `Texts and email: the new-customer welcome is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`
     : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
