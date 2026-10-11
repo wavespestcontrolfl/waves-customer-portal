@@ -1941,14 +1941,14 @@ router.post('/call', async (req, res, next) => {
     // rollback keeps its strict customer-leg proof and completion action,
     // whether the UI linked the commitment (card) or the source call (the
     // existing Call Log action). Pre-policy attempts keep the legacy proof.
-    const metadata = relatedCommitmentId ? { relatedCommitmentId } : relatedCallId ? { relatedCallId } : null;
-    const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
-    if (cardPolicy) metadata.callback_policy = 'card';
     // Who placed it, from the verified session, never the body: the callback
     // spam settlement (GATE_CALLBACK_SPAM_CLOSES_PARENT) closes a voicemail's
     // admin triage cards only on a callback an ADMIN placed, so a technician
     // who can reach this route cannot settle admin review through it.
-    if (metadata) { metadata.placed_by = req.technicianId; metadata.placed_by_role = req.techRole; }
+    const placedBy = { placed_by: req.technicianId, placed_by_role: req.techRole };
+    const metadata = relatedCommitmentId ? { relatedCommitmentId, ...placedBy } : relatedCallId ? { relatedCallId, ...placedBy } : null;
+    const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
+    if (cardPolicy) metadata.callback_policy = 'card';
     // The dial target is persisted canonical so the live-call interlock can
     // match it exactly.
     const dialTo = normalizePhone(to) || to;

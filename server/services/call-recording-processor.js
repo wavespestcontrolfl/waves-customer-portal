@@ -1145,6 +1145,18 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
   const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
     .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(settledNonSpam).limit(limit).select('cb.*');
+  // The parent re-read as something other than a voicemail (a replaced
+  // recording, settled) while the callback still reads spam: the proof no
+  // longer applies (callbackReachedSolicitor refuses it), so the stamp, the
+  // cards and the dismissal it holds are retired through the same correction
+  // (standingSpamCallbacks is empty for a non-voicemail parent).
+  const notVoicemail = (q) => q.where('cb.processing_status', 'spam').whereNull('cb.processing_token')
+    .whereRaw("NOT (p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
+    .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(settledParentSql('p'));
+  const obsoleteStamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(notVoicemail).limit(limit).select('cb.*');
+  const obsoleteDismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'")).join('call_log as p', 'p.id', 'cc.call_log_id')
+    .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(notVoicemail).limit(limit).select('cb.*');
   // Cards the nightly sweep closed on callback-spam evidence carry no stamp:
   // start from the card (resolved callback_spam, no live row for its reason,
   // parent unstamped) and every settled non-spam office callback linked to
@@ -1176,7 +1188,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
         .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
     })
     .modify(settledNonSpam).limit(limit).distinct('cb.*');
-  const callbacks = new Map([...stamped, ...dismissed, ...swept].map((cb) => [cb.id, cb]));
+  const callbacks = new Map([...stamped, ...dismissed, ...obsoleteStamped, ...obsoleteDismissed, ...swept].map((cb) => [cb.id, cb]));
   // The FORWARD half: a settlement whose promise refresh was lost (the cards
   // closed and the stamp written, the callback still settled spam, a callback
   // promise still open). Recent stamps only (7 days), judged again by
