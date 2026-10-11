@@ -56,8 +56,9 @@
  *     on a day the caller asked for (card status requested, offered or
  *     ambiguous only). Service, cadence and time of day are NOT
  *     checked: a person went to the property inside the asked days, so the
- *     scheduling doubt has nothing left to settle. One active property, no
- *     blackout day. The customer has ONE call
+ *     scheduling doubt has nothing left to settle. The visit is at the
+ *     account's one active property, which the card was filed against and
+ *     the call did not replace with another address; no blackout day. The customer has ONE call
  *     with an open card of these codes (staff_visit_arrived_after_card)
  *
  *   DISMISS (informational card aged out unactioned):
@@ -2621,7 +2622,8 @@ function arrivedVisitsAfterCard(item, mine) {
 }
 
 // not_confirmed / ambiguous_scheduling → a technician arrived at a visit staff
-// made after the card, inside the asked days, on a one-property account. Single claimant: the customer's
+// made after the card, inside the asked days, at the account's one property
+// (the premise the card was filed against). Single claimant: the customer's
 // open and in-progress cards of these codes all belong to this card's call.
 async function loadStaffVisitArrivedEvidence(conn, facts, flag) {
   const cards = facts?.visitItems.filter((i) => ARRIVED_VISIT_CODES.has(i.reason_code)) || [];
@@ -2632,10 +2634,15 @@ async function loadStaffVisitArrivedEvidence(conn, facts, flag) {
     const customer = String(item.call_customer_id);
     const calls = new Set(claimed.get(customer) || []);
     for (const other of cards) if (String(other.call_customer_id) === customer) calls.add(String(other.call_log_id));
-    // One active property only (soleProperty): with several, the arrival may
-    // have been at another home than the one the call was about.
-    if (facts.soleProperty.has(customer) && calls.size === 1 && calls.has(String(item.call_log_id))
-      && arrivedVisitsAfterCard(item, facts.visitsByCustomer.get(customer) || []).length) {
+    // The same premise binding as staff_booked_at_account_address: the account
+    // has ONE active property, the card was filed against it (its on-file
+    // snapshot), the call named no other address (none, or exactly the one on
+    // file), and the arrived visit is at that property (visitAtSoleProperty:
+    // pointing at it or at nothing, never stamped elsewhere).
+    const sole = facts.soleProperty.get(customer);
+    if (sole && filedAgainstProperty(item, sole) && requestedAddressIsOnFile(item)
+      && calls.size === 1 && calls.has(String(item.call_log_id))
+      && arrivedVisitsAfterCard(item, facts.visitsByCustomer.get(customer) || []).some((v) => visitAtSoleProperty(v, sole))) {
       flag(item.id, 'staff_visit_arrived_after_card');
     }
   }

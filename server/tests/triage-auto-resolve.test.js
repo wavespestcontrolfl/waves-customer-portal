@@ -2134,7 +2134,8 @@ describe('staff_visit_arrived_after_card', () => {
     status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
     preferred_time_of_day: 'unspecified', requested_date_range_start: '2026-10-09', requested_date_range_end: '2026-10-09', ...over,
   });
-  const askPayload = (code, windowOver = {}, status = 'requested') => ({ flag: code, confidence: 0.6, scheduling_status: status, scheduling_window: windowOf({ status, ...windowOver }) });
+  const HOME = { address_line1: '1234 Sample Palm Dr', address_line2: null, city: 'Sampleton', zip: '34200' };
+  const askPayload = (code, windowOver = {}, status = 'requested') => ({ flag: code, confidence: 0.6, scheduling_status: status, on_file_address: HOME, scheduling_window: windowOf({ status, ...windowOver }) });
   const card = (over = {}) => item({ id: 't1', call_log_id: 'call-1', call_customer_id: 'c1', created_at: CARD_AT, call_created_at: '2026-10-09T13:50:00Z', ...over });
   const notConfirmed = (over = {}) => card({ reason_code: 'not_confirmed', payload: askPayload('not_confirmed', { preferred_time_of_day: 'morning' }), ...over });
   const ambiguous = (over = {}) => card({ reason_code: 'ambiguous_scheduling', payload: askPayload('ambiguous_scheduling', {}, 'ambiguous'), ...over });
@@ -2263,7 +2264,7 @@ describe('staff_visit_arrived_after_card', () => {
 
     test('closes the audited not_confirmed and ambiguous shapes', async () => {
       const nc = notConfirmed();
-      const amb = ambiguous({ id: 't2', call_log_id: 'call-2', call_customer_id: 'c2', payload: askPayload('ambiguous_scheduling', {}, 'ambiguous') });
+      const amb = ambiguous({ id: 't2', call_log_id: 'call-2', call_customer_id: 'c2', payload: { ...askPayload('ambiguous_scheduling', {}, 'ambiguous'), on_file_address: { ...HOME, address_line1: '500 Sample Tower Blvd' } } });
       const ev = await run([nc, amb], fakeConn({
         visits: [visit({ customer_id: 'c1' }), visit({ id: 'v2', customer_id: 'c2', status: 'on_site', created_at: after(150), window_start: '10:00:00' })],
         cards: [claim('t1', 'call-1'), claim('t2', 'call-2', 'c2')],
@@ -2279,6 +2280,23 @@ describe('staff_visit_arrived_after_card', () => {
       expect((await run([notConfirmed()], fakeConn({ ...args, properties: [...oneHome, second] }))).get('t1')).toBeUndefined();
       expect((await run([notConfirmed()], fakeConn({ ...args, properties: [] }))).get('t1')).toBeUndefined();
       expect((await run([notConfirmed()], fakeConn(args))).get('t1')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    // Codex r4: one property on the account is not enough; the card and the visit must both be at it.
+    test('the card must be filed against the property, the call must name no other address, and the visit must be there', async () => {
+      const args = (v = visit()) => ({ visits: [v], cards: [claim('t1', 'call-1')] });
+      const flagged = async (c, a = args()) => (await run([c], fakeConn(a))).get('t1')?.staff_visit_arrived_after_card;
+      expect(await flagged(notConfirmed())).toBe(true);
+      // No on-file snapshot, or a snapshot of another address.
+      expect(await flagged(notConfirmed({ payload: { ...askPayload('not_confirmed'), on_file_address: null } }))).toBeUndefined();
+      expect(await flagged(notConfirmed({ payload: { ...askPayload('not_confirmed'), on_file_address: { ...HOME, address_line1: '77 Sample Shore Ln' } } }))).toBeUndefined();
+      // The call named a different address.
+      const elsewhere = { street_line_1: '77 Sample Shore Ln', street_line_2: null, city: 'Sampleton', postal_code: '34200', raw_text: '77 Sample Shore Ln', additional_properties: 0 };
+      expect(await flagged(notConfirmed({ payload: askPayload('not_confirmed', { requested_address: elsewhere }) }))).toBeUndefined();
+      // The visit is stamped to another address, or points at another property.
+      expect(await flagged(notConfirmed(), args(visit({ service_address_line1: '77 Sample Shore Ln', service_address_city: 'Sampleton', service_address_zip: '34200' })))).toBeUndefined();
+      expect(await flagged(notConfirmed(), args(visit({ property_id: 'p-other' })))).toBeUndefined();
+      expect(await flagged(notConfirmed(), args(visit({ property_id: 'p1' })))).toBe(true);
     });
 
     test('a not_confirmed and an ambiguous card of the SAME call both close', async () => {
