@@ -2718,6 +2718,16 @@ async function refreshFulfillment(conn, callLogId, call = null) {
     .where({ call_log_id: callLogId })
     .whereNull("human_state")
     .whereRaw(...autoClosedSql(promiseEvidenceCloseLive()));
+  // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a promise kept on a DIRECT
+  // outbound-call proof is judged again too (the refreshable scope, so a
+  // card's confirmed row included): that call reprocessed to spam is a
+  // solicitor, not the office keeping its word, and the resolvers now refuse
+  // it (settledNonSpamCallback) or read it as callback_spam.
+  const keptOnCall = require("../config/feature-gates").isEnabled("callbackSpamClosesParent")
+    ? await conn("call_commitments").where({ call_log_id: callLogId, status: "fulfilled" }).whereRaw(...refreshableVerdictSql())
+      .whereRaw("fulfillment ->> 'record_type' = 'call_log' AND fulfillment ->> 'kind' = 'outbound_call' AND fulfillment ->> 'strength' = 'direct'")
+      .whereNotIn("id", kept.map((k) => k.id))
+    : [];
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -2812,9 +2822,9 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  const rejudged = await rejudgeAutoClosed(conn, kept, row, callLogId);
+  const rejudged = await rejudgeAutoClosed(conn, [...kept, ...keptOnCall], row, callLogId);
   failed += rejudged.failed;
-  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
+  return { checked: open.length + kept.length + keptOnCall.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
 }
 
 // The rows refreshFulfillment re-judges after they closed: a slot booking's
@@ -2871,22 +2881,36 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
     const stored = keeps ? storedProof(keeps, row.customer_id, prior?.closed_at) : null;
     // Same record, judged for the same customer: nothing to write.
     if (stored && SAME_CLOSE_KEYS.every((k) => (stored[k] ?? null) === (prior?.[k] ?? null))) continue;
+    // The row as read: status, human state (NULL for every evidence close;
+    // a callback card's confirmed row only via keptOnCall) and version.
     const unchanged = (q) => q
       .where({ id: c.id, status: c.status })
-      .whereNull("human_state")
+      .whereRaw("human_state IS NOT DISTINCT FROM ?", [c.human_state ?? null])
       .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at]);
     if (keeps) {
       // Kept by another record now (another visit at the slot, a canonical
       // proof, another follow-up): same customer guard as the open-row write.
-      const left = keeps.kind === CUSTOMER_LEFT;
-      await unchanged(conn("call_commitments"))
+      // A callback that reached a solicitor dismisses, as on an open row:
+      // written only while that callback still reads spam (share lock), with
+      // the promise's reminders closed in the same transaction.
+      const left = keeps.kind === CUSTOMER_LEFT || keeps.kind === CALLBACK_SPAM;
+      const settle = (t) => unchanged(t("call_commitments"))
         .modify((q) => {
           if (keeps.strength === "direct" && keeps.basis !== SLOT_BOOKING_BASIS) return;
           q.whereExists(function callStillHasThatCustomer() {
-            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+            this.select(t.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        .modify((q) => {
+          if (keeps.kind !== CALLBACK_SPAM) return;
+          q.whereExists(function callbackStillSpam() {
+            this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": keeps.record_id, "cb.processing_status": "spam" }).whereNull("cb.processing_token").forShare();
           });
         })
         .update({ status: left ? "dismissed" : "fulfilled", fulfillment: JSON.stringify(stored), fulfilled_at: left ? null : keeps.matched_at || new Date(), updated_at: new Date() });
+      if (keeps.kind !== CALLBACK_SPAM) { await settle(conn); continue; }
+      const dismissSpam = async (t) => { if ((await settle(t)) > 0) await closeCallbackReminders(t, c.id); };
+      if (conn.isTransaction) await dismissSpam(conn); else await conn.transaction(dismissSpam);
       continue;
     }
     // No longer kept: owed again, carrying whatever hint the facts support.
@@ -3077,7 +3101,24 @@ async function listLapsedEvidenceClosedCallIds(conn) {
               AND (cc.fulfillment ->> 'matched_at') <= to_char(cc.due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))`,
     [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000).toISOString(), CUSTOMER_LEFT, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT, CUSTOMER_LEFT],
   );
-  return (rows?.rows || []).map((r) => r.call_log_id);
+  const ids = (rows?.rows || []).map((r) => r.call_log_id);
+  // A promise kept on a DIRECT outbound-call proof (resolveCallback's, no
+  // closed_by marker) whose call is no longer a settled non-spam call: it was
+  // reprocessed to spam, or is back in a pass that may yet say so. Listed so
+  // refreshFulfillment (keptOnCall) judges it again. Partial index
+  // call_commitments_direct_call_proof_index (migration 20261010300000).
+  if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) {
+    const direct = await conn.raw(
+      `SELECT DISTINCT cc.call_log_id
+         FROM call_commitments cc
+         JOIN call_log ev ON ev.id = (cc.fulfillment ->> 'record_id')::uuid
+        WHERE cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
+          AND (cc.fulfillment ->> 'kind') = 'outbound_call'
+          AND NOT ${settledNonSpamCallbackSql("ev")}`,
+    );
+    for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
+  }
+  return ids;
 }
 
 // ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
