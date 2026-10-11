@@ -882,13 +882,29 @@ function dropUnneededCallCards(flags, extraction, options) {
 //    so). The model's own verdict is recommended_disposition
 //    no_action_needed, and the call left no open thread: no time agreed,
 //    offered or accepted, no promised callback or follow-up, no promised
-//    quote, not a voicemail. Such a call holds on "not_confirmed" or on its
+//    quote, not a voicemail. Scheduling status 'requested' means only that
+//    the caller wanted a visit, not that the caller dropped it, so on its own
+//    it keeps every card: it qualifies only with the call's own evidence
+//    that the request ended (the caller declined the stated price and
+//    accepted no other, or the urgency reads no_appointment_needed). Such a call holds on "not_confirmed" or on its
 //    address, and the card that files is nobody's work. Returned as card
 //    codes, not as a flag filter, because not_confirmed is the routing
 //    reason and never one of the call's flags. The routing verdict and the
 //    flags are untouched. A stated street keeps the address cards, for the
 //    same reason as rule 3 (Step 3's backfill can copy it onto a record).
-const NO_ACTION_SCHEDULING_STATUSES = new Set(['none', 'requested']);
+// The caller said no to the price staff stated, and said yes to no other.
+function callerDeclinedThePrice(serviceRequest) {
+  const sr = serviceRequest || {};
+  const all = [sr.price, ...(Array.isArray(sr.prices) ? sr.prices : [])].filter(Boolean);
+  if (all.some((p) => p.caller_response === 'accepted' || p.accepted === true)) return false;
+  return sr.price?.caller_response === 'declined';
+}
+
+function requestedVisitWasDropped(extraction) {
+  const sr = extraction?.service_request || {};
+  return sr.urgency === 'no_appointment_needed' || callerDeclinedThePrice(sr);
+}
+
 const NO_ACTION_HOLD_CARDS = ['not_confirmed', 'ambiguous_scheduling'];
 const NO_ACTION_ADDRESS_CARDS = ['missing_service_address', 'address_unverifiable', 'address_unverified', 'low_confidence_address'];
 
@@ -896,7 +912,8 @@ function callEndedWithNothingToDo(extraction) {
   if (!extraction || extraction.recommended_disposition !== 'no_action_needed') return false;
   if (extraction.meta?.is_voicemail === true) return false;
   const scheduling = extraction.scheduling || {};
-  if (!NO_ACTION_SCHEDULING_STATUSES.has(String(scheduling.status || 'none'))) return false;
+  const status = String(scheduling.status || 'none');
+  if (status === 'requested' ? !requestedVisitWasDropped(extraction) : status !== 'none') return false;
   const openThread = scheduling.confirmed_start_at
     || scheduling.agent_committed_booking === true
     || scheduling.caller_accepted_slot === true

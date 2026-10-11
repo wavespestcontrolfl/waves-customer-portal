@@ -150,8 +150,25 @@ describe('noActionCallCards: a call that ended with nothing to do', () => {
     ]);
   });
 
-  test('a caller who asked for a visit and then declined (status requested) files no not_confirmed card', () => {
-    expect(noActionCallCards(done({ scheduling: { status: 'requested' } }))).toContain('not_confirmed');
+  test('a caller who asked for a visit and then dropped it (declined the price, or no appointment needed) files no not_confirmed card', () => {
+    const declined = { quote_promised: false, price: { amount_usd: 75, caller_response: 'declined', accepted: false } };
+    expect(noActionCallCards(done({ scheduling: { status: 'requested' }, service_request: declined }))).toContain('not_confirmed');
+    expect(noActionCallCards(done({ scheduling: { status: 'requested' }, service_request: { urgency: 'no_appointment_needed' } }))).toContain('not_confirmed');
+  });
+
+  // Codex r1: 'requested' says the caller wanted a visit, not that the caller dropped it.
+  test('a requested visit with no evidence that it ended keeps every card', () => {
+    const stillOpen = [
+      {},
+      { urgency: 'within_48_hours' },
+      { price: { amount_usd: 75, caller_response: 'no_response' } },
+      { price: { amount_usd: 75, caller_response: 'not_at_issue' } },
+      { price: { amount_usd: 75, caller_response: 'accepted', accepted: true } },
+      { price: { amount_usd: 250, caller_response: 'declined' }, prices: [{ amount_usd: 250, caller_response: 'declined' }, { amount_usd: 200, caller_response: 'accepted' }] },
+    ];
+    for (const sr of stillOpen) {
+      expect(noActionCallCards(done({ scheduling: { status: 'requested' }, service_request: sr }))).toEqual([]);
+    }
   });
 
   test('a stated street keeps every address card (from the extraction or the merged record)', () => {
