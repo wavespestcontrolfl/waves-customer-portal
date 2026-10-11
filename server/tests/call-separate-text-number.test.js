@@ -88,6 +88,23 @@ describe('only a valid V2 payload speaks for the no-text fields', () => {
     expect(raw.caller.ani_cannot_text).toBe(true);
   });
 
+  test('a failed payload also loses the model-emitted callback_number_needed flag unless the caller disclaimed the number (codex r14 P1)', () => {
+    const flagged = { ...raw, triage_flags: ['callback_number_needed', 'out_of_service_area'] };
+    expect(noTextSafeExtraction({ status: 'schema_failed', extraction: flagged }).triage_flags).toEqual(['out_of_service_area']);
+    const disclaimed = { ...flagged, caller: { ...flagged.caller, caller_id_disclaimed: true } };
+    expect(noTextSafeExtraction({ status: 'schema_failed', extraction: disclaimed }).triage_flags).toEqual(['callback_number_needed', 'out_of_service_area']);
+    expect(flagged.triage_flags).toHaveLength(2);
+  });
+
+  test('card build: an impossible NANP text number is not shown; the card write syncs the call review status in the same transaction (codex r14 P2s)', () => {
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = src.indexOf('const buildTextNumberCardItem = async');
+    expect(src.slice(at, at + 900)).toContain('&& !isImpossibleNanpPhone(callerForText.text_phone_e164)');
+    const w = src.indexOf('const writeTextNumberCard = async (trx, item');
+    const body = src.slice(w, src.indexOf('const fileTextNumberCard = async', w));
+    expect(body).toContain('await syncCallReviewStatus(trx, call.id);');
+  });
+
   test('a valid payload is returned untouched; a payload without the fields is not cloned; null passes through', () => {
     expect(noTextSafeExtraction({ status: 'valid', extraction: raw })).toBe(raw);
     const plain = v2();
@@ -205,7 +222,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
 
   test('no automatic use of text_phone_e164: the processor reads it only to fill the card payload', () => {
     const uses = src.split('\n').filter((l) => /text_phone_e164/.test(l) && !/^\s*\/\//.test(l));
-    expect(uses).toHaveLength(2); // the isDialablePhone check and the value it guards
+    expect(uses).toHaveLength(3); // the isDialablePhone check, the impossible-number check, and the value they guard
     expect(src).not.toMatch(/callTextNumber|smsRecipient\s*=\s*[^;]*text/);
     // Step 3 is exactly as on main
     expect(src).toContain('const phone = resolveCallContactPhone(call, extracted.phone);');

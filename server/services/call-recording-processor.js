@@ -11144,7 +11144,10 @@ const CallRecordingProcessor = {
     const buildTextNumberCardItem = async (ext, linkedCustomerId) => {
         const callerForText = ext?.caller;
         const aniPhone = firstExternalPhone(contactPhone);
+        // Same bar as the other spoken numbers: an impossible NANP value (a transcription slip) is
+        // never shown as "texts go to" — the card asks staff to copy it into the account (codex r14 P2).
         const spokenText = isDialablePhone(callerForText?.text_phone_e164) && !samePhone(callerForText.text_phone_e164, aniPhone)
+          && !isImpossibleNanpPhone(callerForText.text_phone_e164)
           ? callerForText.text_phone_e164 : null;
         const onFile = linkedCustomerId ? await db('customers').where({ id: linkedCustomerId }).first('phone') : null;
         return buildTriageItem({
@@ -11180,6 +11183,9 @@ const CallRecordingProcessor = {
         await trx('triage_items').insert(item)
           .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
       }
+      // The call-level aggregate follows the card in the same locked transaction: the tech follow-up
+      // and voicemail branches return before the pass's usual review-status write (codex r14 P2).
+      await syncCallReviewStatus(trx, call.id);
     };
     const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {
       try {

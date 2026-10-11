@@ -92,7 +92,12 @@ function noTextSafeExtraction(v2Result, extraction = v2Result?.extraction) {
   if (!extraction || v2Result?.status === 'valid') return extraction;
   const caller = extraction.caller;
   if (!caller || (caller.ani_cannot_text == null && caller.text_phone_e164 == null)) return extraction;
-  return { ...extraction, caller: { ...caller, ani_cannot_text: null, text_phone_e164: null } };
+  // The model's own callback_number_needed flag rides along: on a failed payload it can only be
+  // justified by a disclaimer (caller_id_disclaimed true); otherwise it came from the no-text claim
+  // being cleared here and must go with it, or the shadow bridge arms the hold anyway (codex r14 P1).
+  const flags = Array.isArray(extraction.triage_flags) && caller.caller_id_disclaimed !== true
+    ? extraction.triage_flags.filter((f) => f !== 'callback_number_needed') : extraction.triage_flags;
+  return { ...extraction, triage_flags: flags, caller: { ...caller, ani_cannot_text: null, text_phone_e164: null } };
 }
 
 // True only for an explicit ani_cannot_text (schema 1.28.0). One reader for the hold, the
