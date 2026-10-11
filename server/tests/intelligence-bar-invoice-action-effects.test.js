@@ -94,8 +94,19 @@ describe('planSendEffects', () => {
     Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'autopay_hold', cadence: [3, 7, 14, 30] });
     expect((await effects.planSendEffects(invoice(), customer, {})).digest).not.toBe(base.digest);
     Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 10, 17, 30, 60, 90] });
-    // The cadence is shown on the card, not pinned: a ladder switch changes the sentence, not the facts.
-    expect((await effects.planSendEffects(invoice(), customer, {})).digest).toBe(base.digest);
+    // The reminders' step days are pinned (GATE_DUNNING_LADDER_90 changes them), not only worded on the card.
+    const ladder = await effects.planSendEffects(invoice(), customer, {});
+    expect(ladder.digest).not.toBe(base.digest);
+    expect(ladder.effects.find((e) => e.key === 'followups').facts).toEqual({ cadence: [3, 10, 17, 30, 60, 90] });
+  });
+
+  test('the digest covers every field of an effect except its wording', () => {
+    const one = { key: 'x', applies: true, state: 's', line: 'words', kind: 'comms', facts: { a: 1 } };
+    const digest = (e) => effects.effectsDigest([e]);
+    expect(digest({ ...one, line: 'other words' })).toBe(digest(one));
+    for (const change of [{ key: 'y' }, { applies: false }, { state: 't' }, { kind: 'operational' }, { facts: { a: 2 } }, { later_field: 1 }]) {
+      expect(digest({ ...one, ...change })).not.toBe(digest(one));
+    }
   });
 
   test('a source that cannot be read throws, so the card refuses instead of showing the effect as absent', async () => {

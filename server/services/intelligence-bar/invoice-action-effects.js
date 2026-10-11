@@ -34,11 +34,14 @@ const etStamp = (value) => {
 };
 const shortId = (id) => String(id).slice(0, 8);
 
-const effect = (key, applies, state, line, kind = 'operational') => ({ key, applies: Boolean(applies), state: String(state), line: line || null, kind });
+// facts: anything else the effect depends on that is not in its state (the reminders' step days, which GATE_DUNNING_LADDER_90
+// changes). It is part of the pin; `line` is only the card's words and is not.
+const effect = (key, applies, state, line, kind = 'operational', facts = null) => ({ key, applies: Boolean(applies), state: String(state), line: line || null, kind, ...(facts ? { facts } : {}) });
 
-// The pin: every effect's key, whether it happens, and the fact behind it.
+// The pin: the whole effect object except its wording (`line`), so any field an effect gains is pinned too: key, whether it
+// happens, the fact behind it, its kind, and its facts.
 const effectsDigest = (effects) => crypto.createHash('sha256')
-  .update(JSON.stringify(effects.map((e) => [e.key, e.applies, e.state]))).digest('hex').slice(0, 32);
+  .update(JSON.stringify(effects.map(({ line, ...pinned }) => pinned))).digest('hex').slice(0, 32);
 
 // Handler calls -> the effect that represents each one. `null` effect = cannot apply to a bar action (reason given).
 const SEND_CALL_COVERAGE = {
@@ -128,7 +131,7 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
   const cadence = `Day ${followup.cadence.join(', ')}`;
   const followups = effect('followups', followup.arms, followup.state,
     `Sending this invoice also arms billing reminders on ${cadence} unless Auto Pay or a payment plan suppresses them (currently: ${followupStateText(followup.state)})`,
-    'comms');
+    'comms', { cadence: followup.cadence });
 
   const review = require('../invoice-delivery-review').reviewDecisionForInvoice(invoice, requestReview, null).requestReview === true;
   return finish([

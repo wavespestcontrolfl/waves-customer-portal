@@ -440,15 +440,28 @@ async function recordApprovedCloseoutRetired(invoiceId, claimToken, { conn = db 
     resource_type: 'invoices',
     resource_id: invoiceId,
     metadata: { invoiceId: String(invoiceId), claimToken: claimToken ? String(claimToken) : null },
+    // Critical: a retirement that did not land leaves an unbound pin, so the failure must reach the caller.
+    critical: true,
     trx: conn,
   });
+}
+
+// A pin with no delivery and no retirement that nothing holds any more: the claim token is not the invoice's live claim
+// (status 'sending' under that token) and the pin is older than the stale-claim window (invoice.js STALE_SENDING_SQL, 10 minutes).
+// Such a pin is finished business: a live claim would still hold the invoice, and a stale one is parked for review.
+const CLOSEOUT_PIN_STALE_MS = 10 * 60 * 1000;
+function pinNoLongerHeld(invoice, token, pinCreatedAt, now = Date.now()) {
+  const holds = invoice && invoice.status === 'sending' && invoice.send_claim_token && String(invoice.send_claim_token) === String(token);
+  const created = pinCreatedAt ? new Date(pinCreatedAt).getTime() : NaN;
+  return !holds && Number.isFinite(created) && now - created > CLOSEOUT_PIN_STALE_MS;
 }
 
 // What the sweep may do for an invoice's CURRENT delivery episode:
 //   { target }   the newest delivery row whose recorded stamp is still the invoice's newest stamp names the claim token
 //                that delivered it; the pin written under that token carries the target.
 //   { unbound }  the newest pin has no delivery row at all and was not retired: its claim may have delivered with no
-//                marker, so the sweep must not close anything the card did not approve (fail closed).
+//                marker, so the sweep must not close anything the card did not approve (fail closed) - until nothing holds
+//                the pin any more (pinNoLongerHeld), when it counts as retired and the invoice is judged as any page send.
 //   null         no pin, a retired pin, or a pin whose episode a later send replaced (a page send is judged as always).
 // Throws on a failed read (the sweep skips the row and the next pass re-reads).
 async function approvedCloseoutTargetFor(conn, invoiceId) {
@@ -463,12 +476,14 @@ async function approvedCloseoutTargetFor(conn, invoiceId) {
     const target = pin ? parseMeta(pin.metadata).approvedTarget : null;
     return target ? { target } : null;
   }
-  const newest = await ofInvoice(CLOSEOUT_PIN_ACTION).orderBy('created_at', 'desc').first('metadata');
+  const newest = await ofInvoice(CLOSEOUT_PIN_ACTION).orderBy('created_at', 'desc').first('metadata', 'created_at');
   const token = newest ? parseMeta(newest.metadata).claimToken : null;
   if (!token) return null;
   const finished = (await ofInvoice(CLOSEOUT_PIN_DELIVERED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'))
     || (await ofInvoice(CLOSEOUT_PIN_RETIRED_ACTION).whereRaw("metadata->>'claimToken' = ?", [String(token)]).first('metadata'));
-  return finished ? null : { unbound: true };
+  if (finished) return null;
+  const live = await conn('invoices').where({ id: invoiceId }).first('status', 'send_claim_token');
+  return pinNoLongerHeld(live, token, newest.created_at) ? null : { unbound: true };
 }
 
 // The sweeps' PREFILTER for the prepayment rule (issuedCloseoutVisitRefusal,
@@ -878,4 +893,6 @@ module.exports = {
   recordApprovedCloseoutTarget,
   recordApprovedCloseoutDelivery,
   recordApprovedCloseoutRetired,
+  pinNoLongerHeld,
+  CLOSEOUT_PIN_STALE_MS,
 };

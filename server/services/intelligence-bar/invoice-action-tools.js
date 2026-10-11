@@ -346,6 +346,11 @@ const SEND_OUTCOME_RULES = [
   [(c) => c.json.code === 'INVOICE_DELIVERY_RECORD_FAILED',
     (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code, text: c.text, email: c.email,
       error: 'The invoice went out, but the app could not record it as sent. Check the invoice by hand and do not send it again.' })],
+  // Nothing was sent and the invoice is as it was, but the visit closeout pin could not be retired: the visit will not close
+  // by itself (a person closes it). Not a retry-and-forget failure.
+  [(c) => c.json.code === 'INVOICE_CLOSEOUT_PIN_RETIRE_FAILED',
+    (c) => ({ ...c.base, failed: true, code: c.json.code, text: c.text, email: c.email,
+      error: 'The invoice was not sent, but the visit closeout record could not be cleared. The visit will not close by itself: close it by hand.' })],
   [(c) => c.unknown && !c.sent,
     (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code || 'delivery_uncertain', text: c.text, email: c.email,
       error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' })],

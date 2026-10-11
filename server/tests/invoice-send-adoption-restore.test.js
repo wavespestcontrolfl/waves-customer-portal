@@ -1246,3 +1246,88 @@ describe('the approved invoice text at the text leg', () => {
     expect(templates.getTemplate).toHaveBeenLastCalledWith('invoice_sent', expect.any(Object), expect.any(Object), {});
   });
 });
+
+// Round 11 (PR #6117): the template CHOICE is a pure function of the invoice, the customer and the facts; the renderer asks for
+// the next choice while a row renders nothing.
+describe('chooseInvoiceSmsTemplate', () => {
+  const choose = InvoiceService.chooseInvoiceSmsTemplate;
+  const invoice = { service_type: 'Quarterly Pest Control' };
+  const customer = { first_name: 'Pat' };
+  const ctx = (extra = {}) => ({
+    prepayActive: false, invoiceSmsActive: true, preServiceCopy: false, coverage: null, serviceDateIsTodayET: false,
+    formattedDate: 'Friday, January 2, 2099', payUrl: 'https://waves.test/l/x', ...extra,
+  });
+  const chain = (c) => { const keys = []; for (let n = choose(invoice, customer, c, keys); n; n = choose(invoice, customer, c, keys)) keys.push(n.key); return keys; };
+
+  test('an ordinary invoice gets the standard copy, with the service date', () => {
+    expect(choose(invoice, customer, ctx())).toEqual({
+      key: 'invoice_sent',
+      vars: { first_name: 'Pat', service_type: 'Quarterly Pest Control', service_date: 'Friday, January 2, 2099', pay_url: 'https://waves.test/l/x' },
+    });
+    expect(choose(invoice, customer, ctx({ formattedDate: '' })).vars.service_date).toBe('today');
+  });
+
+  test('a pre-service invoice prefers the upfront variant and falls back to the standard copy', () => {
+    expect(chain(ctx({ preServiceCopy: true }))).toEqual(['invoice_sent_upfront', 'invoice_sent']);
+    expect(choose(invoice, customer, ctx({ preServiceCopy: true })).vars).toEqual({ first_name: 'Pat', service_type: 'Quarterly Pest Control', pay_url: 'https://waves.test/l/x' });
+  });
+
+  test('an active annual prepay comes first, with the coverage summary; the first-visit clause only on the service day', () => {
+    const coverage = { coverageSummary: '4 visits this year', coverageCount: 4 };
+    expect(chain(ctx({ prepayActive: true, coverage, preServiceCopy: true }))).toEqual(['invoice_sent_annual_prepay', 'invoice_sent_upfront', 'invoice_sent']);
+    expect(choose(invoice, customer, ctx({ prepayActive: true, coverage })).vars).toMatchObject({ coverage_summary: '4 visits this year', first_visit_clause: '' });
+    expect(choose(invoice, customer, ctx({ prepayActive: true, coverage, serviceDateIsTodayET: true })).vars.first_visit_clause).toBe(" Today's visit is the first of 4.");
+    expect(choose(invoice, customer, ctx({ prepayActive: true })).vars.coverage_summary).toBe('your annual service plan');
+  });
+
+  test('a disabled base switch drops both variants; a missing first name stays empty for the renderer; nothing left is null', () => {
+    expect(chain(ctx({ prepayActive: true, preServiceCopy: true, invoiceSmsActive: false }))).toEqual(['invoice_sent']);
+    expect(choose(invoice, {}, ctx()).vars.first_name).toBe('');
+    expect(choose(invoice, customer, ctx(), ['invoice_sent'])).toBeNull();
+  });
+
+  test('the renderer falls through a variant whose row renders nothing to the next choice', async () => {
+    const templates = require('../routes/admin-sms-templates');
+    templates.getTemplate.mockReset();
+    templates.getTemplate.mockImplementation(async (key) => (key === 'invoice_sent' ? 'standard text' : null));
+    const db2 = require('../models/db');
+    db2.mockImplementation((table) => { if (table === 'scheduled_services') return customerQuery({ status: 'pending' }); throw new Error(table); });
+    const out = await InvoiceService.renderInvoiceSmsBody({ id: 'inv-9', service_date: '2099-01-02', scheduled_service_id: 'svc-1' }, { first_name: 'Pat' }, 'https://x');
+    expect(out).toEqual({ body: 'standard text', renderedTemplateKey: 'invoice_sent' });
+    expect(templates.getTemplate.mock.calls.map((c) => c[0])).toEqual(['invoice_sent_upfront', 'invoice_sent']);
+  });
+});
+
+// Round 11: the retirement of a handed-back claim's closeout pin is a critical write, and its failure reaches the result.
+describe('a handed-back bar claim whose pin cannot be retired', () => {
+  const closeout = require('../services/invoice-issued-closeout');
+  const { approvedInvoiceVersionDigest } = require('../services/invoice-helpers');
+  const base = { id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null, token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null, line_items: [{ description: 'Service', amount: 100 }] };
+  test('the send reports it and the bar words it as "close the visit by hand"', async () => {
+    const invoices = makeInvoicesTable({ ...base });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return makeSmsLogTable([]).query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: null });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(table);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendInvoiceEmail.mockResolvedValue({ ok: false, error: 'SMTP rejected' });
+    closeout.recordApprovedCloseoutRetired.mockRejectedValueOnce(new Error('audit down'));
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
+      expectedVersion: { updatedAtMs: null, digest: approvedInvoiceVersionDigest(base), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: async () => null },
+      refusalOnly: true,
+    });
+    expect(result).toMatchObject({ ok: false, code: 'INVOICE_CLOSEOUT_PIN_RETIRE_FAILED', closeoutPinRetireFailed: true, error: expect.stringMatching(/close it by hand/) });
+    // The claim itself was handed back.
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test('the retirement is written critical, so a failed insert throws', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice-issued-closeout.js'), 'utf8');
+    const fn = source.slice(source.indexOf('async function recordApprovedCloseoutRetired'), source.indexOf('// A pin with no delivery and no retirement'));
+    expect(fn).toMatch(/critical: true/);
+  });
+});

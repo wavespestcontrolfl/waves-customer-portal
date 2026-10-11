@@ -320,6 +320,7 @@ describe('send_invoice commit', () => {
     ['the lines (same total)', () => { state.invoices[0].line_items = JSON.stringify([{ description: 'Quarterly Pest Control', amount: 129 }]); }],
     ['the row version', () => { state.invoices[0].updated_at = new Date('2099-01-03T00:00:00Z'); }],
     ['the email recipient', () => { Invoices.getInvoiceDeliveryRecipients.mockResolvedValue(recipients({ emailRecipient: { email: 'other@example.com' } })); }],
+    ['the reminder ladder (GATE_DUNNING_LADDER_90) after the card', () => { Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 10, 17, 30, 60, 90] }); }],
     ['the email-content gates (round 9 pin)', () => { jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((gate) => gate === 'balanceVisibility'); }],
   ])('drift in %s refuses with preview_changed and sends nothing', async (_label, mutate) => {
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
@@ -364,6 +365,12 @@ describe('send_invoice commit', () => {
       await run();
       expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version).not.toHaveProperty('smsDigest');
     });
+  });
+
+  test('round 11: a handed-back send whose closeout pin could not be retired says so, and tells the admin to close the visit by hand', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 400, json: { ok: false, code: 'INVOICE_CLOSEOUT_PIN_RETIRE_FAILED', error: 'x', sms: { ok: false }, email: { ok: false, error: 'SMTP rejected' } } });
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    await expect(run()).resolves.toMatchObject({ failed: true, code: 'INVOICE_CLOSEOUT_PIN_RETIRE_FAILED', error: expect.stringMatching(/close it by hand/) });
   });
 
   test('the card pins the approved version, and a claim that finds it changed reports preview_changed with nothing sent', async () => {

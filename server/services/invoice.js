@@ -5376,149 +5376,112 @@ function receiptHandoffCheck(beforeProviderHandoff, { to = null, amount = null }
   };
 }
 
-// The invoice text as it will be sent: which template row renders (annual-prepay, pre-service or the standard invoice_sent) and
-// its body, with the pay link given. The ONE renderer: sendViaSMS sends what it returns, and the Intelligence Bar's card shows,
-// pins and re-checks it. body is null when no row is enabled (the send skips the text).
-async function renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants = false, audit = true } = {}) {
-  // noVariants: the Intelligence Bar's text is the base template row, the one body its card can show (a weighted variant is random).
-  // audit false: a preview writes nothing (getTemplate otherwise records a template defect in the audit log).
-  const renderOpts = { ...(noVariants ? { noVariants: true } : {}), ...(audit ? {} : { audit: false }) };
-  const serviceType = invoice.service_type || invoice.title || "your service";
-
-  // Service-date framing, all on the ET calendar day. Knex returns DATE as a
-  // UTC-midnight Date; etCalendarDayOf reads that and a plain YYYY-MM-DD
-  // string as the same calendar day (etDateString would shift the Date to
-  // the previous ET day and wrongly drop the "today" clause). An unparseable
-  // value falls back to undated copy.
+// ── the invoice text: facts, template choice, rendering ────────────────────────────────────────────────────────────────
+// The date framing of the text, all on the ET calendar day. Knex returns DATE as a UTC-midnight Date; etCalendarDayOf reads that
+// and a plain YYYY-MM-DD string as the same calendar day (etDateString would shift the Date to the previous ET day and wrongly
+// drop the "today" clause). An unparseable value falls back to undated copy.
+function invoiceSmsDateFacts(invoice, now = new Date()) {
   let serviceYmd = "";
   try {
     serviceYmd = invoice.service_date ? etCalendarDayOf(invoice.service_date) : "";
   } catch {
     serviceYmd = "";
   }
-  const todayYmd = etDateString(new Date());
-  // The annual-prepay "Today's visit is the first of N" clause is gated on
-  // today: a resend from sent/viewed/overdue or a delayed/scheduled send can
-  // run on a day other than service_date, where a same-day claim would be false.
-  const serviceDateIsTodayET = serviceYmd === todayYmd;
-  // A service date still in the future — the setup + first-application
-  // invoice auto-sent at estimate acceptance is the common case — must not
-  // use the generic "...completed on {service_date}" copy. ISO YYYY-MM-DD
-  // compares lexicographically === chronologically.
-  const serviceDateIsFutureET = serviceYmd > todayYmd;
   const formattedDate = serviceYmd
     ? new Date(`${serviceYmd}T12:00:00`).toLocaleDateString("en-US", {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-      timeZone: "America/New_York",
+      weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York",
     })
     : "";
+  const todayYmd = etDateString(now);
+  // The annual-prepay "Today's visit is the first of N" clause is gated on today: a resend from sent/viewed/overdue or a
+  // delayed/scheduled send can run on a day other than service_date. A service date still in the future (the setup +
+  // first-application invoice auto-sent at estimate acceptance is the common case) must not use the generic "...completed on
+  // {service_date}" copy. ISO YYYY-MM-DD compares lexicographically === chronologically.
+  return { formattedDate, serviceDateIsTodayET: serviceYmd === todayYmd, serviceDateIsFutureET: serviceYmd > todayYmd };
+}
 
-  // Pre-service copy: a future service date, or a linked visit that has not
-  // completed. An overdue or same-day appointment can still be open, so its
-  // completion state decides rather than its date; an unreadable status
-  // fails toward the pre-service copy.
-  let preServiceCopy = serviceDateIsFutureET;
-  if (!preServiceCopy && invoice.scheduled_service_id) {
-    try {
-      const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
-      preServiceCopy = visit?.status !== "completed";
-    } catch (err) {
-      logger.warn(`[invoice] Linked visit status lookup failed for ${invoice.id}: ${err.message}`);
-      preServiceCopy = true;
-    }
+// Pre-service copy: a future service date, or a linked visit that has not completed. An overdue or same-day appointment can
+// still be open, so its completion state decides rather than its date; an unreadable status fails toward the pre-service copy.
+async function invoicePreServiceCopy(invoice, serviceDateIsFutureET) {
+  if (serviceDateIsFutureET || !invoice.scheduled_service_id) return serviceDateIsFutureET;
+  try {
+    const visit = await db("scheduled_services").where({ id: invoice.scheduled_service_id }).first("status");
+    return visit?.status !== "completed";
+  } catch (err) {
+    logger.warn(`[invoice] Linked visit status lookup failed for ${invoice.id}: ${err.message}`);
+    return true;
   }
+}
 
-  // Annual-prepay invoices use a dedicated, coverage-aware template — the
-  // generic invoice_sent copy ("...completed on {service_date}") misframes a
-  // full year of prepaid visits as a single completed service. Resolve the
-  // term up front; a cancelled/refunded term reverts to the standard copy.
+// Which template row renders the text, and the variables it renders with (pure). Annual-prepay invoices use a dedicated,
+// coverage-aware template (the generic copy misframes a full year of prepaid visits as one completed service); an invoice billed
+// before its service uses the pre-service variant; everything else the standard invoice_sent. Both variants sit behind the base
+// `invoice` kill switch (a disabled invoice_sent skips them too, keeping the invoice retryable). A variant whose row is missing
+// or disabled renders nothing, so the caller asks again with `tried` and gets the next choice: the standard copy is last, so a
+// missing variant row never blocks the send. Returns null when every choice has been tried.
+function chooseInvoiceSmsTemplate(invoice, customer, ctx, tried = []) {
+  const firstName = customer?.first_name || "";
+  const serviceType = invoice.service_type || invoice.title || "your service";
+  const choices = [];
+  if (ctx.prepayActive && ctx.invoiceSmsActive) {
+    // A display-only prepay flag (no visit count) still gets the prepay framing, via a generic phrase.
+    const coverage = ctx.coverage;
+    choices.push({
+      key: "invoice_sent_annual_prepay",
+      vars: {
+        first_name: firstName,
+        coverage_summary: coverage?.coverageSummary || "your annual service plan",
+        first_visit_clause: coverage && ctx.serviceDateIsTodayET ? ` Today's visit is the first of ${coverage.coverageCount}.` : "",
+        pay_url: ctx.payUrl,
+      },
+    });
+  }
+  if (ctx.preServiceCopy && ctx.invoiceSmsActive) {
+    choices.push({ key: "invoice_sent_upfront", vars: { first_name: firstName, service_type: serviceType, pay_url: ctx.payUrl } });
+  }
+  choices.push({
+    key: "invoice_sent",
+    vars: { first_name: firstName, service_type: serviceType, service_date: ctx.formattedDate || "today", pay_url: ctx.payUrl },
+  });
+  return choices.find((choice) => !tried.includes(choice.key)) || null;
+}
+
+// The invoice text as it will be sent: which template row renders and its body, with the pay link given. The ONE renderer:
+// sendViaSMS sends what it returns, and the Intelligence Bar's card shows, pins and re-checks it. body is null when no row is
+// enabled (the send skips the text).
+async function renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants = false, audit = true } = {}) {
+  // noVariants: the Intelligence Bar's text is the base template row, the one body its card can show (a weighted variant is random).
+  // audit false: a preview writes nothing (getTemplate otherwise records a template defect in the audit log).
+  const renderOpts = { ...(noVariants ? { noVariants: true } : {}), ...(audit ? {} : { audit: false }) };
+  const dates = invoiceSmsDateFacts(invoice);
+  const preServiceCopy = await invoicePreServiceCopy(invoice, dates.serviceDateIsFutureET);
+  // Annual-prepay: the term is resolved up front; a cancelled/refunded term reverts to the standard copy. coverageActive is the
+  // descriptor's single source of truth for "is this term still covered" (a renewal lapse stays active through term_end).
   const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
-  // coverageActive is the descriptor's single source of truth for "is this
-  // term still covered" — it keeps a renewal lapse (cancelled +
-  // renewal_decision='cancel', still covered through term_end) active while
-  // excluding true void/refund terms, matching the billing guard.
   const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
-  const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
-
-  // Body comes from the editable invoice_sent template (or its annual-prepay
-  // variant). If the row is missing/disabled, we skip the SMS rather than
-  // falling back to inline copy.
-  let body = null;
-  // Tracks whichever of the three rows below actually rendered — never
-  // guessed, so a caught template-lookup error below (body stays null)
-  // leaves this null too.
-  let renderedTemplateKey = null;
   try {
     const templates = require("../routes/admin-sms-templates");
-    const tplOpts = {
-      workflow: "invoice_send",
-      entity_type: "invoice",
-      entity_id: invoice.id,
+    const tplOpts = { workflow: "invoice_send", entity_type: "invoice", entity_id: invoice.id };
+    // The annual-prepay variant is its own template row, so it would render even when ops disabled the base invoice_sent kill
+    // switch, and the provider would then swallow the send as a fake success. Honor the base switch for the variants.
+    const ctx = {
+      ...dates,
+      preServiceCopy,
+      prepayActive,
+      coverage: prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null,
+      invoiceSmsActive: await templates.isTemplateActive("invoice"),
+      payUrl,
     };
-    // The annual-prepay variant is its own template row, so it would render
-    // even when ops disabled the base invoice_sent kill switch — and the
-    // provider (messageType 'invoice' → invoice_sent) would then swallow the
-    // send as a fake success and mark the invoice sent without delivery,
-    // blocking retries. Honor the base kill switch here so a disabled
-    // invoice_sent skips the variant too and the invoice stays retryable
-    // (falls through to the null-body skip + restoreSendClaim path below).
-    const invoiceSmsActive = await templates.isTemplateActive("invoice");
-    const firstName = customer.first_name || "";
-    if (prepayActive && invoiceSmsActive) {
-      // Coverage summary is built when a visit count is configured; a
-      // display-only prepay flag (no count) still gets the prepay framing via
-      // a generic phrase instead of the misleading "completed on" copy.
-      const coverageSummary = coverage?.coverageSummary || "your annual service plan";
-      // Only claim "today" when the service date actually is today in ET —
-      // resends and delayed sends run on other days. Off-day sends drop the
-      // clause; the coverage summary still conveys the full-term framing.
-      const firstVisitClause = coverage && serviceDateIsTodayET
-        ? ` Today's visit is the first of ${coverage.coverageCount}.`
-        : "";
-      body = await templates.getTemplate("invoice_sent_annual_prepay", {
-        first_name: firstName,
-        coverage_summary: coverageSummary,
-        first_visit_clause: firstVisitClause,
-        pay_url: payUrl,
-      }, tplOpts, renderOpts);
-      if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
-    }
-    // Upfront invoices — the setup + first-application invoice auto-sent at
-    // estimate acceptance, or any invoice billed before its service date —
-    // must not use the generic "...completed on {service_date}" copy, which
-    // asserts a not-yet-performed service AND prints a future date. A future
-    // service date or an uncompleted linked visit selects a pre-service
-    // variant with no completion claim and no date placeholder. Gated on the same base `invoice` kill
-    // switch as the prepay variant (a disabled invoice_sent skips this too,
-    // keeping the invoice retryable); a missing/disabled variant row falls
-    // through to the standard copy below so the send is never blocked.
-    if (!body && preServiceCopy && invoiceSmsActive) {
-      body = await templates.getTemplate("invoice_sent_upfront", {
-        first_name: firstName,
-        service_type: serviceType,
-        pay_url: payUrl,
-      }, tplOpts, renderOpts);
-      if (body) renderedTemplateKey = "invoice_sent_upfront";
-    }
-    if (!body) {
-      // Either an ordinary invoice, or the prepay template was missing/disabled
-      // — fall back to the standard invoice_sent copy so a missing variant row
-      // never blocks the send.
-      body = await templates.getTemplate("invoice_sent", {
-        first_name: firstName,
-        service_type: serviceType,
-        service_date: formattedDate || "today",
-        pay_url: payUrl,
-      }, tplOpts, renderOpts);
-      if (body) renderedTemplateKey = "invoice_sent";
+    const tried = [];
+    for (let choice = chooseInvoiceSmsTemplate(invoice, customer, ctx, tried); choice; choice = chooseInvoiceSmsTemplate(invoice, customer, ctx, tried)) {
+      const body = await templates.getTemplate(choice.key, choice.vars, tplOpts, renderOpts);
+      if (body) return { body, renderedTemplateKey: choice.key };
+      tried.push(choice.key);
     }
   } catch (err) {
     logger.warn(`[invoice] Template lookup failed: ${err.message}`);
   }
-  return { body, renderedTemplateKey };
+  return { body: null, renderedTemplateKey: null };
 }
 
 const InvoiceService = {
@@ -8660,6 +8623,8 @@ const InvoiceService = {
       || email.deliveryOutcome === "uncertain");
     let ownedDeliveryFinalized = false;
     let deliveryRecordFailed = false;
+    // The handed-back claim's pin could not be retired (see the retire write below): the visit will not auto-close.
+    let pinRetireFailed = false;
     let queueOutcome = {};
     let adoptedQueueUnrestored = false;
     // Codex round-8 audit P1 (#4131 slice 4): defaults to voided=true for the
@@ -8812,7 +8777,9 @@ const InvoiceService = {
         try {
           await require("./invoice-issued-closeout").recordApprovedCloseoutRetired(invoiceId, claim.invoice.send_claim_token);
         } catch (retireErr) {
-          logger.warn(`[invoice] closeout pin retire record failed for ${invoiceId}: ${retireErr.message}`);
+          // The claim is handed back, but its pin stays unretired: the visit will not auto-close. Said on the result.
+          pinRetireFailed = true;
+          logger.error(`[invoice] closeout pin retire record failed for ${invoiceId}: ${retireErr.message}`);
         }
       }
       // No channel delivered — reverse the credit this seam auto-applied before
@@ -8876,6 +8843,14 @@ const InvoiceService = {
         ...(holdLegs.find((leg) => leg.nextAllowedAt) ? { nextAllowedAt: holdLegs.find((leg) => leg.nextAllowedAt).nextAllowedAt } : {}),
       } : {}),
       ...(adoptedQueueUnrestored ? { code: "ADOPTED_QUEUE_RESTORE_FAILED", deliveryHeld: true } : {}),
+      ...(pinRetireFailed ? {
+        closeoutPinRetireFailed: true,
+        closeoutPinWarning: "The send did not go out and the invoice is back as it was, but the closeout pin could not be retired; the visit will not auto-close, close it by hand.",
+        ...(!deliveryRecordFailed && !adoptedQueueUnrestored ? {
+          code: "INVOICE_CLOSEOUT_PIN_RETIRE_FAILED",
+          error: "The send did not go out and the invoice is back as it was, but the closeout pin could not be retired; the visit will not auto-close, close it by hand.",
+        } : {}),
+      } : {}),
       ...(terminalVisitRefused
         ? (terminalVisitVoided
           ? { code: "INVOICE_VISIT_TERMINAL" }
@@ -13765,6 +13740,7 @@ module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 module.exports._convertLeadOnInvoiceSent = convertLeadOnInvoiceSent;
 module.exports._checkInvoiceDeliveryPreconditions = checkInvoiceDeliveryPreconditions;
 module.exports.renderInvoiceSmsBody = renderInvoiceSmsBody;
+module.exports.chooseInvoiceSmsTemplate = chooseInvoiceSmsTemplate;
 // The approved-version claim checks, each one decision (tested on its own).
 module.exports._approvedClaimChecks = {
   approvedDigestRefusal, approvedEffectsRefusal, approvedOwnerRefusal, approvedAttachmentRefusal, recordApprovedPinOrRefusal, runApprovedClaimChecks,

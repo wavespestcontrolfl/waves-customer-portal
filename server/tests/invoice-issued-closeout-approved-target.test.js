@@ -80,14 +80,14 @@ const SENT_MS = new Date(SENT_AT).getTime();
 const PIN = 'invoice.send_closeout_target_approved';
 const DELIVERED = 'invoice.send_closeout_target_delivered';
 const RETIRED = 'invoice.send_closeout_target_retired';
-function sweepConn({ pins = [], deliveries = [], retired = [], sentAt = SENT_AT, pinReadFails = false } = {}) {
-  const invoice = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: 'sent', scheduled_service_id: 'visit-live', sent_at: sentAt };
+function sweepConn({ pins = [], deliveries = [], retired = [], sentAt = SENT_AT, pinReadFails = false, liveStatus = 'sent', liveClaimToken = null } = {}) {
+  const invoice = { id: 'inv-1', invoice_number: 'WPC-2099-0001', status: liveStatus, send_claim_token: liveClaimToken, scheduled_service_id: 'visit-live', sent_at: sentAt };
   const candidate = { invoice_id: 'inv-1', invoice_status: 'sent', visit_id: 'visit-live', visit_status: 'pending', own_attempt_parked: false, issued_after_service_day: true };
   const connFor = (table) => {
     const state = { action: null, token: null };
     const rowsOf = () => (state.action === DELIVERED ? deliveries : state.action === RETIRED ? retired.map((claimToken) => ({ claimToken })) : pins)
       .filter((row) => state.token === null || row.claimToken === state.token)
-      .map((row) => ({ metadata: row }));
+      .map((row) => ({ metadata: row, created_at: row.createdAt }));
     const b = new Proxy({}, {
       get: (_t, prop) => {
         if (prop === 'then') return (res, rej) => Promise.resolve(table === 'invoices as i' ? [candidate] : table === 'audit_log' && state.action === DELIVERED ? rowsOf() : null).then(res, rej);
@@ -185,5 +185,32 @@ describe('the pin rows', () => {
       action: DELIVERED, resource_id: 'inv-1', critical: true, actor_id: 'admin-1',
       metadata: { invoiceId: 'inv-1', claimToken: 'claim-a', deliveredAtMs: SENT_MS + 5000 },
     }));
+  });
+});
+
+describe('an unbound pin heals once nothing holds it (round 11)', () => {
+  const { pinNoLongerHeld, CLOSEOUT_PIN_STALE_MS } = require('../services/invoice-issued-closeout');
+  const old = new Date(Date.now() - CLOSEOUT_PIN_STALE_MS - 60000).toISOString();
+  const fresh = new Date(Date.now() - 60000).toISOString();
+
+  test('pinNoLongerHeld: a live claim under the pin\'s token holds it; otherwise it is released only after the stale window', () => {
+    expect(pinNoLongerHeld({ status: 'sending', send_claim_token: 'claim-a' }, 'claim-a', old)).toBe(false);
+    expect(pinNoLongerHeld({ status: 'sent', send_claim_token: null }, 'claim-a', old)).toBe(true);
+    expect(pinNoLongerHeld({ status: 'sending', send_claim_token: 'claim-b' }, 'claim-a', old)).toBe(true);
+    expect(pinNoLongerHeld({ status: 'sent', send_claim_token: null }, 'claim-a', fresh)).toBe(false);
+    expect(pinNoLongerHeld({ status: 'sent', send_claim_token: null }, 'claim-a', null)).toBe(false);
+  });
+
+  test('a stale unbound pin (no claim holds it) no longer blocks the sweep: the invoice is judged as any page send', async () => {
+    const out = await sweep({ pins: [{ ...pin('claim-lost', 'none'), createdAt: old }], deliveries: [] });
+    expect(out).toMatchObject({ retried: 1, closed: 1 });
+    expect(recordAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'invoice.closeout_pin_unbound' }));
+  });
+
+  test('a pin still held by a live claim, or a fresh one, still fails closed', async () => {
+    const held = await sweep({ pins: [{ ...pin('claim-live', 'none'), createdAt: old }], deliveries: [], liveStatus: 'sending', liveClaimToken: 'claim-live' });
+    expect(held).toMatchObject({ retried: 0, closed: 0 });
+    const young = await sweep({ pins: [{ ...pin('claim-young', 'none'), createdAt: fresh }], deliveries: [] });
+    expect(young).toMatchObject({ retried: 0, closed: 0 });
   });
 });
