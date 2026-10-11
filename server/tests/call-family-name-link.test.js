@@ -140,30 +140,30 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(triage.slice(at, at + 700)).toContain("'family_account_candidates'");
   });
   test('techs: the card is hidden from the list and counts and refused on every transition (admin-only reasons)', () => {
-    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];");
+    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];");
     expect(triage).toContain("q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain("q.whereNotIn('reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain('if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {');
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);');
+    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);');
     const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
     expect(branch.slice(0, 600)).toContain('isAdmin ? (');
   });
   test('Resolve / Dismiss bind to the version the operator saw (expected_updated_at), via the version-bound reason set', () => {
-    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',\s*\];/);
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',(?:\s*'name_spelling_differs',)?\s*\];/);
     expect(triage).toContain('if (VERSION_BOUND_REASONS.includes(item.reason_code)');
     expect(triage).toContain('|| emailReviewCard');
     expect(triage).toContain("return { outcome: 'stale_version' };");
   });
   test('a merged candidate opens its survivor: the list resolves customer_ids for this card too', () => {
-    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];");
+    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates', 'name_spelling_differs'];");
     expect(triage).toContain('items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code))');
   });
   test('the inbox: no verdict badge or Accept / Deny, own evidence component, looked up by reason', () => {
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\([\s\S]*?"family_account_candidates"[\s\S]*?\]\);/);
     expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
-    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence,');
+    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence };');
     expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
   });
 });

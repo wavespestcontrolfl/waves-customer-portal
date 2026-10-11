@@ -386,3 +386,244 @@ describe('persisted marker + stale unit ask', () => {
     expect(src).toContain('whole-structure unit waiver failed open (hold stands)');
   });
 });
+
+// Card-only companion (owner 2026-10-07): the advisory "which unit?" card is
+// skipped for a whole-building service, commercial jobs included; the address
+// hold itself is the waiver's business above and is unchanged.
+describe('callIsPreConstructionPretreat (unit card skip)', () => {
+  const { callIsPreConstructionPretreat } = require('../services/call-recording-processor')._test;
+  const { dropUnneededCallCards } = require('../services/call-triage-flags');
+  const run = (extracted, v2Extraction = null, transcription = '') => callIsPreConstructionPretreat({ extracted, v2Extraction, transcription, services: CATALOG });
+
+  test('a commercial slab pre-treat counts as whole-structure', () => {
+    const extracted = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run(extracted, { property: { property_type: 'commercial' } })).toBe(true);
+  });
+
+  test('interior pest work, a condo, or condo/apartment wording does not', () => {
+    expect(run({ matched_service: 'General Pest Control', requested_service: 'roaches inside' })).toBe(false);
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    expect(run(slab, { property: { property_type: 'condo' } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial' } }, 'the slab for the new apartment building')).toBe(false);
+  });
+
+  test('fails closed: unknown property type, partial occupancy, or a unit-level second service', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    expect(run(slab, { property: { property_type: 'unknown' } })).toBe(false);
+    expect(run(slab, null)).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: false } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: false } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial' }, service_request: { secondary_categories: ['pest_general'] } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['termite'] } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['inspection_only'] } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: [] } })).toBe(true);
+  });
+
+  test('any mention of a suite or unit keeps the card: either speaker, denials included', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    const commercial = { property: { property_type: 'commercial' } };
+    expect(run(slab, commercial, 'Agent: Do you have a suite or unit number?\nCaller: No, it is the whole new building.')).toBe(false);
+    expect(run(slab, commercial, 'Caller: we do not have a unit number')).toBe(false);
+    expect(run(slab, commercial, 'Suite 4\nCaller: it is a new lot')).toBe(false);
+    expect(run(slab, commercial, 'Caller: new construction lot, slab pours Monday')).toBe(true);
+  });
+
+  test('only pre-construction pre-treats skip the card; WDO, other families and localized termite work keep it', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run(slab, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'Termite Pretreatment Service' }, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'WDO Inspection (Termite Letter)' }, commercial)).toBe(false);
+    // Another family heard only by V1, or anywhere in the summary.
+    const v1Mixed = { ...slab, requested_service: 'slab pre-treat and interior roach treatment' };
+    expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: v1Mixed, v2Extraction: commercial, services: CATALOG })).toBe(false);
+    expect(run({ ...slab, call_summary: 'Wants the slab pre-treat and also has ants in the model home' }, commercial)).toBe(false);
+    // Other work recorded only in pain_points.
+    expect(run({ ...slab, pain_points: 'Needs the slab pre-treat; also roaches inside the sales office' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: 'Needs a termite pre-treat for the slab pour' }, commercial)).toBe(true);
+    // Localized termite work may target one unit.
+    expect(run({ ...slab, requested_service: 'slab pre-treat plus a termite foam spot treatment next door' }, commercial)).toBe(false);
+  });
+
+  test('an exact slab pre-treat pick mixed with existing-structure termite work keeps the unit card', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run(slab, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Wants the slab pre-treat and trenching around the old building' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'rodding along the existing wall'] }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'slab pre-treat plus a liquid perimeter treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat and a termite inspection of the office' }, commercial)).toBe(false);
+    // Structured-field treatments the word list never named (r11): positive
+    // proof over canonicalized fragments keeps the card.
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'Bora-Care on the existing framing'] }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: 'Slab pre-treat plus Bora-Care on the existing framing' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Wants the slab pre-treat. Also asked about a termite bond renewal' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat and termite monitoring afterward' }, commercial)).toBe(false);
+    expect(run({ ...slab, specific_service_name: 'Termite Wood Treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, matched_service: 'Wood Treatment' }, commercial)).toBe(false);
+    // Two services in one fragment (r12): the split must not matter.
+    expect(run({ ...slab, call_summary: 'Slab pre-treat with Bora-Care on the existing framing' }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'slab pretreat & wood treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'pre-treat / WDO' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['slab pre-treat + trenching'] }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat and annual termite protection plan' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['slab pre-treat', 'termite warranty renewal'] }, commercial)).toBe(false);
+    // Existing-structure context is a cue whatever the treatment word is (r14).
+    expect(run({ ...slab, call_summary: 'Slab pre-treat plus soil treatment around the existing home' }, commercial)).toBe(false);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat plus a termite barrier around the existing structure' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['slab pre-treat', 'barrier treatment of the building'] }, commercial)).toBe(false);
+    // Plain pre-treat wording still drops the card.
+    expect(run({ ...slab, call_summary: 'Termite protection before the slab pour' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'New-construction termite protection' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Slab pre-treat with a warranty' }, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'Termite Pretreatment Service' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Termidor pre-slab treatment' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Apply liquid termiticide before the slab pour' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, commercial)).toBe(true);
+  });
+
+  test('every structured service fragment must be the pre-slab service; unclassified ones fail closed (r15)', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'termiticide injection treatment in the storefront'] }, commercial)).toBe(false);
+    // Fails closed: a pain point nothing classifies keeps the card.
+    expect(run({ ...slab, pain_points: ['Slab pre-treat', 'price question'] }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: ['Slab pre-treat'] }, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'Slab Pre-Treat Termite Service' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Caller asked when the crew can come out' }, commercial)).toBe(true);
+    expect(run({ ...slab, call_summary: 'Caller asked when the crew can come out. Needs the slab pre-treat' }, commercial)).toBe(true);
+  });
+
+  describe('schema-valid V2 slab extraction through the processor path (r16)', () => {
+    const { validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
+    const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
+    const slabV2 = (overrides = {}) => ({
+      meta: {
+        is_voicemail: false, is_spam: false, transcript_word_count: 210, transcript_duration_seconds: 120,
+        call_summary: 'Builder needs the slab pre-treat before the pour next week.',
+        call_id: '550e8400-e29b-41d4-a716-446655440000', schema_version: SCHEMA_VERSION,
+        extracted_at: '2026-10-09T02:30:00Z', extraction_model: 'test-model', extraction_prompt_version: 'v1-test',
+      },
+      caller: {
+        name_full: 'Pat Example', first_name: 'Pat', last_name: 'Example', organization_name: null, name_confidence: 0.9,
+        phone_e164: '+19415550100', phone_raw_spoken: 'nine four one five five five zero one zero zero', phone_source: 'spoken',
+        email: null, relationship_to_property: 'owner', on_site_authorization: true, decision_maker_present: true,
+        preferred_contact_method: 'phone',
+      },
+      consent: {
+        sms_consent_given: true, sms_consent_quote: 'Yes, text me.', call_recording_disclosed: true,
+        do_not_contact_request: false, sms_declined: false,
+      },
+      property: {
+        service_address: {
+          raw_text: '100 Example Rd, Parrish', street_line_1: '100 Example Rd', street_line_2: null, city: 'Parrish',
+          state: 'FL', postal_code: '34219', county: 'Manatee', subdivision_or_community: null, normalization_status: 'not_attempted',
+        },
+        property_type: 'single_family', hoa_community_flag: false, hoa_common_area_service: false, commercial_subtype: null,
+        approximate_lot_size_acres: null, approximate_living_sqft: null,
+        pets_on_property: { present: false, species_notes: null }, access_notes: null,
+      },
+      service_request: {
+        primary_service_category: 'termite', secondary_categories: [], pests_observed_status: 'not_observed_preventative', pests_observed: [],
+        service_intent: 'preventative_one_time', urgency: 'within_one_week', waveguard_tier_mentioned: null,
+        specific_service_name: 'Slab Pre-Treat Termite Service',
+      },
+      customer_history: { status: 'new_customer', competitor_name: null, referral_source: null, prior_complaint_mentioned: false },
+      scheduling: {
+        status: 'none', confirmed_start_at: null, requested_date_range_start: null, requested_date_range_end: null,
+        preferred_time_of_day: null, callback_window_start: null, callback_window_end: null, blackout_dates: [], scheduling_notes_raw: null,
+      },
+      sentiment_and_lead: { sentiment: 'neutral', lead_quality: 'hot', objections_raised: [], buying_signals: [] },
+      evidence: [{ field_path: '/property/service_address', quote: 'It is 100 Example Rd in Parrish', speaker: 'caller', transcript_offset_ms: 12000 }],
+      confidence: {
+        caller_identity: 0.9, service_address: 0.95, property_type: 0.8, primary_service_category: 0.95,
+        urgency: 0.85, scheduling_window: 0.9, consent_capture: 0.92, overall: 0.9,
+      },
+      triage_flags: [],
+      ...overrides,
+    });
+    // The processor adopts V2 fields into the extracted record, then judges the
+    // card on the merged record plus the V2-overridden view.
+    const runV2 = (v2) => {
+      const { merged } = adoptV2PrimaryFields({}, v2);
+      return callIsPreConstructionPretreat({ extracted: merged, v2Extraction: v2, services: CATALOG });
+    };
+
+    test('the fixture is schema-valid and a pure slab pre-treat drops the card', () => {
+      const v2 = slabV2();
+      const { valid, errors } = validatePersisted(v2);
+      expect(errors || []).toEqual([]);
+      expect(valid).toBe(true);
+      expect(runV2(v2)).toBe(true);
+    });
+
+    test('extra work in the V2 pain points keeps the card', () => {
+      const v2 = slabV2();
+      v2.sentiment_and_lead.objections_raised = ['termiticide injection treatment in the storefront'];
+      expect(validatePersisted(v2).valid).toBe(true);
+      expect(runV2(v2)).toBe(false);
+    });
+
+    test('a follow-up intent keeps the card', () => {
+      const v2 = slabV2();
+      v2.service_request.service_intent = 'follow_up_existing_service';
+      expect(validatePersisted(v2).valid).toBe(true);
+      expect(runV2(v2)).toBe(false);
+    });
+  });
+
+  test('every structured field is split on conjunctions; bare soil treatment is pre-treat wording (r16)', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run({ ...slab, requested_service: 'slab pre-treat plus termiticide injection treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, matched_service: 'slab pre-treat plus termiticide injection treatment' }, commercial)).toBe(false);
+    expect(run({ ...slab, requested_service: 'soil treatment' }, commercial)).toBe(true);
+    expect(run({ ...slab, requested_service: 'soil treatment around the existing home' }, commercial)).toBe(false);
+  });
+
+  test('only a new-service intent can drop the card (r14)', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    const withIntent = (service_intent) => ({ property: { property_type: 'commercial' }, service_request: { service_intent } });
+    const callback = { ...slab, call_summary: 'Existing customer needs a pre-treatment callback' };
+    expect(run(callback, withIntent('follow_up_existing_service'))).toBe(false);
+    expect(run(callback, withIntent('complaint_or_callback'))).toBe(false);
+    expect(run(slab, withIntent('cancellation_request'))).toBe(false);
+    expect(run(slab, withIntent('preventative_one_time'))).toBe(true);
+    expect(run({ ...slab, call_summary: 'Existing customer needs a slab pre-treat' }, withIntent('preventative_one_time'))).toBe(true);
+  });
+
+  test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
+    const pre = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    const commercial = { property: { property_type: 'commercial' } };
+    expect(run(pre, commercial, 'we need the pre-treat for our suite')).toBe(false);
+    expect(run({ ...pre, address_line2: 'Suite 4' }, commercial)).toBe(false);
+    expect(run(pre, commercial, 'it is bay 3 in the plaza')).toBe(false);
+    expect(run({ ...pre, address_line1: '100 Example Rd #12' }, commercial)).toBe(false);
+    expect(run({ specific_service_name: 'Slab Pre-Treat Termite Service' }, commercial, 'new construction lot, slab pours Monday')).toBe(true);
+  });
+
+  test('the V1 service heard before V2 adoption must agree, and an unclear-service call never counts', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    const interior = { matched_service: 'General Pest Control', requested_service: 'roaches inside' };
+    expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: interior, services: CATALOG })).toBe(false);
+    expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: { ...slab }, v2Extraction: { property: { property_type: 'commercial' } }, services: CATALOG })).toBe(true);
+    const unclear = { triage_flags: ['ambiguous_pest_or_service'], property: { property_type: 'commercial' } };
+    expect(callIsPreConstructionPretreat({ extracted: slab, v2Extraction: unclear, services: CATALOG, unclearServiceAssessment: true })).toBe(false);
+  });
+
+  test('the shadow bridge applies the same rule before filing its reasons', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const bridge = src.indexOf('= deriveCallReviewBridge({');
+    const rule = src.indexOf("needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);", bridge);
+    const filing = src.indexOf('bridgeNeedsConfirmation.push(...needsConfirmation);', bridge);
+    expect(rule).toBeGreaterThan(bridge);
+    expect(filing).toBeGreaterThan(rule);
+  });
+
+  test('the card filter drops only missing_unit_number when told the service is whole-structure', () => {
+    const ext = { scheduling: { status: 'requested' }, caller: {}, service_request: { service_intent: 'preventative_one_time' } };
+    expect(dropUnneededCallCards(['missing_unit_number', 'commercial_requires_quote'], ext, { preConstructionPretreat: true }).flags)
+      .toEqual(['commercial_requires_quote']);
+    expect(dropUnneededCallCards(['missing_unit_number'], ext).flags).toEqual(['missing_unit_number']);
+  });
+});

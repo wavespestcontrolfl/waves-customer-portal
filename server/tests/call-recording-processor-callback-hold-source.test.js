@@ -256,14 +256,16 @@ describe('round-6 (structural) — the NUMBER-keyed hold is written wherever the
 describe('round-7 P1 — the number hold is persisted when the flag is decided', () => {
   // Round 8 P1: the call now sits in `if (!(await …())) return abandonToPeer(…)`
   // (a lost processing claim abandons the pass) — match the awaited call.
-  const ARM = 'await armCallbackNumberHoldAtDecision()';
+  // #6112: the helper takes { cardExtraction } (the no-text release card rides in the same transaction).
+  const ARM_ENFORCE = 'await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction })';
+  const ARM_SHADOW = 'await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext })';
 
   test('the decision-point helper arms through armDisclaimedNumberHold and fails the pass closed', () => {
-    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
+    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {');
     expect(idx).toBeGreaterThan(-1);
     const body = src.slice(idx, src.indexOf('\n    };', idx));
-    // Round 8 P1: the write now carries the pass's processing claim.
-    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,\s*\}\)/);
+    // Round 8 P1: the write now carries the pass's processing claim (#6112: and the companion card write).
+    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,(?: noTextHold: noTextHoldArming,)?(?:\s*afterArm: [^\n]*,)?\s*\}\)/);
     expect(body).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
     expect(body).toMatch(/throw failClosed;/);
     expect(body).not.toMatch(/holdErr\.message/);
@@ -271,15 +273,15 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
 
   test('enforce: armed right where the flag is raised — before the route decision insert and before any card insert', () => {
     const gate = src.indexOf('if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {');
-    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags)) {', gate);
+    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {', gate);
     const decideEnd = src.indexOf('\n          }\n', decide);
     const block = src.slice(decide, decideEnd);
     const flip = block.indexOf('callbackNumberNeededHoldActive = true;');
     expect(flip).toBeGreaterThan(-1);
-    expect(block.indexOf(ARM)).toBeGreaterThan(flip);
+    expect(block.indexOf(ARM_ENFORCE)).toBeGreaterThan(flip);
     // Nothing awaited between the decision and the write.
-    expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
-    const armAt = decide + block.indexOf(ARM);
+    expect(block.slice(0, block.indexOf(ARM_ENFORCE)).match(/await /g)).toBeNull();
+    const armAt = decide + block.indexOf(ARM_ENFORCE);
     expect(armAt).toBeLessThan(src.indexOf('await upsertRouteDecision(db, routeDecision', decide));
     expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
   });
@@ -289,9 +291,9 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
     const decide = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {', gate);
     const decideEnd = src.indexOf('\n        }\n', decide);
     const block = src.slice(decide, decideEnd);
-    expect(block.indexOf(ARM)).toBeGreaterThan(block.indexOf('callbackNumberNeededHoldActive = true;'));
-    expect(block.slice(0, block.indexOf(ARM)).match(/await /g)).toBeNull();
-    const armAt = decide + block.indexOf(ARM);
+    expect(block.indexOf(ARM_SHADOW)).toBeGreaterThan(block.indexOf('callbackNumberNeededHoldActive = true;'));
+    expect(block.slice(0, block.indexOf(ARM_SHADOW)).match(/await /g)).toBeNull();
+    const armAt = decide + block.indexOf(ARM_SHADOW);
     expect(armAt).toBeLessThan(src.indexOf('deriveCallReviewBridge({', decide));
     expect(armAt).toBeLessThan(src.indexOf("db('triage_items')", decide));
   });
@@ -327,15 +329,17 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
  */
 describe('round-8 P1 — the decision-point write is fenced to the processing claim', () => {
   test('the helper reports a lost claim (false) without marking the hold armed', () => {
-    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async () => {');
+    const idx = src.indexOf('const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {');
     const body = src.slice(idx, src.indexOf('\n    };', idx));
     expect(body).toMatch(/if \(armed\?\.claimLost\) return false;/);
     expect(body.indexOf('if (armed?.claimLost) return false;')).toBeLessThan(body.indexOf('callbackNumberHoldArmed = true;'));
   });
 
   test('both decision points abandon the pass on a lost claim', () => {
-    const sites = src.match(/if \(!\(await armCallbackNumberHoldAtDecision\(\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);/g) || [];
-    expect(sites).toHaveLength(2);
-    expect(src.match(/armCallbackNumberHoldAtDecision\(\)/g)).toHaveLength(2);
+    // #6112: two decision points, the post-customer recovery for a pass whose enforce routing threw,
+    // the non-workable voicemail terminal branch (r10 P2) and the tech follow-up short-circuit (r12 P2)
+    const sites = src.match(/if \(!\(await armCallbackNumberHoldAtDecision\(\{ cardExtraction: [\w.]+ \}\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);/g) || [];
+    expect(sites).toHaveLength(5);
+    expect(src.match(/await armCallbackNumberHoldAtDecision\(/g)).toHaveLength(5);
   });
 });

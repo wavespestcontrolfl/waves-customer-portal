@@ -331,7 +331,7 @@ describe('crash recovery', () => {
       contact_correction_jobs: [jobRow({ id: 1, customer_id: CUSTOMER_ID, expected_values: snapshot, created_at: Date.now() - 11 * 60_000 })],
       customers: [{ id: CUSTOMER_ID, deleted_at: null }],
       messages: [{ id: 'message-9', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
-      sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', created_at: Date.now() }],
+      sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: CUSTOMER_ID, created_at: Date.now() }],
     });
     const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
     expect(summary.promoted).toBe(1);
@@ -528,6 +528,72 @@ describe('round-19 hardening', () => {
     expect(knex._data.contact_correction_jobs[0].customer_id).toBe(CUSTOMER_ID);
     // Only reserved rows accept context — a fired job's payload is settled.
     expect(await queue.attachContactCorrectionContext(2, { senderPhone: '+15550001111', knex })).toBe(false);
+  });
+
+  it('a shared number attaches the one marked account under GATE_SMS_SHARED_PHONE_LINK, nothing otherwise', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000c2';
+    const base = { deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null, updated_at: 1 };
+    const rows = () => ({
+      contact_correction_jobs: [jobRow()],
+      customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: true }, { ...base, id: OTHER, sms_primary_for_shared_phone: false }],
+    });
+    const saved = process.env.GATE_SMS_SHARED_PHONE_LINK;
+    try {
+      delete process.env.GATE_SMS_SHARED_PHONE_LINK;
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex: makeStubKnex(rows()) })).toBe(false);
+      process.env.GATE_SMS_SHARED_PHONE_LINK = 'true';
+      const knex = makeStubKnex(rows());
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex })).toBe(true);
+      expect(knex._data.contact_correction_jobs[0].customer_id).toBe(CUSTOMER_ID);
+      // Two marked rows stay ambiguous.
+      const both = rows(); both.customers[1].sms_primary_for_shared_phone = true;
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex: makeStubKnex(both) })).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_SMS_SHARED_PHONE_LINK; else process.env.GATE_SMS_SHARED_PHONE_LINK = saved;
+    }
+  });
+
+  it('a primary-mark transfer between the match and the lock fails the attach closed', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000c2';
+    const base = { deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null, updated_at: 1 };
+    const saved = process.env.GATE_SMS_SHARED_PHONE_LINK;
+    try {
+      process.env.GATE_SMS_SHARED_PHONE_LINK = 'true';
+      const knex = makeStubKnex({
+        contact_correction_jobs: [jobRow()],
+        customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: true }, { ...base, id: OTHER, sms_primary_for_shared_phone: false }],
+      });
+      // The transfer commits while this attach waits for A's lock: A unmarked, B marked.
+      const trxProxy = new Proxy(knex, {
+        apply(target, thisArg, args) {
+          const chain = target(...args);
+          const origForUpdate = chain.forUpdate;
+          chain.forUpdate = () => {
+            knex._data.customers[0].sms_primary_for_shared_phone = false;
+            knex._data.customers[1].sms_primary_for_shared_phone = true;
+            return origForUpdate();
+          };
+          return chain;
+        },
+      });
+      knex.transaction = async (fn) => fn(trxProxy);
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex })).toBe(false);
+      expect(knex._data.contact_correction_jobs[0].customer_id).toBeFalsy();
+    } finally {
+      if (saved === undefined) delete process.env.GATE_SMS_SHARED_PHONE_LINK; else process.env.GATE_SMS_SHARED_PHONE_LINK = saved;
+    }
+  });
+
+  it('enqueue cancels and scrubs a reservation attached to a different customer than the route\'s match', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000c2';
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ customer_id: CUSTOMER_ID })] });
+    expect(await queue.enqueueContactCorrectionJob(1, { customerId: OTHER, knex })).toBe(false);
+    // Cancelled and scrubbed at once: the stale sweep must never promote it.
+    const row = knex._data.contact_correction_jobs[0];
+    expect(row.status).toBe('cancelled');
+    expect(row.cancel_reason).toBe('linkage_mismatch');
+    expect(row.body).toBeNull();
+    expect(row.expected_values).toBeNull();
   });
 
   it('each processing pass claims under a distinct lock owner', async () => {
@@ -917,6 +983,86 @@ describe('round-32 hardening', () => {
   });
 });
 
+
+test('a dead reservation on a shared number is cancelled unless the primary mark still names its customer', async () => {
+  const OTHER = '00000000-0000-4000-8000-0000000000c2';
+  const base = { deleted_at: null, phone: '+15550001111', updated_at: 1 };
+  const aged = () => jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 });
+  const saved = process.env.GATE_SMS_SHARED_PHONE_LINK;
+  mockDetectIntent.mockReturnValue(true);
+  try {
+    process.env.GATE_SMS_SHARED_PHONE_LINK = 'true';
+    // Mark moved to the other account (or the route's later match was null and its cancel was lost).
+    let knex = makeStubKnex({
+      contact_correction_jobs: [aged()],
+      customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: false }, { ...base, id: OTHER, sms_primary_for_shared_phone: true }],
+      messages: [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
+    });
+    expect(await queue._internals.promoteStaleReservations(knex)).toBe(0);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_link_mismatch');
+    expect(knex._data.contact_correction_jobs[0].body).toBeNull();
+    // Mark still on this customer: replays as before.
+    knex = makeStubKnex({
+      contact_correction_jobs: [aged()],
+      customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: true }, { ...base, id: OTHER, sms_primary_for_shared_phone: false }],
+      messages: [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
+    });
+    expect(await queue._internals.promoteStaleReservations(knex)).toBe(1);
+    // Gate off on a shared number: no mark can apply, cancelled.
+    delete process.env.GATE_SMS_SHARED_PHONE_LINK;
+    knex = makeStubKnex({
+      contact_correction_jobs: [aged()],
+      customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: true }, { ...base, id: OTHER }],
+      messages: [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
+    });
+    expect(await queue._internals.promoteStaleReservations(knex)).toBe(0);
+    expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_link_mismatch');
+  } finally {
+    if (saved === undefined) delete process.env.GATE_SMS_SHARED_PHONE_LINK; else process.env.GATE_SMS_SHARED_PHONE_LINK = saved;
+  }
+});
+
+test('a dead reservation the route logged as unlinked (or linked elsewhere) is never replayed', async () => {
+  mockDetectIntent.mockReturnValue(true);
+  const aged = () => jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 });
+  const inbox = [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }];
+  let knex = makeStubKnex({ contact_correction_jobs: [aged()], messages: inbox, customers: [{ id: CUSTOMER_ID, deleted_at: null, phone: '+15550001111' }],
+    sms_log: [{ id: 's1', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: null, created_at: Date.now() }] });
+  expect(await queue._internals.promoteStaleReservations(knex)).toBe(0);
+  expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_route_unlinked');
+  expect(knex._data.contact_correction_jobs[0].body).toBeNull();
+  // Logged to the same customer: replays.
+  knex = makeStubKnex({ contact_correction_jobs: [aged()], messages: inbox, customers: [{ id: CUSTOMER_ID, deleted_at: null, phone: '+15550001111' }],
+    sms_log: [{ id: 's1', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: CUSTOMER_ID, created_at: Date.now() }] });
+  expect(await queue._internals.promoteStaleReservations(knex)).toBe(1);
+  expect(knex._data.contact_correction_jobs[0].sms_log_id).toBe('s1');
+});
+
+test('a failed shared-phone linkage lookup leaves the reservation untouched and logs no phone digits', async () => {
+  mockDetectIntent.mockReturnValue(true);
+  const logger = require('../services/logger');
+  logger.warn.mockClear();
+  const knex = makeStubKnex({
+    contact_correction_jobs: [jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 })],
+    messages: [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
+    sms_log: [{ id: 's1', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: CUSTOMER_ID, created_at: Date.now() }],
+  });
+  const real = knex;
+  const failing = (table) => {
+    const chain = real(table);
+    if (table === 'customers') {
+      chain.whereRaw = () => { const e = new Error('select * from customers where RIGHT(...) = \'5550001111\' - timeout'); e.code = 'ETIMEDOUT'; throw e; };
+    }
+    return chain;
+  };
+  Object.assign(failing, real);
+  expect(await queue._internals.promoteStaleReservations(failing)).toBe(0);
+  expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
+  const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+  expect(logged).toContain('ETIMEDOUT');
+  expect(logged).not.toContain('5550001111');
+});
 
 test('a dead reservation without an inbox source cannot run a correction', async () => {
   const knex = makeStubKnex({

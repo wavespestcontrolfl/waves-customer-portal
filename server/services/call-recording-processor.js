@@ -61,7 +61,7 @@ function recordedPartOfComposite(text) {
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts, sameDayWindowElapsed } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords, familiesIn } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -211,7 +211,7 @@ function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Vi
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
-const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
@@ -516,6 +516,7 @@ const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an imp
 function transcriptRejectionUpdate(rejectionMeta) {
   return {
     processing_status: 'voicemail',
+    processed_at: new Date(),
     answered_by: 'voicemail',
     call_outcome: 'voicemail',
     transcription: TRANSCRIPTION_REJECTED_SENTINEL,
@@ -959,6 +960,7 @@ const CONFIRM_REASON_TEXT = {
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
+  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.",
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -1198,6 +1200,22 @@ function phoneNearMissOfAni(extracted, ani) {
   if (!Number.isFinite(diff)) return false;
   for (let i = 0; i < 7; i += 1) if (a7[i] !== b7[i]) diff += 1;
   return diff > 0 && diff <= 2;
+}
+
+// The payload mark a no-text hold leaves on an OPEN callback_number_needed card an earlier pass filed.
+// Same expression as disclaimed-number-holds.NO_TEXT_MARK_SQL: a card that did not already carry
+// no_text_hold was filed as an ownership disclaimer, and keeps that meaning (ownership_disclaimed).
+const { NO_TEXT_MARK_SQL } = require('./disclaimed-number-holds');
+
+// True when `phone` is one of the numbers the call itself touched: the ANI, the dialed number, or
+// the lead's number a form-callback bridge recorded in the call's metadata. Anything else on a
+// no-text call is a dictated number and is never adopted (codex #6112 r8 P1).
+function phoneIsOneOfCallLegs(call = {}, phone) {
+  if (!phone) return false;
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const legs = [call.from_phone, call.to_phone, metadata?.type === 'lead_auto_bridge' ? metadata.leadPhone : null];
+  return legs.some((leg) => leg && samePhone(phone, leg));
 }
 
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
@@ -3083,6 +3101,8 @@ async function pushCallToRetryLaneAfterQuarantineFailure({
     }
     const pushedRows = await lastResortQ.update({
       processing_status: 'extraction_failed',
+      // A retry-lane row carries no verdict time (Codex #6269 r2).
+      processed_at: null,
       extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
       metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [String(reason), JSON.stringify(quarantineQueueEntry(reason, procGeneration))]),
       updated_at: new Date(),
@@ -4090,11 +4110,144 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
   });
 }
 
+const parseCardPayload = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
+
+// Calls whose spelling is never compared with the linked customer: a third-party caller (family
+// member, agent, tenant, buyer ...), or an applicant / vendor an inbound number prelinked to a
+// customer. An unlinked call still compares against the extracted caller name.
+function nameSpellingCallExcluded({ customerId, relationship, v2Result }) {
+  return !!customerId && (isExplicitlyNonOwner(relationship) || thirdPartyCallNatureFromV2(v2Result));
+}
+
+// An OPEN card is stale when the live stored name now equals the spelling the card itself recorded,
+// or when the caller is now known not to be the account holder. Retired as an auto close; an
+// operator's in_progress card is never touched.
+async function retireStaleNameSpellingCard(trx, callLogId, card, note = 'Superseded — the customer name now matches the spelling.') {
+  await trx('triage_items').where({ id: card.id }).update({
+    status: 'resolved',
+    resolution_source: 'auto',
+    resolution_note: note,
+    resolved_at: new Date(),
+    updated_at: new Date(),
+  });
+  await syncCallReviewStatus(trx, callLogId);
+}
+
+// A reprocess that now classifies a LINKED caller as a third party (not the account holder) retires the
+// open card an earlier pass filed: it would still tell staff to rename the account holder. Same lock
+// order as the writer (customer row, call lock, claim fence). A pass with simply NO usable spelling
+// does not come here and leaves the card alone: inconclusive evidence never retires.
+async function retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken }) {
+  const open = { call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' };
+  if (!(await conn('triage_items').where(open).first('id'))) return false;
+  return conn.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    await lockTriageCall(trx, callLogId);
+    if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+    const card = await trx('triage_items').where(open).forUpdate().first('id');
+    if (!card) return false;
+    await retireStaleNameSpellingCard(trx, callLogId, card, 'Superseded — the caller is not the account holder.');
+    return false; // no card filed
+  });
+}
+
+// The thin writer, inside the card transaction. Lock order is the customer row FIRST, then the
+// per-call triage lock, then the claim fence (a Customer 360 edit locks the row and then the
+// customer's call locks; the reverse order here would deadlock with it). The customer name is read
+// live under that lock, so the card never carries a name the record no longer has.
+async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, relationship = null, procToken }) {
+  const live = customerId ? await trx('customers').where({ id: customerId }).forUpdate().first('first_name', 'last_name') : null;
+  await lockTriageCall(trx, callLogId);
+  if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+  const openCard = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).forUpdate().first('id', 'payload');
+  // A spouse / partner is authorized on the account but is not the account holder: unless the caller's
+  // own name is the record's, their spelling is not compared with it and an earlier card is retired.
+  if (spouseCallerIsNotAccountHolder({ relationship, extracted, live })) {
+    if (openCard) await retireStaleNameSpellingCard(trx, callLogId, openCard, 'Superseded — the caller is not the account holder.');
+    return false;
+  }
+  const { saved, differences, retire } = nameSpellingCardDecision({
+    dictation, live, extracted, openCardPayload: openCard ? parseCardPayload(openCard.payload) : null,
+  });
+  if (retire) await retireStaleNameSpellingCard(trx, callLogId, openCard);
+  if (!differences.length) return false;
+  const filingCustomer = live && customerId ? String(customerId) : null;
+  const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
+    .whereIn('status', ['resolved', 'dismissed']).select('payload');
+  const [top, ...others] = unsettledNameDifferences(differences, settled.map((r) => parseCardPayload(r.payload)), filingCustomer);
+  if (!top) return false;
+  await trx('triage_items')
+    .insert(buildTriageItem({
+      callLogId,
+      flag: 'name_spelling_differs',
+      extraction,
+      severity: 'advisory',
+      extraPayload: nameSpellingCardPayload({ top, others, saved, filingCustomer }),
+    }))
+    .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .merge(['payload', 'summary', 'updated_at'])
+    .where('triage_items.status', 'open');
+  await syncCallReviewStatus(trx, callLogId);
+  return true;
+}
+
+// The caller relationship from a VALID V2 result only; any other status classifies nobody.
+const validV2CallerRelationship = (v2Result) => (v2Result?.status === 'valid' ? v2Result.extraction?.caller?.relationship_to_property : null);
+
+// Work exists when this pass has a caller-turn spelling or the call has an open card to prune.
+async function nameSpellingPassHasWork(conn, callLogId, dictation) {
+  if ((dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return true;
+  return !!(await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).first('id'));
+}
+
+// The name_spelling_differs card (advisory, card-only): the caller spelled their own name
+// and the spelling differs (letters, any case) from the name being saved for the caller
+// (the linked customer's name when linked, else the extracted name). ONE open card per call.
+// Inbound calls only (outbound diarization can swap the speaker labels). Runs under the per-call
+// triage lock and the processing-token fence (a pass that lost its claim files nothing). A
+// reprocess refreshes an OPEN card in place (an operator's in_progress card is never touched);
+// only a discrepancy a HUMAN settled on this call is not re-filed (a recording-swap or auto close
+// does not suppress it). The payload records which customer the spelling was compared against
+// (customer_ids, rendered and merge-survivor-resolved like the other owed-customer cards), or says
+// the comparison was against the name heard on the call. Never writes a name. Fail-open.
+async function fileNameSpellingCard(conn, {
+  callLogId, customerId, extracted = {}, dictation, v2Result = null, procToken = null, isOutbound = false,
+}) {
+  try {
+    if (isOutbound) return false;
+    const extraction = v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } };
+    // Who the caller is comes only from a VALID V2 result: a partial extraction from a failed
+    // normalization or schema check classifies nobody (no exclusion, no spouse veto, no retire).
+    const relationship = validV2CallerRelationship(v2Result);
+    if (nameSpellingCallExcluded({ customerId, relationship, v2Result })) {
+      return await retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken });
+    }
+    // No usable caller spelling in this pass and no open card: nothing to do. With an open card the
+    // writer still prunes it against the live stored name (an entry the office already fixed drops);
+    // inconclusive evidence itself never adds, replaces or retires an entry that still differs.
+    if (!(await nameSpellingPassHasWork(conn, callLogId, dictation))) return false;
+    return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, relationship, procToken }));
+  } catch (err) {
+    logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
 // Is the call's missing_first_name card still an open task (open or claimed)? Read under
 // the finalization triage lock so a concurrent close is seen. Pure of side effects.
 async function missingFirstNameCardStillOpen(conn, callLogId) {
   const card = await conn('triage_items')
     .where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+    .whereIn('status', ['open', 'in_progress']).first('id');
+  return !!card;
+}
+
+// Is this call's card for `reasonCode` still open? Finalization judges an early-filed card's review
+// reason on this, so staff settling it first never reopens call_log.review_status.
+async function callCardStillOpen(conn, callLogId, reasonCode) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: reasonCode })
     .whereIn('status', ['open', 'in_progress']).first('id');
   return !!card;
 }
@@ -6369,14 +6522,23 @@ function hasPreSlabTermiteContext(text) {
 // "Waves Pest Control and lawn care was requested" keeps its lawn request.
 const OWN_BUSINESS_NAME_RE = /\bwaves\s+pest\s+control(?!\s+appointment\s+service\b)(?:\s*&\s*lawn\s*care\b)?/g;
 
+// Non-pre-treat termite cues, shared by canonicalWavesService (first match
+// wins there) and the unit-card pre-treat proof (any cue anywhere keeps the
+// card). One source of truth: do not copy these patterns.
+const TERMITE_WOOD_TREATMENT_CUE_RE = /\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/;
+const TERMITE_FOAM_DRILL_CUE_RE = /\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/;
+// Termidor is NOT in this one: it also names the pre-slab product.
+const TERMITE_LIQUID_PERIMETER_CUE_RE = /\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b/;
+const TERMITE_WDO_CUE_RE = /\bwdo\b|wood destroying organism/;
+
 function canonicalWavesService(value) {
   const text = String(value || '').toLowerCase().replace(OWN_BUSINESS_NAME_RE, ' ').trim();
   if (!text) return null;
   if (hasPreSlabTermiteContext(text)) return 'Pre-Slab Termidor';
-  if (/\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/.test(text)) return 'Termite Wood Treatment';
-  if (/\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/.test(text)) return 'Termite Foam Drill';
-  if (/\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b|\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
-  if (/\bwdo\b|wood destroying organism/.test(text)) return 'WDO Inspection';
+  if (TERMITE_WOOD_TREATMENT_CUE_RE.test(text)) return 'Termite Wood Treatment';
+  if (TERMITE_FOAM_DRILL_CUE_RE.test(text)) return 'Termite Foam Drill';
+  if (TERMITE_LIQUID_PERIMETER_CUE_RE.test(text) || /\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
+  if (TERMITE_WDO_CUE_RE.test(text)) return 'WDO Inspection';
   if (/\bbed\s*bugs?\b|\bbedbugs?\b/.test(text)) return 'Bed Bug Treatment';
   if (/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait stations?\b/.test(text)) return 'Rodent Control';
   if (/\bmosquito(?:es|s)?\b/.test(text)) return 'Mosquito Control';
@@ -7006,6 +7168,212 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   return out;
 }
 
+// Unit-level language beyond condo/apartment: a commercial suite, bay or
+// multi-tenant center has a unit even for a whole-structure service, so its
+// unit card stays (same safeguard the business whole-building waiver keeps).
+const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
+
+const PRE_CONSTRUCTION_SERVICE_KEYS = new Set(['termite_slab_pretreat', 'termite_pretreatment']);
+// Existing-structure termite work: localized treatments (spot, foam, bait,
+// drill, station) and the treatments an existing building gets (trenching,
+// rodding, perimeter treatment, WDO or other inspection, retreat). Any of
+// these in the view's service words means the pre-treat is NOT the only
+// requested work, so the unit card stays. Soil treatment and barrier are not
+// listed alone: a pre-construction pre-treat is itself a soil barrier. The
+// bare words "liquid" and "existing" are not listed either: "liquid
+// termiticide before the slab pour" and "existing customer needs a slab
+// pre-treat" are plain pre-treat jobs. "Liquid" vetoes only through
+// existingStructureTermiteWork below.
+const EXISTING_STRUCTURE_TERMITE_WORK_RE = /\b(?:spot|foam\w*|bait\w*|drill\w*|stations?|sentricon|localized|fumigat\w*|tent(?:ing|ed)?|trench\w*|rodd?(?:ing|ed)?|rods?|perimeter|wdo|wood[- ]destroying|inspect\w*|re-?treat\w*)\b/i;
+const LIQUID_TERMITE_WORK_RE = /\bliquid\b/i;
+const LIQUID_EXISTING_CONTEXT_RE = /\b(?:perimeter|barrier|foundation|around (?:the )?(?:home|house|structure))\b/i;
+const LIQUID_NEW_CONSTRUCTION_RE = /\b(?:pour|before the slab|new construction)\b/i;
+function existingStructureTermiteWork(words) {
+  if (EXISTING_STRUCTURE_TERMITE_WORK_RE.test(words)) return true;
+  // Fail closed for a mixed call: liquid work tied to the building's
+  // perimeter or foundation, with no new-construction wording to explain it.
+  return LIQUID_TERMITE_WORK_RE.test(words) && LIQUID_EXISTING_CONTEXT_RE.test(words)
+    && !LIQUID_NEW_CONSTRUCTION_RE.test(words);
+}
+// The whole unit-card skip rule, in one place (Codex r11 to r14). The card is
+// dropped only when ALL of these hold for EVERY view of the call:
+//  1. Property: a known building-level type, no partial occupancy, no second
+//     requested service (propertyHasNoUnitToAsk).
+//  2. Intent: the V2 service_intent is not an existing-service intent
+//     (follow-up, complaint or callback, cancellation). A missing intent is
+//     allowed: the V2 schema requires the field, so only a bare test fixture
+//     lacks it, and callMakesNoServiceAsk treats a missing intent the same way.
+//  3. Catalog: the resolved row is a pre-construction pre-treat.
+//  4. Cues: NO fragment, and not the joined service words, carries a
+//     non-pre-treat cue (hasNonPretreatTermiteCue). Cue classes:
+//       a. treatment cues shared with canonicalWavesService: wood treatment /
+//          Bora-Care, foam drill, trench / rod / liquid perimeter, WDO;
+//       b. add-on wording: monitor*, bond, renewal, bait*, stations, and
+//          protection / warranty with plan or contract context;
+//       c. existing-structure work: spot, foam, drill, perimeter,
+//          inspection, retreat and the like (existingStructureTermiteWork);
+//       d. existing-structure CONTEXT, whatever the treatment word is:
+//          a building qualifier ("existing / current / occupied / around the
+//          / of the" + home, house, structure, building, property,
+//          foundation, residence) unless the same fragment says pour, before
+//          the slab, new construction, new build or pre-slab. A bare "soil
+//          treatment" is not context: a pre-treat is a soil treatment.
+//  5. Positive proof: every structured fragment (requested_service,
+//     matched_service, specific_service_name, each pain_points item, every
+//     one split on the conjunctions; a bare V2 category word is a placeholder
+//     and is skipped) is the
+//     pre-slab service or plain "pre-treat" wording; one that classifies as
+//     anything else, or as nothing, keeps the card. Narrative sentences
+//     (call_summary) may be anything that carries no cue and is not another
+//     termite service, and at least one fragment overall is the pre-treat.
+//  6. No unit, suite, bay or condo wording anywhere in the transcript.
+// Any doubt keeps the card. Do not add one regex per Codex round: add a cue
+// to the matching class above.
+const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
+// A pre-treat IS a soil treatment, so bare "soil treatment" is pre-treat wording
+// (existing-structure context still vetoes it when a building qualifier follows).
+const PRETREAT_WORDING_RE = /\bpre[-\s]?treat(?:ment)?\b|\bsoil (?:treatment|poison)\b/i;
+const TERMITE_ADDON_WORDING_RE = /\b(?:monitor\w*|bond|renewal|bait\w*|stations?)\b/i;
+// "Protection" and "warranty" name ordinary pre-construction wording too
+// ("termite protection before the slab pour", a pre-treat's warranty), so they
+// count as add-on work only with plan/contract context and no new-slab wording
+// in the same fragment.
+const TERMITE_PROTECTION_WORDING_RE = /\b(?:protection|warranty)\b/i;
+const TERMITE_PROTECTION_ADDON_CONTEXT_RE = /\b(?:plan|program|renewal|annual|yearly|contract|bond|coverage|agreement|existing|current|ongoing)\b/i;
+const TERMITE_NEW_SLAB_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|pre[-\s]?treat(?:ment)?|slab)\b/i;
+function hasTermiteAddonWording(text) {
+  if (TERMITE_ADDON_WORDING_RE.test(text)) return true;
+  return TERMITE_PROTECTION_WORDING_RE.test(text) && TERMITE_PROTECTION_ADDON_CONTEXT_RE.test(text)
+    && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
+}
+const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b/i;
+const NEW_BUILD_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|new[-\s]build|pre[-\s]?slab)\b/i;
+function hasExistingStructureContext(text) {
+  return EXISTING_STRUCTURE_CONTEXT_RE.test(text) && !NEW_BUILD_WORDING_RE.test(text);
+}
+function hasNonPretreatTermiteCue(text) {
+  const value = String(text || '').toLowerCase();
+  return TERMITE_WOOD_TREATMENT_CUE_RE.test(value) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+    || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
+    || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
+}
+function splitFragments(text) {
+  return String(text || '').split(SERVICE_FRAGMENT_SPLIT_RE).map((f) => f.trim()).filter(Boolean);
+}
+// STRUCTURED fields name the service the caller asked for; the narrative
+// (call_summary) is free prose.
+// V2's required primary_service_category is a bare category word (enum value),
+// and flatView copies it into requested_service and maps it to a legacy label
+// in matched_service: placeholders, not a statement of the work. They are
+// neither proof nor veto; the precise fields and the catalog row decide.
+const V2_PRIMARY_CATEGORY_VALUES = new Set(
+  (require('../schemas/call-extraction.model-output.schema.json').properties?.service_request?.properties?.primary_service_category?.enum || [])
+    .map((v) => String(v).toLowerCase()),
+);
+function isV2CategoryPlaceholder(fragment, field, v2Extraction) {
+  const value = String(fragment || '').trim().toLowerCase();
+  if (V2_PRIMARY_CATEGORY_VALUES.has(value)) return true;
+  if (field !== 'matched_service') return false;
+  const category = v2Extraction?.service_request?.primary_service_category;
+  const legacy = category ? mapServiceCategoryToLegacy(category) : null;
+  return !!legacy && value === String(legacy).toLowerCase();
+}
+// Every structured field is split on the conjunctions, not only pain_points.
+function structuredFragmentsOf(view, v2Extraction) {
+  const out = [];
+  const add = (text, field) => {
+    for (const fragment of splitFragments(text)) {
+      if (!isV2CategoryPlaceholder(fragment, field, v2Extraction)) out.push(fragment);
+    }
+  };
+  add(view.requested_service, 'requested_service');
+  add(view.matched_service, 'matched_service');
+  add(view.specific_service_name, 'specific_service_name');
+  const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
+  for (const item of painPoints) add(item, 'pain_points');
+  return out;
+}
+function pretreatIsOnlyTermiteWork(view, v2Extraction = null) {
+  const structured = structuredFragmentsOf(view, v2Extraction);
+  const narrative = splitFragments(view.call_summary);
+  const fragments = [...structured, ...narrative];
+  if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
+  // Fail closed: a structured fragment that is not the pre-slab service (or
+  // plain pre-treat wording) keeps the card, including one nothing classifies.
+  const isPretreat = (fragment) => canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment);
+  if (!structured.every(isPretreat)) return false;
+  // Narrative sentences may be anything without a cue, but none may be some
+  // other termite service.
+  const narrativeOtherTermite = narrative.some((fragment) => {
+    const label = canonicalWavesService(fragment);
+    return label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
+      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment));
+  });
+  return !narrativeOtherTermite && fragments.some(isPretreat);
+}
+
+const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
+
+// Card-only companion to the waiver above (owner 2026-10-07), narrowed to
+// what the audit showed: true when EVERY view of the call's service resolves
+// to a PRE-CONSTRUCTION pre-treat row (slab pre-treat, pretreatment), the
+// property type is a known building-level one, and nothing on the call names a
+// unit, a suite or other work. Commercial jobs count — a new slab has no unit.
+// WDO, trenching and liquid treatments keep today's card. Used only to skip
+// the advisory missing_unit_number card; it never changes an address hold.
+// The PROPERTY half, positive evidence only (fails closed): a KNOWN
+// building-level property type (an unknown type cannot prove the work is not
+// unit-level), no partial occupancy on either occupancy field, and no second
+// requested service (a coarse category cannot prove that work is
+// building-level).
+function propertyHasNoUnitToAsk(v2Extraction) {
+  const property = v2Extraction?.property || {};
+  const secondary = v2Extraction?.service_request?.secondary_categories;
+  return CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())
+    && property.whole_building_occupancy !== false
+    && property.whole_building_occupancy_final !== false
+    && !(Array.isArray(secondary) && secondary.length);
+}
+
+function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+  // Same conservative views as wholeStructureUnitWaiverForCall: a call the
+  // unclear-service rule may book as a Waves Assessment is not whole-structure,
+  // and the V1 service as heard BEFORE V2-primary adoption must agree too.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return false;
+  if (!propertyHasNoUnitToAsk(v2Extraction)) return false;
+  // A revisit, complaint, callback or cancellation is not a new slab job.
+  if (EXISTING_SERVICE_INTENTS.has(String(v2Extraction?.service_request?.service_intent || ''))) return false;
+  const views = [preAdoptionExtracted, extracted, v2BookingServiceView(extracted, v2Extraction)].filter(Boolean);
+  return views.every((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    // The WHOLE transcript, either speaker, denials included: any mention of
+    // a suite, unit, bay or condo keeps the card (speaker labels and
+    // negations are not reliable enough to suppress on).
+    const text = [transcription, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
+    // Pre-construction pre-treats only (PRE_CONSTRUCTION_SERVICE_KEYS): a new
+    // slab has no unit. The rule is positive proof over canonicalized
+    // service fragments (pretreatIsOnlyTermiteWork): every termite fragment
+    // must be the pre-slab service and none may carry add-on wording. The
+    // view's service words must also name only the termite family and no
+    // existing-structure work (existingStructureTermiteWork backstop) —
+    // anything else heard on the call may target one unit.
+    // pain_points is the extractor's own list of what the caller wants fixed.
+    // The raw transcript is NOT family-scanned: on the audited slab calls a
+    // transcript-wide scan read stray words as another service family. It is
+    // scanned in full for unit/suite wording below.
+    const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
+    const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
+    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords)
+      && pretreatIsOnlyTermiteWork(view, v2Extraction);
+    return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
+      && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
+  });
+}
+
 // Business whole-building unit waiver for one call
 // (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT; caller checks the gate). No
 // service allowlist: the owner's ruling (2026-10-06) is about the ADDRESS, a
@@ -7308,6 +7676,17 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (!customer.state && extracted.state) updates.state = extracted.state;
   if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
   if (Object.keys(updates).length === 0) return customer;
+  // A backfilled number is a phone-identity change for a marked profile: the
+  // shared-phone texting mark was chosen for a number this profile no longer
+  // has (codex #6268 r9/r10). Decided INSIDE the UPDATE against the row's
+  // current phone and mark, not the unlocked `customer` snapshot, so a mark
+  // staff commit between this read and the write is still cleared.
+  if (updates.phone !== undefined) {
+    const newKey = String(updates.phone == null ? '' : updates.phone).replace(/\D/g, '').slice(-10);
+    updates.sms_primary_for_shared_phone = db.raw(
+      "CASE WHEN RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN sms_primary_for_shared_phone ELSE false END",
+      [newKey]);
+  }
   updates.updated_at = new Date();
   // An empty→value email write has no old address to retarget, so the
   // lightweight path (resolve the cards only) is right. REPLACING a garbled
@@ -7365,7 +7744,10 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
       logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
     }
   }
-  return { ...customer, ...updates };
+  // The in-UPDATE CASE is not a value; the merged row reports the mark as
+  // cleared only when it was set and the number changed.
+  const { sms_primary_for_shared_phone: markCase, ...plainUpdates } = updates;
+  return { ...customer, ...plainUpdates, ...(markCase !== undefined ? { sms_primary_for_shared_phone: customer.sms_primary_for_shared_phone === true && String(customer.phone || '').replace(/\D/g, '').slice(-10) === String(updates.phone || '').replace(/\D/g, '').slice(-10) } : {}) };
 }
 
 let Anthropic;
@@ -9231,6 +9613,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
       transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
       sentiment: extracted.sentiment || null,
       processing_status: 'processed',
+      processed_at: new Date(),
       processing_token: null,
       metadata: db.raw(
         "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
@@ -9441,6 +9824,11 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // The verdict time belongs to the pass that lands it: a claim on a
+            // settled row (admin Reprocess) clears the old stamp, so a pass
+            // that ends in a retry lane never reports the previous verdict's
+            // time as its own (Codex #6269 r1).
+            processed_at: null,
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
             // already draining stamps itself IN the claim write, so the stamp
@@ -9510,6 +9898,11 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // The verdict time belongs to the pass that lands it: a claim on a
+            // settled row (admin Reprocess) clears the old stamp, so a pass
+            // that ends in a retry lane never reports the previous verdict's
+            // time as its own (Codex #6269 r1).
+            processed_at: null,
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
             // already draining stamps itself IN the claim write, so the stamp
@@ -10031,6 +10424,9 @@ const CallRecordingProcessor = {
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
+        // The claim cleared the verdict time; a restored terminal status gets
+        // its own stamp back, a NULL / pending status none (Codex #6269 r2).
+        processed_at: preClaimStatus ? (call.processed_at || null) : null,
         processing_token: null,
         updated_at: new Date(),
       });
@@ -10689,11 +11085,161 @@ const CallRecordingProcessor = {
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
 
+    // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
+    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
+    // the decision point — the same statement that flips the boolean above
+    // — before the card is published and before any further awaited work,
+    // so no sender (an invoice/estimate follow-up mid-flight, even at its
+    // provider check) sees the flag decided with no row. armDisclaimedNumber
+    // Hold serializes with the card's /resolve under the per-call triage
+    // lock and is the ONE write in this pass that may re-arm a cleared row
+    // (a genuine reprocess raising the flag again); every later write in
+    // the pass is ensure-only and cannot undo a clearance that lands after
+    // this decision. A failure fails the pass closed (the capped
+    // extraction_failed retry) — code/name only in the log (a Knex message
+    // can render the bound phone number).
+    //
+    // Round 8 P1: the write is FENCED to this pass's processing claim —
+    // armDisclaimedNumberHold verifies processing_token (+ generation)
+    // with a FOR UPDATE on call_log inside the same transaction as the
+    // insert (lock order: triage advisory lock → call_log row → hold row,
+    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
+    // lock first too). A superseded worker writes nothing and gets false
+    // back: the caller abandons the pass (abandonToPeer), the same
+    // outcome as the stillOwnsClaim boundaries — it must never arm, or
+    // re-arm over a human clearance, from a stale extraction.
+    let callbackNumberHoldArmed = false;
+    // Set by each decision point just before it arms: the hold rests on a VALID ani_cannot_text.
+    let noTextHoldArming = false;
+    // True once a no-text hold and its text_number_differs release card are COMMITTED together
+    // (the decision-point pair). Read by the post-customer write: a pass whose enforce routing
+    // threw before the decision point arms the pair there instead of refreshing a card that
+    // does not exist (codex r7 P1).
+    let noTextDecisionLanded = false;
+    // cardExtraction: on a no-text hold, the VALID extraction the release card is built from. The
+    // card insert runs INSIDE armDisclaimedNumberHold's transaction (afterArm), under the per-call
+    // triage lock and the processing-claim fence, so the hold and its only release card commit or
+    // roll back together (codex r7 P2): a failed card write leaves no hold behind, and a lost
+    // claim writes neither.
+    const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {
+      const wantsCard = noTextHoldArming && !!cardExtraction;
+      if (callbackNumberHoldArmed) {
+        // Armed earlier in this pass without the card (a hold decided before the no-text statement
+        // was read): the card is owed; its own fenced write fails closed.
+        if (wantsCard && !noTextDecisionLanded) {
+          await fileTextNumberCard(cardExtraction, call.customer_id || null, { failClosed: true });
+          noTextDecisionLanded = true;
+        }
+        return true;
+      }
+      try {
+        const item = wantsCard ? await buildTextNumberCardItem(cardExtraction, call.customer_id || null) : null;
+        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
+          procToken, procGeneration, noTextHold: noTextHoldArming,
+          afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,
+        });
+        if (armed?.claimLost) return false;
+        callbackNumberHoldArmed = true;
+        if (item) noTextDecisionLanded = true;
+        return true;
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
+    };
+    // text_number_differs (owner ruling 2026-10-08): the card that releases the no-text hold. It is
+    // filed at the hold decision point too (before any hard-veto exit, so a durable hold never
+    // exists without the card that can release it) and refreshed with the final customer later.
+    // Idempotent per open card; never blocks the pass.
+    const buildTextNumberCardItem = async (ext, linkedCustomerId) => {
+        const callerForText = ext?.caller;
+        const aniPhone = firstExternalPhone(contactPhone);
+        // Same bar as the other spoken numbers: an impossible NANP value (a transcription slip) is
+        // never shown as "texts go to" — the card asks staff to copy it into the account (codex r14 P2).
+        const spokenText = isDialablePhone(callerForText?.text_phone_e164) && !samePhone(callerForText.text_phone_e164, aniPhone)
+          && !isImpossibleNanpPhone(callerForText.text_phone_e164)
+          ? callerForText.text_phone_e164 : null;
+        const onFile = linkedCustomerId ? await db('customers').where({ id: linkedCustomerId }).first('phone') : null;
+        return buildTriageItem({
+          callLogId: call.id,
+          flag: 'text_number_differs',
+          extraction: ext,
+          severity: 'advisory',
+          extraPayload: {
+            ani_phone: aniPhone,
+            text_phone: spokenText,
+            // A snapshot only: the inbox shows the customer's LIVE phone (list query); this is the account phone at the time of the call.
+            customer_phone_at_call: onFile?.phone || null,
+            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.`,
+          },
+        });
+    };
+    // The card write itself. The caller holds the per-call triage lock and has verified the
+    // processing claim (armDisclaimedNumberHold's transaction, or fileTextNumberCard's own).
+    const writeTextNumberCard = async (trx, item, { refresh = false } = {}) => {
+      // A callback_number_needed card filed by an earlier pass (before this call was known to be a
+      // no-text line) keeps its old payload; mark it, or its Resolve could release the hold we arm now.
+      await trx('triage_items')
+        .where({ call_log_id: call.id, reason_code: 'callback_number_needed' })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ payload: trx.raw(NO_TEXT_MARK_SQL) });
+      if (refresh) {
+        // Refresh the OPEN card only: a card staff already resolved or dismissed stays settled.
+        await trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ payload: item.payload, updated_at: new Date() });
+      } else {
+        await trx('triage_items').insert(item)
+          .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+      }
+      // The call-level aggregate follows the card in the same locked transaction: the tech follow-up
+      // and voicemail branches return before the pass's usual review-status write (codex r14 P2).
+      await syncCallReviewStatus(trx, call.id);
+    };
+    const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {
+      try {
+        const item = await buildTextNumberCardItem(ext, linkedCustomerId);
+        // One transaction under the per-call triage lock (the contract every triage writer and the
+        // version-checked release share), fenced to this pass's processing claim: the card write cannot
+        // interleave with a release's version check, and a superseded worker writes nothing.
+        await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          const owner = await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+          if (!owner) return;
+          await writeTextNumberCard(trx, item, { refresh });
+        });
+      } catch (triageErr) {
+        const code = triageErr.code || triageErr.name || 'db_error';
+        if (failClosed) {
+          // The hold is already committed and callback_number_needed's card is suppressed for this
+          // case, so the release card must exist: abort the pass for the capped retry, like the
+          // hold write itself.
+          logger.error(`[call-proc] text-number card write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+          const closed = new Error(`text-number card write failed (${code})`);
+          closed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+          throw closed;
+        }
+        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${code}`);
+      }
+    };
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
     // Extraction is final here and no side effect has run yet: the call
     // keeps its transcript, extraction, summary and commitments, and
     // nothing of the lead pipeline below touches it.
     if (isTechFollowUpCall(call)) {
+      // A customer who tells the technician on this outbound follow-up that the dialed line cannot get
+      // texts (valid V2 ani_cannot_text): the number-keyed hold and its release card are armed here,
+      // before the short-circuit, so reminders for the linked visit stop (codex #6112 r12 P2). Same
+      // fence and abandon-on-lost-claim as the decision points; spam excluded.
+      if (!extracted.is_spam && aniCannotText(noTextSafeExtraction(v2Result)?.caller)) {
+        noTextHoldArming = true;
+        if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
+      }
       return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
     }
 
@@ -10775,6 +11321,7 @@ const CallRecordingProcessor = {
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
+        processed_at: new Date(),
         processing_token: null,
         updated_at: new Date(),
       };
@@ -10833,6 +11380,15 @@ const CallRecordingProcessor = {
       // between them left the call retryable while its funnel history was
       // already deleted. A 0-row terminal write throws inside the
       // transaction so the retire and stamp clear roll back with it.
+      // A non-workable VOICEMAIL that says the calling line cannot get texts (a valid V2
+      // ani_cannot_text) still needs the number-keyed hold and its release card: reminders and other
+      // automated texts to a known customer key on the number, not on this pass (codex #6112 r10 P2).
+      // Spam stays excluded. Armed BEFORE the terminal write, while this pass still owns the claim,
+      // with the same fence and the same abandon-on-lost-claim as the decision points.
+      if (!extracted.is_spam && aniCannotText(noTextSafeExtraction(v2Result)?.caller)) {
+        noTextHoldArming = true;
+        if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
+      }
       const terminalSettled = await db.transaction(async (trx) => {
         const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
         if (!settled) return false;
@@ -11093,47 +11649,11 @@ const CallRecordingProcessor = {
     // scheduled_services.callback_number_hold_at once the visit is booked so
     // the reminder cron can honor the same hold days later.
     let callbackNumberNeededHoldActive = false;
-    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
-    // the decision point — the same statement that flips the boolean above
-    // — before the card is published and before any further awaited work,
-    // so no sender (an invoice/estimate follow-up mid-flight, even at its
-    // provider check) sees the flag decided with no row. armDisclaimedNumber
-    // Hold serializes with the card's /resolve under the per-call triage
-    // lock and is the ONE write in this pass that may re-arm a cleared row
-    // (a genuine reprocess raising the flag again); every later write in
-    // the pass is ensure-only and cannot undo a clearance that lands after
-    // this decision. A failure fails the pass closed (the capped
-    // extraction_failed retry) — code/name only in the log (a Knex message
-    // can render the bound phone number).
-    //
-    // Round 8 P1: the write is FENCED to this pass's processing claim —
-    // armDisclaimedNumberHold verifies processing_token (+ generation)
-    // with a FOR UPDATE on call_log inside the same transaction as the
-    // insert (lock order: triage advisory lock → call_log row → hold row,
-    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
-    // lock first too). A superseded worker writes nothing and gets false
-    // back: the caller abandons the pass (abandonToPeer), the same
-    // outcome as the stillOwnsClaim boundaries — it must never arm, or
-    // re-arm over a human clearance, from a stale extraction.
-    let callbackNumberHoldArmed = false;
-    const armCallbackNumberHoldAtDecision = async () => {
-      if (callbackNumberHoldArmed) return true;
-      try {
-        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
-          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
-          procToken, procGeneration,
-        });
-        if (armed?.claimLost) return false;
-        callbackNumberHoldArmed = true;
-        return true;
-      } catch (holdErr) {
-        const code = holdErr.code || holdErr.name || 'db_error';
-        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
-        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
-        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
-        throw failClosed;
-      }
-    };
+    // What the SMS gate read BEFORE a number hold forced v2SmsBlocked true (the TCPA verdict in
+    // enforce mode, nothing in shadow). Restored when the office's "Line can get texts" lands while
+    // this pass is still running (codex #6112 r9 P2), so the per-pass blockers follow the durable hold.
+    let v2SmsBlockedBeforeHold = false;
+    let v2SmsClearedByImpliedConsentBeforeHold = false;
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent
@@ -11705,7 +12225,18 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, {
+            canonicalStreet: extracted?.address_line1,
+            preConstructionPretreat: finalFlags.includes('missing_unit_number')
+              && callIsPreConstructionPretreat({
+                extracted, preAdoptionExtracted, v2Extraction, transcription,
+                services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+              }),
+          }).dropped);
+          // A call that ended with nothing to do files no booking-hold card
+          // (2026-10-10 audit). Codes, not flags: not_confirmed is the
+          // routing reason, so it is never in finalFlags.
+          for (const code of noActionCallCards(v2Extraction, { canonicalStreet: extracted?.address_line1 })) unneededCards.add(code);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier
@@ -11752,7 +12283,14 @@ const CallRecordingProcessor = {
           // callback_number_needed card) — never automatic. Pure decision
           // in call-triage-flags.js so it's unit-testable independent of
           // this pass's DB/LLM calls.
-          if (callbackNumberNeededBlocksSms(finalFlags)) {
+          // A hard-vetoed call (spam / out of area / do-not-contact) writes nothing canonical and its
+          // customer is never texted, so a no-text line gets neither the hold nor the card there
+          // (a hold needs the card that releases it). A caller who also disclaimed the number
+          // keeps the original behavior.
+          const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);
+          if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {
+            v2SmsBlockedBeforeHold = v2SmsBlocked;
+            v2SmsClearedByImpliedConsentBeforeHold = v2SmsClearedByImpliedConsent;
             v2SmsBlocked = true;
             v2SmsClearedByImpliedConsent = false;
             // P1-C: this hold must outlive the confirmation send — the
@@ -11764,7 +12302,9 @@ const CallRecordingProcessor = {
             // Round 7 P1: persisted NOW — before the route decision, the
             // advisory card below, and anything else this pass awaits.
             // Round 8 P1: a lost claim abandons the pass (nothing written).
-            if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
+            noTextHoldArming = aniCannotText(v2Extraction?.caller);
+            // Hold + release card in one transaction (cardExtraction is ignored unless the hold is a no-text hold).
+            if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction }))) return abandonToPeer('the disclaimed-number hold write');
           }
 
           const routeDecision = buildRouteDecision({
@@ -12066,7 +12606,8 @@ const CallRecordingProcessor = {
 
     if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
       try {
-        const v2Ext = v2Result?.extraction || null;
+        // Only a valid V2 payload may speak for ani_cannot_text (an invalid one would arm a number-wide hold).
+        const v2Ext = noTextSafeExtraction(v2Result) || null;
         // Merge deterministic caller-authorization flags so `caller_not_authorized`
         // (caller.on_site_authorization === false + non-owner) is caught even when
         // the model omits the redundant triage_flag — matching the enforce gate.
@@ -12093,13 +12634,28 @@ const CallRecordingProcessor = {
         // below is about to file from, so shadow mode behaves exactly like
         // enforce mode for this one signal.
         if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
+          v2SmsBlockedBeforeHold = v2SmsBlocked;
+          v2SmsClearedByImpliedConsentBeforeHold = v2SmsClearedByImpliedConsent;
           v2SmsBlocked = true;
           v2SmsClearedByImpliedConsent = false;
           callbackNumberNeededHoldActive = true;
           // Round 7 P1: persisted NOW — before the bridge files the card
           // below and before any further awaited work.
           // Round 8 P1: a lost claim abandons the pass (nothing written).
-          if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
+          // ASYMMETRY with enforce mode (owner-confirmed 2026-10-08): in shadow the legacy V1 pipeline
+          // still runs the customer, booking and SMS even when a V2-only hard veto (spam / out of area /
+          // do-not-contact) applies, so the SMS hold for a valid ani_cannot_text is armed regardless of
+          // the veto (a hold only blocks texts and is always safe). Enforce mode blocks the canonical
+          // writes on a veto, so it arms neither.
+          // The release card goes WITH the hold, veto or not (Codex security r6, 2026-10-10): a
+          // number-wide hold with no text_number_differs card has no release path, and on a shared
+          // relay or office line one caller would block every text to every record on that number.
+          // The callback_number_needed card is suppressed for a no-text-only call, so this card is the
+          // only release task; the later { refresh: true } write only updates a card that exists.
+          // Hold and card commit in ONE transaction (codex r7 P2), so the hold never exists without
+          // its card: a failed card write rolls the hold back and the pass retries.
+          noTextHoldArming = aniCannotText(v2Ext?.caller);
+          if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext }))) return abandonToPeer('the disclaimed-number hold write');
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the
@@ -12117,6 +12673,15 @@ const CallRecordingProcessor = {
           v2Extraction: v2Result?.status === 'valid' ? v2Ext : null,
           addressRecovery,
         });
+        // Shadow posture gets the same whole-structure rule as the enforce
+        // card filter: no "which unit?" card or unit ask on a slab, trench or
+        // WDO job (owner 2026-10-07).
+        if (needsConfirmation.includes('missing_unit_number') && callIsPreConstructionPretreat({
+          extracted, preAdoptionExtracted, v2Extraction: v2Result?.status === 'valid' ? v2Ext : null, transcription,
+          services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+        })) {
+          needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);
+        }
         // Decoder-only email evidence: when the primary extraction captured
         // NO email (empty email + email_raw) the bridge's email review stays
         // silent, which would drop the decoder's candidates/question on the
@@ -12222,7 +12787,7 @@ const CallRecordingProcessor = {
                     callLogId: call.id,
                     flag,
                     onFileAddress,
-                    extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                    extraction: noTextSafeExtraction(v2Result) || { meta: { call_summary: extracted.call_summary || null } },
                     severity: 'advisory',
                     // Google's resolved building when it has one (a corrected
                     // street/ZIP rides on this verdict shape), else what the
@@ -12251,7 +12816,7 @@ const CallRecordingProcessor = {
                   callLogId: call.id,
                   flag,
                   onFileAddress,
-                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                  extraction: noTextSafeExtraction(v2Result) || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
                   // The surname card's filing-time names include the merged
                   // V1 extraction's — what backfillCustomerFromAppointmentContact
@@ -12465,6 +13030,7 @@ const CallRecordingProcessor = {
             sentiment: extracted.sentiment || null,
             lead_quality: extracted.lead_quality || null,
             processing_status: extracted.is_spam ? 'spam' : 'processed',
+            processed_at: new Date(),
             review_status: 'open',
             processing_token: null,
             // A definitive rejection that finalizes 'processed' (wrong
@@ -12521,6 +13087,12 @@ const CallRecordingProcessor = {
     // audit (ai_extraction_enriched, triage payloads) but must not drive
     // customer/lead side effects.
     const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    // ani_cannot_text (schema 1.28.0, owner ruling 2026-10-08, CARD-ONLY): the caller said the
+    // line they called from cannot get texts. Automation never uses the number they dictated
+    // for texts — no customer phone write, no send; texts to the ANI hold through
+    // callback_number_needed, and the text_number_differs card asks the office to fix the
+    // phones. Not caller_id_disclaimed: the caller owns the line for calls.
+    const callAniCannotText = aniCannotText(noTextSafeExtraction(v2Result, v2CanonicalExtraction)?.caller);
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
@@ -12572,6 +13144,19 @@ const CallRecordingProcessor = {
       }
     }
 
+    // ani_cannot_text (codex r7 P1, r8 P1): the V1 extractor has ONE phone field, so a number the
+    // caller dictated for texts can land in extracted.phone and from there key the customer match,
+    // the stored phone and every later leg — the automatic phone write the owner's card-only ruling
+    // forbids. On a no-text call, inbound or outbound, a spoken number that is not one of the call's
+    // own legs is quarantined: automation never adopts it, and the text_number_differs card carries
+    // the dictated number for the office. The ANI (or the dialed customer) stays the callable number.
+    // The call's own legs are the only numbers automation may keep: the ANI, the dialed number and,
+    // for a form-callback bridge, the lead's number in the bridge metadata (the outbound branch of
+    // resolveCallContactPhone would otherwise prefer the dictated number over the dialed customer).
+    if (callAniCannotText && extracted.phone && !phoneIsOneOfCallLegs(call, extracted.phone)) {
+      logger.info(`[call-proc] no-text call: dictated number ${maskPhone(extracted.phone)} kept off the caller fields for ${maskSid(callSid)}`);
+      extracted.phone = null;
+    }
     if (!(await stillOwnsClaim())) return abandonToPeer('the customer write');
     // Step 3: Create or update customer
     let customerId = call.customer_id;
@@ -12890,6 +13475,18 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Card-only: a spelling the caller gave of their own name that differs from the name saved
+    // for them goes to the office as an advisory card. Nothing is written from it.
+    await fileNameSpellingCard(db, {
+      callLogId: call.id,
+      customerId,
+      extracted,
+      dictation: contactDictation,
+      v2Result,
+      procToken,
+      isOutbound: isOutboundCall(call),
+    });
+
     // Pre-linked calls (call.customer_id set at ring time by the inbound
     // webhook, an operator link, or the transcript-name reconciliation
     // above) skipped the phone-match branch entirely, so a capture on a
@@ -13002,6 +13599,43 @@ const CallRecordingProcessor = {
       }
     }
 
+    // text_number_differs (owner ruling 2026-10-08): both numbers and the ask, for a new or an
+    // existing customer alike. Advisory, with its own Resolve (a sibling card's verdict does
+    // not sweep it). Writes nothing to the customer. A failed insert never blocks the pass.
+    if (callAniCannotText) {
+      if (!noTextDecisionLanded) {
+        // The decision-point pair never landed (enforce routing threw before it and the gate catch
+        // carried on with SMS enabled; codex r7 P1): a known no-text line would get later texts and
+        // the review reason would point at a card that was never inserted. Arm hold + card here,
+        // in one transaction, with the same fence and the same abandon-on-lost-claim.
+        v2SmsBlockedBeforeHold = v2SmsBlocked;
+        v2SmsClearedByImpliedConsentBeforeHold = v2SmsClearedByImpliedConsent;
+        v2SmsBlocked = true;
+        v2SmsClearedByImpliedConsent = false;
+        callbackNumberNeededHoldActive = true;
+        noTextHoldArming = true;
+        if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2CanonicalExtraction }))) return abandonToPeer('the disclaimed-number hold write');
+      } else {
+        await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });
+        // "Line can get texts" may have landed while this pass ran: the route cleared the durable
+        // hold and closed the early card. Follow it — the per-pass blockers go back to what the SMS
+        // gate read before the hold, so the confirmation and dropped-call texts are not skipped on a
+        // line the office just verified (codex r9 P2). Read after the locked refresh; a read error
+        // keeps the hold (fail closed).
+        try {
+          const Holds = require('./disclaimed-number-holds');
+          const own = await db(Holds.TABLE).where({ source_call_log_id: call.id }).orderBy('held_at', 'desc').first('cleared_at');
+          if (own && own.cleared_at) {
+            callbackNumberNeededHoldActive = false;
+            v2SmsBlocked = v2SmsBlockedBeforeHold;
+            v2SmsClearedByImpliedConsent = v2SmsClearedByImpliedConsentBeforeHold;
+            logger.info(`[call-proc] no-text hold for ${maskSid(callSid)} was released by the office during the pass — per-pass SMS blockers follow it`);
+          }
+        } catch (_e) { /* hold stays: fail closed */ }
+      }
+      if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
+    }
+
     // Phone-verification lane (owner directive 2026-07-27): when a call ends
     // up linked to an EXISTING customer whose on-file numbers do NOT include
     // the number the caller actually dialed from, the link came from
@@ -13015,7 +13649,9 @@ const CallRecordingProcessor = {
     // P2). Skips brand-new customers (their phone IS this call's) and
     // outbound dials. Best-effort: a failed check must never break call
     // processing.
-    let callerPhoneUnverified = false;
+    // A no-text ANI is never saved to the account by the appointment-contact backfill, whether
+    // or not it is already on file in a secondary slot (suppressPhone below).
+    let callerPhoneUnverified = callAniCannotText;
     // Anonymous/restricted sentinels and internal forwarding numbers are
     // truthy but say nothing about the caller — without the usability gate
     // they'd open bogus "save this number" cards and suppress legitimate
@@ -13691,7 +14327,9 @@ const CallRecordingProcessor = {
         const linked = await db('customers').where({ id: customerId })
           .first(['first_name', 'last_name', ...identityPhoneCols]);
         const phoneOnFile = !!linked && identityPhoneCols.some((col) => samePhone(verifiableAni, linked[col]));
-        if (linked && !phoneOnFile) {
+        // Not for a no-text line: "save this number to the account" is the opposite ask
+        // (the text_number_differs card above covers the phones).
+        if (linked && !phoneOnFile && !callAniCannotText) {
           callerPhoneUnverified = true;
           await db('triage_items')
             .insert(buildTriageItem({
@@ -22246,9 +22884,13 @@ const CallRecordingProcessor = {
       // closed card's reason must not reopen review. Judged under the lock just taken.
       const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')
         || await missingFirstNameCardStillOpen(trx, call.id);
+      // …and the no-text line card, filed early at the hold decision (staff may have settled it since).
+      const textCardStillOpen = !bridgeNeedsConfirmation.includes('text_number_differs')
+        || await callCardStillOpen(trx, call.id, 'text_number_differs');
       const reviewReasonCount = bridgeNeedsConfirmation
         .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)
-          && (r !== 'missing_first_name' || firstNameStillOwed)).length;
+          && (r !== 'missing_first_name' || firstNameStillOwed)
+          && (r !== 'text_number_differs' || textCardStillOpen)).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -22257,6 +22899,9 @@ const CallRecordingProcessor = {
         .where('processing_token', procToken)
         .update({
           processing_status: finalStatus,
+          // Terminal verdict time (migration 20261010250000): the one plain
+          // column a report can order by; updated_at moves on every later write.
+          processed_at: new Date(),
           processing_token: null,
           // Address unverifiable / caller-not-owner / missing surname, or a
           // customer-less recovery lead that failed to persist → open the call for
@@ -23616,6 +24261,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  fileNameSpellingCard,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
@@ -23670,6 +24316,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
+  callIsPreConstructionPretreat,
   businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,

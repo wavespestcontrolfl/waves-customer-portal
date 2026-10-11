@@ -59,6 +59,10 @@ function normalizeCaller(caller) {
     organization_name: cleanText(caller.organization_name),
     phone_e164: normalizePhone(caller.phone_e164),
     phone_raw_spoken: cleanText(caller.phone_raw_spoken),
+    // text_phone_e164 (schema 1.25.0): the number the caller gave for texts when
+    // the line they called from cannot take them. Same phone cleanup as
+    // phone_e164; ani_cannot_text rides through the spread untouched.
+    text_phone_e164: normalizePhone(caller.text_phone_e164),
     // phone_note (schema 1.14.0): the caller's own words on why the ANI
     // isn't theirs. Schema already clamps at 160 chars; clamp again here
     // too so a normalizer-only consumer (pre-validation) can't see a longer

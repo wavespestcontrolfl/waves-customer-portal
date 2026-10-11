@@ -162,9 +162,39 @@ async function findSingleCustomerByPhone(phone) {
 
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
+    if (require('../services/shared-phone-link').sharedPhoneLinkEnabled()) {
+      return pickSharedPhoneCustomer(key, phone);
+    }
     logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
   }
   return null;
+}
+
+// GATE_SMS_SHARED_PHONE_LINK: the rule lives in services/shared-phone-link.js
+// (one matcher for this route and the contact-correction queue). Here only
+// the logging; a failed lookup returns null, the same outcome as the gate off.
+async function pickSharedPhoneCustomer(key, phone) {
+  let picked;
+  try {
+    picked = await require('../services/shared-phone-link').pickMarkedCustomerForPhone(db, key);
+  } catch (err) {
+    logger.warn(`[sms] shared-phone lookup failed for ${maskPhone(phone)}; not auto-linking inbound SMS`, { code: err.code || 'unknown' });
+    return null;
+  }
+  if (picked.reason === 'none') {
+    logger.warn(`[sms] shared-phone: no primary mark for sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
+    return null;
+  }
+  if (picked.reason === 'ambiguous') {
+    logger.warn(`[sms] shared-phone: more than one customer marked primary for sender phone ${maskPhone(phone)}; ambiguous, not auto-linking inbound SMS`);
+    return null;
+  }
+  logger.info(`[sms] shared-phone: primary mark; sender phone ${maskPhone(phone)} linked to ${picked.customer.id}`);
+  // Non-enumerable: never spread into a write or a JSON body. The inbox
+  // persist reads it to leave the number's earlier unknown thread alone
+  // (codex #6268 r14).
+  Object.defineProperty(picked.customer, 'sharedPhoneLinked', { value: true, enumerable: false });
+  return picked.customer;
 }
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
@@ -419,6 +449,10 @@ router.post('/sms', async (req, res) => {
     // wait for a durable message so redelivery can safely resume processing.
     const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
+      // A mark-linked shared-phone sender joins the customer's thread with
+      // THIS message only; the number's earlier unknown thread is kept
+      // (codex #6268 r14, GATE_SMS_SHARED_PHONE_LINK).
+      preserveUnknownThread: customer?.sharedPhoneLinked === true,
       channel: 'sms',
       ourEndpointId: To,
       contactPhone: From,
@@ -2166,13 +2200,16 @@ async function runLegacyAiDraft(ctx) {
     return;
   }
   const {
-    customer, Body, From, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
+    customer, Body, smsLogEntry, park = async (row) => { await db('message_drafts').insert(row); return true; },
   } = ctx;
   try {
     const ContextAggregator = require('../services/context-aggregator');
     const ResponseDrafter = require('../services/response-drafter');
 
-    const context = await ContextAggregator.getFullCustomerContext(From);
+    // Context from the customer THIS route resolved (single active match, or
+    // the gated shared-phone mark), never a fresh unordered phone lookup
+    // that could load the other account on a shared number (codex #6268 r10).
+    const context = await ContextAggregator.getContextForCustomer(customer);
 
     // Simple intent classification
     const intentMap = [
@@ -2286,6 +2323,7 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 }
 
 router._internals = {
+  findSingleCustomerByPhone,
   hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
