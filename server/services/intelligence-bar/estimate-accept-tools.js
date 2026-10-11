@@ -489,12 +489,17 @@ function serviceAndBillLines(preview) {
 
 // Each priced one-time line the estimate sells and what the accept does
 // about it. A manual accept books and invoices none of them.
+// What the card says for each one-time line, by what the accept does with it.
+const ONE_TIME_LINE_LABELS = {
+  schedule_and_invoice_by_hand: (l) => `One-time ${l.name} (${money(l.amount)}): this accept does not schedule or invoice it — schedule it and invoice it by hand`,
+  // A fee is not work: nothing to schedule, only an invoice line.
+  invoice_by_hand: (l) => `${l.name} (${money(l.amount)}): this accept does not invoice it — add it to the first invoice by hand; there is no visit to schedule`,
+  subtract_when_invoicing: (l) => `${l.name}: ${money(-l.amount)} off — the lines above are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`,
+};
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
     kind: 'operational',
-    label: l.consequence === 'subtract_when_invoicing'
-      ? `${l.name}: ${money(-l.amount)} off — the lines above are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`
-      : `One-time ${l.name} (${money(l.amount)}): this accept does not schedule or invoice it — schedule it and invoice it by hand`,
+    label: ONE_TIME_LINE_LABELS[l.consequence]?.(l) || ONE_TIME_LINE_LABELS.schedule_and_invoice_by_hand(l),
   }));
 }
 
@@ -676,6 +681,10 @@ function acceptedResult(preview, json, stored) {
     monthly_rate_now: monthlyRateNow(json, stored),
     tier_now: stored ? (stored.waveguard_tier || null) : null,
     warnings: Array.isArray(json.warnings) ? json.warnings : [],
+    // The receipt path (outcomes.js executionOutcome, PendingActionsCard)
+    // reads the singular field: one or more post-commit warnings make the
+    // outcome partially_completed and show on the card.
+    ...(Array.isArray(json.warnings) && json.warnings.length ? { warning: json.warnings.join(' ') } : {}),
     message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted. No visits were booked — book the first visit on the calendar.`,
   };
 }

@@ -453,7 +453,7 @@ describe('round 10, finding 1: a partly itemized one-time total refuses; the mem
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
       { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
-      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand' },
     ]);
   });
   test('lines that add up to less than the total refuse, naming the missing amount', async () => {
@@ -930,6 +930,13 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     const second = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: skipping, world: closed });
     expect(skipping.markLinkedLeadEstimateAccepted).toHaveBeenCalled();
     expect(second.result.warnings).toContain('The linked lead was not marked won: what it acts on changed after the accept. Complete it by hand.');
+  });
+  test('round 12: a multi-home flip that fails after the commit is a result warning', async () => {
+    const refresh = jest.spyOn(Linkage, 'refreshHasMultiHome').mockRejectedValue(new Error('down'));
+    const warnings = [];
+    await Effects.POST_COMMIT_STEPS.multi_home.run({ step: 'multi_home', target: { customer_id: 'cust-1', flips: true } }, { warnings, acceptedEstimate: { id: 'est-1', customer_id: 'cust-1' }, proposalCustomer: null, database: {} });
+    expect(warnings).toEqual(['The other homes on this account were not marked: the flip failed after the accept. Complete it by hand.']);
+    refresh.mockRestore();
   });
   test('round 9, finding 2: every post-commit step has an operator label for its skip', () => {
     expect(Object.keys(Effects.STEP_LABELS).sort()).toEqual(Object.keys(Effects.POST_COMMIT_STEPS).sort());

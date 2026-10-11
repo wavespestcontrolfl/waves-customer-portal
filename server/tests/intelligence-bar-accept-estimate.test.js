@@ -708,6 +708,32 @@ describe('Confirm', () => {
     expect(result).toMatchObject({ success: true, monthly_rate_now: 55, tier_now: 'Bronze' });
   });
 
+  test('round 12: post-commit warnings reach the receipt as the singular warning, so the outcome is partially_completed', async () => {
+    const { executionOutcome } = require('../services/intelligence-bar/outcomes');
+    const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    realReply = async () => ({ status: 200, json: { success: true, alreadyAccepted: false, conversion: null, warnings: ['The linked lead was not marked won: what it acts on changed after the accept. Complete it by hand.'] } });
+    const result = await confirmWith(approved);
+    expect(result.success).toBe(true);
+    expect(result.warning).toBe('The linked lead was not marked won: what it acts on changed after the accept. Complete it by hand.');
+    expect(executionOutcome(result)).toBe('partially_completed');
+    realReply = async () => ({ status: 200, json: { success: true, alreadyAccepted: false, conversion: null, warnings: [] } });
+    const clean = await confirmWith(await executeEstimateAcceptTool('accept_estimate', INPUT));
+    expect(clean.warning).toBeUndefined();
+    expect(executionOutcome(clean)).toBe('completed');
+  });
+
+  test('round 12: the membership fee line tells staff to invoice it, not to schedule a visit', async () => {
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand' },
+      postCommit([]),
+    ];
+    const card = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    const labels = JSON.stringify(card);
+    expect(labels).toContain('add it to the first invoice by hand; there is no visit to schedule');
+    expect(labels).not.toContain('schedule it and invoice it by hand');
+  });
+
   test('refuses without a verified card', async () => {
     const result = await confirmWith(undefined);
     expect(result.preview_changed).toBe(true);

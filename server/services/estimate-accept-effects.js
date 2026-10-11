@@ -174,7 +174,7 @@ const readPath = (data, path) => path.reduce((o, k) => (o && typeof o === 'objec
 function membershipFeeLine(data) {
   for (const path of MEMBERSHIP_FEE_PATHS) {
     const n = Number(readPath(data, path));
-    if (Number.isFinite(n) && n > 0) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(n), consequence: 'schedule_and_invoice_by_hand' };
+    if (Number.isFinite(n) && n > 0) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(n), consequence: 'invoice_by_hand' };
   }
   return null;
 }
@@ -535,6 +535,7 @@ const POST_COMMIT_STEPS = {
         await require('./estimate-property-linkage').refreshHasMultiHome(step.target.customer_id, ctx.database);
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] multi-home refresh failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`);
+        ctx.warnings?.push(`${STEP_LABELS.multi_home}: the flip failed after the accept. Complete it by hand.`);
       }
     },
   },
