@@ -851,7 +851,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stripped sentence by sentence: the banner composes a plan sentence onto a
   // frozen line (partial credit), so the frozen sentence alone must go too.
   const bannerSentences = hasActualTreatment
-    && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
+    && ['hold', 'water_in', 'hold_then_water_in', 'water_in_by_rain'].includes(data.reportV2?.banner?.state)
     ? (data.reportV2.banner.lines || [])
       .filter((line) => typeof line === 'string' && line)
       .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])

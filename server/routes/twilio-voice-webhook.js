@@ -2597,6 +2597,8 @@ router.post('/recording-status', async (req, res) => {
           // fresh branch is `processing_status IS NULL`, and it never
           // re-enters voicemail/spam rows that still carry a transcript.
           write.processing_status = null;
+          // The verdict time belongs to the OLD audio too (Codex #6269 r2).
+          write.processed_at = null;
           // …and the retry budget: extraction_attempts counted failures on
           // the OLD audio, and the sweep's cap would otherwise refuse the
           // new recording after a single transient error (Codex #3736 r11).

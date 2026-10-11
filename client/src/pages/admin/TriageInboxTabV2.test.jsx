@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence, NameSpellingEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -412,6 +412,85 @@ describe('missing first-name card', () => {
     const el = (await screen.findByText('Murphy')).closest('.py-4');
     fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+});
+
+describe('NameSpellingEvidence', () => {
+  it('shows the card text and EVERY differing spelling with its caller turn', () => {
+    render(<NameSpellingEvidence payload={JSON.stringify({
+      flag: 'name_spelling_differs',
+      field: 'last_name',
+      spelled_value: 'Serov',
+      saved_value: 'Sirov',
+      quote: 'Caller: my last name is Serov, S-E-R-O-V',
+      card_text: 'Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs.',
+      also: [{ field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell', quote: 'Caller: first name K-W-E-N-T-R-E-L-L' }],
+    })} />);
+    expect(screen.getByText(/the record says Sirov\. Fix the name/)).toBeInTheDocument();
+    expect(screen.getByText(/last name:/)).toBeInTheDocument();
+    expect(screen.getByText(/caller spelled Serov; record says Sirov/)).toHaveTextContent('my last name is Serov, S-E-R-O-V');
+    expect(screen.getByText(/caller spelled Kwentrell; record says Quentrell/)).toHaveTextContent('first name K-W-E-N-T-R-E-L-L');
+  });
+
+  it('shows who it was compared against and opens THAT customer (the server-resolved survivor), not the call link', () => {
+    const A = '11111111-2222-4333-8444-555555555555';
+    const B = '66666666-7777-4888-8999-000000000000';
+    const payload = JSON.stringify({
+      spelled_value: 'Serov', saved_value: 'Sirov', field: 'last_name', customer_ids: [A],
+      compared_against: { source: 'customer', name: 'Quentrell Sirov' },
+    });
+    const { rerender } = render(<NameSpellingEvidence payload={payload} />);
+    expect(screen.getByText(/Compared against:/).parentElement).toHaveTextContent('Quentrell Sirov (customer record)');
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    // A merged-away customer opens its survivor (the server's open ids win).
+    rerender(<NameSpellingEvidence payload={payload} openCustomerIds={[B]} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    // An unlinked call compares against the heard name and links nothing.
+    rerender(<NameSpellingEvidence payload={JSON.stringify({ spelled_value: 'Serov', saved_value: 'Sirov', customer_ids: [], compared_against: { source: 'extracted', name: 'Quentrell Sirov' } })} />);
+    expect(screen.getByText(/Compared against:/).parentElement).toHaveTextContent('name heard on this call');
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  it('renders nothing without a spelling', () => {
+    const { container } = render(<NameSpellingEvidence payload={{ flag: 'name_spelling_differs' }} />);
+    expect(container.firstChild).toBeNull();
+  });
+});
+
+describe('name-spelling card', () => {
+  const card = { ...ordinary, id: 'ns', first_name: 'Quentrell', last_name: 'Sirov', feedback_verdict: null,
+    reason_code: 'name_spelling_differs',
+    payload: JSON.stringify({ flag: 'name_spelling_differs', spelled_value: 'Serov', saved_value: 'Sirov', quote: 'Caller: my last name is Serov, S-E-R-O-V' }) };
+  const load = () => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+    ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+
+  it('Resolve is admin-only: a non-admin sees Dismiss but no Resolve', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
+  });
+
+  it('has its own Resolve and Dismiss for an admin, no Accept/Deny', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+  });
+
+  it('Resolve is PUT /resolve with its version, never a /verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/ns/resolve', {
       method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
     }));
     expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);

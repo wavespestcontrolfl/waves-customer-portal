@@ -2937,6 +2937,11 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
   }
   const catalogRow = match.row;
+  // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
+  // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
+  if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
+  }
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(serviceType)) {
     if (stated) {
@@ -4002,6 +4007,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // above is only a fast refusal).
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
         'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+      // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
+      // is changed). A same-day change and a visit with no limited add-on cost nothing.
+      await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -4753,4 +4761,6 @@ module.exports = {
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.
   CARD_CANCEL_REFUSED_MESSAGE,
+  // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
+  _ibBookingPricing: ibBookingPricing,
 };

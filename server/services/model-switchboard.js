@@ -97,6 +97,7 @@ const SELECTORS = [
   // 'vision' (Codex #5307 r1 finding 6) — the referee call sends the SAME
   // photos every other photo-model selector below sends, not text alone.
   { key: 'SMS_SCHEDULING_DECIDE', env: 'MODEL_SMS_SCHEDULING_DECIDE', description: 'SMS scheduling decide step (owner ruling 2026-10-02: one model, Sonnet 5.5; shadow behind GATE_SMS_SCHEDULING_DECIDE)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  { key: 'AUTO_DISPATCH_PROOFREADER', env: 'MODEL_AUTO_DISPATCH_PROOFREADER', description: 'Auto-dispatch move proofreader (owner 2026-10-09: reads the customer record before an automatic move; replay only, no nightly call site yet)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   // deep: true — its only call site (report-ask-ai.js, TEXT_POLICIES.reportAsk)
   // goes through llm/call.js, same as NEWSLETTER above.
   { key: 'REPORT_ASK', env: 'MODEL_REPORT_ASK', description: 'Service report Ask Waves answers (owner 2026-10-05: Sonnet 5.5; dark behind GATE_REPORT_ASK_AI)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
@@ -153,6 +154,7 @@ const ROUTE_SELECTOR = {
   smsToneRewrite: 'SMS_SONNET',
   plantIdReferee: 'PLANT_ID_REFEREE',
   smsSchedulingDecide: 'SMS_SCHEDULING_DECIDE',
+  autoDispatchProofreader: 'AUTO_DISPATCH_PROOFREADER',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
   typedDecision: 'TYPESAFE_JEV',
   typedDecisionClef: 'CLOUDFLARE_CLEF',
@@ -434,6 +436,7 @@ const LANES = [
   // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
   // invalid, or out of budget leaves the escalation result unchanged.
   L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE: records what it would do (owner ruling 2026-10-02: one model, Sonnet 5.5); a would-move is carried out by code only when GATE_SMS_SCHEDULING_ACT_MOVE is on' }),
+  L('auto_dispatch_proofreader', 'Auto-dispatch move proofreader (may a move break a time promise?)', 'auto-dispatch/proofreader/index.js', 'reason', R('autoDispatchProofreader'), null, { note: 'Owner 2026-10-09: allow / hold / unknown on one planned move, from the full customer record. Replay only (scripts/auto-dispatch-proofreader-replay.js); no nightly call site yet' }),
   L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,

@@ -189,6 +189,24 @@ Pipeline (all fail-open, kill switch `CONTACT_DICTATION_ENABLED=false`):
    contradict a clean extracted value → adopted (behind the cross-customer
    ownership gate). Anything else → review card with candidates + the
    confirmation question. Nothing ambiguous ever reaches a send.
+7. **Spelled names (card-only)** — the decoder also returns `names` entries (a
+   first or last name spelled out letter by letter) and the MODEL labels each
+   `whose: "caller" | "other"`; no regex decides whose name it is. An entry is
+   kept only when its `raw_spoken` is in a source transcript and its letters
+   make `spelled_value`. **Nothing is written from a spelling**: no extraction,
+   customer or lead name changes. When an entry the model attributed to the
+   caller (≥ 0.75, in a `Caller:`-labeled turn when labels exist, not in email
+   wording) differs by letters (any case) from the name being saved for the
+   caller (the linked customer's name when linked, else the extracted name), the
+   processor files ONE advisory `name_spelling_differs` card (category
+   `name_review`): payload `{ spelled_value, field, saved_value, quote, confidence }`,
+   where `quote` is the caller turn with the spelling. Equal letters, no saved
+   name (the missing-name cards cover it), or disagreeing caller spellings of
+   one field file nothing. A reprocess refreshes the open card in place
+   (`onConflict` merge), so Resolve / Dismiss are version-bound; a verdict on a
+   sibling card never sweeps it; a spelling the office already settled on the
+   call is not re-filed. Roles and technician rules are the same as the other
+   `name_review` cards.
 
 ### 1d. CSR read-back script (dictation-quality upstream fix)
 

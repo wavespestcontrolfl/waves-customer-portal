@@ -716,6 +716,11 @@ export default function TechTreatmentZoneModal({
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
+            {lawnMode && !yardMode ? (
+              <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: 500, color: T.muted }}>
+                Trace the grass only — leave the house, driveway and pool out.
+              </p>
+            ) : null}
             {suggestNote ? (
               <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: 500, color: T.accent }}>{suggestNote}</p>
             ) : null}

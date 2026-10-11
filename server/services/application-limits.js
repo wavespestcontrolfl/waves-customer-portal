@@ -791,29 +791,46 @@ class ApplicationLimitChecker {
     for (const limit of limits) {
       const max = Number(limit.limit_value);
       let violation;
-      if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max, window);
+      if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max, window, await this.ownApplicationsBeyondFirst(database, customerId, productId, opts));
       else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts);
-      else violation = await this.auditInterval(others, product, day, max);
+      else violation = await this.auditInterval(others, product, day, max, await this.ownApplicationsBeyondFirst(database, customerId, productId, opts));
       if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
     }
     return violations;
   }
 
+  // The other applications of the product on the visit being audited, beyond the first: a visit that recorded the product twice
+  // (a Tree & Shrub host row and an area add-on row of the same product) made two applications, and the audit judges the
+  // visit's FIRST as the one the others are compared with. 0 for a visit with one row, and when no visit is named.
+  // Keyed on the DATA, never on the area add-on sale gate: a visit booked while the gate was on is completed and audited
+  // after it is turned off, and its second application must still count. A caller that already knows the visit has no add-on
+  // row says so (`addOnRows: false`) and the audit reads nothing extra.
+  async ownApplicationsBeyondFirst(database, customerId, productId, opts = {}) {
+    if (!opts.excludeScheduledServiceId || opts.addOnRows === false) return 0;
+    const row = await database('property_application_history')
+      .where({ customer_id: customerId, product_id: productId }).whereNull('retracted_at')
+      .whereIn('service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
+      .count('* as n').first();
+    return Math.max(0, Number(row && row.n) - 1) || 0;
+  }
+
   // A rolling-365 product (see ROLLING_365): the recorded application is flagged when ANY 365-day window that contains its day already
   // holds `max` other applications (so this one would be the max + 1th inside that window). Windows reach 364 days either side.
-  async auditRollingCount(others, product, day, max) {
+  // `ownBeyondFirst`: this visit's own applications of the product beyond its first (see ownApplicationsBeyondFirst).
+  async auditRollingCount(others, product, day, max, ownBeyondFirst = 0) {
     const rows = await others().where('application_date', '>=', shiftDay(day, 1 - ROLLING_DAYS)).where('application_date', '<=', shiftDay(day, ROLLING_DAYS - 1)).select('id', 'application_date');
-    const fullest = Math.max(0, ...windowsAround(dated(rows), day).map((set) => set.length));
+    const fullest = Math.max(0, ...windowsAround(dated(rows), day).map((set) => set.length)) + ownBeyondFirst;
     if (fullest < max) return null;
     return { type: 'annual_max_apps', message: `${product.name}: ${fullest}/${max} other applications within 365 days of ${day} — LIMIT REACHED.`, current: fullest, max };
   }
 
-  async auditAnnualCount(others, product, day, max, window = this.windowFor(day, null)) {
-    if (window.rolling) return this.auditRollingCount(others, product, day, max);
+  async auditAnnualCount(others, product, day, max, window = this.windowFor(day, null), ownBeyondFirst = 0) {
+    if (window.rolling) return this.auditRollingCount(others, product, day, max, ownBeyondFirst);
     const year = day.slice(0, 4);
     const rows = await others().where('application_date', '>=', `${year}-01-01`).where('application_date', '<=', `${year}-12-31`).select('id');
-    if (rows.length < max) return null;
-    return { type: 'annual_max_apps', message: `${product.name}: ${rows.length}/${max} other applications in ${year} — LIMIT REACHED.`, current: rows.length, max };
+    const used = rows.length + ownBeyondFirst;
+    if (used < max) return null;
+    return { type: 'annual_max_apps', message: `${product.name}: ${used}/${max} other applications in ${year} — LIMIT REACHED.`, current: used, max };
   }
 
   // The yearly amount: every other application of the product in the calendar year of the date (before and
@@ -838,7 +855,12 @@ class ApplicationLimitChecker {
     return { type: 'annual_max_rate', message: `${product.name}: ${pct(total)}% of the yearly label amount in ${year} — LIMIT EXCEEDED.`, current: pct(total), max: 100 };
   }
 
-  async auditInterval(others, product, day, min) {
+  // `ownBeyondFirst`: a second application of the product on this same visit (a host row plus an add-on row) is a
+  // zero-day gap, whatever the other visits say.
+  async auditInterval(others, product, day, min, ownBeyondFirst = 0) {
+    if (ownBeyondFirst > 0 && min > 0) {
+      return { type: 'min_interval_days', message: `${product.name}: applied ${ownBeyondFirst + 1} times on this visit (min ${min} days between applications).`, current: 0, max: min };
+    }
     const before = await others().where('application_date', '<=', day).orderBy('application_date', 'desc').first('application_date');
     const after = await others().where('application_date', '>', day).orderBy('application_date', 'asc').first('application_date');
     const anchor = new Date(`${day}T12:00:00Z`);
@@ -848,6 +870,10 @@ class ApplicationLimitChecker {
     const nearest = Math.min(...gaps);
     return { type: 'min_interval_days', message: `${product.name}: only ${nearest} days from another application (min ${min}).`, current: nearest, max: min };
   }
+
+  // The treated-property scope of a history query, for readers outside this class (the area add-on yearly limits
+  // count the same rows the closeout audit counts). See scopeHistoryToTreatment.
+  scopeHistoryToTreatment(query, database, opts, table) { return scopeHistoryToTreatment(query, database, opts, table); }
 
   getYearStart(date) { return `${etCalendarDayOf(date).slice(0, 4)}-01-01`; }
 }

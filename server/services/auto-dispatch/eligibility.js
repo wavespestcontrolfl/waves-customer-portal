@@ -277,4 +277,6 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
   }
 }
 
-module.exports = { isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES };
+module.exports = {
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES, SLOT_CHANGED_SQL,
+};

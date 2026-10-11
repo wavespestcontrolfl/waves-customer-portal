@@ -1037,6 +1037,9 @@ function buildTriageItem({
     // Booked on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) — the office
     // collects the first name; never holds the booking.
     missing_first_name: 'name_review',
+    // The caller spelled their own name and the spelling differs from the name saved for
+    // them (contact-dictation names section) — advisory, card-only, never an auto-write.
+    name_spelling_differs: 'name_review',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     // Call-classified property roles (occupancy contradiction / primary-

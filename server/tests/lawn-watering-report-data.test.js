@@ -853,3 +853,308 @@ describe('amount-only water-in on the report payload', () => {
     expect(data.reportV2.banner).not.toHaveProperty('setupLine');
   });
 });
+
+// GATE_LAWN_WATER_IN_RAIN through the real report builder (owner 2026-10-09): rain measured since the completion that reaches the
+// water-in amount turns a FROZEN water-in banner into "water_in_by_rain"; before that a generic spray-and-rotor pair reads as an
+// amount first. Read time only: the frozen instruction, the completion pass and the text are untouched. Synthetic data only.
+describe('GATE_LAWN_WATER_IN_RAIN on the report payload', () => {
+  const application = require('../services/service-report/application-conditions');
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const { lawnWateringSmsPlan } = require('../services/service-report/lawn-watering-sms');
+  const { stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature } = require('../services/service-report/report-data');
+  const KEYS = ['GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATER_IN_RAIN'];
+  const SAVED = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  const HALF = { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24, source: 'owner' };
+  const PRECAUTION = 'Keep pets off until dry. Water in with about ½ inch within 24 hours.';
+  const COMPLETED = '2026-09-30T18:40:00Z';
+  const NOW = '2026-10-01T12:00:00Z';
+  const COVERED_LINES = ['Rain since your visit has watered today’s treatment in.', 'No extra sprinkler run is needed for it.'];
+  let spy;
+  let rainTotal;
+  beforeEach(() => {
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    delete process.env.GATE_LAWN_WATER_IN_RAIN;
+    rainTotal = 0;
+    require('../services/service-report/lawn-water-in-rain')._private.CLOSED_WINDOW_MEMO.clear();
+    spy = jest.spyOn(application, 'fetchPropertyForecast').mockImplementation(async () => (
+      rainTotal === null ? { status: 'unavailable', reason: 'timeout' } : { status: 'ok', precipitationInTotalExact: rainTotal }
+    ));
+    jest.useFakeTimers().setSystemTime(new Date(NOW));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    spy.mockRestore();
+    for (const k of KEYS) { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }
+  });
+
+  const factsFor = (rule, precaution) => ({ ...facts(rule), name: 'Granular Pre-emergent', category: 'herbicide', ...(precaution === undefined ? {} : { precautionSummary: precaution }) });
+  const serviceFor = (instruction, rule = HALF, precaution = PRECAUTION, extra = {}) => {
+    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: factsFor(rule, precaution) } });
+    return {
+      id: 'svc-lawn-w1', scheduled_service_id: 'ss-current', customer_id: 'cust-lawn-w1', service_line: 'lawn',
+      service_type: 'Lawn Care Treatment Program', service_date: '2026-09-30', completed_at: COMPLETED,
+      first_name: 'Test', last_name: 'Customer', areas_serviced: JSON.stringify(['Front Lawn']),
+      customer_latitude: 27.5, customer_longitude: -82.5,
+      structured_notes: instruction ? JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instruction } }) : '{}',
+      service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }),
+      ...extra,
+    };
+  };
+  const generic = (rules = [HALF]) => JSON.parse(JSON.stringify(buildWateringInstruction({
+    rules: rules.map((rule, i) => ({ name: `p${i}`, rule })), completedAt: COMPLETED, runtime: null,
+  })));
+  const rotor = () => JSON.parse(JSON.stringify(buildWateringInstruction({
+    rules: [{ name: 'p', rule: HALF }], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] },
+  })));
+  // The /data and PDF renders opt in (lawnWaterInRain); the Q&A and map builds do not.
+  const render = (service, options = { lawnWaterInRain: true }) => buildReportV1Data(service, 'token-w1', makeKnex(fixtures()), options);
+
+  test('a build that does not opt in (the Q&A call, /map.svg) reads no rain and leaves the banner as frozen', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 4.68;
+    const frozenGeneric = generic();
+    for (const options of [{}, { mode: 'live' }, { mode: 'live', lawnWaterInRain: false }]) {
+      const data = await render(serviceFor(frozenGeneric), options);
+      expect(data.reportV2.banner.state).toBe('water_in');
+      expect(data.reportV2.banner.lines[1]).toBe('Run spray heads about 30 minutes a zone and rotors about 80 minutes.');
+      expect(data.reportV2.aftercare.watering).not.toMatch(/Rain since|about ½ inch — around/);
+    }
+    expect(spy).not.toHaveBeenCalled();
+    // The same record, opted in, does change.
+    expect((await render(serviceFor(frozenGeneric))).reportV2.banner.state).toBe('water_in_by_rain');
+  });
+
+  test('gate off: the payload is exactly what it was and no rain is read', async () => {
+    rainTotal = 4.68;
+    const instruction = generic();
+    const off = await render(serviceFor(instruction));
+    expect(spy).not.toHaveBeenCalled();
+    expect(off.reportV2.banner.state).toBe('water_in');
+    expect(off.reportV2.banner.lines[1]).toBe('Run spray heads about 30 minutes a zone and rotors about 80 minutes.');
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'false';
+    const alsoOff = await render(serviceFor(instruction));
+    expect(JSON.stringify(alsoOff.reportV2)).toBe(JSON.stringify(off.reportV2));
+  });
+
+  test('rain at the water-in amount: the banner, the aftercare and the hero task say the rain did it', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 0.5;
+    const data = await render(serviceFor(generic()));
+    const v2 = data.reportV2;
+    expect(v2.banner.state).toBe('water_in_by_rain');
+    expect(v2.banner.lines).toEqual(COVERED_LINES);
+    expect(v2.banner).not.toHaveProperty('setupLine');
+    expect(v2.banner.waterInBy).toBe('2026-10-01T18:00:00.000Z');
+    expect(v2.banner.expiresAt).toBe('2026-10-01T18:00:00.000Z');
+    expect(v2.aftercare.watering).toBe(COVERED_LINES.join(' '));
+    expect(v2.aftercare).toMatchObject({ waterInRequired: false, creditableWaterIn: false, wateringHold: false });
+    expect(JSON.stringify(v2)).not.toMatch(/minutes a zone|Run it even if/);
+    // The window the rain is read for: completion to now (the deadline is later), in whole hours.
+    expect(spy).toHaveBeenCalledTimes(1);
+    const args = spy.mock.calls[0][0];
+    expect(args.from.toISOString()).toBe('2026-09-30T18:40:00.000Z');
+    expect(args.to.toISOString()).toBe('2026-10-01T12:00:00.000Z');
+    expect(args.exactTotal).toBe(true);
+    expect([args.latitude, args.longitude]).toEqual([27.5, -82.5]);
+  });
+
+  test('rain below the amount: the banner stays as frozen, with the amount line for a generic pair', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 0.49;
+    const data = await render(serviceFor(generic()));
+    expect(data.reportV2.banner.state).toBe('water_in');
+    expect(data.reportV2.banner.lines).toEqual([
+      'Water in today’s treatment by Thu 2 PM: about ½ inch — around 30 minutes on spray heads or 80 on rotors.',
+      'Run it even if it is not your usual day.',
+    ]);
+    expect(data.reportV2.aftercare.waterInRequired).toBe(true);
+    expect(data.reportV2.aftercare.watering).toContain('about ½ inch — around 30 minutes on spray heads or 80 on rotors');
+  });
+
+  test('a head type on file keeps its single minutes line, and rain still covers it', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 0.1;
+    const below = await render(serviceFor(rotor()));
+    expect(below.reportV2.banner.lines).toEqual(['Water in today’s treatment by Thu 2 PM.', 'Run each zone about 80 minutes.', 'Run it even if it is not your usual day.']);
+    rainTotal = 0.6;
+    const covered = await render(serviceFor(rotor()));
+    expect(covered.reportV2.banner.state).toBe('water_in_by_rain');
+    expect(covered.reportV2.banner.lines).toEqual(COVERED_LINES);
+  });
+
+  test('an amount-only instruction (no setup at completion) keeps its amount line until rain covers it', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    const out = {};
+    await buildReportV1Data(serviceFor(null), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+    const amountOnly = JSON.parse(JSON.stringify(out.instruction));
+    expect(amountOnly.amountOnly).toBe(true);
+    rainTotal = 0.2;
+    const below = await render(serviceFor(amountOnly));
+    expect(below.reportV2.banner.lines[0]).toBe('Water in today’s treatment with about ½ inch by Thu 2 PM.');
+    rainTotal = 0.5;
+    expect((await render(serviceFor(amountOnly))).reportV2.banner.lines).toEqual(COVERED_LINES);
+  });
+
+  test('no readable amount in the precaution: 0.5 inch is the threshold, whatever the rule prints', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    const quarter = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default' };
+    const instruction = generic([quarter]);
+    for (const precaution of ['Water in after application.', null, undefined]) {
+      rainTotal = 0.4;
+      expect((await render(serviceFor(instruction, quarter, precaution))).reportV2.banner.state).toBe('water_in');
+      rainTotal = 0.5;
+      expect((await render(serviceFor(instruction, quarter, precaution))).reportV2.banner.state).toBe('water_in_by_rain');
+    }
+    // A readable amount wins over the default: ¼ inch asked, ¼ inch of rain covers it.
+    rainTotal = 0.3;
+    expect((await render(serviceFor(instruction, quarter, 'Water in with ¼ inch within 24 hours.'))).reportV2.banner.state).toBe('water_in_by_rain');
+  });
+
+  test('rain that could not be read leaves the banner as frozen; a failed read never reads as rain', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = null;
+    const data = await render(serviceFor(rotor()));
+    expect(data.reportV2.banner.state).toBe('water_in');
+    spy.mockImplementation(async () => ({ status: 'ok', precipitationInTotalExact: null }));
+    expect((await render(serviceFor(rotor()))).reportV2.banner.state).toBe('water_in');
+    spy.mockImplementation(async () => { throw new Error('boom'); });
+    expect((await render(serviceFor(rotor()))).reportV2.banner.state).toBe('water_in');
+  });
+
+  test('after the deadline the window ends at the deadline: rain after it does not count, rain before it does', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    jest.setSystemTime(new Date('2026-10-04T12:00:00Z'));
+    rainTotal = 0.2;
+    const open = await render(serviceFor(rotor()));
+    expect(open.reportV2.banner.state).toBe('water_in');
+    expect(spy.mock.calls[0][0].to.toISOString()).toBe('2026-10-01T18:00:00.000Z');
+    // The window is closed, so its answer is remembered: the same report is not read from the weather service again.
+    rainTotal = 0.5;
+    expect((await render(serviceFor(rotor()))).reportV2.banner.state).toBe('water_in');
+    expect(spy).toHaveBeenCalledTimes(1);
+    require('../services/service-report/lawn-water-in-rain')._private.CLOSED_WINDOW_MEMO.clear();
+    const covered = await render(serviceFor(rotor()));
+    expect(covered.reportV2.banner.state).toBe('water_in_by_rain');
+    expect(covered.reportV2.banner.expiresAt).toBe('2026-10-01T18:00:00.000Z');
+  });
+
+  test('hold then water-in: rain covers the water-in, the hold line stays and stays a hold', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    const hold = { mode: 'hold', hold_hours: 6, source: 'label' };
+    const instruction = generic([hold, HALF]);
+    expect(instruction.state).toBe('hold_then_water_in');
+    rainTotal = 0.2;
+    const below = await render(serviceFor(instruction));
+    expect(below.reportV2.banner.state).toBe('hold_then_water_in');
+    expect(below.reportV2.banner.lines[1]).toMatch(/^After that, water in today’s treatment by .*: about ½ inch — around 30 minutes on spray heads or 80 on rotors\.$/);
+    rainTotal = 0.5;
+    const covered = await render(serviceFor(instruction));
+    expect(covered.reportV2.banner.state).toBe('water_in_by_rain');
+    expect(covered.reportV2.banner.lines).toEqual([instruction.lines[0], ...COVERED_LINES]);
+    expect(covered.reportV2.banner.holdUntil).toBe(instruction.holdUntil);
+    expect(covered.reportV2.aftercare).toMatchObject({ wateringHold: true, waterInRequired: false, holdTask: instruction.lines[0] });
+  });
+
+  test('the completion pass, the frozen object and the watering text never change', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 4.68;
+    const out = {};
+    await buildReportV1Data(serviceFor(null), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+    expect(out.instruction.state).toBe('water_in');
+    expect(out.instruction.lines[0]).toBe('Water in today’s treatment with about ½ inch by Thu 2 PM.');
+    expect(spy).not.toHaveBeenCalled();
+    const frozen = JSON.parse(JSON.stringify(out.instruction));
+    const before = JSON.stringify(frozen);
+    const smsArgs = { deliveryMode: 'auto_send', phone: '+15555550100', gateOn: true, ruleGateOn: true, completedAt: frozen.completedAt, nowMs: Date.parse(frozen.completedAt) + 60000 };
+    const planBefore = lawnWateringSmsPlan({ instruction: frozen, ...smsArgs });
+    const data = await render(serviceFor(frozen));
+    expect(data.reportV2.banner.state).toBe('water_in_by_rain');
+    expect(JSON.stringify(frozen)).toBe(before);
+    const planAfter = lawnWateringSmsPlan({ instruction: frozen, ...smsArgs });
+    expect(planAfter.vars.watering_lines).toBe(planBefore.vars.watering_lines);
+    expect(planAfter.vars.watering_lines).toBe("Water in today's treatment with about ½ inch by Thu 2 PM. Run it even if it is not your usual day.");
+  });
+
+  test('a hold-only, a none and an unfrozen visit are not touched and read no rain', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 4.68;
+    const holdOnly = generic([{ mode: 'hold', hold_hours: 24, source: 'label' }]);
+    expect((await render(serviceFor(holdOnly))).reportV2.banner.state).toBe('hold');
+    const none = generic([{ mode: 'none', source: 'label' }]);
+    expect((await render(serviceFor(none))).reportV2.banner.state).toBe('none');
+    const unfrozen = serviceFor(null);
+    expect((await render(unfrozen)).reportV2.banner.state).toBe('water_in');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('the PDF keeps the covered lines: the live-only strip leaves the state and lines alone', async () => {
+    process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+    rainTotal = 0.6;
+    const data = await render(serviceFor(generic()));
+    stripLiveOnlyScheduleFields(data);
+    expect(data.reportV2.banner).toMatchObject({ state: 'water_in_by_rain', lines: COVERED_LINES });
+  });
+
+  describe('cache signature', () => {
+    const record = (instruction) => ({ ...serviceFor(instruction), 'service_records.id': 'svc-lawn-w1' });
+    const signatureFor = async (row) => {
+      const knex = makeKnex({
+        ...fixtures(),
+        products_catalog: [{ id: PRODUCT_ID, name: 'Granular Pre-emergent', category: 'herbicide' }],
+        service_records: [row],
+      });
+      return lawnAssessmentPdfSignature({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex);
+    };
+
+    test('gate off: the same key whatever the rain', async () => {
+      rainTotal = 0;
+      const dry = await signatureFor(record(generic()));
+      rainTotal = 4.68;
+      expect(await signatureFor(record(generic()))).toBe(dry);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the key moves once rain has covered the banner, and moves with the amount line', async () => {
+      const off = await signatureFor(record(generic()));
+      process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+      rainTotal = 0.1;
+      const amountLine = await signatureFor(record(generic()));
+      expect(amountLine).not.toBe(off);
+      rainTotal = 0.5;
+      const covered = await signatureFor(record(generic()));
+      expect(covered).not.toBe(amountLine);
+      expect(covered).not.toBe(off);
+      expect(await signatureFor(record(generic()))).toBe(covered);
+    });
+
+    test('gate on: the key reads the location from the frozen identity map center, like the render', async () => {
+      process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+      rainTotal = 0.1;
+      const withCenter = (center) => {
+        const base = record(generic());
+        const data = JSON.parse(base.service_data);
+        data.reportIdentitySnapshot.mapCenter = center;
+        return { ...base, service_data: JSON.stringify(data) };
+      };
+      await signatureFor(withCenter({ lat: 28.25, lng: -81.75 }));
+      expect(spy.mock.calls[0][0]).toMatchObject({ latitude: 28.25, longitude: -81.75 });
+      spy.mockClear();
+      // A snapshot with no map center (resolved to none) reads no location, as the render does.
+      await signatureFor(withCenter(null));
+      expect(spy.mock.calls[0][0].latitude).toBeNull();
+      spy.mockClear();
+      // No snapshot map center at all: the live join's coordinates.
+      await signatureFor(record(generic()));
+      expect(spy.mock.calls[0][0]).toMatchObject({ latitude: 27.5, longitude: -82.5 });
+    });
+
+    test('gate on: a visit this gate does not change keeps its gate-off key', async () => {
+      rainTotal = 4.68;
+      const hold = generic([{ mode: 'hold', hold_hours: 24, source: 'label' }]);
+      const holdOff = await signatureFor(record(hold));
+      process.env.GATE_LAWN_WATER_IN_RAIN = 'true';
+      rainTotal = 0.1;
+      expect(await signatureFor(record(hold))).toBe(holdOff);
+    });
+  });
+});
