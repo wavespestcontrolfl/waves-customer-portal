@@ -80,7 +80,7 @@ const complete = async (request) => {
   return JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
 };
 const FOUR_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' };
-const WRAP_UP_KEYS = ['timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'reviewDelayMinutes', 'reviewScheduledFor'];
+const WRAP_UP_KEYS = ['timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'reviewDelayMinutes', 'reviewScheduledFor', 'wrapUpReviewAsk'];
 const opened = (request) => request.calls.map((c) => c.path);
 
 describe('gate off', () => {

@@ -167,6 +167,22 @@ function reserviceFixedRecapHonored({ requestedMode, fastCompleteGate, recapGate
     && !NOT_PERFORMED_OUTCOMES.has(visitOutcome);
 }
 
+// Whether a re-service completion may ask for a review (GATE_FAST_COMPLETE_WRAP_UP; owner 2026-10-10,
+// "show on"). One pure decision for every re-service path. The ask is REFUSED when any of these holds:
+//  - `marker`: the body carries `wrapUpReviewAsk` (the Wrap-up section posts it beside requestReview:true on
+//    the pest and lawn re-service sheets) and the gate is not live NOW. Rolling the gate back stops the new
+//    asks even from a sheet that was already open with the section on.
+//  - the fixed text was requested (`fixedRequested`) and not honored (`fixedHonored`): that completion sends
+//    no text at all, so no review ask follows it.
+//  - the fixed text is honored and the gate is not live: the fixed text is the ONE text (today's rule).
+// Otherwise nothing changes: a body without the marker (the full form, which asks by default) is as it was.
+// Only exactly true counts as live. Every other blocker on the ask is the caller's.
+function reviewAskAllowed({ marker, wrapUpGate, fixedRequested, fixedHonored }) {
+  if (marker === true && wrapUpGate !== true) return false;
+  if (fixedRequested === true && fixedHonored !== true) return false;
+  return !(fixedHonored === true && wrapUpGate !== true);
+}
+
 // The body the provider is handed, and so the body audited and shown to the
 // tech: sendCustomerMessage removes the https:// scheme and normalizes
 // typographic punctuation for customer SMS (the same two helpers, here).
@@ -263,6 +279,7 @@ module.exports = {
   providerBody,
   buildReserviceFixedRecap,
   reserviceFixedRecapHonored,
+  reviewAskAllowed,
   loadReserviceFixedRecapFacts,
   customerTextOutcome,
 };

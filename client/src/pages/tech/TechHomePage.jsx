@@ -1091,6 +1091,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteLawnReserviceSheet
           key={lawnReserviceFastService.id}
           service={{
+            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            ...wrapUpSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
             serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,

@@ -59,15 +59,26 @@ function reentryFields({ ext, int, seeds }) {
   };
 }
 
+// The pay link a sheet posts. A sheet whose text carries no pay link (`noPayLink`: the pest re-service's
+// fixed text and its report-flow text) posts false whatever the tech does; any other posts the tech's
+// choice only while the visit invoices and the text is on, else true.
+const payLinkPosted = ({ noPayLink, willInvoice, sendSms, includePayLink }) => (noPayLink ? false : (willInvoice && sendSms ? includePayLink : true));
+
+// The mark a re-service sheet's Wrap-up puts on a review ask (owner 2026-10-10, "show on"): the server
+// refuses a marked ask once GATE_FAST_COMPLETE_WRAP_UP is off, so a gate turned off under an open sheet
+// stops the new re-service asks. Only beside requestReview:true, and only where the sheet asks `reviewMarker`.
+const reviewMarkerFields = ({ reviewMarker, willReview }) => (reviewMarker && willReview ? { wrapUpReviewAsk: true } : {});
+
 // The body fragment. Untouched it is the four customer-text flags the sheets always posted; every
 // other key appears only when the tech changed it. `adjusted` is the admin's typed minutes ('' for
 // anyone else): blank sends nothing (the server measures check-in to Complete), a number overrides.
-export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming }) {
+export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker }) {
   const timing = { willReview, reviewTiming, reviewCustomAt };
   return {
     sendCompletionSms: sendSms,
-    includePayLink: willInvoice && sendSms ? includePayLink : true,
+    includePayLink: payLinkPosted({ noPayLink, willInvoice, sendSms, includePayLink }),
     requestReview: willReview,
+    ...reviewMarkerFields({ reviewMarker, willReview }),
     ...timingFields(timing, omitAutoTiming),
     ...completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }),
     ...reentryFields({ ext, int, seeds }),

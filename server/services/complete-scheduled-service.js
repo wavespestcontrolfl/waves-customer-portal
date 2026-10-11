@@ -2923,6 +2923,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // completion profile and both dark gates are known.
       customerRecapMode,
       requestReview,
+      // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
+      // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
+      wrapUpReviewAsk,
       reviewTiming,
       reviewScheduledFor,
       oneTimeRecapOnly = false,
@@ -3548,6 +3551,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
       ? false
       : sendCompletionSmsRequested;
+    // Whether a re-service completion may ask for a review: one decision, read live (so a gate turned off
+    // while a sheet is open stops the new asks too). See ReserviceFixedRecap.reviewAskAllowed.
+    const reviewAskAllowed = ReserviceFixedRecap.reviewAskAllowed({
+      marker: wrapUpReviewAsk === true,
+      wrapUpGate: require('../config/feature-gates').fastCompleteWrapUpLive(),
+      fixedRequested: reserviceFixedRecapRequested,
+      fixedHonored: reserviceFixedRecap,
+    });
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
@@ -6785,7 +6796,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Backfill completions freeze it off for the same reason: a
             // review ask days after the visit (or from the later payment)
             // must never fire from a quiet backlog closeout.
-            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false,
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             reviewTiming: reviewTiming || null,
@@ -13232,8 +13243,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
-      // follows it (scope: "leave it off on re-services").
-      && !reserviceFixedRecap;
+      // follows it (scope: "leave it off on re-services"). With
+      // GATE_FAST_COMPLETE_WRAP_UP on, a re-service asks for a review by default
+      // (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview and
+      // wrapUpReviewAsk, and a fixed-text ask goes as its OWN message through
+      // enrollPostService below (shouldBundleReview refuses fixed mode). Gate off,
+      // the marker is refused and every re-service path is as it was. Decided once,
+      // above, by ReserviceFixedRecap.reviewAskAllowed.
+      && reviewAskAllowed;
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -13347,6 +13364,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
+      // The fixed re-service text is final as built: a review ask never rides
+      // inside it (it follows as its own message, below).
+      !reserviceFixedRecap &&
       // Only an operator-chosen immediate ask rides inside the completion
       // text. No timing ("Automatic", or a client that sent none) is the
       // legacy 120-minute separate ask that enrollPostService schedules
