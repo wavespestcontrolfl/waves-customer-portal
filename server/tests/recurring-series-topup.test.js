@@ -1082,6 +1082,15 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
       expect((await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10)).hosts.map((h) => h.date)).toEqual(['2026-10-21']);
     });
 
+    test('a preview that returns an error reason (not a throw) refuses as unverified; a rule blocker is still no ride', async () => {
+      for (const reason of ['blackout_check_error', 'series_check_error', 'error']) {
+        spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue({ ...plan('2026-11-05'), reasons: [reason] }));
+        expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+          .toMatchObject({ code: 'RECURRING_BILLING_UNVERIFIED' });
+        spies[spies.length - 1].mockRestore();
+      }
+    });
+
     test('a rider mechanism that cannot answer refuses as unverified; a series that rides nothing is untouched', async () => {
       spies.push(jest.spyOn(Preview, 'previewRiderPair').mockRejectedValue(new Error('preview down')));
       expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))

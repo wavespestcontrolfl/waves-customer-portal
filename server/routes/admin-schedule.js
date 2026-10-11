@@ -20457,6 +20457,7 @@ async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
 // answer is not known (rideLawnExtension then walks the cadence, as the top-up does;
 // the Intelligence Bar's verdict refuses as unverified instead). Also the one function
 // the billing-type verdict (seriesVerdictWalk) asks which date a rider series seeds on.
+const RIDE_PREVIEW_ERROR_REASONS = new Set(['blackout_check_error', 'series_check_error', 'error']);
 async function rideLawnCandidate(ctx) {
   const {
     conn, parent, parentId, cols, opts, latest, existingDates,
@@ -20473,6 +20474,9 @@ async function rideLawnCandidate(ctx) {
     logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
     return { unanswered: true };
   }
+  // A read failure the preview swallowed into a reason is not a rule ruling the ride out: the
+  // answer is unknown (the top-up walks its cadence either way; the billing verdict refuses).
+  if (plan.reasons.some((r) => RIDE_PREVIEW_ERROR_REASONS.has(r))) return { unanswered: true };
   if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
   // The preview's insert list assumes its proposed MOVES happen too; this
   // extension only appends. So spacing is enforced against the latest rider
