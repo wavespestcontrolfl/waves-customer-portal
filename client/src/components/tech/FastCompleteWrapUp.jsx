@@ -196,7 +196,7 @@ function PayLinkRow({ checked, onChange }) {
   return (
     <Toggle indent checked={checked} onChange={onChange}>
       Include payment link in the text
-      <span className="tech-visit-muted">
+      <span className="tech-visit-muted tech-wrapup-hint">
         {checked ? 'Texts the service report and the pay link.' : 'Report only — no pay link (e.g. paid in person).'}
       </span>
     </Toggle>
