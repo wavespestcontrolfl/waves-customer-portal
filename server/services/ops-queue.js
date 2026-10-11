@@ -221,7 +221,8 @@ async function laneCallProcessing() {
   });
   // The extraction_failed scan feeds BOTH statuses (under-cap rows inside the
   // fence classify as pending retries), so a capped scan floors both counts.
-  return finish(items, { truncated: [...capped(failedRows, 'failed', 'pending'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending')] });
+  // The no_transcription scan feeds both too (at-cap rows classify as failed).
+  return finish(items, { truncated: [...capped(failedRows, 'failed', 'pending'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending', 'failed')] });
 }
 
 async function laneContentParks() {

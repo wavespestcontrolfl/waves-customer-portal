@@ -1224,7 +1224,10 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
         .whereRaw('later.call_log_id = ti.call_log_id AND later.reason_code = ti.reason_code AND later.id <> ti.id')
         .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
     })
-    .modify(recentParent).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
+    // Recent by the PARENT's change (no stamp: the sweep writes none, so
+    // recentParent's stamp arm would contradict the IS NULL above; r42 P1).
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`)
+    .modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
   const callbacks = new Map([...stamped, ...dismissed, ...obsoleteStamped, ...obsoleteDismissed, ...swept, ...sweptObsolete].map((cb) => [cb.id, cb]));
   // The FORWARD half: a settlement whose promise refresh was lost (the cards
   // closed and the stamp written, the callback still settled spam, a callback

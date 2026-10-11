@@ -77,9 +77,9 @@ const REREAD_PARENT_SID = sid('po');
 const REREAD_CHILD_SID = sid('cs');
 const PEXHAUST_PARENT_SID = sid('pp');
 const PEXHAUST_CHILD_SID = sid('ct');
-const NOTRANS_PARENT_SID = sid('pn');
+const NOTRANS_PARENT_SID = sid('pq');
 const NOTRANS_CHILD_SID = sid('cu');
-const SWEPTOBS_PARENT_SID = sid('po');
+const SWEPTOBS_PARENT_SID = sid('pr');
 const SWEPTOBS_CHILD_SID = sid('cv');
 const UUID = '11111111-1111-4111-8111-111111111111';
 
@@ -564,7 +564,11 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const [{ id: promiseId }] = await db('call_commitments').insert([promise(parentId, 'cb-rollback')]).returning('id');
     const childId = await insertChild(ROLLBACK_CHILD_SID, parentId, { to_phone: '+15555550131' });
     expect(await close(ROLLBACK_CHILD_SID)).toMatchObject({ applied: true, cards: 1, promises: 1 });
+    // The gate is boot-read (feature-gates captures the env at require), so a
+    // rollback is the cached object flipped, as a redeploy would read it.
+    const gates = require('../config/feature-gates').gates;
     delete process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT;
+    gates.callbackSpamClosesParent = false;
     try {
       // Gate off: a new spam verdict settles nothing...
       expect(await processor.settleParentForCallbackVerdict(await readCall(ROLLBACK_CHILD_SID), { callSid: ROLLBACK_CHILD_SID, procGeneration: 3, status: 'spam' })).toEqual({ applied: false, reason: 'no_parent' });
@@ -578,6 +582,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
       expect((await readCall(ROLLBACK_PARENT_SID)).metadata.callback_verdict).toBeUndefined();
     } finally {
       process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT = 'true';
+      gates.callbackSpamClosesParent = true;
     }
   });
 

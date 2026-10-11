@@ -26,6 +26,26 @@ function addressText(addr) {
   return parts.length ? parts.join(', ') : (addr.raw_text || null);
 }
 
+// The two retry lanes' state, in one place (the sweep's eligibility, read
+// back): under the attempt cap (and, for extraction_failed, inside the 7-day
+// creation window) the sweep retries; past either, the row is terminal and
+// only Reprocess tries again.
+function retryLaneState(status, call) {
+  const attempts = Number(call.extraction_attempts || 0);
+  const createdAt = call.created_at ? new Date(call.created_at) : null;
+  const tooOld = status === 'extraction_failed' && !!createdAt && !Number.isNaN(createdAt.getTime())
+    && (Date.now() - createdAt.getTime()) > EXTRACTION_RETRY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const exhausted = attempts >= CALL_EXTRACTION_MAX_ATTEMPTS;
+  const retrying = !exhausted && !tooOld;
+  const what = status === 'no_transcription' ? 'Transcription produced nothing' : 'Extraction failed';
+  const detail = exhausted
+    ? `${what} ${attempts} times; automatic retries are exhausted — Reprocess to try again.`
+    : tooOld
+      ? `${what} (attempt ${attempts || 1}); the call is older than ${EXTRACTION_RETRY_WINDOW_DAYS} days, so the sweep no longer retries it — Reprocess to try again.`
+      : `${what} (attempt ${attempts || 1}); the sweep retries automatically.`;
+  return { phase: retrying ? 'failed_retrying' : 'failed', retryable: retrying, detail };
+}
+
 // Honest processing state, in words an operator can act on.
 function describeProcessing(call) {
   const status = call.processing_status || null;
@@ -64,31 +84,10 @@ function describeProcessing(call) {
       phase = 'complete';
       detail = status === 'spam' ? 'Classified as spam; no lead or customer was created.' : 'Voicemail lane: no live conversation to extract from.';
       break;
-    case 'no_transcription': {
-      const attempts = Number(call.extraction_attempts || 0);
-      const exhausted = attempts >= CALL_EXTRACTION_MAX_ATTEMPTS;
-      phase = exhausted ? 'failed' : 'failed_retrying';
-      retryable = !exhausted;
-      detail = exhausted
-        ? `Transcription produced nothing ${attempts} times; automatic retries are exhausted — Reprocess to try again.`
-        : `Transcription produced nothing (attempt ${attempts || 1}); the sweep retries automatically.`;
+    case 'no_transcription':
+    case 'extraction_failed':
+      ({ phase, retryable, detail } = retryLaneState(status, call));
       break;
-    }
-    case 'extraction_failed': {
-      const attempts = Number(call.extraction_attempts || 0);
-      const createdAt = call.created_at ? new Date(call.created_at) : null;
-      const tooOld = !!createdAt && !Number.isNaN(createdAt.getTime())
-        && (Date.now() - createdAt.getTime()) > EXTRACTION_RETRY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-      const exhausted = attempts >= CALL_EXTRACTION_MAX_ATTEMPTS;
-      phase = (exhausted || tooOld) ? 'failed' : 'failed_retrying';
-      retryable = phase === 'failed_retrying';
-      detail = exhausted
-        ? `Extraction failed ${attempts} times; automatic retries are exhausted — Reprocess to try again.`
-        : tooOld
-          ? `Extraction failed (attempt ${attempts || 1}); the call is older than ${EXTRACTION_RETRY_WINDOW_DAYS} days, so the sweep no longer retries it — Reprocess to try again.`
-          : `Extraction failed (attempt ${attempts || 1}); the sweep retries automatically.`;
-      break;
-    }
     case 'customer_creation_failed':
       phase = 'failed';
       detail = 'The call named a real prospect but the customer record could not be saved — see the review card.';

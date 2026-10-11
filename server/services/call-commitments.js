@@ -2116,15 +2116,19 @@ const settledParentSql = (t) => `(${t}.duration_seconds IS NOT NULL AND ${t}.pro
 // it, so an obsolete settlement must not wait on one). Never evidence for a
 // NEW settlement.
 const terminalParentSql = (t) => `(${settledParentSql(t)} OR (${t}.processing_token IS NULL AND ${exhaustedExtractionSql(t)}))`;
-// The write-time fence every callback_spam dismissal carries (the sweep's
-// card write has its twin): the parent must still be a settled voicemail IN
-// the conditional UPDATE, so an adoption or reprocess since
-// callbackReachedSolicitor read it makes the write skip (codex #6271 r40/r41).
+// The write-time fence every callback_spam dismissal carries: the parent must
+// still be a settled voicemail IN the conditional UPDATE, read FOR SHARE like
+// the callback arm, so an adoption or reprocess that holds the parent row
+// makes this write wait and then re-read it (and one that committed since
+// callbackReachedSolicitor's read makes it skip). Lock order is the
+// processor's (call_log, then call_commitments); the adoption transaction
+// touches call_log and triage_items only, so no cycle (codex #6271 r40-r42).
 function whereParentStillSettledVoicemail(q, t, parentId) {
   q.whereExists(function parentStillSettledVoicemail() {
     this.select(t.raw("1")).from("call_log as p").where({ "p.id": parentId }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "p.source"))
       .whereRaw(settledParentSql("p"))
-      .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')");
+      .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
+      .forShare();
   });
 }
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {

@@ -86,8 +86,18 @@ async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
   // commitments gate below.
   // Every tick, gate or no gate: with the gate off only the correction half
   // runs (a rollback must not strand what the feature closed).
-  await runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
-    .catch((err) => logger.warn(`[call-commitments-watchdog] callback verdict reconcile failed: ${err.message}`));
+  const reconcile = await runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
+    .catch((err) => { logger.warn(`[call-commitments-watchdog] callback verdict reconcile failed: ${err.message}`); return null; });
+  // runExclusive resolves { skipped, reason } instead of throwing: a
+  // no_connection skip is a missed correction run and is recorded as a failed
+  // job (the scheduler's cards-off tick does the same); a held lease is
+  // another pod's run.
+  if (reconcile?.skipped === true && reconcile.reason !== 'lease_held') {
+    const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+    const t0 = Date.now();
+    await recordJobStart('callback-verdict-reconcile').catch(() => {});
+    await recordJobEnd('callback-verdict-reconcile', t0, new Error(`tick skipped: ${reconcile.reason || 'no_connection'}`)).catch(() => {});
+  }
   if (!isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
   return runExclusive('call-commitments-watchdog', async () => {
     const result = await runInner({ now });
