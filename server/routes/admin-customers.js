@@ -4279,6 +4279,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
+          // The mark clear above ran on the unlocked read; a save that marked this
+          // number may have committed since, so decide again from the locked row
+          // (codex #6268 r4). A no-op when the first pass already cleared it.
+          require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, lockedBefore);
           contactAuditAt = new Date();
           // ADMIN-BUG-R10 (round 3): on EVERY write of pipeline_stage=
           // 'churned' — including a re-save on an already-churned row, so a

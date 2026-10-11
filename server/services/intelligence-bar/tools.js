@@ -1449,6 +1449,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.customerNoLongerLive = true;
         throw err;
       }
+      // Decide the shared-phone mark clear again from the LOCKED row: a save
+      // that marked this number may have committed after the unlocked read
+      // (codex #6268 r4). No-op when the first pass already cleared it.
+      clearSharedPhoneMarkOnPhoneChange(clean, lockedBefore);
       if (expectedVersion) {
         // Compare Postgres' full-precision version while holding the same row
         // lock as the domain write; JS Date equality loses microseconds.

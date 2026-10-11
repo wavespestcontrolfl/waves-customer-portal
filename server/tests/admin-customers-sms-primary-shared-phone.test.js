@@ -119,6 +119,13 @@ describe('PUT /admin/customers/:id smsPrimaryForSharedPhone', () => {
     expect(mockState.patches[0]).toMatchObject({ phone: expect.any(String), sms_primary_for_shared_phone: false });
   });
 
+  test('a mark committed between the unlocked read and the lock is still dropped on a phone change', async () => {
+    mockState.initial.sms_primary_for_shared_phone = false;
+    mockState.locked.sms_primary_for_shared_phone = true;
+    await saveCustomer({ phone: '+19415550199' });
+    expect(mockState.patches[0]).toMatchObject({ sms_primary_for_shared_phone: false });
+  });
+
   test('the same number in another format keeps the mark', async () => {
     mockState.initial.sms_primary_for_shared_phone = true;
     mockState.locked.sms_primary_for_shared_phone = true;
