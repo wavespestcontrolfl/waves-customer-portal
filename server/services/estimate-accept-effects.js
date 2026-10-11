@@ -59,6 +59,7 @@ function effectsFingerprint(effects) {
 }
 
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+const money = (n) => `$${round2(n).toFixed(2)}`;
 const orNull = (v) => (v == null ? null : v);
 
 // ── State snapshots: what the conversion changes, read inside the accept ──
@@ -167,6 +168,40 @@ function oneTimeLineEffects(estimate, converter) {
     .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: positiveAmount(item) }))
     .filter((line) => line.amount != null)
     .map((line) => ({ kind: 'one_time_line', ...line, consequence: 'schedule_and_invoice_by_hand' }));
+}
+
+// The one-time total the estimate carries as a plain number: the row's
+// onetime_total or the engine's aggregate, whichever is positive first. A
+// legacy estimate can carry only this aggregate and no priced item, so the
+// lines above are empty while the customer still owes the amount.
+const ONE_TIME_AGGREGATE_PATHS = [
+  ['onetime_total'], ['oneTime', 'total'], ['results', 'oneTime', 'total'], ['result', 'oneTime', 'total'], ['engineResult', 'oneTime', 'total'],
+];
+function oneTimeAggregateTotal(estimate) {
+  const data = parseData(estimate.estimate_data);
+  const candidates = [estimate.onetime_total, ...ONE_TIME_AGGREGATE_PATHS.map((path) => path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), data))];
+  for (const value of candidates) {
+    if (value == null || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return round2(n);
+  }
+  return null;
+}
+
+// A carded accept refuses when the estimate carries a positive one-time
+// total that no line itemizes: the card could show only an amount, not the
+// work staff must schedule and invoice by hand after the accept. Returns the
+// refusal, or null when every one-time dollar is on a listed line.
+function unitemizedOneTimeRefusal(estimate, lines) {
+  if (lines.some((line) => line.kind === 'one_time_line')) return null;
+  const total = oneTimeAggregateTotal(estimate);
+  if (total == null) return null;
+  return {
+    message: `This estimate carries a ${money(total)} one-time charge with no itemized service, so the bar cannot say what to schedule and invoice after the accept. Accept it from the estimate page.`,
+    statusCode: 409,
+    code: 'one_time_unitemized',
+    total,
+  };
 }
 
 // ── The side-effect gate: one context for everything outside the transaction ──
@@ -522,6 +557,25 @@ const POST_COMMIT_STEPS = {
 
 const sameTarget = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
+// What the operator reads when a step the card promised did not run. The
+// accept is committed and the idempotent path never re-runs the plan, so the
+// result must say which effect still needs a hand.
+const STEP_LABELS = {
+  group_followup_transfer: 'The follow-up messages were not moved to the other estimate in the group',
+  property_link: 'The property was not linked to the accepted services',
+  multi_home: 'The other homes on this account were not marked',
+  lead_won: 'The linked lead was not marked won',
+  membership_email: 'The membership email was not sent',
+  welcome_sms: 'The welcome text was not sent',
+  termite_agreement: 'The termite agreement was not created',
+  admin_bell: 'The office notification was not posted',
+};
+const SKIPPED_STEP_SUFFIX = ': what it acts on changed after the accept. Complete it by hand.';
+function skippedStepWarning(ctx, step) {
+  if (!Array.isArray(ctx.warnings)) return;
+  ctx.warnings.push(`${STEP_LABELS[step.step] || `The ${step.step} step did not run`}${SKIPPED_STEP_SUFFIX}`);
+}
+
 // Resolve every step's target (the dry run, inside the accept's transaction)
 // and return the plan with each target attached. `facts` carries the
 // accepted row, the conversion, the proposal customer and leadLinkService.
@@ -546,10 +600,12 @@ async function runPostCommit(plan, ctx) {
         current = await def.resolveTarget(ctx.database, { ...ctx, step });
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] ${step.step} skipped for estimate ${ctx.acceptedEstimate.id}: target_changed (target unreadable: ${err.message})`);
+        skippedStepWarning(ctx, step);
         continue;
       }
       if (!sameTarget(current, step.target)) {
         logger.warn(`[estimate-manual-acceptance] ${step.step} skipped for estimate ${ctx.acceptedEstimate.id}: target_changed`, { pinned: step.target, current });
+        skippedStepWarning(ctx, step);
         continue;
       }
     }
@@ -565,6 +621,9 @@ module.exports = {
   stateDiffEffects,
   conversionEffect,
   oneTimeLineEffects,
+  oneTimeAggregateTotal,
+  unitemizedOneTimeRefusal,
+  STEP_LABELS,
   readEmailInputs,
   membershipEmailStep,
   planPostCommit,

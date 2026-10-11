@@ -1171,7 +1171,13 @@ async function planPostCommitSteps(trx, ctx, outcome) {
 async function settleEffects(trx, ctx, outcome, isCommercialProposal) {
   const plan = await planPostCommitSteps(trx, ctx, outcome);
   if (ctx.effects.enabled) {
-    if (!isCommercialProposal) for (const line of AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter)) ctx.effects.add(line);
+    if (!isCommercialProposal) {
+      const lines = AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter);
+      for (const line of lines) ctx.effects.add(line);
+      // A positive one-time total with no itemized line: the card cannot name
+      // the work, so the bar refuses (the page's own accept is not carded).
+      throwRefusal(AcceptEffects.unitemizedOneTimeRefusal(outcome.acceptedEstimate, lines));
+    }
     ctx.effects.add({ kind: 'post_commit', plan });
     if (ctx.expected?.effectsKey && AcceptEffects.effectsFingerprint(ctx.effects.list()) !== ctx.expected.effectsKey) throw cardChanged();
   }

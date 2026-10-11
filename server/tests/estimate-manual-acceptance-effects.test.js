@@ -399,6 +399,44 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
   });
 });
 
+describe('round 9, finding 1: a one-time total with no itemized line refuses', () => {
+  const aggregateOnly = (extra = {}) => makeWorld({
+    estimateOverrides: {
+      monthly_total: '49.00', onetime_total: '350.00',
+      estimate_data: JSON.stringify({
+        recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+        result: { oneTime: { total: 350, items: [] } },
+        ...extra,
+      }),
+    },
+  });
+  test('the dry run refuses as one_time_unitemized, naming the amount, and nothing commits', async () => {
+    const world = aggregateOnly();
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unitemized', statusCode: 409, message: expect.stringContaining('$350.00') });
+    expect(world.tables.estimates[0].status).not.toBe('accepted');
+  });
+  test('the carded real run refuses the same way; the page button (no card) still accepts', async () => {
+    const carded = aggregateOnly();
+    await expect(markEstimateManuallyAccepted(base(carded, fakeConverter(carded), { expected: { effectsKey: 'any', membershipEmail: 'send' } })))
+      .rejects.toMatchObject({ code: 'one_time_unitemized' });
+    const page = aggregateOnly();
+    const result = await markEstimateManuallyAccepted(base(page, fakeConverter(page)));
+    expect(result.estimate.status).toBe('accepted');
+  });
+  test('an itemized line covers the total: no refusal', async () => {
+    const world = aggregateOnly({ result: { oneTime: { total: 350, items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toHaveLength(1);
+  });
+  test('the aggregate is read from the row, the engine result and the legacy top-level shape', () => {
+    expect(Effects.oneTimeAggregateTotal({ onetime_total: '12.50', estimate_data: '{}' })).toBe(12.5);
+    expect(Effects.oneTimeAggregateTotal({ onetime_total: null, estimate_data: JSON.stringify({ oneTime: { total: '99' } }) })).toBe(99);
+    expect(Effects.oneTimeAggregateTotal({ onetime_total: '0', estimate_data: JSON.stringify({ results: { oneTime: { total: 0 } } }) })).toBeNull();
+    expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '0', estimate_data: '{}' }, [])).toBeNull();
+  });
+});
+
 describe('finding 5 (round 6): the one-time amount is what the customer pays', () => {
   test('a $100 line discounted to $90 is listed at $90; a line discounted to $0 is not listed', async () => {
     const world = makeWorld({
@@ -817,6 +855,20 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     modelDb.mockReset();
   });
 
+  test('round 9, finding 2: a target_changed skip is a result warning naming the step, so the operator finishes it by hand', async () => {
+    const changing = resolvingLeads(['lead-aaaaaa']);
+    changing.markLinkedLeadEstimateAccepted.mockImplementation(async () => { changing.world.tables.customers[0].email = 'someone.else@example.com'; });
+    const world = makeWorld();
+    changing.world = world;
+    const { result } = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: changing, world });
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/^The membership email was not sent: what it acts on changed after the accept\. Complete it by hand\.$/)]));
+  });
+  test('round 9, finding 2: every post-commit step has an operator label for its skip', () => {
+    expect(Object.keys(Effects.STEP_LABELS).sort()).toEqual(Object.keys(Effects.POST_COMMIT_STEPS).sort());
+    const warnings = [];
+    Effects.runPostCommit([{ step: 'lead_won', target: { lead_ids: ['a'] } }], { warnings, acceptedEstimate: { id: 'e' }, database: { raw: async () => { throw new Error('down'); } } });
+    return new Promise((r) => setImmediate(r)).then(() => expect(warnings[0]).toMatch(/^The linked lead was not marked won: /));
+  });
   test('membership email: an address that changed after the commit is a target_changed skip, not a send to the new address', async () => {
     const changing = resolvingLeads(['lead-aaaaaa']);
     changing.markLinkedLeadEstimateAccepted.mockImplementation(async () => { changing.world.tables.customers[0].email = 'someone.else@example.com'; });
