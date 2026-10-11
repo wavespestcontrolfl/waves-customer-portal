@@ -351,7 +351,7 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 // count of visits that carry billing (always 0 on a card that was shown), the
 // collection context, and the open membership-dues invoices.
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
-  const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status]);
+  const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
   const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified']);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
@@ -369,8 +369,6 @@ function startsMembership(before, after) {
   const member = (row) => hasMembership(row) && !isAutoDerivedTierLabelRow(row);
   return !member(before) && member(after);
 }
-
-const ymd = (d) => String(d instanceof Date ? d.toISOString() : d ?? '').slice(0, 10);
 
 // '2026-10' -> 'October 2026'.
 const monthLabel = (key) => new Date(`${key}-01T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -415,15 +413,17 @@ const SIDE_FLOW_CHECKS = [
   // for this ET month's dues, which covers an unresolved invoice-less
   // stripe_orphan_charges row and a failed dues attempt parked with
   // metadata.ambiguous_outcome.
-  async ({ dbh, customerId, laneBefore, laneAfter, visits, facts }) => {
+  async ({ dbh, customerId, laneBefore, laneAfter, facts }) => {
     if (laneBefore !== 'monthly_membership' || laneAfter === 'monthly_membership') return null;
     // A dues debit still `processing` (normal ACH: recorded, lock released, settles days
-    // later) paid for its month's visits. Upcoming visits dated in that month would now be
-    // charged on the new lane too: double collection, so refuse. Dues that cover only past
-    // service are disclosed on the card instead (processingLine) and pinned.
-    const covered = facts.processing.find((p) => visits.some((v) => ymd(v.scheduled_date).startsWith(p.monthKey)));
-    if (covered) {
-      return refuse(`The ${monthLabel(covered.monthKey)} dues (${money(covered.amount)}) are still processing by bank debit and cover visits this month that would now be charged on the new billing type. Try again after the debit settles. Nothing was proposed.`, 'billing_dues_processing');
+    // later) may yet FAIL, and a failed monthly debit arms the retry that this change would
+    // supersede (retry-collectibility.js classifyFailedPaymentRetry: the customer left the
+    // monthly lane). So there is no honest "it will settle" line: refuse while any
+    // monthly-dues debit of this or last month is processing, fail closed. The payment is
+    // pinned, so a debit that appears between the card and Confirm refuses at commit.
+    const processing = facts.processing[0];
+    if (processing) {
+      return refuse(`The ${monthLabel(processing.monthKey)} dues (${money(processing.amount)}) are still processing by bank debit. If the debit fails, this change would cancel its retry, so wait until it settles. Nothing was proposed.`, 'billing_dues_processing');
     }
     const { armedRetryQuery, isMonthlyObligationRow, hasUnresolvedSiblingStripeOutcome } = require('../retry-collectibility');
     const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');
@@ -552,13 +552,11 @@ const DUES_STOP = 'Monthly dues stop: the monthly dues charge and any retry of a
 // flat "dues stop" promise names it instead.
 const duesStopLine = (openDues) => {
   if (!openDues.length) return DUES_STOP;
-  const total = openDues.reduce((n, d) => n + (Number(d.total) || 0), 0);
+  const total = openDues.reduce((n, d) => n + (Number(d.amount_due) || 0), 0);
   return `Monthly dues stop: no new monthly dues charge runs. ${plural(openDues.length, 'open membership-dues invoice', 'open membership-dues invoices')} (${money(total)}) stay${openDues.length === 1 ? 's' : ''} collectible: their pay links and follow-ups continue. Dues already paid for this month are not refunded.`;
 };
 
-const processingLine = (p) => `The ${monthLabel(p.monthKey)} dues (${money(p.amount)}) are still processing by bank debit and will settle; it is not refunded by this change.`;
-
-function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
+function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = []) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
   // one_time and any other explicit lane bill like per_visit.
@@ -571,7 +569,7 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
   return [
     head,
     ...tenderLines(laneAfter, charge),
-    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues), ...facts.processing.map(processingLine)] : []),
+    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
   ];
 }
 
@@ -611,7 +609,7 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues, facts),
+      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues),
     },
   };
 }

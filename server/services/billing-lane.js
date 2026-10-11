@@ -1140,13 +1140,19 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
     .whereRaw(stamped)
     .whereRaw(`status NOT IN (${placeholders})`, [...INVOICE_UNCOLLECTIBLE_STATUSES])
     .whereRaw('payer_id IS NULL');
-  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status');
-  if (!lock || !rows.length) return rows;
+  // amount_due is the collectible amount: invoice-helpers.js invoiceAmountDue, the charge base
+  // every collection path prices from (total less credit_applied), not the gross total.
+  const { invoiceAmountDue } = require('./invoice-helpers');
+  const shape = ({ id, total, status, credit_applied: creditApplied }) => ({
+    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied }),
+  });
+  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied');
+  if (!lock || !rows.length) return rows.map(shape);
   const locked = await dbConn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait()
-    .select('id', 'total', 'status', 'customer_id', 'payer_id');
+    .select('id', 'total', 'status', 'credit_applied', 'customer_id', 'payer_id');
   return locked
     .filter((r) => String(r.customer_id) === String(customerId) && r.payer_id == null && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(r.status))
-    .map(({ id, total, status }) => ({ id, total, status }));
+    .map(shape);
 }
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately

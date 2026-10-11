@@ -6072,6 +6072,23 @@ const SERIES_VERDICT_UNVERIFIED = {
 // takes the minimum over the dates it is given, so the verdict is the same one
 // the per-date walk would give. Read-only (the legacy cap freeze the extension
 // writes is skipped). Null when the series has nothing to extend or bills.
+// A rider series (rides_parent_id, GATE_PEST_RIDES_LAWN_AT_ACCEPT + visit groups) seeds
+// its next visit on a lawn host date before it walks its own cadence
+// (walkExtensionCandidates -> rideLawnExtension), and an add-on can price one date and
+// not the other. So the host date the top-up would ride, from the top-up's own candidate
+// function (rideLawnCandidate, read-only), is validated too; when that answer is
+// unknown the verdict is unverified.
+async function seriesWalkWithRide(conn, walk, latest, horizonEnd) {
+  const { parent, cols } = walk;
+  if (!(cols.rides_parent_id && parent.rides_parent_id)) return walk;
+  const ride = await rideLawnCandidate({
+    conn, parent, parentId: parent.id, cols, latest, opts: { maxDate: horizonEnd }, existingDates: await loadActiveSeriesDates(conn, parent.id),
+  });
+  if (!ride) return walk;
+  if (ride.unanswered) return SERIES_VERDICT_UNVERIFIED;
+  return { ...walk, dates: [...new Set([...walk.dates, ride.date])] };
+}
+
 async function seriesVerdictWalk(conn, parentId) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
@@ -6103,7 +6120,7 @@ async function seriesVerdictWalk(conn, parentId) {
     const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
       .map((addon) => parentAddons.indexOf(addon)).join(',');
     if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
-    if (past) return { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent };
+    if (past) return seriesWalkWithRide(conn, { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent }, latest, horizonEnd);
   }
   // The attempt cap ended the walk before the horizon: unverified, never passed.
   return SERIES_VERDICT_UNVERIFIED;
@@ -20365,7 +20382,13 @@ async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
 // scope, lawn-service identity of the host and of each occurrence, blackouts and
 // weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
 // that rule a ride out). null = no ride: the caller walks its normal cadence.
-async function rideLawnExtension(ctx) {
+// The read-only half of the ride: the lawn occurrence the rider's next visit would
+// join, with no write. null = no ride (gate off, not a rider, a blocking reason, or no
+// date the plan still wants); { unanswered: true } = the pair preview failed, so the
+// answer is not known (rideLawnExtension then walks the cadence, as the top-up does;
+// the Intelligence Bar's verdict refuses as unverified instead). Also the one function
+// the billing-type verdict (seriesVerdictWalk) asks which date a rider series seeds on.
+async function rideLawnCandidate(ctx) {
   const {
     conn, parent, parentId, cols, opts, latest, existingDates,
   } = ctx;
@@ -20379,7 +20402,7 @@ async function rideLawnExtension(ctx) {
     plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
   } catch (err) {
     logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
-    return null;
+    return { unanswered: true };
   }
   if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
   // The preview's insert list assumes its proposed MOVES happen too; this
@@ -20391,7 +20414,15 @@ async function rideLawnExtension(ctx) {
   const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
   // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
   const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
-  const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
+  return host ? { date, host } : null;
+}
+
+async function rideLawnExtension(ctx) {
+  const { parent } = ctx;
+  const ride = await rideLawnCandidate(ctx);
+  if (!ride || ride.unanswered) return null;
+  const { date, host } = ride;
+  const window = normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
   if (!window || window.unplaceable) return null;
   return placeGroupedExtension(ctx, date, [host.id], {
     technicianId: host.technician_id || null,

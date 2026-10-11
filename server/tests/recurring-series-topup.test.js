@@ -1015,6 +1015,72 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
     }
   });
 
+  describe('a rider series seeds on the lawn host date (rideLawnCandidate, the top-up\'s own candidate)', () => {
+    const Preview = require('../services/rider-series-preview');
+    const FG = require('../config/feature-gates');
+    let spies;
+    let visitGroups;
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+      jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
+      process.env.RECURRING_TOPUP_HORIZON_DAYS = '120';
+      visitGroups = FG.gates.visitGroups;
+      FG.gates.visitGroups = true;
+      spies = [jest.spyOn(FG, 'pestRidesLawnAtAcceptLive').mockReturnValue(true)];
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+      delete process.env.RECURRING_TOPUP_HORIZON_DAYS;
+      FG.gates.visitGroups = visitGroups;
+      spies.forEach((sp) => sp.mockRestore());
+    });
+    // Zero base; a seasonal Feb-Oct add-on carries the whole price. Quarterly from Jul 15:
+    // the cadence date (Oct 21) is priced; the horizon (Nov 12) also holds a host date.
+    const seasonal = { id: 'a5', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
+    const fixture = {
+      parentOverrides: { recurring_pattern: 'quarterly', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00', rides_parent_id: 'lawn-1' },
+      colsOverrides: { rides_parent_id: true },
+      seriesDates: ['2026-07-15'],
+      addons: [seasonal],
+    };
+    const plan = (hostDate) => ({
+      reasons: [], insert: [hostDate], planFloor: '2026-07-23',
+      hostRows: [{ id: 'host-1', scheduled_date: hostDate, window_start: '09:00', technician_id: null }],
+    });
+
+    test('a host date the add-on does not price refuses although the cadence date is priced', async () => {
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(plan('2026-11-05')));
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      // Without a ride the same series passes: the cadence date alone is priced.
+      spies[1].mockResolvedValue({ ...plan('2026-11-05'), reasons: [[...Preview.RIDE_BLOCKING_REASONS][0]] });
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    });
+
+    test('a host date the add-on prices (the cadence date itself) passes', async () => {
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(plan('2026-10-21')));
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    });
+
+    test('a rider mechanism that cannot answer refuses as unverified; a series that rides nothing is untouched', async () => {
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockRejectedValue(new Error('preview down')));
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_BILLING_UNVERIFIED' });
+      const flat = { ...fixture, parentOverrides: { ...fixture.parentOverrides, rides_parent_id: null } };
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(flat).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    });
+
+    test('source contract: the verdict asks the top-up\'s own rider candidate, and the top-up\'s ride is built on that same function', () => {
+      const code = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+      const walk = code.slice(code.indexOf('async function seriesWalkWithRide'), code.indexOf('async function seriesVerdictWalk'));
+      expect(walk).toContain('rideLawnCandidate(');
+      expect(walk).not.toMatch(/previewRiderPair|hostRows/);
+      const ride = code.slice(code.indexOf('async function rideLawnExtension'), code.indexOf('async function joinOwnStopExtension'));
+      expect(ride).toContain('rideLawnCandidate(ctx)');
+      expect(ride).toContain('placeGroupedExtension(');
+    });
+  });
+
   test('the verdict function stays within the repository complexity limit (decisions, not a one-use helper)', () => {
     const { Linter } = require('eslint');
     const fs = require('fs');

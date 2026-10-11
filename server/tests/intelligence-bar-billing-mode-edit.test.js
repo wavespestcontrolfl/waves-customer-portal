@@ -1055,41 +1055,45 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
     const PROCESSING = { id: 'pay-proc', amount: '55.00', status: 'processing', description: 'Gold WaveGuard Monthly — Pat Sample' };
     const label = new Date(`${thisMonth}-01T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
-    test('processing dues that cover visits this month and a switch that would charge them again: refused (double collection)', async () => {
+    test('Codex round 15: leaving monthly while a dues debit is processing is refused whatever the visits (a failed debit would lose its retry); no disclose path', async () => {
+      const refusal = {
+        code: 'billing_dues_processing',
+        error: `The ${label} dues ($55.00) are still processing by bank debit. If the debit fails, this change would cancel its retry, so wait until it settles. Nothing was proposed.`,
+      };
       mockState.customer = { ...MONTHLY };
       mockState.processing = PROCESSING;
       mockState.visits = [clean('p1', { scheduled_date: `${thisMonth}-28` })];
-      expect(await propose(LEAVE)).toMatchObject({
-        code: 'billing_dues_processing',
-        error: `The ${label} dues ($55.00) are still processing by bank debit and cover visits this month that would now be charged on the new billing type. Try again after the debit settles. Nothing was proposed.`,
-      });
+      expect(await propose(LEAVE)).toMatchObject(refusal);
+      // Visits only in the future, or none: still refused (before: a disclosure line).
+      mockState.visits = [clean('p1', { scheduled_date: '2099-01-05' })];
+      expect(await propose(LEAVE)).toMatchObject(refusal);
+      mockState.visits = [];
+      expect(await propose({ billing_mode: 'per_visit' })).toMatchObject(refusal);
     });
 
-    test('processing dues that cover only past service: disclosed as an effect and pinned; a settle or a new one between card and commit refuses', async () => {
+    test('a debit that appears between the card and Confirm refuses at commit (the payment is pinned)', async () => {
       mockState.customer = { ...MONTHLY };
-      mockState.processing = PROCESSING;
-      mockState.visits = [clean('p1', { scheduled_date: '2099-01-05' })];
+      mockState.visits = [];
       const card = await propose(LEAVE);
       expect(card.error).toBeUndefined();
-      expect(card.display.next_visits).toContain(`The ${label} dues ($55.00) are still processing by bank debit and will settle; it is not refunded by this change.`);
-      expect(card.pin).toContain('["pay-proc","55.00","processing"');
-      // The debit settled (or another appeared) before Confirm: the pin differs.
-      mockState.processing = { ...PROCESSING, status: 'paid' };
+      mockState.processing = PROCESSING;
       expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
         .toMatchObject({ preview_changed: true });
       expect(customerWrites()).toHaveLength(0);
-      mockState.processing = PROCESSING;
+      mockState.processing = null;
       mockState.customer = { ...MONTHLY };
       expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
     });
 
-    test('a customer who is not leaving monthly, or has no processing dues, gets no line', async () => {
+    test('a customer who is not leaving monthly is not asked about processing dues', async () => {
       mockState.customer = { ...BASE };
       mockState.processing = PROCESSING;
-      expect((await propose(LEAVE)).display.next_visits.join(' ')).not.toMatch(/processing by bank debit/);
-      mockState.customer = { ...MONTHLY };
-      mockState.processing = null;
-      expect((await propose(LEAVE)).display.next_visits.join(' ')).not.toMatch(/processing by bank debit/);
+      expect((await propose(LEAVE)).error).toBeUndefined();
+    });
+
+    test('the "will settle" disclosure is gone', () => {
+      const card = require('fs').readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
+      expect(card).not.toMatch(/processingLine|bank debit and will settle/);
     });
 
     test('the cron\'s own already-collected predicate is asked, narrowed to processing and without the invoice fallback', async () => {
@@ -1139,6 +1143,32 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
         .toMatchObject({ preview_changed: true });
       expect(customerWrites()).toHaveLength(0);
+    });
+  });
+
+  describe('Codex round 15: open dues invoices show the collectible amount', () => {
+    test('$49 invoice with $20 applied credit shows $29; the credit is pinned, and one applied after the card refuses', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      mockState.dues = [{ id: 'dues-1', total: '49.00', credit_applied: '20.00', status: 'sent', customer_id: CUSTOMER_ID, payer_id: null }];
+      const card = await propose({ billing_mode: 'per_visit' });
+      const lines = card.display.next_visits.join(' ');
+      expect(lines).toContain('1 open membership-dues invoice ($29.00) stays collectible');
+      expect(lines).not.toContain('$49.00');
+      expect(card.pin).toContain('["dues-1","49.00","sent","20.00"]');
+      // More credit applied after the card: the pin differs, so the commit refuses.
+      mockState.dues = [{ ...mockState.dues[0], credit_applied: '49.00' }];
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: { billing_mode: 'per_visit' }, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('source contract: the amount is invoice-helpers invoiceAmountDue, the charge base every collection path uses', () => {
+      const lane = require('fs').readFileSync(require.resolve('../services/billing-lane.js'), 'utf8');
+      const fn = lane.slice(lane.indexOf('async function openStampedDuesInvoices'), lane.indexOf('// Reasons a no_charge prediction'));
+      expect(fn).toContain("require('./invoice-helpers')");
+      expect(fn).toContain('invoiceAmountDue(');
+      expect(fn).toContain("'credit_applied'");
     });
   });
 
