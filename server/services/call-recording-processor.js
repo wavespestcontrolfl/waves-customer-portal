@@ -1053,19 +1053,54 @@ function callMetadataObject(call) {
     return {};
   }
 }
-async function closeParentOnCallbackSpam(call, { callSid = null } = {}) {
+// The asks a return call would have answered. A solicitor's voicemail makes
+// these moot; cards that judge on-file customer data, authorization, email or
+// a property role are human verdicts and stay (codex #6271 r1).
+const CALLBACK_SPAM_MOOT_CODES = new Set([
+  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+  'address_unverified', 'address_validation_unavailable', 'address_not_validated',
+  'missing_first_name', 'missing_last_name', 'missing_required_customer_fields',
+  'not_confirmed', 'quote_promised', 'callback_number_needed',
+  'ambiguous_pest_or_service', 'ambiguous_scheduling', 'low_extraction_confidence',
+  'call_dropped_mid_intake',
+]);
+function isVoicemailParent(row) {
+  return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
+}
+async function closeParentOnCallbackSpam(call, { callSid = null, procGeneration = null } = {}) {
   if (!isEnabled('callbackSpamClosesParent')) return { applied: false, reason: 'gated_off' };
   if (!isOutboundCall(call)) return { applied: false, reason: 'not_outbound' };
+  // Only an office callback placed from the parent's own card/row carries the
+  // link (admin-communications sets source 'admin-callback' + relatedCallId).
+  if (call?.source !== 'admin-callback') return { applied: false, reason: 'not_admin_callback' };
   const parentId = callMetadataObject(call).relatedCallId;
   if (!parentId || !CALLBACK_PARENT_UUID_RE.test(String(parentId))) return { applied: false, reason: 'no_parent' };
+  if (!call?.id) return { applied: false, reason: 'no_parent' };
   try {
     return await db.transaction(async (trx) => {
-      const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate().first('id');
+      // Shared triage lock FIRST (utils/triage-locks.js): every writer that
+      // transitions a call's cards and syncs review_status serializes here.
+      await lockTriageCall(trx, parentId);
+      // Fence: the verdict that reached us must be the one on the row. A
+      // peer reclaim (newer generation) or a live token means this pass no
+      // longer owns the callback's verdict; a reprocess may yet overturn it.
+      const childQ = trx('call_log').where({ id: call.id, processing_status: 'spam' }).whereNull('processing_token');
+      if (procGeneration != null) childQ.where('processing_generation', procGeneration);
+      const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source');
+      if (!child || child.source !== 'admin-callback') return { applied: false, reason: 'verdict_superseded' };
+      const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
+        .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status');
       if (!parent) return { applied: false, reason: 'parent_not_found' };
+      if (!isVoicemailParent(parent)) return { applied: false, reason: 'parent_not_voicemail' };
+      // The callback must have gone to the voicemail's own number (or its
+      // customer); a relatedCallId pointing anywhere else settles nothing.
+      const sameCustomer = !!parent.customer_id && parent.customer_id === child.customer_id;
+      if (!samePhone(parent.from_phone, child.to_phone) && !sameCustomer) return { applied: false, reason: 'parent_mismatch' };
       const now = new Date();
       const cards = await trx('triage_items')
         .where({ call_log_id: parentId })
         .whereIn('status', ['open', 'in_progress'])
+        .whereIn('reason_code', [...CALLBACK_SPAM_MOOT_CODES])
         .update({
           status: 'resolved',
           resolution_note: 'Closed: the callback reached a solicitor, so the voicemail was spam.',
@@ -1082,16 +1117,8 @@ async function closeParentOnCallbackSpam(call, { callSid = null } = {}) {
           fulfilled_at: null,
           updated_at: now,
         });
-      // Mirror triage-auto-resolve's review_status sync: a call with no
-      // open/in_progress card left takes the status that cleared it.
       let reviewSynced = false;
-      if (cards > 0) {
-        const remaining = await trx('triage_items').where({ call_log_id: parentId }).whereIn('status', ['open', 'in_progress']).count({ n: '*' }).first();
-        if (Number(remaining?.n || 0) === 0) {
-          await trx('call_log').where({ id: parentId }).update({ review_status: 'resolved', updated_at: now });
-          reviewSynced = true;
-        }
-      }
+      if (cards > 0) reviewSynced = (await syncCallReviewStatus(trx, parentId, 'resolved')) === 'resolved';
       await trx('call_log').where({ id: parentId }).update({
         metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
           [JSON.stringify({ spam: true, callback_call_log_id: call.id, at: now.toISOString() })]),
@@ -10928,7 +10955,7 @@ const CallRecordingProcessor = {
       }
       // A callback that reached a solicitor settles its parent voicemail
       // (closeParentOnCallbackSpam, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
-      if (extracted.is_spam) await closeParentOnCallbackSpam(call, { callSid });
+      if (extracted.is_spam) await closeParentOnCallbackSpam(call, { callSid, procGeneration });
       // A previously classified call reprocessed into spam/non-workable
       // must not leave its property_role_confirm card actionable — the
       // office could still one-click property mutations from the
@@ -12570,7 +12597,7 @@ const CallRecordingProcessor = {
       }
       // A callback that reached a solicitor settles its parent voicemail
       // (closeParentOnCallbackSpam, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
-      if (extracted.is_spam) await closeParentOnCallbackSpam(call, { callSid });
+      if (extracted.is_spam) await closeParentOnCallbackSpam(call, { callSid, procGeneration });
       // Retire any open property_role_confirm card from a prior pass — the
       // veto blocks every canonical write, so its parked mutations are
       // superseded and must not stay one-click applicable (codex #3418
