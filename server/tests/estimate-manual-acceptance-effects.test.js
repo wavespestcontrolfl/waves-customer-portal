@@ -38,7 +38,7 @@ const { markEstimateManuallyAccepted } = require('../services/estimate-manual-ac
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
 // ── A table-aware fake with a real commit / rollback ──
-function makeWorld({ estimateOverrides = {}, customerOverrides = {}, prefs = [], turf = [], property = null } = {}) {
+function makeWorld({ estimateOverrides = {}, customerOverrides = {}, prefs = [], turf = [], property = null, extraTables = {} } = {}) {
   const tables = {
     estimates: [{
       id: 'est-1', status: 'sent', customer_id: 'cust-1', sent_at: '2026-10-01T12:00:00.000Z', accepted_at: null,
@@ -57,6 +57,7 @@ function makeWorld({ estimateOverrides = {}, customerOverrides = {}, prefs = [],
     notification_prefs: prefs,
     activity_log: [],
     leads: [],
+    ...extraTables,
   };
   const state = { committed: 0, rolledBack: 0, commitsWithWrites: [], locks: [] };
   let depth = 0;
@@ -127,6 +128,7 @@ function fakeConverter(world, o = {}) {
     Object.assign(world.tables.customers[0], { monthly_rate: '104.00', waveguard_tier: 'Gold', ...(o.customerWrites || {}) });
     world.tables.customer_plan_rates = [{ family_key: 'lawn_care', monthly_rate: '55.00' }, { family_key: 'pest_control', monthly_rate: '49.00' }];
     if (o.lawnWrites) o.lawnWrites(world.tables);
+    if (o.tableWrites) o.tableWrites(world.tables);
     return {
       customerId: 'cust-1', tier: 'Gold', monthlyRate: 104, serviceCount: 1, serviceMode: 'recurring', requiresManualRecurringScheduling: false,
       membershipEmail: { customerId: 'cust-1', billingLane: 'per_application', perApplicationAmount: null, monthlyRate: 104 },
@@ -170,7 +172,9 @@ describe('a dry run', () => {
     const result = await markEstimateManuallyAccepted(base(world, converter, { dryRun: true, leadLinkService: leads }));
     await settle();
     expect(result.dryRun).toBe(true);
-    expect(kinds(result.effects)).toEqual(['estimate', 'add_on_classification', 'customer', 'plan_rate_ledger', 'lawn_profile', 'conversion', 'post_commit']);
+    expect(kinds(result.effects).filter((k) => k !== 'table_changes')).toEqual(['estimate', 'add_on_classification', 'customer', 'plan_rate_ledger', 'lawn_profile', 'conversion', 'post_commit']);
+    // ... and every table row the accept changed, from the table-driven snapshot.
+    expect(result.effects.filter((e) => e.kind === 'table_changes').map((e) => e.table)).toEqual(['estimates', 'customers', 'customer_plan_rates', 'activity_log']);
     // The transaction rolled back: the tables are as they were.
     expect(world.state).toMatchObject({ committed: 0, rolledBack: 1 });
     expect(world.tables.estimates[0].status).toBe('sent');
@@ -311,7 +315,9 @@ describe('finding 1: the approved email decision rides through delivery', () => 
   test('the dry run lists the masked recipient when the email will go', async () => {
     const world = makeWorld();
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
-    expect(planStep(effects, 'membership_email')).toEqual({ step: 'membership_email', attempt: true, will_send: true, reason: null, to: 'l***@example.com' });
+    expect(planStep(effects, 'membership_email')).toEqual({
+      step: 'membership_email', attempt: true, will_send: true, reason: null, to: 'l***@example.com', recipient_key: Effects.recipientKey('lena.synthetic@example.com'),
+    });
   });
 
   test('a one_time lane never emails (the sender suppresses it)', async () => {
@@ -392,6 +398,28 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
   });
 });
 
+describe('finding 5 (round 6): the one-time amount is what the customer pays', () => {
+  test('a $100 line discounted to $90 is listed at $90; a line discounted to $0 is not listed', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [
+            { service: 'german_roach', name: 'German Roach Cleanout', price: 100, priceAfterDiscount: 90 },
+            { service: 'wasp', name: 'Wasp Nest Removal', price: 150, priceAfterDiscount: 0 },
+            { service: 'rodent', name: 'Rodent Exclusion', price: 200 },
+          ] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([
+      ['German Roach Cleanout', 90],
+      ['Rodent Exclusion', 200],
+    ]);
+  });
+});
+
 describe('finding 6: the bells come from the conversion through the post-commit plan', () => {
   test('a plan-rate review bell (the grouped reset) and a tier bell are listed, and fire after the commit', async () => {
     const world = makeWorld();
@@ -409,6 +437,95 @@ describe('finding 6: the bells come from the conversion through the post-commit 
       'WaveGuard Gold activated: review existing plan rates',
       'Multi-plan rate needs review after re-quote',
     ]);
+  });
+});
+
+describe('every table the accept writes shows as an effect (the table-driven snapshot)', () => {
+  const OPEN_CONSULTATION = { id: 'co-1', customer_id: 'cust-1', outcome: 'warm', won_via: null, won_at: null, lead_id: null };
+  const consultWorld = () => makeWorld({ extraTables: { consultation_outcomes: [{ ...OPEN_CONSULTATION }] } });
+  const closeConsultation = (t) => { t.consultation_outcomes[0] = { ...t.consultation_outcomes[0], outcome: 'won', won_via: 'estimate_accept', won_at: new Date().toISOString() }; };
+
+  test('a consultation closed as won is listed, without its clock', async () => {
+    const world = consultWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world, { tableWrites: closeConsultation }), { dryRun: true }));
+    expect(effects.find((e) => e.kind === 'table_changes' && e.table === 'consultation_outcomes')).toEqual({
+      kind: 'table_changes',
+      table: 'consultation_outcomes',
+      changed: [{ key: 'co-1', columns: { outcome: { before: 'warm', after: 'won' }, won_at: { before: null, after: '<time>' }, won_via: { before: null, after: 'estimate_accept' } } }],
+      added: [],
+      removed: [],
+    });
+  });
+
+  test('the same state with a later clock gives the same list, so the pinned key still matches', async () => {
+    const a = consultWorld();
+    const first = await markEstimateManuallyAccepted(base(a, fakeConverter(a, { tableWrites: closeConsultation }), { dryRun: true }));
+    const b = consultWorld();
+    const second = await markEstimateManuallyAccepted(base(b, fakeConverter(b, {
+      tableWrites: (t) => { closeConsultation(t); t.consultation_outcomes[0].won_at = '2031-01-01T00:00:00.000Z'; t.customers[0].updated_at = '2031-01-01T00:00:00.000Z'; },
+    }), { dryRun: true }));
+    expect(Effects.effectsFingerprint(second.effects)).toBe(Effects.effectsFingerprint(first.effects));
+  });
+
+  test('the real run refuses as preview_changed when a consultation is closed that the card did not list', async () => {
+    const dry = makeWorld({ extraTables: { consultation_outcomes: [{ ...OPEN_CONSULTATION }] } });
+    const { effects } = await markEstimateManuallyAccepted(base(dry, fakeConverter(dry), { dryRun: true }));
+    const key = Effects.effectsFingerprint(effects);
+    const real = consultWorld();
+    await expect(markEstimateManuallyAccepted(base(real, fakeConverter(real, { tableWrites: closeConsultation }), { expected: { effectsKey: key } })))
+      .rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(real.state.committed).toBe(0);
+  });
+
+  test('rows the accept inserts (a credit entry) and reprices (a live visit) are listed, new rows without their id', async () => {
+    const world = makeWorld({ extraTables: { scheduled_services: [{ id: 'visit-1', customer_id: 'cust-1', status: 'scheduled', estimated_price: '49.00' }] } });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world, {
+      tableWrites: (t) => {
+        t.scheduled_services[0].estimated_price = '45.00';
+        t.customer_credit_ledger = [{ id: 'gen-1', customer_id: 'cust-1', delta: '12.50', balance_after: '12.50', source: 'waveguard_extension' }];
+      },
+    }), { dryRun: true }));
+    expect(effects.find((e) => e.table === 'scheduled_services')).toMatchObject({
+      changed: [{ key: 'visit-1', columns: { estimated_price: { before: '49.00', after: '45.00' } } }], added: [], removed: [],
+    });
+    expect(effects.find((e) => e.table === 'customer_credit_ledger')).toEqual({
+      kind: 'table_changes', table: 'customer_credit_ledger', changed: [], removed: [],
+      added: [{ balance_after: '12.50', customer_id: 'cust-1', delta: '12.50', source: 'waveguard_extension' }],
+    });
+  });
+
+  test('a table nobody listed is not read, and the contract test is what keeps the list whole', () => {
+    const Snapshot = require('../services/estimate-accept-snapshot');
+    expect(Snapshot.SNAPSHOT_TABLES.map((t) => t.table)).toEqual([
+      'estimates', 'customers', 'customer_plan_rates', 'customer_turf_profiles', 'customer_properties',
+      'consultation_outcomes', 'customer_credit_ledger', 'scheduled_services', 'activity_log',
+    ]);
+  });
+});
+
+describe('finding 4: the approved recipient rides through delivery', () => {
+  test('the real run hands the sender the approved recipient key; the page button hands it none', async () => {
+    const dry = makeWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(dry, fakeConverter(dry), { dryRun: true }));
+    const key = Effects.effectsFingerprint(effects);
+    const real = makeWorld();
+    await markEstimateManuallyAccepted(base(real, fakeConverter(real), { expected: { effectsKey: key, membershipEmail: 'send' } }));
+    await settle();
+    expect(AccountMembershipEmail.sendMembershipStarted.mock.calls[0][0]).toMatchObject({ recipientKey: Effects.recipientKey('lena.synthetic@example.com') });
+    AccountMembershipEmail.sendMembershipStarted.mockClear();
+    const page = makeWorld();
+    await markEstimateManuallyAccepted(base(page, fakeConverter(page)));
+    await settle();
+    expect(AccountMembershipEmail.sendMembershipStarted.mock.calls[0][0]).not.toHaveProperty('recipientKey');
+  });
+
+  test('an address that changed between the card and the accept refuses as preview_changed (the recipient is in the list)', async () => {
+    const dry = makeWorld();
+    const { effects } = await markEstimateManuallyAccepted(base(dry, fakeConverter(dry), { dryRun: true }));
+    const key = Effects.effectsFingerprint(effects);
+    const real = makeWorld({ customerOverrides: { email: 'someone.else@example.com' } });
+    await expect(markEstimateManuallyAccepted(base(real, fakeConverter(real), { expected: { effectsKey: key } })))
+      .rejects.toMatchObject({ code: 'preview_changed' });
   });
 });
 

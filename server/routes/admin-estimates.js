@@ -5453,11 +5453,12 @@ async function markAcceptedHandler(req, res, next) {
       adminUserId: req.technicianId,
       source: req.body?.source || 'verbal_yes',
       billingTerm: req.body?.billingTerm || 'standard',
-      // The Intelligence Bar card's pins (markEstimateAcceptedAsStaff); the
-      // estimate page sends none.
-      ...(req.body?.expected && typeof req.body.expected === 'object' ? { expected: req.body.expected } : {}),
-      // Set only by markEstimateAcceptedAsStaff (never from the HTTP body): run
-      // the accept, list its effects, roll back.
+      // The Intelligence Bar card's pins and the dry-run switch are internal
+      // arguments, set only by markEstimateAcceptedAsStaff on the request
+      // object. NOTHING here reads them from req.body: a caller of the HTTP
+      // route cannot supply pins (for example an approved "no email") or
+      // switch the accept into a dry run.
+      ...(req.acceptExpected && typeof req.acceptExpected === 'object' ? { expected: req.acceptExpected } : {}),
       ...(req.acceptDryRun === true ? { dryRun: true } : {}),
     });
     if (result.dryRun) return res.json({ success: true, ...result });
@@ -5479,8 +5480,10 @@ async function markAcceptedHandler(req, res, next) {
 // preflight, markEstimateManuallyAccepted, the dashboard cache clear). It runs
 // the handler with the only request fields it reads and resolves the reply it
 // would send: { status, json }. An error the handler passes to next() rejects.
-function markEstimateAcceptedAsStaff({ estimateId, body, actor, dryRun = false }) {
-  const req = { params: { id: estimateId }, body, technicianId: actor.technicianId, acceptDryRun: dryRun === true };
+function markEstimateAcceptedAsStaff({ estimateId, body, actor, dryRun = false, expected = null }) {
+  const req = {
+    params: { id: estimateId }, body, technicianId: actor.technicianId, acceptDryRun: dryRun === true, acceptExpected: expected,
+  };
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,

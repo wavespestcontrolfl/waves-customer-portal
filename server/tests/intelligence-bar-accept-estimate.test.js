@@ -163,7 +163,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       'Bills each service per application at its own visit price (no single account fee)',
       'No setup invoice, no charge and no receipt now',
       'Visits: books none — book the first visit on the calendar after',
-      'Message: Email "membership started" to l***@example.com right after Confirm: plan, tier, rate and services (sent once per estimate)',
+      'Message: Email "membership started" to l***@example.com right after Confirm: plan, tier, rate and services (sent once per estimate). Not sent if the customer opts out first or the address on file changes',
       'Message: No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it',
     ]));
     expect(writes).toEqual([]);
@@ -370,6 +370,25 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(contract.action_label).toBe('Mark an estimate accepted (starts the plan)');
   });
 
+  test('a one-time estimate with a visit already linked is refused too (it takes the same reservation path)', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } }, booked: [{ id: 'svc-1', scheduled_date: '2026-10-14', status: 'confirmed' }] });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('booked_from_estimate');
+    expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+  });
+
+  test('the linked-visit pin binds a one-time card as well', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      postCommit(),
+    ];
+    const card = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    // expectedFrom() sends this as noLinkedVisits, which the accept re-checks under its locks.
+    expect(card.pins.no_linked_visits).toBe(true);
+  });
+
   test('an estimate with visits already booked from it is refused (the reservation path can add and change visits)', async () => {
     // A cancelled linked visit counts too: the converter's reservation lookup
     // does not filter by status.
@@ -411,6 +430,25 @@ describe('fail closed', () => {
     expect(result.error).toBe('This accept would also text the customer and ring an admin bell, and the bar cannot show that yet. Accept it from the estimate page. Nothing was changed.');
   });
 
+  test('rows the accept changes outside the bill are worded on the card: a consultation closed as won, credit entries, repriced visits', async () => {
+    dryEffects = () => addOnEffects({
+      extra: [
+        { kind: 'table_changes', table: 'consultation_outcomes', changed: [{ key: 'co-1', columns: { outcome: { before: 'warm', after: 'won' } } }], added: [], removed: [] },
+        { kind: 'table_changes', table: 'customer_credit_ledger', changed: [], removed: [], added: [{ delta: '12.50', source: 'waveguard_extension' }] },
+        { kind: 'table_changes', table: 'scheduled_services', changed: [{ key: 'v1', columns: { estimated_price: { before: '49.00', after: '45.00' } } }, { key: 'v2', columns: { estimated_price: { before: '49.00', after: '45.00' } } }], added: [], removed: [] },
+        { kind: 'table_changes', table: 'customers', changed: [{ key: 'c', columns: { monthly_rate: { before: '55.00', after: '145.00' } } }], added: [], removed: [] },
+        { kind: 'table_changes', table: 'some_future_table', changed: [], added: [{ a: 1 }], removed: [] },
+      ],
+    });
+    const lines = (await executeEstimateAcceptTool('accept_estimate', INPUT)).card_lines.map((l) => l.label);
+    expect(lines).toContain('Closes the open consultation as won');
+    expect(lines).toContain('Posts 1 account credit entry ($12.50 in all)');
+    expect(lines).toContain("Reprices 2 existing visits on the customer's plan");
+    expect(lines).toContain('Also changes 1 row in some future table');
+    // Tables another line already words add nothing.
+    expect(lines.filter((l) => /customers|monthly_rate/.test(l))).toEqual([]);
+  });
+
   test('commercial recurring work the converter would schedule by hand refuses even if the quote looked residential', async () => {
     dryEffects = () => addOnEffects({ conversion: { manual_recurring_scheduling: true } });
     expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).code).toBe('commercial_recurring');
@@ -425,6 +463,8 @@ describe('fail closed', () => {
 describe('refusals before any card', () => {
   test.each([
     ['already accepted', { status: 'accepted', accepted_at: '2026-10-02T10:00:00.000Z' }, /already accepted on 2026-10-02/],
+    // 9:30 pm on Oct 2 in Eastern time is already Oct 3 in UTC: the office's day wins.
+    ['already accepted late in the evening, Eastern', { status: 'accepted', accepted_at: '2026-10-03T01:30:00.000Z' }, /already accepted on 2026-10-02\./],
     ['declined', { status: 'declined', decline_reason: 'went with another company' }, /was declined \(went with another company\)/],
     ['archived', { archived_at: '2026-10-03T00:00:00.000Z' }, /is archived/],
     ['still a draft (the page refuses)', { status: 'draft' }, /Only sent or viewed estimates can be manually marked accepted\. Current status: draft\./],
@@ -554,19 +594,19 @@ describe('Confirm', () => {
     const result = await confirmWith(approved);
     expect(realCalls()).toEqual([[{
       estimateId: ESTIMATE_ID,
-      body: {
-        source: 'verbal_yes',
-        // The card's pins, re-checked under the accept's own locks.
-        expected: {
-          estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
-          customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
-          customerBilling: 'per_application||Bronze|active_customer|',
-          planRows: '',
-          lawnProfile: '|||',
-          noLinkedVisits: true,
-          effectsKey: approved.effects_key,
-          membershipEmail: 'send',
-        },
+      // The page's own body: the pins are NOT part of it.
+      body: { source: 'verbal_yes' },
+      // The card's pins, an internal argument re-checked under the accept's
+      // own locks.
+      expected: {
+        estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
+        customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
+        customerBilling: 'per_application||Bronze|active_customer|',
+        planRows: '',
+        lawnProfile: '|||',
+        noLinkedVisits: true,
+        effectsKey: approved.effects_key,
+        membershipEmail: 'send',
       },
       actor: { technicianId: 'tech-owner' },
     }]]);
@@ -581,7 +621,8 @@ describe('Confirm', () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(approved.membership_email).toBe('skip');
     await confirmWith(approved);
-    expect(realCalls()[0][0].body.expected.membershipEmail).toBe('skip');
+    expect(realCalls()[0][0].expected.membershipEmail).toBe('skip');
+    expect(realCalls()[0][0].body).toEqual({ source: 'verbal_yes' });
   });
 
   test.each([

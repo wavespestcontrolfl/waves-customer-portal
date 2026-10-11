@@ -126,3 +126,50 @@ describe('account-membership-email distinguishes a transient prefs failure from 
     expect(result.skipped).not.toBe(true);
   });
 });
+
+// The membership-started email approved on an Intelligence Bar accept card goes
+// to the approved recipient only (recipientKey), and a fresh opt-out still
+// vetoes it.
+describe('sendMembershipStarted with an approved recipient', () => {
+  const { recipientKey } = require('../services/estimate-accept-effects');
+  const base = { customerId: 'cust-1', membershipTier: 'Gold', monthlyRate: '98.00', billingCadence: 'monthly', billingLane: 'monthly_membership', includedServices: 'Pest Control' };
+  const setup = ({ onFile = customer(), prefs = null } = {}) => {
+    jest.clearAllMocks();
+    const queues = {
+      customers: [chain({ first: onFile }), chain({ first: onFile })],
+      customer_interactions: [chain(), chain(), chain()],
+      notification_prefs: [chain({ first: prefs })],
+    };
+    db.mockImplementation((table) => {
+      const q = queues[table];
+      if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
+      return q.shift();
+    });
+  };
+
+  test('the address changed since the card: no email, nothing handed to the provider', async () => {
+    setup({ onFile: customer({ email: 'someone.else@example.com' }) });
+    const result = await AccountMembershipEmail.sendMembershipStarted({ ...base, recipientKey: recipientKey('taylor@example.com') });
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'recipient_changed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('the same address and a fresh opt-out: the sender\'s own check still vetoes', async () => {
+    setup({ prefs: { customer_id: 'cust-1', email_enabled: false } });
+    const result = await AccountMembershipEmail.sendMembershipStarted({ ...base, recipientKey: recipientKey('Taylor@Example.com') });
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'email_opted_out' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('the same address and no opt-out: it is sent', async () => {
+    setup();
+    await AccountMembershipEmail.sendMembershipStarted({ ...base, recipientKey: recipientKey('taylor@example.com') });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('no recipient key (the page button): sent to the address on file, as before', async () => {
+    setup({ onFile: customer({ email: 'someone.else@example.com' }) });
+    await AccountMembershipEmail.sendMembershipStarted(base);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+});

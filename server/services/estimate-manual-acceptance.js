@@ -4,6 +4,7 @@ const { etDateString } = require('../utils/datetime-et');
 const EstimateConverter = require('./estimate-converter');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 const AcceptEffects = require('./estimate-accept-effects');
+const AcceptSnapshot = require('./estimate-accept-snapshot');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
 const { normalizeProposal } = require('./estimate-proposal');
 const proposalWin = require('./proposal-win');
@@ -1108,6 +1109,20 @@ async function stampCommercialOneTime(trx, updatedEstimate) {
 
 // ── Effects: recorded in the transaction, compared under the locks ──
 
+// Every table the accept writes (estimate-accept-snapshot.js SNAPSHOT_TABLES),
+// read before the claim and again after the last write: any row that changed
+// shows as a table_changes effect (log on only).
+async function captureTablesBefore(trx, ctx, estimate, isCommercialProposal) {
+  if (!ctx.effects.enabled || isCommercialProposal) return null;
+  return AcceptSnapshot.snapshotTables(trx, { estimateId: estimate.id, customerId: estimate.customer_id || null });
+}
+
+async function recordTableChanges(trx, ctx, updatedEstimate) {
+  if (!ctx.tablesBefore) return;
+  const after = await AcceptSnapshot.snapshotTables(trx, { estimateId: updatedEstimate.id, customerId: updatedEstimate.customer_id || null });
+  for (const effect of AcceptSnapshot.diffTables(ctx.tablesBefore, after)) ctx.effects.add(effect);
+}
+
 // The customer rows the conversion writes, before it runs (log on only).
 async function captureStateBefore(trx, ctx, updatedEstimate) {
   if (!ctx.effects.enabled || !updatedEstimate.customer_id) return null;
@@ -1169,6 +1184,7 @@ async function acceptInTransaction(trx, ctx) {
 
   const isCommercialProposal = isCommercialProposalEstimate(estimate);
   const annualPrepayAmount = await assertAnnualPrepayAllowed(trx, ctx, estimate, isCommercialProposal);
+  ctx.tablesBefore = await captureTablesBefore(trx, ctx, estimate, isCommercialProposal);
   const claimed = await claimEstimateRow(trx, ctx, estimate);
   if (claimed.outcome) return finishAccept(ctx, claimed.outcome);
   const { updatedEstimate } = claimed;
@@ -1190,6 +1206,7 @@ async function acceptInTransaction(trx, ctx) {
   await logManualAcceptance(trx, {
     estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
   });
+  await recordTableChanges(trx, ctx, updatedEstimate);
   const outcome = await settleEffects(trx, ctx, {
     acceptedEstimate: updatedEstimate,
     alreadyAccepted: false,

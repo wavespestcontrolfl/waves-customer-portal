@@ -34,6 +34,7 @@ const { ibAcceptEstimateLive } = require('../../config/feature-gates');
 const PlanRateLedger = require('../plan-rate-ledger');
 const AcceptEffects = require('../estimate-accept-effects');
 const { ledgerPin, lineLabel, money } = require('./rate-change');
+const { etDateString } = require('../../utils/datetime-et');
 
 const ESTIMATE_ACCEPT_TOOLS = [
   {
@@ -56,7 +57,15 @@ Use for: "Pat accepted the lawn quote", "mark her estimate accepted", "he said y
 const uuid = (v) => (v == null ? '' : String(v).trim().toLowerCase());
 const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 const iso = (v) => (v == null ? null : (v instanceof Date ? v.toISOString() : String(v)));
+// A DATE column (a visit day): its calendar day as stored.
 const dateOnly = (v) => (v == null ? null : (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)));
+// An instant (accepted_at): the calendar day in Eastern time, which is the day
+// the office saw, not the UTC day.
+const etDay = (v) => {
+  if (v == null) return null;
+  const at = v instanceof Date ? v : new Date(v);
+  return Number.isFinite(at.getTime()) ? etDateString(at) : String(v).slice(0, 10);
+};
 
 function parseData(value) {
   if (!value) return {};
@@ -120,7 +129,7 @@ function statusRefusal(estimate, label) {
     return refuse('This is a commercial proposal. Mark it won from the proposal page; the bar does not accept proposals.', 'commercial_proposal');
   }
   if (estimate.status === 'accepted') {
-    const on = estimate.accepted_at ? ` on ${dateOnly(estimate.accepted_at)}` : '';
+    const on = estimate.accepted_at ? ` on ${etDay(estimate.accepted_at)}` : '';
     return refuse(`That ${label} was already accepted${on}.`, 'already_accepted');
   }
   if (estimate.status === 'declined') {
@@ -248,7 +257,9 @@ async function activation(estimateData, customerId) {
 // property the accept would add or match.
 async function laterRefusal({ converts, estimate, estimateData, act, customerId }) {
   if (act.commercialRecurring) return refuse('Accept commercial work on the estimate page.', 'commercial_recurring');
-  const blocked = converts && (conversionRefusal(estimate, estimateData, act.tier) || await bookedRefusal(estimate.id));
+  // Linked visits are refused whether or not the accept converts: a one-time
+  // estimate with a booked visit still takes the converter's reservation path.
+  const blocked = (converts && conversionRefusal(estimate, estimateData, act.tier)) || await bookedRefusal(estimate.id);
   return blocked || await propertyLinkRefusal(estimate, customerId);
 }
 
@@ -343,6 +354,38 @@ function perApplicationLine({ conv, cust, monthlyRate, laneAfter }) {
   return `Bills ${money(conv.per_application_amount)} per application (about ${money(monthlyRate)} a month)${kept}`;
 }
 
+// Row changes in the tables the accept writes (estimate-accept-snapshot.js),
+// worded for the card. Tables another card line already words (the bill, the
+// lawn profile, the estimate and customer status, the audit log) say nothing
+// here; a table nothing words falls back to a plain "also changes" line, so a
+// written row never goes unmentioned.
+const COVERED_TABLES = new Set(['estimates', 'customers', 'customer_plan_rates', 'customer_turf_profiles', 'customer_properties', 'activity_log']);
+const TABLE_LABELS = { consultation_outcomes: 'consultation records', customer_credit_ledger: 'account credit entries', scheduled_services: 'scheduled visits' };
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function rowChangeNote(e) {
+  if (COVERED_TABLES.has(e.table)) return null;
+  if (e.table === 'consultation_outcomes') {
+    const won = e.changed.filter((c) => c.columns?.outcome?.after === 'won').length;
+    const other = e.changed.length - won + e.added.length + e.removed.length;
+    return [
+      won ? `Closes ${won === 1 ? 'the open consultation' : `${won} open consultations`} as won` : null,
+      other ? `Also changes ${plural(other, 'consultation record', 'consultation records')}` : null,
+    ].filter(Boolean).join('; ') || null;
+  }
+  if (e.table === 'scheduled_services' && !e.added.length && !e.removed.length) {
+    return `Reprices ${plural(e.changed.length, 'existing visit', 'existing visits')} on the customer's plan`;
+  }
+  if (e.table === 'customer_credit_ledger' && !e.changed.length && !e.removed.length) {
+    const total = round2(e.added.reduce((sum, r) => sum + Number(r.delta || 0), 0));
+    return `Posts ${plural(e.added.length, 'account credit entry', 'account credit entries')} (${money(total)} in all)`;
+  }
+  const rows = e.changed.length + e.added.length + e.removed.length;
+  return `Also changes ${plural(rows, 'row', 'rows')} in ${TABLE_LABELS[e.table] || String(e.table).replace(/_/g, ' ')}`;
+}
+
+const rowChangeNotes = (effects) => effectsOfKind(effects, 'table_changes').map(rowChangeNote).filter(Boolean);
+
 const EMAIL_SKIP_TEXT = {
   one_time_lane: 'No "membership started" email: the plan bills one time',
   no_address: 'No "membership started" email: no email address on file',
@@ -361,7 +404,7 @@ function messagesFromPlan({ plan, converts }) {
   } else if (email.will_send === true) {
     messages.push({
       kind: 'email', will_send: true, template: 'membership.started',
-      text: `Email "membership started" to ${email.to} right after Confirm: plan, tier, rate and services (sent once per estimate)`,
+      text: `Email "membership started" to ${email.to} right after Confirm: plan, tier, rate and services (sent once per estimate). Not sent if the customer opts out first or the address on file changes`,
     });
   } else {
     messages.push({ kind: 'none', will_send: false, text: EMAIL_SKIP_TEXT[email.reason] || 'No "membership started" email' });
@@ -479,15 +522,16 @@ function cardLines(preview) {
         ? 'Marks the estimate accepted and locks its price; the customer becomes an active customer; a linked lead is marked won'
         : "Marks the estimate accepted and locks its price; a linked lead is marked won; the customer's status and plan stay as they are",
     },
+    ...preview.row_changes.map((label) => ({ kind: 'operational', label })),
     ...preview.admin_bells.map((title) => ({ kind: 'operational', label: `Admin bell: ${title}` })),
     ...preview.customer_messages.map((m) => ({ kind: 'comms', label: `Message: ${m.text}` })),
   ];
 }
 
 // What approval binds beside the effect list: any change before Confirm
-// refuses the card. The bill pins (ledger, lawn profile, add-on evidence, no
-// linked visit) exist only when the accept converts (a recurring monthly
-// total).
+// refuses the card. The bill pins (ledger, lawn profile, add-on evidence) exist
+// only when the accept converts (a recurring monthly total); the no-linked-visit
+// pin binds every accept.
 async function cardPins({ estimate, customer, converts }) {
   const Manual = require('../estimate-manual-acceptance');
   const Converter = require('../estimate-converter');
@@ -504,7 +548,7 @@ async function cardPins({ estimate, customer, converts }) {
     ledger: bill?.ledger ?? null,
     lawn_profile: bill?.lawn_profile ?? null,
     plan_rows: bill?.plan_rows ?? null,
-    no_linked_visits: !!bill,
+    no_linked_visits: true,
   };
 }
 
@@ -537,6 +581,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     visits: { books_new: false },
     per_application: perApplicationLine({ conv, cust, monthlyRate, laneAfter }),
     admin_bells: plan.filter((s) => s.step === 'admin_bell').map((s) => s.title),
+    row_changes: rowChangeNotes(effects),
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
     // The approved email decision rides through delivery.
@@ -635,8 +680,10 @@ async function acceptEstimate(input, actionContext = {}) {
   // accept's own estimate and customer locks (estimate-manual-acceptance.js).
   const reply = await markEstimateAcceptedAsStaff({
     estimateId: preview.estimate_id,
-    body: { source: 'verbal_yes', expected: expectedFrom(approved) },
+    body: { source: 'verbal_yes' },
     actor: { technicianId: actionContext.technicianId || null },
+    // An internal argument, never part of the HTTP body.
+    expected: expectedFrom(approved),
   });
   if (reply.json?.code === 'preview_changed') {
     return { error: reply.json.error, preview_changed: true };

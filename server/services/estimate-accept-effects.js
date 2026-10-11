@@ -134,10 +134,16 @@ function conversionEffect(conversion) {
 
 // ── The sold one-time lines ──
 
+// What the customer pays for the line: the amount AFTER the estimate's
+// discount (the field the engine totals from) when the line carries one, else
+// the list price. The first field that holds a number decides, so a line
+// discounted to $0 reads $0 and is not listed at its list price.
+const ONE_TIME_AMOUNT_FIELDS = ['priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
 function positiveAmount(item) {
-  for (const key of ['price', 'amount', 'total', 'priceAfterDiscount', 'totalAfterDiscount']) {
-    const n = Number(item?.[key]);
-    if (Number.isFinite(n) && n > 0) return round2(n);
+  for (const key of ONE_TIME_AMOUNT_FIELDS) {
+    if (item?.[key] == null || item[key] === '') continue;
+    const n = Number(item[key]);
+    if (Number.isFinite(n)) return n > 0 ? round2(n) : null;
   }
   return null;
 }
@@ -258,6 +264,13 @@ const BELLS = [
   ['plan_rate_review', 'planRateReviewNotification'],
 ];
 
+// A short, stable key of the approved recipient. The plan carries it (not the
+// address), the sender compares it with the address on file at the moment of
+// delivery, and a changed address means no email.
+function recipientKey(address) {
+  return crypto.createHash('sha256').update(String(address || '').trim().toLowerCase()).digest('hex').slice(0, 24);
+}
+
 function maskEmail(address) {
   const [local, domain] = String(address || '').trim().split('@');
   return domain ? `${local.slice(0, 1)}***@${domain}` : null;
@@ -297,7 +310,9 @@ function membershipEmailStep({ conversion, billingTerm, emailInputs }) {
   if (!emailInputs.email) return refused('no_address', true);
   if (!require('./account-membership-email').isEmailLike(emailInputs.email)) return refused('invalid_address', true);
   if (!emailInputs.emailOn) return refused('email_off', true);
-  return { step: 'membership_email', attempt: true, will_send: true, reason: null, to: maskEmail(emailInputs.email) };
+  return {
+    step: 'membership_email', attempt: true, will_send: true, reason: null, to: maskEmail(emailInputs.email), recipient_key: recipientKey(emailInputs.email),
+  };
 }
 
 // The work after the commit, as an ordered list of steps (pure). Inputs are
@@ -369,13 +384,17 @@ const POST_COMMIT_RUNNERS = {
       ctx.warnings.push('Linked lead was not marked won automatically.');
     }
   },
-  async membership_email(_step, ctx) {
+  async membership_email(step, ctx) {
     // The card approved "no email" (opted out, no address): that decision
     // rides through delivery. A fresh opt-out still vetoes a planned send in
     // the sender itself.
     if (ctx.approvedEmail === 'skip') return;
     const AccountMembershipEmail = require('./account-membership-email');
-    void AccountMembershipEmail.sendMembershipStarted(ctx.conversion.membershipEmail)
+    // The approved recipient rides through delivery: the sender compares it
+    // with the address on file when it sends, and sends nothing if the
+    // address changed since the card (a fresh opt-out still vetoes there too).
+    const payload = step.recipient_key ? { ...ctx.conversion.membershipEmail, recipientKey: step.recipient_key } : ctx.conversion.membershipEmail;
+    void AccountMembershipEmail.sendMembershipStarted(payload)
       .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
   },
   async welcome_sms(_step, ctx) {
@@ -426,6 +445,7 @@ module.exports = {
   planPostCommit,
   runPostCommit,
   maskEmail,
+  recipientKey,
   maskPhone,
   CardedPathRefusal,
   createSideEffectGate,

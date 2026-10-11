@@ -632,7 +632,7 @@ describe('markEstimateAcceptedAsStaff runs the POST /:id/mark-accepted handler',
     markEstimateManuallyAccepted.mockResolvedValue({ alreadyAccepted: false, warnings: [] });
     const expected = { estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: 'cust-1', customerVersion: 'v', ledgerPin: '0.00|' };
     await adminEstimatesRouter.markEstimateAcceptedAsStaff({
-      estimateId: 'est-1', body: { source: 'verbal_yes', expected }, actor: { technicianId: 'tech-1' },
+      estimateId: 'est-1', body: { source: 'verbal_yes' }, actor: { technicianId: 'tech-1' }, expected,
     });
     expect(markEstimateManuallyAccepted.mock.calls[0][0]).toEqual({
       estimateId: 'est-1', adminUserId: 'tech-1', source: 'verbal_yes', billingTerm: 'standard', expected,
@@ -640,6 +640,29 @@ describe('markEstimateAcceptedAsStaff runs the POST /:id/mark-accepted handler',
     const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
     await handler({ params: { id: 'est-1' }, body: { source: 'verbal_yes' }, technicianId: 'tech-1' }, makeRes(), jest.fn());
     expect(markEstimateManuallyAccepted.mock.calls[1][0]).not.toHaveProperty('expected');
+  });
+
+  test('the HTTP route ignores pins and a dry-run switch in the request body (internal-only arguments)', async () => {
+    markEstimateManuallyAccepted.mockResolvedValue({ alreadyAccepted: false, warnings: [] });
+    const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
+    const res = makeRes();
+    await handler({
+      params: { id: 'est-1' },
+      body: { source: 'verbal_yes', expected: { membershipEmail: 'skip', effectsKey: 'x', noLinkedVisits: false }, dryRun: true, acceptDryRun: true },
+      technicianId: 'tech-1',
+    }, res, jest.fn());
+    expect(markEstimateManuallyAccepted.mock.calls[0][0]).toEqual({
+      estimateId: 'est-1', adminUserId: 'tech-1', source: 'verbal_yes', billingTerm: 'standard',
+    });
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+
+  test('a pin smuggled in the body of the in-process call is ignored too; only the expected argument counts', async () => {
+    markEstimateManuallyAccepted.mockResolvedValue({ alreadyAccepted: false, warnings: [] });
+    await adminEstimatesRouter.markEstimateAcceptedAsStaff({
+      estimateId: 'est-1', body: { source: 'verbal_yes', expected: { membershipEmail: 'skip' } }, actor: { technicianId: 'tech-1' },
+    });
+    expect(markEstimateManuallyAccepted.mock.calls[0][0]).not.toHaveProperty('expected');
   });
 
   test("the page's refusal comes back as the same status and body", async () => {

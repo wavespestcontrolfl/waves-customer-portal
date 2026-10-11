@@ -761,9 +761,29 @@ async function sendMembershipStarted({
   billingLane = null,
   perApplicationAmount,
   idempotencyKey,
+  // The recipient an operator approved (estimate-accept-effects.recipientKey of
+  // the address on the card). When set, the email goes only if the address on
+  // file NOW is that address; a changed address is no email, logged. Callers
+  // that approved nothing leave it unset.
+  recipientKey = null,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  if (recipientKey) {
+    const onFile = getPrimaryContact(customer).email;
+    if (require('./estimate-accept-effects').recipientKey(onFile) !== recipientKey) {
+      logger.warn(`[account-membership-email] membership.started not sent for customer ${customer.id}: the address changed since it was approved`);
+      await logLifecycleEmailAttempt({
+        customerId: customer.id,
+        templateKey: 'membership.started',
+        eventType: 'membership.started',
+        status: 'skipped',
+        failureReason: 'recipient_changed',
+        metadata: { source_id: sourceId },
+      });
+      return { ok: false, skipped: true, reason: 'recipient_changed' };
+    }
+  }
   const built = membershipStartedPayloadFor(customer, {
     membershipTier, monthlyRate, billingCadence, includedServices, effectiveDate, billingLane, perApplicationAmount,
   });
