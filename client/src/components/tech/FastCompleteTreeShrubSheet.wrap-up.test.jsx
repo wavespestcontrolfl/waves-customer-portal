@@ -104,12 +104,10 @@ describe('gate on', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Increase Exterior (dry-down) by 5 minutes' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Send completion text' }));
     fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'customer_requested' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'Needs adjustment?' }));
-    fireEvent.change(screen.getByLabelText('Next visit adjustment note'), { target: { value: 'Skip the east bed' } });
     const body = await complete(request);
     expect(body).toMatchObject({
       sendCompletionSms: false, requestReview: true, includePayLink: true, reviewTiming: 'customer_requested', reviewDelayMinutes: 0, reviewScheduledFor: null,
-      timeOnSite: 40, reentryExteriorMinutes: 35, nextVisitAdjustmentNote: 'Skip the east bed',
+      timeOnSite: 40, reentryExteriorMinutes: 35,
     });
     expect(body).not.toHaveProperty('reentryInteriorMinutes');
   });

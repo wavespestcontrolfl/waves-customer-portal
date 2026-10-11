@@ -287,14 +287,13 @@ describe('the submit-time check of the send-time preview', () => {
 });
 
 describe('next scheduled visit', () => {
-  test('shows the next visit, and "Needs adjustment?" opens a note that posts as nextVisitAdjustmentNote', async () => {
+  // No note box: the server stores no next-visit note, so the sheet does not take one.
+  test('shows the next visit and posts nothing for it', async () => {
     await show({ request: makeRequest({ nextVisit: { id: 'svc-2', date: '2026-11-05', serviceType: 'Lawn Care' } }) });
     await screen.findByText('Next scheduled visit');
     expect(screen.getByText('Thu, Nov 5')).toBeTruthy();
     expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
-    fireEvent.click(screen.getByRole('button', { name: 'Needs adjustment?' }));
-    fireEvent.change(screen.getByLabelText('Next visit adjustment note'), { target: { value: 'Gate code changed' } });
-    expect(wrapUp.fields().nextVisitAdjustmentNote).toBe('Gate code changed');
+    expect(screen.queryByRole('button', { name: 'Needs adjustment?' })).toBeNull();
   });
 
   test('with no next visit there is no card', async () => {

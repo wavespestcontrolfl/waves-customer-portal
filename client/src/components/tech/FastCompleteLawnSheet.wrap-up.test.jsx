@@ -147,13 +147,11 @@ describe('gate on', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Decrease Interior re-entry by 15 minutes' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Include payment link in the text/ }));
     fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'tomorrow_8' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'Needs adjustment?' }));
-    fireEvent.change(screen.getByLabelText('Next visit adjustment note'), { target: { value: 'Move to Friday' } });
     await confirmAssessment();
     const body = await complete();
     expect(body).toMatchObject({
       sendCompletionSms: true, requestReview: true, includePayLink: false, reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0,
-      timeOnSite: 35, reentryInteriorMinutes: 105, nextVisitAdjustmentNote: 'Move to Friday',
+      timeOnSite: 35, reentryInteriorMinutes: 105,
     });
     expect(body.reviewScheduledFor).toMatch(/^\d{4}-\d{2}-\d{2}T08:00$/);
     expect(body).not.toHaveProperty('reentryExteriorMinutes');

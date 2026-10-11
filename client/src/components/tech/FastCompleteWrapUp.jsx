@@ -68,8 +68,6 @@ export function useWrapUp({ enabled, service, request, base, applicationsRecorde
   const [reentryExt, setReentryExt] = useState(null);
   const [reentryInt, setReentryInt] = useState(null);
   const [nextVisit, setNextVisit] = useState(null);
-  const [nextNoteOpen, setNextNoteOpen] = useState(false);
-  const [nextNote, setNextNote] = useState('');
   const [preview, setPreview] = useState(null);
   const [notice, setNotice] = useState('');
   const previewRef = useRef(null);
@@ -164,7 +162,6 @@ export function useWrapUp({ enabled, service, request, base, applicationsRecorde
     ...(isAdmin ? completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }) : {}),
     ...(extDirty ? { reentryExteriorMinutes: reentryExt } : {}),
     ...(intDirty ? { reentryInteriorMinutes: reentryInt } : {}),
-    ...(nextVisit && nextNote ? { nextVisitAdjustmentNote: nextNote } : {}),
   };
   const latest = useRef(null);
   latest.current = { fields, willReview, reviewTiming, reviewCustomAt, isAdmin, adjusted };
@@ -230,7 +227,7 @@ export function useWrapUp({ enabled, service, request, base, applicationsRecorde
       reentrySeeds, reentryExt, reentryInt,
       stepExt: (delta) => setReentryExt(stepReentry(delta)),
       stepInt: (delta) => setReentryInt(stepReentry(delta)),
-      nextVisit, nextNoteOpen, openNextNote: () => setNextNoteOpen(true), nextNote, setNextNote,
+      nextVisit,
       willInvoice, payerBanner, suppression, willReview, hint, notice,
     },
   };
@@ -335,18 +332,6 @@ export default function FastCompleteWrapUp({ wrapUp }) {
           <span className="tech-product-editor-label">Next scheduled visit</span>
           <p className="tech-wrapup-next">{nextVisitDate(v.nextVisit.date)}</p>
           <p className="tech-visit-muted">{v.nextVisit.serviceType || 'Standard service'}</p>
-          {v.nextNoteOpen ? (
-            <Input
-              className="tech-visit-control"
-              type="text"
-              aria-label="Next visit adjustment note"
-              value={v.nextNote}
-              placeholder="Note about next visit adjustment…"
-              onChange={(e) => v.setNextNote(e.target.value)}
-            />
-          ) : (
-            <Button type="button" variant="secondary" className="tech-visit-action" onClick={v.openNextNote}>Needs adjustment?</Button>
-          )}
         </div>
       )}
       {v.notice && <p className="tech-visit-feedback" role="alert">{v.notice}</p>}
