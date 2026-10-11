@@ -12,6 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
+const { ibAcceptEstimateLive } = require('../../config/feature-gates');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
@@ -65,6 +66,7 @@ const MODULES = [
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
+  ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
 ];
 
@@ -126,6 +128,7 @@ function allowed(action, { role, context, fullAccess } = {}) {
   if (action.id === 'reprice_future_visits' && !repriceVisitsLive()) return false;
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
   if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
+  if (action.id === 'accept_estimate' && !ibAcceptEstimateLive()) return false;
   if (action.id === 'delete_duplicate_customer' && !deleteDuplicateCustomerEnabled()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
@@ -193,9 +196,13 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'offer_choices',
 ]);
 
+// Page-specific additions beyond a page's own domain (owner ruling 2026-10-07
+// Q5: "he accepted" is said on the Customers page and the dashboard too).
+const PAGE_EXTRA_TOOL_NAMES = Object.freeze({ customers: ['accept_estimate'], dashboard: ['accept_estimate'] });
+
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
-  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
+  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES, ...(PAGE_EXTRA_TOOL_NAMES[context] || [])]);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');

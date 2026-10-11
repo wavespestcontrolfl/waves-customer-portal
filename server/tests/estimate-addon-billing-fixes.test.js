@@ -491,6 +491,24 @@ describe('addOnPreservedMonthlyRateBase', () => {
     })).resolves.toBe(0);
   });
 
+  test('strict mode (the bar card) throws instead of falling back to replace when the evidence cannot be read', async () => {
+    await expect(classifyAddOnAcceptContext({
+      database: makeFakeConn([], { throwOnQuery: true }),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: TS_ADDON_EST_DATA,
+      customer: LIVE_CUSTOMER,
+      strict: true,
+    })).rejects.toMatchObject({ isOperational: true, statusCode: 409, code: 'add_on_classification_unavailable' });
+  });
+
+  test('strict mode reads exactly as the default when the evidence is readable', async () => {
+    const args = {
+      database: makeFakeConn([PEST_PLAN_ROW]), estimateId: 'est-addon', estimate: TS_ADDON_ESTIMATE, estimateData: TS_ADDON_EST_DATA, customer: LIVE_CUSTOMER,
+    };
+    expect(await classifyAddOnAcceptContext({ ...args, strict: true })).toEqual(await classifyAddOnAcceptContext(args));
+  });
+
   test('a mixed estimate that re-prices an existing family stays replace (full family union, codex r2)', async () => {
     // The adoption helper narrows a mixed estimate to its PRIMARY family
     // (pest) — the overlap test must see EVERY recurring family, or an

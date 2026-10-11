@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -873,6 +873,11 @@ const PINNED_DISPLAY_BUILDERS = {
       method: preview.method.label,
       auto_pay: preview.autopay.uses_this_method ? `${preview.autopay.state}, using this method` : preview.autopay.state,
     }
+    : null),
+  // accept_estimate names the customer and the estimate, never raw ids; the
+  // plan, bill, visits and messages ride the contract's curated lines.
+  accept_estimate: (params, preview) => (preview?.preview === true && preview.estimate
+    ? { customer: preview.customer_name || preview.customer_id, estimate: `${preview.estimate.label} (${preview.estimate.status})` }
     : null),
   correct_invoice_address: (params, preview) => (preview?.preview === true && preview.invoice_number
     ? {
@@ -3424,6 +3429,13 @@ Use fresh authorized lookups and validated IDs for targets. An explicitly named 
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
 Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
     }
+    // Offered only while GATE_IB_ACCEPT_ESTIMATE is on (owner ruling
+    // 2026-10-07, Q5); appended after the shared blocks so off is
+    // byte-identical and the cacheable prefix is unchanged.
+    if (platformEnabled && context !== 'tech' && context !== 'agent_estimate' && ibAcceptEstimateLive()) {
+      systemPrompt += `\n\nACCEPTED QUOTES:
+When the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"), find that customer's sent or viewed estimate and prepare accept_estimate for it (load it with discover_capabilities if it is not listed). It does what the estimate page's Mark accepted does. Never use update_customer or create_appointment to record an acceptance. If the customer has more than one open estimate, ask which one.`;
+    }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
     if (context !== 'tech') {
@@ -4565,6 +4577,11 @@ async function commitPendingAction(req, { id, contractHash }) {
         }
         if (action.tool_name === 'correct_invoice_address' && livePreview?.invoice_id) {
           execParams._verified_address_correction = livePreview;
+        }
+        // accept_estimate: the verified card IS the approved plan — the
+        // executor re-plans and refuses if its own card differs.
+        if (action.tool_name === 'accept_estimate' && livePreview?.estimate_id) {
+          execParams._verified_accept_plan = livePreview;
         }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate

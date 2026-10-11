@@ -240,12 +240,27 @@ function parseEstimateAddress(raw) {
  * an admin who hand-set the flag for a customer whose second property isn't
  * in the table yet must not be un-flagged by an accept.
  */
-async function refreshHasMultiHome(customerId, database = db) {
-  if (!customerId) return false;
+async function hasTwoActiveProperties(customerId, database = db) {
   const [{ count } = {}] = await database('customer_properties')
     .where({ customer_id: customerId, active: true })
     .count('id as count');
-  const multi = Number(count) >= 2;
+  return Number(count) >= 2;
+}
+
+// Would refreshHasMultiHome flip customers.has_multi_home right now? The same
+// predicate it uses (two active properties) while the flag is still off, and
+// only under the customer-properties gate, the only place the accept refreshes
+// it. The Intelligence Bar card lists and pins this answer.
+async function multiHomeFlipPending(database, customerId) {
+  if (!customerId || !customerPropertiesGateOn()) return false;
+  if (!(await hasTwoActiveProperties(customerId, database))) return false;
+  const customer = await database('customers').where({ id: customerId }).first('has_multi_home');
+  return !!customer && customer.has_multi_home !== true;
+}
+
+async function refreshHasMultiHome(customerId, database = db) {
+  if (!customerId) return false;
+  const multi = await hasTwoActiveProperties(customerId, database);
   if (multi) {
     await database('customers')
       .where({ id: customerId })
@@ -260,7 +275,24 @@ async function refreshHasMultiHome(customerId, database = db) {
  * visits, refresh has_multi_home. Runs POST-COMMIT on the global pool.
  * Returns { propertyId, hasMultiHome } or null. Never throws.
  */
-async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null }) {
+// The accepted estimate's own property: estimates.property_id when it names an
+// active property of this customer. linkAcceptedEstimateProperty links this
+// one without creating or matching anything; exported so the Intelligence
+// Bar accept_estimate card can tell whether an accept would add a property.
+async function linkedAcceptPropertyId(database, estimate, customerId) {
+  if (!estimate?.property_id) return null;
+  const linked = await database('customer_properties').where({ id: estimate.property_id }).first();
+  return linked && String(linked.customer_id) === String(customerId) && linked.active !== false ? linked.id : null;
+}
+
+// approvedServiceIds (the Intelligence Bar card path): the exact set of visit
+// rows this linkage may touch, EMPTY when the card saw no visit. Unlike
+// onlyServiceIds, an empty array here means "touch none". Any other
+// non-terminal row of this estimate is logged target_changed and left alone.
+// Omitted, every caller behaves as before.
+async function linkAcceptedEstimateProperty({
+  estimateId, customerId, database = db, onlyServiceIds = null, refreshMultiHome = true, approvedServiceIds = null,
+}) {
   try {
     if (!estimateId || !customerId) return null;
     // Optional id scope (codex #3504 r10 hook P0): quote-wizard drafts are
@@ -284,10 +316,9 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     const sourceRow = await database('estimates').where({ id: estimateId }).first('source');
     const excludeSelfBooked = sourceRow?.source === 'quote_wizard'
       && !(Array.isArray(onlyServiceIds) && onlyServiceIds.length);
-    const scopeToActivation = (qb) => {
-      if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) qb.whereIn('id', onlyServiceIds);
-      else if (excludeSelfBooked) qb.whereNull('self_booking_id');
-    };
+    const approvedScope = Array.isArray(approvedServiceIds);
+    const scopeToActivation = activationScope({ approvedServiceIds, onlyServiceIds, excludeSelfBooked });
+    if (approvedScope) await logStrayVisits(database, estimateId, approvedServiceIds);
     if (!customerPropertiesGateOn()) {
       // Gate OFF: no customer_properties writes — but a GROUPED accept still
       // stamps its booked visits' service address. service_address_* are
@@ -406,13 +437,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     // runs this inside a transaction that already holds the customers row.
     await ensurePrimaryProperty(customerId, { conn: database });
 
-    let propertyId = null;
-    if (estimate.property_id) {
-      const linked = await database('customer_properties').where({ id: estimate.property_id }).first();
-      if (linked && String(linked.customer_id) === String(customerId) && linked.active !== false) {
-        propertyId = linked.id;
-      }
-    }
+    let propertyId = await linkedAcceptPropertyId(database, estimate, customerId);
 
     let parts = null;
     if (!propertyId) {
@@ -594,7 +619,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
       // address. Fill the missing address from the property row; rows
       // stamped with an address (any property) stay untouched.
       await database('scheduled_services')
-        .where({ source_estimate_id: estimateId, property_id: propertyId })
+        .where({ source_estimate_id: estimateId, property_id: propertyId }).modify(approvedIdScope(approvedServiceIds))
         .whereNull('service_address_line1')
         .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
         .update({
@@ -608,7 +633,9 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         });
     }
 
-    const hasMultiHome = await refreshHasMultiHome(customerId, database);
+    // refreshMultiHome false: the caller runs the has_multi_home flip as its own
+    // pinned step (estimate-accept-effects 'multi_home').
+    const hasMultiHome = refreshMultiHome ? await refreshHasMultiHome(customerId, database) : false;
     logger.info(`[estimate-property-linkage] estimate ${estimateId} linked to property ${propertyId} (customer ${customerId}${hasMultiHome ? ', multi-home' : ''})`);
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r10): rows
     // stamped with their property here may now share a stop with existing
@@ -629,7 +656,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         // anything, so it must never be auto-grouped (codex #3590 r15).
         .whereNotNull('window_start')
         .select('id');
-      if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
+      regroup.modify(regroupScope({ approvedServiceIds, onlyServiceIds }));
       // Every linked row, in id order — a cap left rows beyond it with no
       // later regroup pass (codex #3590 r13 P2).
       for (const r of await regroup.orderBy('id', 'asc')) {
@@ -648,8 +675,53 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     // (it is not an accept retry anchor), so no update above reaches it.
     // Mirror the stamp onto it or it dispatches to the customer's primary
     // address. Gate-dark, best-effort (package-followup-booking.js).
-    await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
+    await mirrorPackageChildren(database, estimateId, approvedServiceIds);
   }
+}
+
+// ── The card path's scoping, out of the linker's own branches ──
+
+const hasIds = (ids) => Array.isArray(ids) && ids.length > 0;
+
+// Which activation rows the linker may touch: the card's exact approved set,
+// else the caller's optional id scope, else (quote-wizard drafts) every row
+// the customer did not self-book.
+function activationScope({ approvedServiceIds, onlyServiceIds, excludeSelfBooked }) {
+  if (Array.isArray(approvedServiceIds)) return (qb) => qb.whereIn('id', approvedServiceIds);
+  if (hasIds(onlyServiceIds)) return (qb) => qb.whereIn('id', onlyServiceIds);
+  if (excludeSelfBooked) return (qb) => qb.whereNull('self_booking_id');
+  return () => {};
+}
+
+// The approved set only, when there is one; otherwise no extra filter.
+function approvedIdScope(approvedServiceIds) {
+  return Array.isArray(approvedServiceIds) ? (qb) => qb.whereIn('id', approvedServiceIds) : () => {};
+}
+
+function regroupScope({ approvedServiceIds, onlyServiceIds }) {
+  if (Array.isArray(approvedServiceIds)) return (qb) => qb.whereIn('id', approvedServiceIds);
+  if (hasIds(onlyServiceIds)) return (qb) => qb.whereIn('id', onlyServiceIds);
+  return () => {};
+}
+
+// A non-terminal row of the estimate the card did not approve is logged
+// target_changed and left alone.
+async function logStrayVisits(database, estimateId, approvedServiceIds) {
+  const strays = await database('scheduled_services')
+    .where({ source_estimate_id: estimateId })
+    .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+    .whereNotIn('id', approvedServiceIds)
+    .select('id');
+  if (strays.length) {
+    logger.warn(`[estimate-property-linkage] estimate ${estimateId}: target_changed — visit(s) ${strays.map((r) => r.id).join(', ')} linked after the card was approved; left untouched`);
+  }
+}
+
+// The package-child mirror touches rows outside the approved set, so a card
+// that approved NO visit skips it.
+async function mirrorPackageChildren(database, estimateId, approvedServiceIds) {
+  if (Array.isArray(approvedServiceIds) && approvedServiceIds.length === 0) return;
+  await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
 }
 
 // Canonical street extraction + normalization for property-scope compares
@@ -900,5 +972,8 @@ module.exports = {
   samePropertyKey,
   estimateQuotesCustomerAddress,
   refreshHasMultiHome,
+  multiHomeFlipPending,
   linkAcceptedEstimateProperty,
+  linkedAcceptPropertyId,
+  customerPropertiesGateOn,
 };

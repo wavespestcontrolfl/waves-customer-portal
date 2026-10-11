@@ -19100,7 +19100,23 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
 // that sibling's own sent/viewed timestamps. Deterministic pick (earliest
 // created) + guarded update keep concurrent terminal events from arming two
 // owners. Best-effort post-commit — never throws.
-async function transferGroupFollowupOwnership(estimate) {
+// The sibling that would take the group's follow-up stages when `estimate`
+// goes terminal: the earliest-created live sibling, or null.
+async function groupFollowupOwnerId(database, estimate) {
+  if (!estimate?.estimate_group_id) return null;
+  const owner = await database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereIn('status', ['sent', 'viewed'])
+    .whereNull('archived_at')
+    .orderBy('created_at', 'asc')
+    .first('id');
+  return owner ? String(owner.id) : null;
+}
+
+// opts.ownerId: the owner a caller pinned (the Intelligence Bar card). When the
+// owner found under the group lock is a different sibling, nothing transfers.
+async function transferGroupFollowupOwnership(estimate, opts = {}) {
   try {
     if (!estimate?.estimate_group_id) return;
     const FLAGS = ['followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent'];
@@ -19132,8 +19148,12 @@ async function transferGroupFollowupOwnership(estimate) {
         .whereNull('archived_at')
         .orderBy('created_at', 'asc')
         .select('id', ...FLAGS);
-      if (!siblings.length) return;
       const owner = siblings[0];
+      if (opts.ownerId !== undefined && String(owner?.id ?? '') !== String(opts.ownerId ?? '')) {
+        logger.warn(`[estimate-public] group ${estimate.estimate_group_id}: follow-up transfer from ${estimate.id} skipped: target_changed (pinned owner ${opts.ownerId}, found ${owner?.id ?? 'none'})`);
+        return;
+      }
+      if (!siblings.length) return;
       const updates = {};
       const copied = {};
       for (const flag of FLAGS) {
@@ -31426,6 +31446,7 @@ module.exports.estimateTotalsReflectManualDiscount = estimateTotalsReflectManual
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
+module.exports.groupFollowupOwnerId = groupFollowupOwnerId;
 module.exports.buildPricingServices = buildPricingServices;
 module.exports.estimateServiceDetailsScope = estimateServiceDetailsScope;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
