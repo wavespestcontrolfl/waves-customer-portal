@@ -96,8 +96,9 @@ describe('runCallIngestWatchdog — every bell bypasses the bell-policy filter',
     const calls = src.split('notifyAdmin(').slice(1);
     expect(calls).toHaveLength(2);
     for (const body of calls) {
-      const options = body.slice(0, body.indexOf(');'));
-      expect(options).toMatch(/bell: true/);
+      // Code only: a comment that mentions the option must not satisfy the guard.
+      const options = body.slice(0, body.indexOf(');')).split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+      expect(options).toMatch(/\bbell: true,/);
     }
   });
 });
