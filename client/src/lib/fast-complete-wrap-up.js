@@ -44,11 +44,12 @@ export const reentryMoved = (value, seed) => value != null && value !== (seed ??
 
 export const stepReentry = (delta) => (current) => Math.min(REENTRY_MAX, Math.max(0, (current ?? 0) + delta));
 
-// Explicit review timing posts only off Automatic, as the full form's reviewDelayMinutes /
-// reviewScheduledFor do.
-function timingFields(timing) {
-  if (timing.reviewTiming === REVIEW_TIMING_DEFAULT) return {};
-  return { reviewDelayMinutes: reviewDelayMinutesOf(timing), reviewScheduledFor: reviewScheduledForOf(timing) };
+// The review timing keys. `reviewTiming` always posts, unless `omitAutoTiming` (a sheet that posted
+// no `reviewTiming` before keeps the key absent while the timing is Automatic). The explicit delay
+// and time post only off Automatic, as the full form's reviewDelayMinutes / reviewScheduledFor do.
+function timingFields(timing, omitAutoTiming) {
+  if (timing.reviewTiming === REVIEW_TIMING_DEFAULT) return omitAutoTiming ? {} : { reviewTiming: timing.reviewTiming };
+  return { reviewTiming: timing.reviewTiming, reviewDelayMinutes: reviewDelayMinutesOf(timing), reviewScheduledFor: reviewScheduledForOf(timing) };
 }
 
 function reentryFields({ ext, int, seeds }) {
@@ -61,14 +62,13 @@ function reentryFields({ ext, int, seeds }) {
 // The body fragment. Untouched it is the four customer-text flags the sheets always posted; every
 // other key appears only when the tech changed it. `adjusted` is the admin's typed minutes ('' for
 // anyone else): blank sends nothing (the server measures check-in to Complete), a number overrides.
-export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds }) {
+export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming }) {
   const timing = { willReview, reviewTiming, reviewCustomAt };
   return {
     sendCompletionSms: sendSms,
     includePayLink: willInvoice && sendSms ? includePayLink : true,
     requestReview: willReview,
-    reviewTiming,
-    ...timingFields(timing),
+    ...timingFields(timing, omitAutoTiming),
     ...completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }),
     ...reentryFields({ ext, int, seeds }),
   };

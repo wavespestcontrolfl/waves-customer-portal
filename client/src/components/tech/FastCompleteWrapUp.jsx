@@ -33,6 +33,7 @@ import {
 } from '../../lib/fast-complete-wrap-up';
 import { etDateString, formatETDateOnly } from '../../lib/timezone';
 import { useNextVisit, useReentrySteppers, useReviewPreview } from '../../hooks/useWrapUpReads';
+import { TimeOnSite } from './FastCompleteParts';
 import { Button, Checkbox, Input, Select } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -46,9 +47,11 @@ const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: tru
 // sent, and `fields(fallback)` is the fallback the sheet always posted. `applicationsRecorded`: the sheet
 // records a product (the full form's spray evidence), which brings the re-entry steppers back on
 // a no-spray visit. `customerConcern`: the full form's fourth customer choice, which suppresses
-// the review ask (the sheets offer three choices, so they pass false). `onChecking(busy)`: the
-// sheet that owns Close and the lock hears when the submit-time check starts and ends.
-export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, onChecking }) {
+// the review ask (the sheets offer three choices, so they pass false). `omitAutoTiming`: the sheet
+// posted no `reviewTiming` before (the pest report flow), so the key stays absent while the timing is
+// Automatic. `onChecking(busy)`: the sheet that owns Close and the lock hears when the
+// submit-time check starts and ends.
+export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, onChecking }) {
   const enabled = gate === true && !submission?.preparing && sharedNote == null;
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -73,7 +76,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
   const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
   const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment }).text;
 
-  const state = { ...choice, adjusted: isAdmin ? choice.adjusted : '', isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
+  const state = { ...choice, omitAutoTiming, adjusted: isAdmin ? choice.adjusted : '', isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
   const latest = useRef(state);
   latest.current = state;
   useEffect(() => { setNotice(''); }, [choice.reviewTiming, choice.reviewCustomAt, choice.adjusted, choice.requestReview]);
@@ -249,4 +252,9 @@ export default function FastCompleteWrapUp({ wrapUp }) {
       {notice && <p className="tech-visit-feedback" role="alert">{notice}</p>}
     </section>
   );
+}
+
+// The Time on-site clock, shown with the Wrap-up (the lawn sheet's own, shared) and nothing while it is off.
+export function WrapUpClock({ wrapUp, since }) {
+  return wrapUp.enabled ? <TimeOnSite since={since} /> : null;
 }

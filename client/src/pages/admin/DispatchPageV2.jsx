@@ -66,7 +66,7 @@ import useDispatchReadiness from "../../components/schedule/useDispatchReadiness
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import { onSiteTimeOf } from "../../lib/on-site-time";
-import { completionBillingFacts } from "../../lib/completion-billing-facts";
+import { completionBillingFacts, wrapUpSheetFields } from "../../lib/completion-billing-facts";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
@@ -992,6 +992,8 @@ export default function DispatchPageV2({
     completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
   });
   const pestSheetService = (row) => ({
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    ...wrapUpSheetFields(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
     serviceType: pickOf(row, 'service_type', 'serviceType'),
