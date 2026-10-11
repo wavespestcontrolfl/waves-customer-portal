@@ -24,8 +24,8 @@ const PROMPT = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-10-05', 
 
 describe('version stamp', () => {
   test('prompt v22 is a new cohort', () => {
-    expect(PROMPT_VERSION).toBe('v28');
-    expect(PROMPT_HASH).toMatch(/^v28-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v29');
+    expect(PROMPT_HASH).toMatch(/^v29-[a-f0-9]{12}$/);
   });
 });
 
@@ -129,6 +129,41 @@ describe('case: staff hedges, caller accepts (call 732b3a5a shape)', () => {
   test('an offered-only extraction (the pre-fix result) is still held', () => {
     expect(canAutoRoute(extraction({ status: 'offered', confirmed_start_at: null }), { addressValidation: AV_CLEAN }))
       .toMatchObject({ allowed: false, reason: 'not_confirmed' });
+  });
+});
+
+// Prompt v29 (2026-10-10 call audit): the CALLER proposed the hour, staff
+// accepted softly and closed with "I'll see you then"; the extraction answered
+// "ambiguous" and the visit was booked by hand 2.5 hours later.
+describe('case: the caller proposes the time, staff accept and close (call 07c4bd83 shape)', () => {
+  test('the prompt confirms a caller-proposed hour that staff accepted and closed on', () => {
+    expect(PROMPT).toContain('CALLER-PROPOSED TIME THAT STAFF ACCEPTED');
+    expect(PROMPT).toContain('STAFF then gave a closing commitment to that visit ("I\'ll see you then", "see you then", "we\'ll see you at one")');
+    expect(PROMPT).toContain('that is the caller offering a time, not the caller hedging on an offer');
+    expect(PROMPT).toContain('does not leave the slot open once staff ALSO gave the closing commitment');
+  });
+
+  test('the prompt keeps it open with no closing commitment, a promised callback, a different time, a range, or an off-hour time', () => {
+    expect(PROMPT).toContain('for ONE day the caller chose or accepted for this visit');
+    expect(PROMPT).toContain('the only day on the call is one the caller rejected, said was unavailable, or merely mentioned');
+    for (const guard of [
+      'two or more days were named and the caller picked none of them',
+      'staff never gave the closing commitment',
+      'staff said they would check, text or call back with a time',
+      'staff named a different time afterward',
+      'the caller proposed a range or a part of the day with no hour',
+      'or the time is not on the hour',
+    ]) expect(PROMPT).toContain(guard);
+  });
+
+  test('confirmed today at 1 PM books; the old ambiguous extraction is still held', () => {
+    expect(canAutoRoute(extraction({
+      status: 'confirmed',
+      confirmed_start_at: '2026-10-05T13:00:00-04:00',
+      agreed_slot_words: { day: 'today', hour: 'one', period: null },
+      caller_accepted_slot: true,
+    }), { addressValidation: AV_CLEAN }).allowed).toBe(true);
+    expect(canAutoRoute(extraction({ status: 'ambiguous', confirmed_start_at: null }, { triage_flags: ['ambiguous_scheduling'] }), { addressValidation: AV_CLEAN }).allowed).toBe(false);
   });
 });
 
