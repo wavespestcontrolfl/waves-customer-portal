@@ -3232,9 +3232,12 @@ async function listLapsedAssociationCloses(conn) {
           -- that may yet say spam: under GATE_CALLBACK_SPAM_CLOSES_PARENT the
           -- resolvers would no longer acquire it (settledNonSpamCallback), so
           -- the close is judged again.
+          -- IS NOT TRUE, not NOT (codex #6271 r45): an adopted recording
+          -- (status NULL, recording_sid set) makes the predicate NULL, and
+          -- that row is unsettled too.
           ${require("../config/feature-gates").isEnabled("callbackSpamClosesParent")
     ? `OR ((cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'kind') IN ('outbound_call', '${PERSON_CONTACT_KIND}')
-              AND ev.id IS NOT NULL AND NOT ${settledNonSpamCallbackSql('ev')})`
+              AND ev.id IS NOT NULL AND (${settledNonSpamCallbackSql('ev')}) IS NOT TRUE)`
     : ''}
           -- ... or on a person's delivered text: gone, relinked to another
           -- customer, or no longer a text a person sent that was delivered.
