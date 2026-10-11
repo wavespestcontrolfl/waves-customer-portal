@@ -2242,7 +2242,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // outer handler only after this returns). Run even when the invoice was
   // already paid so webhook retry after a mid-flight crash can recover.
   // ReviewService.create is idempotent by service_record_id.
-  await closeOutVisitAfterPaidInvoice(piId);
+  // A bar charge carries the visit its card said would be closed (metadata.approved_closeout_target); a page charge carries none.
+  await closeOutVisitAfterPaidInvoice(piId, { approvedTarget: paymentIntent.metadata?.approved_closeout_target || null });
   await scheduleReviewAfterPaidInvoice(piId);
 
   // ── Auto-send payment receipt (SMS + email) ───────────────
@@ -2690,7 +2691,7 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
 // status-guarded and the closeout is idempotent, so the retry re-runs safely.
 // Runs BEFORE the review step, like the reconcile route — the review
 // enrollment reads the record this closeout links.
-async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
+async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null, approvedTarget = null } = {}) {
   let out;
   try {
     const paid = await db('invoices')
@@ -2699,17 +2700,33 @@ async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
       .first('id');
     if (!paid) return;
     const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-    out = await closeOutVisitForIssuedInvoice({ invoiceId: paid.id, trigger: 'paid' });
+    out = await closeOutVisitForIssuedInvoice({ invoiceId: paid.id, trigger: 'paid', approvedTarget });
   } catch (err) {
     logger.error(`[stripe-webhook] Paid-invoice visit closeout failed for PI ${piId} — rethrowing for Stripe retry: ${err.message}`);
     throw err;
   }
+  if (out && out.reason === 'approved_target_mismatch') await bellApprovedTargetMismatch(piId, out);
   // ANY outcome that left the visit open without its audit row — a failure
   // or a refusal alike: the sweep cannot tell a refusal of the moment
   // (timer running, day not passed) from a final one without the row.
   if (out && !out.closed && out.audited === false) {
     logger.error(`[stripe-webhook] Paid-invoice visit closeout for PI ${piId} left its visit open (${out.reason}) with no audit row — rethrowing for Stripe retry`);
     throw new Error(`paid-invoice visit closeout (${out.reason}) was not recorded for retry`);
+  }
+}
+
+// A bar charge was approved against one visit closeout and the live target differs: the closeout was skipped
+// (invoice-issued-closeout.js refuseUnapprovedTarget). Tell the admins; a person decides what to close.
+async function bellApprovedTargetMismatch(piId, out) {
+  logger.warn(`[stripe-webhook] approved_target_mismatch for PI ${piId}: approved ${out.approvedTarget}, live visit ${out.visitId} — closeout skipped`);
+  try {
+    await triggerNotification('internal_admin_alert', {
+      title: 'Bar charge: visit left open',
+      body: `Invoice ${out.invoiceId} was charged from the Intelligence Bar, but the visit to close changed after approval. The visit was not closed; close it by hand if it was done.`,
+      link: '/admin/invoices',
+    });
+  } catch (err) {
+    logger.warn(`[stripe-webhook] approved_target_mismatch bell failed for PI ${piId}: ${err.message}`);
   }
 }
 

@@ -37,10 +37,19 @@ const invoice = (overrides = {}) => ({
 });
 const customer = { id: 'cust-1', phone: '9415550100' };
 const byKey = (plan, key) => plan.effects.find((e) => e.key === key);
+// The attachment rows the stubbed table answers with; every other read answers no row.
+let attachments = [];
+const dbStub = (table) => ({
+  where: () => ({
+    first: async () => null,
+    orderBy: () => ({ orderBy: () => ({ select: async () => (table === 'invoice_attachments' ? attachments : []) }) }),
+  }),
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
-  db.mockImplementation(() => ({ where: () => ({ first: async () => null }) }));
+  attachments = [];
+  db.mockImplementation(dbStub);
   issuedCloseoutTarget.mockResolvedValue(null);
   LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [] });
   Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 7, 14, 30] });
@@ -56,7 +65,7 @@ describe('planSendEffects', () => {
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: false });
     LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [LEAD] });
     const plan = await effects.planSendEffects(invoice(), customer, {});
-    expect(plan.effects.map((e) => e.key)).toEqual(['delivery', 'closeout', 'lead_conversion', 'followups', 'review', 'credit']);
+    expect(plan.effects.map((e) => e.key)).toEqual(['delivery', 'attachments', 'closeout', 'lead_conversion', 'followups', 'review', 'credit']);
     expect(byKey(plan, 'delivery')).toMatchObject({ state: 'first', line: 'Not sent before.' });
     expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { trigger: 'sent' });
     expect(byKey(plan, 'closeout').line).toMatch(/^Sending this invoice also completes the linked visit/);
@@ -133,14 +142,74 @@ describe('planChargeEffects', () => {
     Reviews.paidInvoiceReviewSkip.mockClear();
     issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: false });
     await effects.planChargeEffects(invoice(), customer, {});
-    expect(Reviews.paidInvoiceReviewSkip).toHaveBeenCalledWith({ customer_id: 'cust-1', service_record_id: 'from_closeout' }, {});
+    expect(Reviews.paidInvoiceReviewSkip).toHaveBeenCalledWith({ customer_id: 'cust-1', service_record_id: 'from_closeout' }, { requestReview: false });
     // Opted out: no review effect.
     Reviews.paidInvoiceReviewSkip.mockReturnValue('completion_opted_out');
     plan = await effects.planChargeEffects(invoice({ service_record_id: 'rec-1' }), customer, {});
-    expect(byKey(plan, 'review')).toMatchObject({ applies: false, state: 'skip:completion_opted_out', line: null });
+    expect(byKey(plan, 'review')).toMatchObject({ applies: false, state: 'skip:completion_opted_out', line: 'No review request is sent.' });
     // A visit completion packet decides itself: disclosed as "may".
     plan = await effects.planChargeEffects(invoice({ visit_completion_packet_id: 'pkt-1' }), customer, {});
     expect(byKey(plan, 'review').line).toMatch(/may also enroll the customer in review outreach \(the visit completion packet decides\)/);
+  });
+
+  // Round 5 item 4: the record a closeout creates is stored with requestReview false, so the plan models it as opted out.
+  test('a closeout-created first service record is modeled as opted out of review: the card says no review request is sent; the real rule decides, in both branches', async () => {
+    const realSkip = jest.requireActual('../services/review-request').paidInvoiceReviewSkip;
+    Reviews.paidInvoiceReviewSkip.mockImplementation(realSkip);
+    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: false });
+    // Branch 1: no record yet and the closeout will create one - opted out.
+    let plan = await effects.planChargeEffects(invoice(), customer, {});
+    expect(byKey(plan, 'review')).toMatchObject({ applies: false, state: 'skip:completion_opted_out', line: 'No review request is sent.' });
+    // Branch 2: a record already exists with no opt-out - the review still enrolls.
+    Reviews.completionNotes.mockResolvedValue({ requestReview: true });
+    plan = await effects.planChargeEffects(invoice({ service_record_id: 'rec-1' }), customer, {});
+    expect(byKey(plan, 'review')).toMatchObject({ applies: true, state: 'enrolls' });
+    // No closeout and no record: nothing to say.
+    issuedCloseoutTarget.mockResolvedValue(null);
+    plan = await effects.planChargeEffects(invoice(), customer, {});
+    expect(byKey(plan, 'review')).toMatchObject({ applies: false, line: null });
+    expect(effects.CLOSEOUT_RECORD_NOTES).toEqual({ requestReview: false });
+  });
+
+  // Round 5 item 2.
+  test('an invoice that pays an annual-prepay term is refused for a bar charge, and the plan keeps the reason as its annual_prepay entry', async () => {
+    expect(effects.annualPrepayRefusal(invoice({ annual_prepay_term_id: 'term-1' }))).toBe('Annual-prepay invoices are charged from the Invoices page, not from the bar.');
+    expect(effects.annualPrepayRefusal(invoice())).toBeNull();
+    const plan = await effects.planChargeEffects(invoice({ annual_prepay_term_id: 'term-1' }), customer, {});
+    expect(byKey(plan, 'annual_prepay')).toMatchObject({ applies: true, state: 'term-1', line: effects.ANNUAL_PREPAY_REFUSAL });
+  });
+
+  // Round 5 item 3 (the plan half): the target the PaymentIntent will carry.
+  test('the approved closeout target is the planned visit id, or none', async () => {
+    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: true });
+    expect(effects.approvedCloseoutTarget((await effects.planChargeEffects(invoice(), customer, {})).effects)).toBe('visit-1');
+    issuedCloseoutTarget.mockResolvedValue(null);
+    expect(effects.approvedCloseoutTarget((await effects.planChargeEffects(invoice(), customer, {})).effects)).toBe('none');
+  });
+
+  // Round 5 item 1 (the plan half).
+  test('the send plan lists the invoice attachments by name and pins their id, name, size and edit time', async () => {
+    let plan = await effects.planSendEffects(invoice(), customer, {});
+    expect(byKey(plan, 'attachments')).toMatchObject({ applies: false, state: 'none', line: 'No attachments.' });
+    const base = plan.digest;
+    attachments = [
+      { id: 'att-1', file_name: 'before.pdf', file_size_bytes: 1200, updated_at: '2099-01-01T10:00:00Z' },
+      { id: 'att-2', file_name: 'after.pdf', file_size_bytes: 3400, updated_at: '2099-01-01T10:00:00Z' },
+    ];
+    plan = await effects.planSendEffects(invoice(), customer, {});
+    expect(byKey(plan, 'attachments').line).toBe('Attachments the customer can open from the online invoice: before.pdf, after.pdf');
+    const two = plan.digest;
+    expect(two).not.toBe(base);
+    // A swapped file (same name, new id), a resized file and a re-saved file each change the pin.
+    for (const change of [{ id: 'att-9' }, { file_size_bytes: 9999 }, { updated_at: '2099-01-02T10:00:00Z' }]) {
+      attachments = [{ ...attachments[0], ...change }, attachments[1]];
+      expect((await effects.planSendEffects(invoice(), customer, {})).digest).not.toBe(two);
+      attachments = [
+        { id: 'att-1', file_name: 'before.pdf', file_size_bytes: 1200, updated_at: '2099-01-01T10:00:00Z' },
+        { id: 'att-2', file_name: 'after.pdf', file_size_bytes: 3400, updated_at: '2099-01-01T10:00:00Z' },
+      ];
+    }
+    expect((await effects.planSendEffects(invoice(), customer, {})).digest).toBe(two);
   });
 
   test('billing reminders stop (with a thank-you text only for a customer with a phone), a payment plan completes, a held report releases', async () => {
@@ -201,7 +270,7 @@ describe('source contract', () => {
   });
 
   test('the coverage tables point at real effects, and each non-applying call states why', () => {
-    const sendKeys = new Set(['delivery', 'closeout', 'lead_conversion', 'followups', 'review', 'credit']);
+    const sendKeys = new Set(['delivery', 'attachments', 'closeout', 'lead_conversion', 'followups', 'review', 'credit']);
     const chargeKeys = new Set(['credit', 'closeout', 'review', 'followup_stop', 'payment_plan', 'annual_prepay', 'held_report', 'receipt', 'admin_notice']);
     for (const [table, keys] of [[effects.SEND_CALL_COVERAGE, sendKeys], [effects.CHARGE_CALL_COVERAGE, chargeKeys]]) {
       for (const [name, entry] of Object.entries(table)) {

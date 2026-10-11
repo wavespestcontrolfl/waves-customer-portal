@@ -81,6 +81,7 @@ function freshState() {
     payment_methods: [cardRow()],
     stripe_invoice_charge_attempts: [],
     stripe_orphan_charges: [],
+    invoice_attachments: [],
     payments: [],
     // The confirmed approval the tests run as (ADMIN.operationId): the run claim is taken on this row.
     ib_pending_actions: [{ id: 'op-1', tool_name: 'charge_invoice', status: 'confirmed', params: { invoice_id: INV }, result: null, consumed_day: TODAY }],
@@ -719,6 +720,7 @@ describe('charge_invoice commit', () => {
     expect(Invoices.chargeInvoiceFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: { paymentMethodId: CARD, expectedTotal: 132.87 }, actor: { technicianId: 'staff-1' }, chargeGuard: expect.any(Function),
       version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/) },
+      closeoutTarget: 'none',
     });
     expect(result).toMatchObject({ success: true, charged: true, payment_id: 'pay-1', amount: '$132.87', card: 'Visa •••• 4242' });
     expect(executionOutcome(result)).toBe('completed');
@@ -956,7 +958,7 @@ describe('round 4: one effects plan, one snapshot, durable run claim', () => {
     LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: ['aaaaaaaa-0000-4000-8000-000000000001'] });
     Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'autopay_hold', cadence: [3, 7, 14, 30] });
     const card = await preview('send_invoice', { invoice_id: INV });
-    expect(card.effects.map((e) => e.key)).toEqual(['delivery', 'lead_conversion', 'followups', 'review', 'credit']);
+    expect(card.effects.map((e) => e.key)).toEqual(['delivery', 'attachments', 'lead_conversion', 'followups', 'review', 'credit']);
     const lines = cardLines('send_invoice', card).map((l) => l.text);
     expect(lines).toEqual(expect.arrayContaining([
       'Sending this invoice also marks lead aaaaaaaa won',
@@ -1014,5 +1016,63 @@ describe('round 4: one effects plan, one snapshot, durable run claim', () => {
     await expect(guard(trx, { totalCents: 13287, invoice: state.invoices[0] })).resolves.toBeUndefined();
     ReportHold.heldReportsForInvoice.mockResolvedValue(['bbbbbbbb-0000-4000-8000-000000000001']);
     await expect(guard(trx, { totalCents: 13287, invoice: state.invoices[0] })).rejects.toMatchObject({ code: 'approved_version_changed' });
+  });
+});
+
+describe('round 5', () => {
+  // Item 1: attachment writes touch only invoice_attachments, so the pin has to read that table.
+  test('send: the card lists the attachments; one added, swapped or removed after the card refuses, and the claim\'s check sees it too', async () => {
+    state.invoice_attachments = [{ id: 'att-1', invoice_id: INV, file_name: 'before.pdf', file_size_bytes: 10, updated_at: '2099-01-01T10:00:00Z' }];
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+    const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    expect(effectText(card, 'attachments')).toBe('Attachments the customer can open from the online invoice: before.pdf');
+    expect(cardLines('send_invoice', card).map((l) => l.text)).toContain('Attachments the customer can open from the online invoice: before.pdf');
+    // An attachment added after the card: the confirmed run refuses before sending.
+    state.invoice_attachments.push({ id: 'att-2', invoice_id: INV, file_name: 'extra.pdf', file_size_bytes: 20, updated_at: '2099-01-01T11:00:00Z' });
+    await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+    // Back to the approved set: the send runs, and the claim's own verify (run under the claim) reads the table again.
+    state.invoice_attachments.pop();
+    await run();
+    const { verifyEffects } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+    const claimed = { ...state.invoices[0], status: 'draft' };
+    await expect(verifyEffects(claimed, db)).resolves.toBe(true);
+    state.invoice_attachments[0] = { ...state.invoice_attachments[0], id: 'att-9' };
+    await expect(verifyEffects(claimed, db)).resolves.toBe(false);
+    state.invoice_attachments = [];
+    await expect(verifyEffects(claimed, db)).resolves.toBe(false);
+  });
+
+  test('send: an invoice with no attachments says so on the card', async () => {
+    const card = await preview('send_invoice', { invoice_id: INV });
+    expect(effectText(card, 'attachments')).toBe('No attachments.');
+  });
+
+  // Item 2: syncTermForInvoicePayment activates the annual plan.
+  test('charge: an invoice that pays an annual-prepay term is refused with the Invoices-page message', async () => {
+    state.invoices[0].annual_prepay_term_id = 'term-1';
+    const refused = await preview('charge_invoice', { invoice_id: INV });
+    expect(refused).toMatchObject({ code: 'annual_prepay_invoice', error: 'Annual-prepay invoices are charged from the Invoices page, not from the bar.' });
+    expect(Invoices.chargeInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  // Item 3: the approved closeout target rides with the charge.
+  test('charge: the visit the card said would close out (or none) is handed to the charge, and never reaches a send', async () => {
+    Invoices.chargeInvoiceFromBar.mockResolvedValue({ status: 200, json: { success: true, paymentId: 'pay-1', status: 'paid', amount: 132.87, brand: 'Visa', last4: '4242' } });
+    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: false });
+    const { card, run } = await confirmWith('charge_invoice', { invoice_id: INV }, '_verified_invoice_charge_version');
+    expect(card._closeout_target).toBe('visit-1');
+    await run();
+    expect(Invoices.chargeInvoiceFromBar).toHaveBeenCalledWith(expect.objectContaining({ closeoutTarget: 'visit-1' }));
+  });
+
+  test('charge: the route and the Stripe charge pass the target down to the PaymentIntent metadata (source contract)', () => {
+    const route = fs.readFileSync(require('path').join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    expect(route).toMatch(/approvedCloseoutTarget: req\.ibCloseoutTarget \|\| null/);
+    expect(route).toMatch(/ibCloseoutTarget: closeoutTarget \|\| null/);
+    const stripe = fs.readFileSync(require('path').join(__dirname, '../services/stripe.js'), 'utf8');
+    expect(stripe).toMatch(/initiatedVia === 'intelligence_bar' && approvedCloseoutTarget \? \{ approved_closeout_target: String\(approvedCloseoutTarget\)/);
+    const webhook = fs.readFileSync(require('path').join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+    expect(webhook).toMatch(/approvedTarget: paymentIntent\.metadata\?\.approved_closeout_target \|\| null/);
   });
 });

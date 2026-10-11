@@ -1943,7 +1943,7 @@ async function invoiceChargeCardHandler(req, res, next) {
         },
         // Set only by chargeInvoiceFromBar (never an HTTP field): the bar's caps,
         // rechecked under the charge lock, and the payment row's provenance stamp.
-        ...(req.ibChargeGuard ? { assertUnderChargeLock: req.ibChargeGuard, initiatedVia: 'intelligence_bar', expectedVersion: req.ibChargeVersion || null } : {}),
+        ...(req.ibChargeGuard ? { assertUnderChargeLock: req.ibChargeGuard, initiatedVia: 'intelligence_bar', expectedVersion: req.ibChargeVersion || null, approvedCloseoutTarget: req.ibCloseoutTarget || null } : {}),
       },
     );
     res.json({ success: true, ...result });
@@ -3786,8 +3786,9 @@ function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
 }
 // chargeGuard: async (trx, { totalCents, invoice }) — the bar's caps, run under the charge lock.
 // version: { updatedAtMs, digest } — the invoice row the card showed, checked under the charge's invoice lock.
-function chargeInvoiceFromBar({ invoiceId, body, actor, chargeGuard, version }) {
-  return runInvoiceHandler(invoiceChargeCardHandler, barRequest(invoiceId, body, actor, { ibChargeGuard: chargeGuard, ibChargeVersion: version || null }));
+// closeoutTarget: the visit id the approved plan would close out on payment, or 'none' (carried on the PaymentIntent).
+function chargeInvoiceFromBar({ invoiceId, body, actor, chargeGuard, version, closeoutTarget }) {
+  return runInvoiceHandler(invoiceChargeCardHandler, barRequest(invoiceId, body, actor, { ibChargeGuard: chargeGuard, ibChargeVersion: version || null, ibCloseoutTarget: closeoutTarget || null }));
 }
 
 module.exports = router;

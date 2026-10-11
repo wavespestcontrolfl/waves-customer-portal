@@ -104,6 +104,19 @@ async function closeoutEffect(invoice, trigger, lead) {
   return effect('closeout', Boolean(closeout), closeoutState(closeout), closeout ? closeoutLine(closeout, lead) : null);
 }
 
+// The files attached to the invoice the customer can open from the online invoice (the delivery email points
+// to them). Pinned by id, name, size and edit time, read with the caller's handle so the send claim reads
+// them under the claim.
+async function attachmentsEffect(invoice, database) {
+  const rows = await database('invoice_attachments').where({ invoice_id: invoice.id })
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').select('id', 'file_name', 'file_size_bytes', 'updated_at');
+  const names = rows.map((row) => String(row.file_name || 'file').replace(/\s+/g, ' ').trim());
+  const state = rows.length
+    ? rows.map((row) => [row.id, row.file_name, row.file_size_bytes, row.updated_at ? new Date(row.updated_at).getTime() : null].join('|')).join(';')
+    : 'none';
+  return effect('attachments', rows.length > 0, state, rows.length ? `Attachments the customer can open from the online invoice: ${names.join(', ')}` : 'No attachments.');
+}
+
 function deliveryNote(invoice, delivered) {
   if (invoice.sent_at) return `Already sent on ${etStamp(invoice.sent_at)}. This sends it again.`;
   if (delivered) return `Already delivered (invoice status ${invoice.status}). This sends it again.`;
@@ -139,6 +152,7 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
   const review = require('../invoice-delivery-review').reviewDecisionForInvoice(invoice, requestReview, null).requestReview === true;
   return finish([
     effect('delivery', true, delivered ? 'resend' : 'first', deliveryNote(invoice, delivered)),
+    await attachmentsEffect(invoice, database),
     await closeoutEffect(invoice, 'sent', 'Sending this invoice'),
     lead,
     followups,
@@ -149,6 +163,22 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
   ]);
 }
 
+// ── charge-only (everything below to the end of planChargeEffects goes with the charge tool) ──
+
+// syncTermForInvoicePayment does far more than a term update (it activates the annual plan), so the bar does
+// not charge an invoice that pays an annual-prepay term.
+const ANNUAL_PREPAY_REFUSAL = 'Annual-prepay invoices are charged from the Invoices page, not from the bar.';
+const annualPrepayRefusal = (invoice) => (invoice && invoice.annual_prepay_term_id ? ANNUAL_PREPAY_REFUSAL : null);
+
+// The visit the approved plan would close out, or 'none': what the PaymentIntent carries to the webhook.
+function approvedCloseoutTarget(effects) {
+  const closeout = (effects || []).find((e) => e.key === 'closeout');
+  return closeout && closeout.applies ? String(closeout.state).split(':')[0] : 'none';
+}
+
+// The notes of the service record invoice-issued-closeout.js runQuietCloseout creates (requestReview: false).
+const CLOSEOUT_RECORD_NOTES = Object.freeze({ requestReview: false });
+
 // The paid-invoice effects, one builder each, in card order. c = { invoice, customer, database, creditCents, closeout }.
 const CHARGE_EFFECT_BUILDERS = [
   async (c) => effect('credit', c.creditCents > 0, String(c.creditCents), c.creditCents > 0 ? `${money(c.creditCents)} of account credit is applied first` : null, 'billing'),
@@ -156,16 +186,20 @@ const CHARGE_EFFECT_BUILDERS = [
   // The review step runs after the closeout and reads the record it links.
   async (c) => {
     const { invoice } = c;
-    const recordId = invoice.service_record_id || (c.closeout.applies ? 'from_closeout' : null);
+    // A record the closeout creates is stored with requestReview false (runQuietCloseout), so it reads as opted out.
+    const fromCloseout = !invoice.service_record_id && c.closeout.applies;
+    const recordId = invoice.service_record_id || (fromCloseout ? 'from_closeout' : null);
     const packetId = invoice.visit_completion_packet_id || null;
     const Reviews = require('../review-request');
-    const notes = invoice.service_record_id ? await Reviews.completionNotes(invoice.service_record_id) : {};
+    const notes = invoice.service_record_id ? await Reviews.completionNotes(invoice.service_record_id) : (fromCloseout ? CLOSEOUT_RECORD_NOTES : {});
     const skip = Reviews.paidInvoiceReviewSkip({ customer_id: invoice.customer_id, service_record_id: recordId }, notes);
     const applies = Boolean(packetId) || !skip;
     const line = packetId
       ? 'Once the charge is paid, the payment may also enroll the customer in review outreach (the visit completion packet decides)'
       : 'Once the charge is paid, the payment also enrolls the customer in review outreach (the review limits, such as an opt-out or a recent ask, can still hold it back)';
-    return effect('review', applies, packetId ? `packet:${packetId}` : (skip ? `skip:${skip}` : 'enrolls'), applies ? line : null, 'comms');
+    const optedOut = skip === 'completion_opted_out';
+    return effect('review', applies, packetId ? `packet:${packetId}` : (skip ? `skip:${skip}` : 'enrolls'),
+      applies ? line : (optedOut ? 'No review request is sent.' : null), 'comms');
   },
   async (c) => {
     const followups = require('../invoice-followups');
@@ -180,8 +214,10 @@ const CHARGE_EFFECT_BUILDERS = [
     const plan = await require('../invoice-followups').activePaymentPlan(c.database, c.invoice.id);
     return effect('payment_plan', Boolean(plan), plan ? 'completes' : 'none', plan ? 'Once the charge is paid, the payment also completes the active payment plan on this invoice' : null, 'billing');
   },
+  // Never reached for a bar charge (annualPrepayRefusal refuses first); kept so a plan built for such an invoice
+  // states the refusal reason instead of staying silent about syncTermForInvoicePayment.
   async (c) => effect('annual_prepay', Boolean(c.invoice.annual_prepay_term_id), c.invoice.annual_prepay_term_id || 'none',
-    c.invoice.annual_prepay_term_id ? 'Once the charge is paid, the payment also updates the annual plan term this invoice pays for' : null, 'billing'),
+    c.invoice.annual_prepay_term_id ? ANNUAL_PREPAY_REFUSAL : null, 'billing'),
   async (c) => {
     const held = await require('../project-report-hold').heldReportsForInvoice(c.invoice.id, c.database);
     return effect('held_report', held.length > 0, held.join(','),
@@ -208,6 +244,10 @@ function finish(effects) {
 module.exports = {
   planSendEffects,
   planChargeEffects,
+  annualPrepayRefusal,
+  approvedCloseoutTarget,
+  ANNUAL_PREPAY_REFUSAL,
+  CLOSEOUT_RECORD_NOTES,
   effectsDigest,
   closeoutLine,
   SEND_CALL_COVERAGE,

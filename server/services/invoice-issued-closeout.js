@@ -618,6 +618,16 @@ async function resolveCloseoutTarget(run) {
   return { closed: false, reason: resolved.reason, visitId: null };
 }
 
+// An approved target (the Intelligence Bar's charge card: the visit id it said would be closed, or 'none'):
+// the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
+// the retry sweeps do not reconsider (a person decides). A payment with no approved target is unchanged.
+async function refuseUnapprovedTarget(run) {
+  if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
+  logger.warn(`[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_target_mismatch' });
+  return { closed: false, reason: 'approved_target_mismatch', invoiceId: run.invoiceId, visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
+}
+
 // Phase 3 — the canonical completion in its quiet backfill posture: no
 // completion SMS, no report, no review ask, no charge; the linked invoice is
 // reused, none minted.
@@ -718,13 +728,13 @@ async function auditCloseoutFailure(run, err) {
 // auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
 // the quiet canonical completion.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), approvedTarget = null } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, approvedTarget: approvedTarget || null, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
-    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run));
+    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run)) || (await refuseUnapprovedTarget(run));
     return refused || await runQuietCloseout(run);
   } catch (err) {
     return auditCloseoutFailure(run, err);

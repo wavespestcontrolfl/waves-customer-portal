@@ -2140,6 +2140,9 @@ const StripeService = {
   // LOCKED invoice row before account credit, any quote or Stripe call: an edit or a
   // partial credit since the card (same total or not) refuses the charge with
   // code approved_version_changed. Null = unchanged for every other caller.
+  // opts.approvedCloseoutTarget — the visit id the Intelligence Bar card said the paid-invoice closeout would
+  // complete, or 'none'. Carried on the PaymentIntent (the attempt table has no params column) so the
+  // payment_intent.succeeded handler enforces it; a page charge sets nothing and the closeout behaves as before.
   // opts.initiatedVia — 'intelligence_bar' stamps payments.metadata.initiated_via
   // and the PaymentIntent's metadata (the webhook's fallback payment insert copies
   // it), so the bar's daily charge cap counts those rows. Both null = unchanged.
@@ -2154,7 +2157,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, assertUnderChargeLock = null, initiatedVia = null, expectedVersion = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, assertUnderChargeLock = null, initiatedVia = null, expectedVersion = null, approvedCloseoutTarget = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2813,6 +2816,7 @@ const StripeService = {
             // Bar provenance on the intent too, so a payment row the webhook writes
             // later (a deferred success) is stamped and counted like this one.
             ...(initiatedVia === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),
+            ...(initiatedVia === 'intelligence_bar' && approvedCloseoutTarget ? { approved_closeout_target: String(approvedCloseoutTarget).slice(0, 64) } : {}),
           },
         };
         if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;

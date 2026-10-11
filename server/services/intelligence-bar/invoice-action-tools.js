@@ -66,7 +66,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest } = require('../invoice-helpers');
 const { isCardMethodType } = require('../stripe-pricing');
-const { planSendEffects, planChargeEffects } = require('./invoice-action-effects');
+const { planSendEffects, planChargeEffects, annualPrepayRefusal, approvedCloseoutTarget } = require('./invoice-action-effects');
 
 const PER_CHARGE_CAP_CENTS = 50000;
 const CARD_LINES_SHOWN = 4;
@@ -393,6 +393,9 @@ async function commitSend(input, actionContext) {
 }
 
 // ── charge_invoice ──────────────────────────────────────────────
+// CHARGE-ONLY: everything from here to the card lines section (CHARGE_PRECHECKS, the daily cap, the run claim,
+// buildChargePlan, runCharge) belongs to charge_invoice; dropping the charge tool removes this section, the
+// charge branch of cardLines, and the charge half of invoice-action-effects.js, and leaves send_invoice whole.
 
 // Today's (ET) bar charges, in cents, from durable rows (see the header).
 // excludeInvoiceId: the invoice being charged. Its own approval is consumed (result
@@ -560,6 +563,10 @@ const CHARGE_PRECHECKS = [
     .whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at').first('id'))
     ? refusal('A saved-card charge is already in progress or awaiting reconciliation. DO NOT charge again until an admin verifies it.', 'charge_in_progress', { invoice_id: invoice.id })
     : null),
+  // syncTermForInvoicePayment activates the annual plan; that is the Invoices page's job, not the bar's.
+  async (invoice) => (annualPrepayRefusal(invoice)
+    ? refusal(annualPrepayRefusal(invoice), 'annual_prepay_invoice', { invoice_id: invoice.id })
+    : null),
   async (invoice) => ((await disputeHold(invoice.customer_id))
     ? refusal('Collection is on hold for this customer (billing dispute). Review before charging. The bar never overrides it; use the Invoices page.', 'collection_hold', { invoice_id: invoice.id })
     : null),
@@ -619,6 +626,8 @@ async function buildChargePlan(input) {
     effects: cardEffects(planned.effects),
     // The credit the effects plan used (not pinned itself: the version digest and the exact total guard it).
     _credit_cents: Math.max(0, creditAfterCents - creditNowCents),
+    // The visit the closeout effect named (or 'none'): the PaymentIntent carries it to the webhook, which enforces it.
+    _closeout_target: approvedCloseoutTarget(planned.effects),
     // Shown on the card, kept out of the approval fingerprint (`_` key): another
     // bar charge landing before Confirm changes it without changing this charge.
     _charged_today: `${money(usedCents)} charged from the bar today`,
@@ -733,6 +742,7 @@ async function runCharge(input, pinned, actionContext) {
     // The invoice row the card showed (edit time + amount due / lines digest): checked under the
     // charge's own invoice lock, before any Stripe call.
     version: { updatedAtMs: pinned.invoice_version, digest: pinned.version_digest },
+    closeoutTarget: plan._closeout_target,
   });
   const result = chargeOutcome(plan, status, json || {});
   logger.info(`[intelligence-bar:invoice-actions] charge ${plan.invoice_id}: ${result.payment_status || result.code || 'done'}`);
