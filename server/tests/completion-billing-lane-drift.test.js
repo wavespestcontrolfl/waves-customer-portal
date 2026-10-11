@@ -65,6 +65,16 @@ describe('Codex rounds 6 and 7 on #6118: the lane is judged on the locked rows o
     expect(check).toBeLessThan(firstVisitWrite);
   });
 
+  test('Codex round 12 on #6118: the same transaction that commits the visit as completed marks the attempt side_effects_running, the durable mark the billing-type edit fences on', () => {
+    const check = src.indexOf('await refuseBillingLaneDriftInTrx(trx, svc);', persistStart);
+    const mark = src.indexOf('await CompletionAttempts.markCompletionAttemptSideEffectsPending(', persistStart);
+    const end = src.indexOf('await withTrackedServicePhotoTransaction({', persistStart);
+    expect(mark).toBeGreaterThan(check);
+    expect(mark).toBeLessThan(end);
+    // Written on the transaction handle (not a separate connection), and cleared only by the final write or a release.
+    expect(src.slice(mark, mark + 600)).toMatch(/\n\s+trx\n\s*\);/);
+  });
+
   test('there is no standalone check left outside the completing transaction (the old pre-decision transaction is gone)', () => {
     expect(src).not.toMatch(/db\.transaction\(\(trx\) => refuseBillingLaneDriftInTrx/);
   });

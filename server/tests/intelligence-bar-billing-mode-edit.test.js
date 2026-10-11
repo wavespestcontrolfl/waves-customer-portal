@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
     const q = { cols: [] };
     // whereRaw notes the dues stamp, so the open-dues query is told apart from the visits' invoices.
     q.whereRaw = (sql) => { if (String(sql).includes('membership_dues_month')) q.duesQuery = true; if (String(sql).includes('ambiguous_outcome')) q.ambiguousQuery = true; return q; };
-    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
+    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orderBy', 'join']) q[m] = () => q;
     // limit is honoured, so a card that cut the visits at a page size would show it.
     q.limit = (n) => { q.cap = n; return q; };
     // where(fn) runs its callback (the live-visit clause is built that way).
@@ -33,6 +33,7 @@ jest.mock('../models/db', () => {
       if (table === 'annual_prepay_terms') return mockState.term;
       if (table === 'payment_methods') return mockState.methodDetail;
       if (table === 'scheduled_services') return mockState.roots[0] || null;
+      if (table.startsWith('service_completion_attempts')) return mockState.inFlight ? { id: 'att-1' } : null;
       if (table === 'stripe_orphan_charges') return mockState.orphan;
       if (table === 'payments') return q.ambiguousQuery ? mockState.ambiguous : mockState.armed;
       return null;
@@ -142,6 +143,7 @@ beforeEach(() => {
   mockState.siblingInvoices = {};
   mockState.orphan = null;
   mockState.ambiguous = null;
+  mockState.inFlight = false;
   mockState.invoiceBusy = false;
   mockState.autopayUnreadable = false;
   mockState.method = { id: 'pm-1', method_type: 'card' };
@@ -969,6 +971,51 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       expect(l[0]).toBe('The $55.00 monthly rate is charged each month by the dues run. 3 upcoming visits have no price today and are covered by dues.');
       mockState.visits = [clean('m1')];
       expect((await lines({ billing_mode: 'monthly_membership' }))[0]).toMatch(/1 upcoming visit has no price today and is covered by dues\.$/);
+    });
+  });
+
+  describe('a completion that committed its record but has not finished billing fences the edit (completion-attempts.js customerHasCompletionInFlight)', () => {
+    const MESSAGE = 'A visit for this customer was just completed and its billing is still being finalized. Try again in a few minutes.';
+
+    test('an unpriced monthly visit completing while the edit switches to per application: the card is refused, never a silent no-bill', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      mockState.inFlight = true;
+      expect(await propose(LEAVE)).toMatchObject({ code: 'billing_completion_pending', error: expect.stringContaining(MESSAGE) });
+    });
+
+    test('a card shown before the completion committed refuses under the lock once it has; nothing is written', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      const card = await propose(LEAVE);
+      expect(card.error).toBeUndefined();
+      // persistRecord committed the visit as completed (gone from the upcoming list) and the attempt as side_effects_running.
+      mockState.inFlight = true;
+      const result = await executeTool('update_customer', {
+        customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin,
+      });
+      expect(result).toMatchObject({ preview_changed: true, error: expect.stringContaining(MESSAGE) });
+      expect(customerWrites()).toHaveLength(0);
+      // Settled (the attempt succeeded): the same card commits.
+      mockState.inFlight = false;
+      mockState.customer = { ...MONTHLY };
+      expect((await executeTool('update_customer', {
+        customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin,
+      })).error).toBeUndefined();
+    });
+
+    test('the fence reads the attempt rows the completing transaction writes: running or pending, within the claim\'s own window, for this customer\'s visits', async () => {
+      const calls = [];
+      const q = { join: (...a) => { calls.push(['join', ...a]); return q; }, where: (...a) => { calls.push(['where', ...a]); return q; }, whereIn: (...a) => { calls.push(['whereIn', ...a]); return q; }, first: async () => null };
+      const knex = jest.fn((t) => { calls.push(['table', t]); return q; });
+      expect(await require('../services/completion-attempts').customerHasCompletionInFlight('cust-9', knex)).toBe(false);
+      expect(calls).toContainEqual(['table', 'service_completion_attempts as a']);
+      expect(calls).toContainEqual(['join', 'scheduled_services as s', 's.id', 'a.service_id']);
+      expect(calls).toContainEqual(['where', 's.customer_id', 'cust-9']);
+      expect(calls).toContainEqual(['whereIn', 'a.status', ['side_effects_running', 'side_effects_pending']]);
+      const window = calls.find((c) => c[0] === 'where' && c[1] === 'a.updated_at');
+      expect(window[2]).toBe('>=');
+      expect(Date.now() - window[3].getTime()).toBeGreaterThanOrEqual(require('../services/completion-attempts').STALE_SIDE_EFFECTS_MS - 1000);
     });
   });
 

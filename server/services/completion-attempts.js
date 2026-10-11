@@ -254,6 +254,32 @@ async function hasCommittedCompletionAttempt(serviceId, knex = db) {
   return Boolean(record);
 }
 
+// Whether a completion for any visit of this customer has COMMITTED its record
+// and not yet finished its billing step: the attempt row the completing
+// transaction itself moves to side_effects_running (side_effects_pending for a
+// grouped closeout) together with the visit's completed status, and that
+// markCompletionAttemptSucceeded (or a release for resume) leaves. This is the
+// durable "billing is not settled" mark: until it clears, the process that
+// committed the record still holds the billing type it read at entry, so a
+// billing-type edit landing now would not reach it (the visit is completed, so
+// no visit-based check sees it either). Bounded by the window claimSideEffectsRun
+// itself treats as owned (STALE_SIDE_EFFECTS_MS): after it another run reclaims
+// the attempt and reloads the customer, so an abandoned row never blocks an edit
+// for long. Writers that hold the customer row FOR UPDATE (the Intelligence Bar
+// billing-type commit) cannot race the transition into this state: the
+// completing transaction holds the customer FOR SHARE from before its first
+// write to its commit.
+async function customerHasCompletionInFlight(customerId, knex = db) {
+  const cutoff = new Date(Date.now() - STALE_SIDE_EFFECTS_MS);
+  const row = await knex('service_completion_attempts as a')
+    .join('scheduled_services as s', 's.id', 'a.service_id')
+    .where('s.customer_id', customerId)
+    .whereIn('a.status', ['side_effects_running', 'side_effects_pending'])
+    .where('a.updated_at', '>=', cutoff)
+    .first('a.id');
+  return Boolean(row);
+}
+
 // Read-only status for the panel's lightweight side-effects poll (codex P1
 // #3187 r11): reports where the service's completion stands so the client
 // re-POSTs the media-bearing completion body only to claim/resume, never as
@@ -846,6 +872,7 @@ module.exports = {
   hasCompletionAttemptForKey,
   withoutPhotoBytes,
   hasCommittedCompletionAttempt,
+  customerHasCompletionInFlight,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency
   // hash and the authorization gate can never disagree about what counts

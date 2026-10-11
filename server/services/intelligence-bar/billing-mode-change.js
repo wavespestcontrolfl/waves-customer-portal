@@ -31,7 +31,9 @@
  *         retry is armed (the retry ladder stops for a non-monthly lane), or
  *         while this month's dues charge has an unsettled Stripe outcome
  *         (retry-collectibility.js hasUnresolvedSiblingStripeOutcome).
- *   - Refused too: any live upcoming visit that carries a price, a prepayment,
+ *   - Refused too: a customer whose completed visit is still finalizing its billing
+ *     (billing_completion_pending: the completion attempt row is the durable fence),
+ *     and any live upcoming visit that carries a price, a prepayment,
  *     create-invoice-on-complete or an invoice of any kind (billing_visits_priced).
  *     The card does not predict per-visit charges (price, tax, surcharge,
  *     prepayment, invoices and dues coverage all move completion's amount); the
@@ -392,6 +394,14 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits) {
   if (unchangedEdit(row, fields)) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
   if (await BillingModeRules.liveAnnualPrepayTerm(dbh, customerId)) {
     return refuse('This customer has an annual prepay term covering today, so the billing type is not changed from the bar. Nothing was proposed.', 'live_annual_prepay_term');
+  }
+  // A completion that committed its record but has not finished billing still
+  // holds the billing type it read at entry (and its visit is completed, so no
+  // visit check sees it): the durable attempt row is the fence
+  // (completion-attempts.js customerHasCompletionInFlight). Under the commit's
+  // customer lock no new completion can reach that state, so a clear read holds.
+  if (await require('../completion-attempts').customerHasCompletionInFlight(customerId, dbh)) {
+    return refuse('A visit for this customer was just completed and its billing is still being finalized. Try again in a few minutes. Nothing was proposed.', 'billing_completion_pending');
   }
   // The card does not predict per-visit charges (price, tax, surcharge,
   // prepayment, invoices, dues coverage all move completion's amount): a visit
