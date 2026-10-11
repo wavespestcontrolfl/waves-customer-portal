@@ -440,6 +440,12 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1, standing: false });
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
     expect((await processor.reconcileCorrectedCallbackVerdicts()).results.find((r) => r.callbackCallId === childId)).toBeUndefined();
+    // Staff resolve the reopened card; an older callback_spam history row for the same reason is not a lost
+    // correction (the newer row settles the reason), so the scan leaves it alone.
+    await db('triage_items').where({ call_log_id: parentId }).update({ status: 'resolved', resolution_source: 'staff', resolution_rule: null, created_at: new Date() });
+    await db('triage_items').insert([{ ...card(parentId, 'missing_service_address', 'resolved'), resolution_rule: 'callback_spam', resolution_source: 'auto', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000) }]);
+    expect((await processor.reconcileCorrectedCallbackVerdicts()).results.find((r) => r.callbackCallId === childId)).toBeUndefined();
+    expect((await db('triage_items').where({ call_log_id: parentId, resolution_source: 'staff' }).first()).status).toBe('resolved');
   });
 
   test('the nightly sweep re-closes a moot card a reprocess filed again after the callback verdict', async () => {

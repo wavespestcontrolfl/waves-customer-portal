@@ -1148,8 +1148,13 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .whereNotNull('p.duration_seconds').whereNull('p.processing_token')
     .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(COALESCE(p.duration_seconds, 0), 0))")
     .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
-    .whereNotExists(function liveRowForReason() {
-      this.select(db.raw('1')).from('triage_items as live').whereRaw('live.call_log_id = ti.call_log_id AND live.reason_code = ti.reason_code').whereIn('live.status', ['open', 'in_progress']);
+    // ...and only the NEWEST row for its reason: a later row of any status
+    // (one the correction reopened and staff then resolved, a reprocess's
+    // fresh ask) means this one is history, not an uncorrected closure.
+    .whereNotExists(function newerRowForReason() {
+      this.select(db.raw('1')).from('triage_items as later')
+        .whereRaw('later.call_log_id = ti.call_log_id AND later.reason_code = ti.reason_code AND later.id <> ti.id')
+        .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
     })
     .modify(settledNonSpam).limit(limit).distinct('cb.*');
   const callbacks = new Map([...stamped, ...dismissed, ...swept].map((cb) => [cb.id, cb]));
