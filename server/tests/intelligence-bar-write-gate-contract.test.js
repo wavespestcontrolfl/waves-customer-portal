@@ -76,10 +76,12 @@ beforeAll(() => {
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
+  process.env.GATE_IB_DELETE_CUSTOMER = 'true';
 });
 afterAll(() => {
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
+  delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -155,6 +157,7 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'delete_duplicate_customer',
   'repair_closeout',
   'resend_receipt',
   'remove_saved_payment_method',
@@ -612,6 +615,17 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
       ],
     }],
+    // delete_duplicate_customer reads the stub (its own seed) and the merge
+    // engine's emptiness readers and pair verdicts (spied below — their SQL is covered by
+    // customer-dedupe.test.js).
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'delete_duplicate_customer', {
+      customer_id: '00000000-0000-0000-0000-00000000e001',
+    }, {
+      customers: [
+        { id: '00000000-0000-0000-0000-00000000e001', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null, version: 'v1', created_at: '2026-10-01T15:00:00Z' },
+        { id: '00000000-0000-0000-0000-00000000e002', first_name: 'Real', last_name: 'Keeper', phone: '9415550100', email: null, deleted_at: null, created_at: '2025-01-01T15:00:00Z' },
+      ],
+    }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —
     // merged on top of SEED for this call only.
@@ -896,6 +910,24 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // DB — install this row's token env vars + a fetch mock that answers its
     // calls in order, and restore both afterward so nothing leaks to the
     // next row (or to another suite requiring the same cached module).
+    const dedupeReaders = toolName === 'delete_duplicate_customer'
+      ? [
+        jest.spyOn(require('../services/customer-dedupe'), 'loserAutoBlockers').mockResolvedValue([]),
+        jest.spyOn(require('../services/customer-dedupe'), 'previewMergeEffects').mockResolvedValue({ moving: { total_rows: 0 } }),
+        jest.spyOn(require('../services/customer-dedupe'), 'nonFkMergeRewrites').mockResolvedValue({}),
+        jest.spyOn(require('../services/customer-dedupe'), 'duplicateWinnerFor').mockResolvedValue({ winnerId: '00000000-0000-0000-0000-00000000e002', eligible: true, code: 'eligible', reason: null, candidate: {} }),
+      ] : [];
+    if (toolName === 'delete_duplicate_customer') {
+      // The field check reads the customers columns and the self-reference
+      // scan reads the constraint list from information_schema.
+      require('../services/customer-empty-loser')._resetCaches();
+      const recordingRaw = dbMock.raw.getMockImplementation();
+      dbMock.raw.mockImplementation((sql, ...rest) => {
+        if (String(sql).includes('is_generated')) return Promise.resolve({ rows: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at'].map((column_name) => ({ column_name, column_default: null, is_generated: 'NEVER' })) });
+        if (String(sql).includes('constraint_type')) return Promise.resolve({ rows: [] });
+        return recordingRaw(sql, ...rest);
+      });
+    }
     const outsideFixture = OUTSIDE_WRITE_FIXTURES[toolName];
     const savedEnv = {};
     const savedFetch = global.fetch;
@@ -913,6 +945,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       acceptDryRun?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;

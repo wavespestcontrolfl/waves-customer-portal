@@ -159,6 +159,7 @@
  *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
+ *   GATE_IB_DELETE_CUSTOMER=true (Intelligence Bar delete_duplicate_customer, owner ruling 2026-10-07: an admin can ARCHIVE ONLY (soft-delete, nothing merged or moved, the other record untouched) ONE empty duplicate customer record - one that holds only the fields the unknown-caller stub creator writes, no linked rows, and that the duplicate queue lists as a confirmed same-identity duplicate of a record sharing its phone (a possible match, such as a different name, goes to merge_customers) - from a confirm card, through the customer page's own DELETE /api/admin/customers/:id handler; restorable via PATCH /api/admin/customers/:id/restore; never owner-direct; sends nothing to a customer. Strict opt-in: exactly 'true', read at call time via ibDeleteCustomerLive(). Ships DARK; off = the tool is not offered on either path and a forced call refuses; kill = unset)
  *   GATE_IB_OWNER_DIRECT=true (Intelligence Bar owner-direct mode, owner ruling 2026-10-01: for the owner login only (ibFullAccess) the bar takes the record it picks as the target with no target refusals, runs internal edits — lead/customer/property fields, statuses, notes, tech assignment, reschedule, stock — without a confirmation card, and answers in 1–3 lines; customer messages, money and bulk changes keep their one-tap card; every other login is unchanged; off = byte-identical to today; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
@@ -3654,6 +3655,11 @@ const gates = {
   // itself; this entry is the status/log listing.
   ibMergeCustomers: gateEnvValue('GATE_IB_MERGE_CUSTOMERS'),
 
+  // Intelligence Bar delete_duplicate_customer (owner ruling 2026-10-07).
+  // Ships DARK. Read at CALL time via ibDeleteCustomerLive() — tool lists on
+  // both paths and the executor; this entry is for logGateStatus only.
+  ibDeleteCustomer: process.env.GATE_IB_DELETE_CUSTOMER === 'true',
+
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /
   // Recommendations boxes) and, in a later PR, the quoted note on the live
@@ -4573,6 +4579,13 @@ const gates = {
 // and gates enforced inside the pricing engine, where a flip must not need
 // a client redeploy and tests mutate the env at runtime). One parser, one
 // truth: '1' / 'true' / 'on', case-insensitive.
+// GATE_IB_DELETE_CUSTOMER read at CALL time — strict `=== 'true'`, dark in
+// every environment. On, the Intelligence Bar offers delete_duplicate_customer
+// (archive-only soft-delete of one empty duplicate record, always a confirm card).
+function ibDeleteCustomerLive() {
+  return process.env.GATE_IB_DELETE_CUSTOMER === 'true';
+}
+
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
 }
@@ -6357,6 +6370,8 @@ module.exports.knownGateCatalog = knownGateCatalog;
 // GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
 module.exports.adminMfaLive = adminMfaLive;
 module.exports.adminMfaEnforceLive = adminMfaEnforceLive;
+// GATE_IB_DELETE_CUSTOMER reader, on its own line so gate PRs never conflict.
+module.exports.ibDeleteCustomerLive = ibDeleteCustomerLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;

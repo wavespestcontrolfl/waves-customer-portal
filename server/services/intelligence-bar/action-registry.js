@@ -11,7 +11,7 @@ const {
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
-const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
+const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
 const { ibAcceptEstimateLive } = require('../../config/feature-gates');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
@@ -129,6 +129,7 @@ function allowed(action, { role, context, fullAccess } = {}) {
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
   if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
   if (action.id === 'accept_estimate' && !ibAcceptEstimateLive()) return false;
+  if (action.id === 'delete_duplicate_customer' && !deleteDuplicateCustomerEnabled()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
   if (action.id === 'create_agent_estimate_draft' && context !== 'agent_estimate') return false;

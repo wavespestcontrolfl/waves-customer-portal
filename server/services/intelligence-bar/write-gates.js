@@ -74,6 +74,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'delete_duplicate_customer',
   'repair_closeout',
   'resend_receipt',
   'remove_saved_payment_method',

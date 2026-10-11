@@ -3889,3 +3889,115 @@ describe('merge carries the per-phone consent boundary (service_preferences)', (
   });
 });
 
+
+
+// ---------------------------------------------------------------------------
+// duplicateWinnerFor — the retained record from ONE queue build
+// ---------------------------------------------------------------------------
+describe('duplicateWinnerFor', () => {
+  const winner = {
+    id: 'dddddddd-0000-0000-0000-000000000001',
+    first_name: 'Synthetic', last_name: 'Winner', phone: '+15550100123',
+    address_line1: '100 Test Street', zip: '34207',
+    stripe_customer_id: 'cus_winner', pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shell = { id: 'dddddddd-0000-0000-0000-000000000002', first_name: 'Synthetic', last_name: null, phone: '5550100123', address_line1: null, zip: null, pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+  const addressConflict = { id: 'dddddddd-0000-0000-0000-000000000003', first_name: 'Synthetic', last_name: null, phone: '5550100123', address_line1: '999 Different St', zip: '34211', pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+  const stranger = { id: 'dddddddd-0000-0000-0000-000000000004', first_name: 'Other', last_name: 'Person', phone: '+15550100123', address_line1: '200 Different Test Street', zip: '34211', pipeline_stage: 'active_customer', created_at: '2026-07-01' };
+
+  const route = ({ customers = [], dismissals = [] }) => (table) => {
+    if (table === 'customers') return customers;
+    if (table === 'customer_duplicate_dismissals') return dismissals;
+    return [];
+  };
+
+  it('names the queue winner and the eligible verdict from a single queue scan', async () => {
+    const seen = [];
+    const inner = route({ customers: [winner, shell] });
+    installDb((table, q) => { seen.push(table); return inner(table, q); });
+    const result = await dedupe.duplicateWinnerFor(shell.id);
+    expect(result).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+    // ONE read of the customers table, however many records share the phone.
+    expect(seen.filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('one scan with several records on the phone still names the one winner', async () => {
+    const extra = Array.from({ length: 6 }, (_, i) => ({ ...shell, id: `dddddddd-0000-0000-0000-0000000001${i}0` }));
+    const seen = [];
+    const inner = route({ customers: [winner, shell, ...extra] });
+    installDb((table, q) => { seen.push(table); return inner(table, q); });
+    const result = await dedupe.duplicateWinnerFor(shell.id);
+    expect(result).toMatchObject({ winnerId: winner.id, eligible: true });
+    expect(seen.filter((t) => t === 'customers')).toHaveLength(1);
+  });
+
+  it('reads a refused candidate the way duplicatePairEligibility does (address conflict, red pair) and still names its winner', async () => {
+    installDb(route({ customers: [winner, addressConflict] }));
+    expect(await dedupe.duplicateWinnerFor(addressConflict.id)).toMatchObject({ winnerId: winner.id, eligible: false, code: 'address_conflict' });
+    installDb(route({ customers: [winner, stranger] }));
+    expect(await dedupe.duplicateWinnerFor(stranger.id)).toMatchObject({ winnerId: winner.id, eligible: false, code: 'red_pair' });
+  });
+
+  it('a record the queue keeps (the winner itself) or does not list gets no winner', async () => {
+    installDb(route({ customers: [winner, shell] }));
+    expect(await dedupe.duplicateWinnerFor(winner.id)).toMatchObject({ winnerId: null, eligible: false, code: 'not_in_queue' });
+    expect(await dedupe.duplicateWinnerFor('dddddddd-0000-0000-0000-000000000099')).toMatchObject({ winnerId: null, code: 'not_in_queue' });
+  });
+
+  it('a dismissed pair is not listed; unreadable dismissals fail CLOSED', async () => {
+    installDb(route({ customers: [winner, shell], dismissals: [{ customer_id_a: winner.id, customer_id_b: shell.id, reason: 'not_duplicates' }] }));
+    expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'not_in_queue' });
+    const inner = route({ customers: [winner, shell] });
+    installDb((table, q) => { if (table === 'customer_duplicate_dismissals') throw new Error('relation unreadable'); return inner(table, q); });
+    expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ winnerId: null, eligible: false, code: 'dismissals_unreadable' });
+  });
+
+  describe('requireSameIdentity (the delete tool): a possible match is not a confirmed duplicate', () => {
+    const nameConflict = { id: 'dddddddd-0000-0000-0000-000000000005', first_name: 'Other', last_name: 'Winner', phone: '5550100123', address_line1: null, zip: null, pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+    const POSSIBLE = 'the queue lists this as a possible match, not a confirmed duplicate; use merge_customers';
+
+    it('refuses a yellow name-conflict candidate, while the default read (merge_customers) still accepts it', async () => {
+      installDb(route({ customers: [winner, nameConflict] }));
+      const strict = await dedupe.duplicateWinnerFor(nameConflict.id, undefined, { requireSameIdentity: true });
+      expect(strict).toMatchObject({ winnerId: winner.id, eligible: false, code: 'possible_match_only', reason: POSSIBLE });
+      expect(strict.candidate.reasons).toContain('name_conflict');
+      expect(await dedupe.duplicateWinnerFor(nameConflict.id)).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+      expect(await dedupe.duplicatePairEligibility(winner.id, nameConflict.id)).toMatchObject({ eligible: true });
+    });
+
+    it('refuses a candidate demoted by group_has_identity_conflict (a second identity on the same line)', async () => {
+      installDb(route({ customers: [winner, shell, nameConflict] }));
+      const strict = await dedupe.duplicateWinnerFor(shell.id, undefined, { requireSameIdentity: true });
+      expect(strict.candidate.reasons).toContain('group_has_identity_conflict');
+      expect(strict).toMatchObject({ eligible: false, code: 'possible_match_only', reason: POSSIBLE });
+      expect(await dedupe.duplicateWinnerFor(shell.id)).toMatchObject({ eligible: true });
+    });
+
+    it('accepts a green same-identity candidate', async () => {
+      installDb(route({ customers: [winner, shell] }));
+      const strict = await dedupe.duplicateWinnerFor(shell.id, undefined, { requireSameIdentity: true });
+      expect(strict).toMatchObject({ winnerId: winner.id, eligible: true, code: 'eligible' });
+      expect(strict.candidate.tier).toBe('green');
+    });
+
+    it('keeps the address and red refusals ahead of it', async () => {
+      installDb(route({ customers: [winner, addressConflict] }));
+      expect(await dedupe.duplicateWinnerFor(addressConflict.id, undefined, { requireSameIdentity: true })).toMatchObject({ code: 'address_conflict' });
+      installDb(route({ customers: [winner, stranger] }));
+      expect(await dedupe.duplicateWinnerFor(stranger.id, undefined, { requireSameIdentity: true })).toMatchObject({ code: 'red_pair' });
+    });
+  });
+
+  it('agrees with duplicatePairEligibility on the same fixtures', async () => {
+    installDb(route({ customers: [winner, shell] }));
+    const single = await dedupe.duplicatePairEligibility(winner.id, shell.id);
+    const once = await dedupe.duplicateWinnerFor(shell.id);
+    expect({ eligible: once.eligible, code: once.code, reason: once.reason }).toEqual({ eligible: single.eligible, code: single.code, reason: single.reason });
+  });
+
+  it('decideWinner is gone from the engine (it had no caller once the tool stopped scanning)', () => {
+    expect(dedupe.decideWinner).toBeUndefined();
+    expect(dedupe.loserAutoBlockers).toEqual(expect.any(Function));
+    expect(dedupe.REPOINT_EXCLUDED_TABLES).toBeInstanceOf(Set);
+  });
+});
