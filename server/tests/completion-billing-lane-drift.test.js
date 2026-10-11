@@ -42,3 +42,45 @@ test('completion runs the check in BOTH mint lanes, inside the mint transaction 
   expect(src.match(/recheckInTrx: mintRecheckInTrx,/g)).toHaveLength(2);
   expect(src).toMatch(/const mintRecheckInTrx = async \(trx\) => \{[\s\S]{0,260}await refuseBillingLaneDriftInTrx\(trx, svc\);/);
 });
+
+describe('Codex round 6 on #6118: the recheck runs before the invoice decision, on every path', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+
+  test('an unpriced monthly visit (nothing to mint) with a concurrent switch to per-application refuses: the check needs no invoice decision', async () => {
+    // The visit is unpriced on the monthly lane, so the decision would not mint;
+    // the check reads only the customer's lane and still refuses on the move.
+    const trx = trxReturning({ billing_mode: 'per_application', per_application_fee: '147.00' });
+    await expect(refuseBillingLaneDriftInTrx(trx, SVC, { lock: true }))
+      .rejects.toMatchObject({ status: 409, statusCode: 409, code: 'BILLING_LANE_CHANGED' });
+  });
+
+  test('the lock option takes the customer row KEY SHARE, so it waits for a switch still committing', async () => {
+    const q = { where: () => q, forKeyShare: jest.fn(() => q), first: async () => ({ billing_mode: 'monthly_membership', per_application_fee: null }) };
+    await refuseBillingLaneDriftInTrx(jest.fn(() => q), SVC, { lock: true });
+    expect(q.forKeyShare).toHaveBeenCalledTimes(1);
+    q.forKeyShare.mockClear();
+    await refuseBillingLaneDriftInTrx(jest.fn(() => q), SVC);
+    expect(q.forKeyShare).not.toHaveBeenCalled();
+  });
+
+  test('wiring: the check sits ahead of the shouldInvoice decision and outside the shouldInvoice branch', () => {
+    const check = src.indexOf('refuseBillingLaneDriftInTrx(trx, svc, { lock: true })');
+    const decision = src.indexOf('const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(');
+    expect(check).toBeGreaterThan(0);
+    expect(check).toBeLessThan(decision);
+    expect(src.slice(check - 120, check)).toMatch(/if \(!packetEffects\) \{\s*await db\.transaction\(/);
+  });
+
+  test('wiring: a thrown drift after the durable commit is never finalized: the outer catch releases the attempt and rethrows', () => {
+    const outer = src.slice(src.lastIndexOf('} catch (err) {', src.indexOf('markCompletionAttemptSucceeded(completionAttempt, { record, invoice, response: responsePayload });')));
+    expect(outer).toMatch(/else \{[\s\S]*releaseCompletionAttemptForResume\(completionAttempt, err\)[\s\S]*\}\s*throw err;/);
+  });
+
+  test('wiring: a drift refused inside the mint releases for resume with a 409, never the non-blocking "bill by hand" finalize', () => {
+    const branch = src.indexOf("invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id");
+    const nonBlocking = src.indexOf('Auto-invoice failed (non-blocking)');
+    expect(branch).toBeGreaterThan(0);
+    expect(branch).toBeLessThan(nonBlocking);
+    expect(src.slice(branch, branch + 700)).toMatch(/releaseCompletionAttemptForResume\(completionAttempt, invErr\)[\s\S]*status: 409[\s\S]*code: 'BILLING_LANE_CHANGED'/);
+  });
+});

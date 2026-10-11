@@ -10494,6 +10494,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       : (resumingCommittedCompletion || completionTaxAuthorityError
         ? undefined
         : (completionResolvedPayer?.payerId || null));
+    // Billing-lane drift is rechecked BEFORE the invoice decision, on every
+    // completion path (Codex round 6 on #6118): the decision below reads the
+    // lane snapshot taken at entry, and an unpriced monthly visit that the
+    // decision declines to bill never reaches the mint's own recheck, so a
+    // concurrent switch to per-application would finish it unbilled. The
+    // read takes the customer row KEY SHARE, so it waits for a switch still
+    // committing. A moved lane throws the retryable 409 out of the completion:
+    // the attempt is released for resume and the retry decides on the new lane.
+    if (!packetEffects) {
+      await db.transaction((trx) => refuseBillingLaneDriftInTrx(trx, svc, { lock: true }));
+    }
     // Auto-invoice eligibility. With GATE_AUTOINVOICE_PRICED_VISITS on, an
     // explicitly-priced visit also qualifies even without the scheduler's
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak
@@ -12482,6 +12493,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? 'This visit\'s setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The customer's billing type moved while the mint waited on its locks
+        // (refuseBillingLaneDriftInTrx): nothing was minted. Retryable on EVERY
+        // lane, never the non-blocking "bill by hand" finalize below — the retry
+        // decides and bills on the new lane.
+        if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: billing type changed during the mint — releasing for resume so the retry bills on the new lane`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 409, body: {
+            error: invErr.message,
+            code: 'BILLING_LANE_CHANGED',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });

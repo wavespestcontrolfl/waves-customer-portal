@@ -145,7 +145,10 @@ function billingPin(row) {
 const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'primary_line_price',
   'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id', 'is_recurring'];
 
-const VISIT_LIMIT = 200;
+// No cut on the card or the pin: every live visit is projected, pinned and
+// locked, so a visit past any page size still counts for the payer rule and the
+// totals. Past this many the card is refused instead of read in part.
+const VISIT_HARD_LIMIT = 2000;
 
 async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   const { etDateString } = require('../../utils/datetime-et');
@@ -158,7 +161,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
     .where({ customer_id: customerId })
     .where(function live() { whereVisitRowLive(this, today); })
     .select(VISIT_COLUMNS);
-  const ordered = () => base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_LIMIT);
+  const ordered = () => base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1);
   if (!lock) return ordered();
   // At commit: lock every candidate visit FOR UPDATE, the row lock the
   // Schedule save takes (admin-schedule.js PUT /:id/update-details: customer
@@ -166,7 +169,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   // than one visit never cross. The projection is read AFTER the locks, with
   // the card's own ordering and cut: a save that committed first is seen, and
   // one that has not is held off until this transaction ends.
-  await base().orderBy('id', 'asc').forUpdate();
+  await base().orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1).forUpdate();
   return ordered();
 }
 
@@ -354,6 +357,7 @@ async function customerPageRefusal(dbh, customerId, row, fields) {
  * `visits` is upcomingVisits() read on the same handle.
  */
 async function billingEditRefusal(dbh, customerId, row, fields, visits) {
+  if (visits.length > VISIT_HARD_LIMIT) return refuse('This customer has too many upcoming visits to confirm from the bar; change it on the customer page. Nothing was proposed.', 'too_many_visits');
   if (row.billing_mode === 'annual_prepay') return refuse('This customer is on annual prepay; that lane follows the annual invoice and its term, so it is not changed from the bar. Nothing was proposed.', 'annual_prepay_lane');
   if (unchangedEdit(row, fields)) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
   if (await BillingModeRules.liveAnnualPrepayTerm(dbh, customerId)) {

@@ -11,7 +11,9 @@ const mockState = {
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
-    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orWhereRaw', 'orderBy', 'limit']) q[m] = () => q;
+    for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
+    // limit is honoured, so a card that cut the visits at a page size would show it.
+    q.limit = (n) => { q.cap = n; return q; };
     // where(fn) runs its callback (the live-visit clause is built that way).
     q.where = (f) => { if (typeof f === 'function') f.call(q, q); return q; };
     q.whereIn = (col) => { if (col === 'id') q.byId = true; return q; };
@@ -36,6 +38,7 @@ jest.mock('../models/db', () => {
         if (q.cols.flat().includes('payer_id')) mockState.log.push(q.locked ? 'visits:lock' : 'visits:read');
       }
       if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
+      if (q.cap != null) rows = rows.slice(0, q.cap);
       return Promise.resolve(rows).then(resolve, reject);
     };
     q.update = async (patch) => {
@@ -706,6 +709,59 @@ describe('Codex round 5 on #6118', () => {
       rules: { complexity: ['error', 20] },
     }, 'billing-mode-change.js');
     expect(messages.map((m) => `${m.line}: ${m.message}`)).toEqual([]);
+  });
+});
+
+describe('Codex round 6 on #6118: no cut on the visits the card and the pin cover', () => {
+  const LEAVE = { billing_mode: 'per_application', per_application_fee: 147 };
+  const MONTHLY = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+  const visit = (n, extra = {}) => ({ id: `w${String(n).padStart(5, '0')}`, status: 'confirmed', scheduled_date: '2099-04-01', estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null, ...extra });
+  const many = (count, extraFor = () => ({})) => Array.from({ length: count }, (_, i) => visit(i + 1, extraFor(i + 1)));
+
+  test('250 visits: the card counts all of them and the pin covers all of them', async () => {
+    mockState.customer = { ...MONTHLY };
+    const visits = many(250);
+    mockState.visits = visits;
+    const proposal = await propose(LEAVE);
+    expect(proposal.error).toBeUndefined();
+    expect(proposal.display.next_visits).toContain('Upcoming visits now on the schedule: 250 visits at its own price.');
+    expect(proposal.display.next_visits).toContain('245 more priced visits: $24500.00 scheduled in all — charged to the saved card at completion.');
+    expect(proposal.pin).toBe(pinFor(MONTHLY, visits, LEAVE));
+    // A change to visit 250 (past any 200-row page) changes the pin: the commit refuses it.
+    const edited = visits.map((v, i) => (i === 249 ? { ...v, estimated_price: '90.00' } : v));
+    mockState.visits = edited;
+    const stale = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
+    });
+    expect(stale).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    // Unchanged, the commit passes with the same 250 locked and read.
+    mockState.visits = visits;
+    expect((await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
+    })).error).toBeUndefined();
+  });
+
+  test('a Bill-To payer on visit 250 refuses the card and the commit', async () => {
+    mockState.customer = { ...BASE };
+    mockState.visits = many(250, (n) => (n === 250 ? { payer_id: 9 } : {}));
+    expect(await propose(LEAVE)).toMatchObject({ code: 'bill_to_payer' });
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: pinFor(BASE, mockState.visits, LEAVE),
+    });
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('past the hard limit the card is refused, not shown in part', async () => {
+    mockState.customer = { ...BASE };
+    mockState.visits = many(2001);
+    expect(await propose(LEAVE)).toMatchObject({
+      code: 'too_many_visits',
+      error: expect.stringContaining('too many upcoming visits to confirm from the bar; change it on the customer page'),
+    });
+    mockState.visits = many(2000);
+    expect((await propose(LEAVE)).error).toBeUndefined();
   });
 });
 
