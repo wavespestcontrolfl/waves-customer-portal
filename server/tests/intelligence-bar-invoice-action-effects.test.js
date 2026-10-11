@@ -1,5 +1,5 @@
 /**
- * The Intelligence Bar's one effects plan for send_invoice / charge_invoice
+ * The Intelligence Bar's one effects plan for send_invoice
  * (invoice-action-effects.js): every post-commit effect, from the handlers' own
  * predicates, with the card wording, one pinned digest, and a source contract that
  * fails when a handler gains a side-effect call the plan does not name.
@@ -11,14 +11,7 @@ jest.mock('../services/invoice-issued-closeout', () => ({ issuedCloseoutTarget: 
 jest.mock('../services/lead-estimate-link', () => ({ invoiceSentConversionTargets: jest.fn(async () => ({ leadIds: [] })) }));
 jest.mock('../services/invoice-followups', () => ({
   planFollowupSequence: jest.fn(async () => ({ arms: true, state: 'active', cadence: [3, 7, 14, 30] })),
-  stopOnPaymentVerdict: jest.fn(() => ({ stops: false, thankYou: false })),
-  activePaymentPlan: jest.fn(async () => null),
 }));
-jest.mock('../services/review-request', () => ({
-  completionNotes: jest.fn(async () => ({})),
-  paidInvoiceReviewSkip: jest.fn(() => 'not_completion_invoice'),
-}));
-jest.mock('../services/project-report-hold', () => ({ heldReportsForInvoice: jest.fn(async () => []) }));
 
 const fs = require('fs');
 const path = require('path');
@@ -26,8 +19,6 @@ const db = require('../models/db');
 const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
 const LeadLink = require('../services/lead-estimate-link');
 const Followups = require('../services/invoice-followups');
-const Reviews = require('../services/review-request');
-const ReportHold = require('../services/project-report-hold');
 const effects = require('../services/intelligence-bar/invoice-action-effects');
 
 const LEAD = '11111111-2222-4333-8444-555555555555';
@@ -53,11 +44,6 @@ beforeEach(() => {
   issuedCloseoutTarget.mockResolvedValue(null);
   LeadLink.invoiceSentConversionTargets.mockResolvedValue({ leadIds: [] });
   Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 7, 14, 30] });
-  Followups.stopOnPaymentVerdict.mockReturnValue({ stops: false, thankYou: false });
-  Followups.activePaymentPlan.mockResolvedValue(null);
-  Reviews.completionNotes.mockResolvedValue({});
-  Reviews.paidInvoiceReviewSkip.mockReturnValue('not_completion_invoice');
-  ReportHold.heldReportsForInvoice.mockResolvedValue([]);
 });
 
 describe('planSendEffects', () => {
@@ -116,76 +102,6 @@ describe('planSendEffects', () => {
     issuedCloseoutTarget.mockRejectedValue(new Error('read failed'));
     await expect(effects.planSendEffects(invoice(), customer, {})).rejects.toThrow('read failed');
   });
-});
-
-describe('planChargeEffects', () => {
-  test('a paid invoice lists credit, closeout, review, reminders, plan, term, held report, receipt and the admin bell', async () => {
-    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: true });
-    const plan = await effects.planChargeEffects(invoice({ service_record_id: 'rec-1', annual_prepay_term_id: 'term-1' }), customer, { creditCents: 2500 });
-    expect(plan.effects.map((e) => e.key)).toEqual(['credit', 'closeout', 'review', 'followup_stop', 'payment_plan', 'annual_prepay', 'held_report', 'receipt', 'admin_notice']);
-    expect(byKey(plan, 'credit').line).toBe('$25.00 of account credit is applied first');
-    expect(issuedCloseoutTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { trigger: 'paid' });
-    expect(byKey(plan, 'closeout').line).toMatch(/^Once the charge is paid, the payment also finishes a closeout already started/);
-    expect(byKey(plan, 'annual_prepay')).toMatchObject({ applies: true });
-    expect(byKey(plan, 'receipt').line).toMatch(/payment receipt/);
-  });
-
-  test('review outreach follows the webhook\'s own test (enrollForPaidInvoice): the completion record\'s notes, the closeout\'s new record, and a packet', async () => {
-    Reviews.paidInvoiceReviewSkip.mockReturnValue(null);
-    Reviews.completionNotes.mockResolvedValue({ requestReview: true });
-    let plan = await effects.planChargeEffects(invoice({ service_record_id: 'rec-1' }), customer, {});
-    expect(Reviews.completionNotes).toHaveBeenCalledWith('rec-1');
-    expect(Reviews.paidInvoiceReviewSkip).toHaveBeenCalledWith({ customer_id: 'cust-1', service_record_id: 'rec-1' }, { requestReview: true });
-    expect(byKey(plan, 'review')).toMatchObject({ applies: true, state: 'enrolls' });
-    expect(byKey(plan, 'review').line).toMatch(/^Once the charge is paid, the payment also enrolls the customer in review outreach/);
-    // The record the closeout creates is the one the review step then reads.
-    Reviews.paidInvoiceReviewSkip.mockClear();
-    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: false });
-    await effects.planChargeEffects(invoice(), customer, {});
-    expect(Reviews.paidInvoiceReviewSkip).toHaveBeenCalledWith({ customer_id: 'cust-1', service_record_id: 'from_closeout' }, { requestReview: false });
-    // Opted out: no review effect.
-    Reviews.paidInvoiceReviewSkip.mockReturnValue('completion_opted_out');
-    plan = await effects.planChargeEffects(invoice({ service_record_id: 'rec-1' }), customer, {});
-    expect(byKey(plan, 'review')).toMatchObject({ applies: false, state: 'skip:completion_opted_out', line: 'No review request is sent.' });
-    // A visit completion packet decides itself: disclosed as "may".
-    plan = await effects.planChargeEffects(invoice({ visit_completion_packet_id: 'pkt-1' }), customer, {});
-    expect(byKey(plan, 'review').line).toMatch(/may also enroll the customer in review outreach \(the visit completion packet decides\)/);
-  });
-
-  // Round 5 item 4: the record a closeout creates is stored with requestReview false, so the plan models it as opted out.
-  test('a closeout-created first service record is modeled as opted out of review: the card says no review request is sent; the real rule decides, in both branches', async () => {
-    const realSkip = jest.requireActual('../services/review-request').paidInvoiceReviewSkip;
-    Reviews.paidInvoiceReviewSkip.mockImplementation(realSkip);
-    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: false });
-    // Branch 1: no record yet and the closeout will create one - opted out.
-    let plan = await effects.planChargeEffects(invoice(), customer, {});
-    expect(byKey(plan, 'review')).toMatchObject({ applies: false, state: 'skip:completion_opted_out', line: 'No review request is sent.' });
-    // Branch 2: a record already exists with no opt-out - the review still enrolls.
-    Reviews.completionNotes.mockResolvedValue({ requestReview: true });
-    plan = await effects.planChargeEffects(invoice({ service_record_id: 'rec-1' }), customer, {});
-    expect(byKey(plan, 'review')).toMatchObject({ applies: true, state: 'enrolls' });
-    // No closeout and no record: nothing to say.
-    issuedCloseoutTarget.mockResolvedValue(null);
-    plan = await effects.planChargeEffects(invoice(), customer, {});
-    expect(byKey(plan, 'review')).toMatchObject({ applies: false, line: null });
-    expect(effects.CLOSEOUT_RECORD_NOTES).toEqual({ requestReview: false });
-  });
-
-  // Round 5 item 2.
-  test('an invoice that pays an annual-prepay term is refused for a bar charge, and the plan keeps the reason as its annual_prepay entry', async () => {
-    expect(effects.annualPrepayRefusal(invoice({ annual_prepay_term_id: 'term-1' }))).toBe('Annual-prepay invoices are charged from the Invoices page, not from the bar.');
-    expect(effects.annualPrepayRefusal(invoice())).toBeNull();
-    const plan = await effects.planChargeEffects(invoice({ annual_prepay_term_id: 'term-1' }), customer, {});
-    expect(byKey(plan, 'annual_prepay')).toMatchObject({ applies: true, state: 'term-1', line: effects.ANNUAL_PREPAY_REFUSAL });
-  });
-
-  // Round 5 item 3 (the plan half): the target the PaymentIntent will carry.
-  test('the approved closeout target is the planned visit id, or none', async () => {
-    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: true });
-    expect(effects.approvedCloseoutTarget((await effects.planChargeEffects(invoice(), customer, {})).effects)).toBe('visit-1');
-    issuedCloseoutTarget.mockResolvedValue(null);
-    expect(effects.approvedCloseoutTarget((await effects.planChargeEffects(invoice(), customer, {})).effects)).toBe('none');
-  });
 
   // Round 5 item 1 (the plan half).
   test('the send plan lists the invoice attachments by name and pins their id, name, size and edit time', async () => {
@@ -212,29 +128,12 @@ describe('planChargeEffects', () => {
     expect((await effects.planSendEffects(invoice(), customer, {})).digest).toBe(two);
   });
 
-  test('billing reminders stop (with a thank-you text only for a customer with a phone), a payment plan completes, a held report releases', async () => {
-    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ status: 'active', touches_sent: 2 }) }) }));
-    Followups.stopOnPaymentVerdict.mockReturnValue({ stops: true, thankYou: true });
-    Followups.activePaymentPlan.mockResolvedValue({ id: 'plan-1' });
-    ReportHold.heldReportsForInvoice.mockResolvedValue(['aaaaaaaa-0000-4000-8000-000000000000']);
-    let plan = await effects.planChargeEffects(invoice(), customer, {});
-    expect(byKey(plan, 'followup_stop').line).toBe('Once the charge is paid, the payment also stops the billing reminders for this invoice and texts the customer a thank-you (a reminder was already sent)');
-    expect(byKey(plan, 'payment_plan').line).toMatch(/completes the active payment plan/);
-    expect(byKey(plan, 'held_report').line).toBe('Once the charge is paid, the payment also releases the held service report (project aaaaaaaa) to the customer');
-    plan = await effects.planChargeEffects(invoice(), { id: 'cust-1', phone: null }, {});
-    expect(byKey(plan, 'followup_stop').line).toBe('Once the charge is paid, the payment also stops the billing reminders for this invoice');
-  });
 
-  test('the digest pins every effect: credit, closeout, review, reminders, plan, held report', async () => {
-    const base = (await effects.planChargeEffects(invoice(), customer, {})).digest;
-    const changes = [
-      () => effects.planChargeEffects(invoice(), customer, { creditCents: 100 }),
-      () => { issuedCloseoutTarget.mockResolvedValue({ visitId: 'v', serviceType: 'x', date: 'd', resuming: false }); return effects.planChargeEffects(invoice(), customer, {}); },
-      () => { issuedCloseoutTarget.mockResolvedValue(null); Reviews.paidInvoiceReviewSkip.mockReturnValue(null); return effects.planChargeEffects(invoice({ service_record_id: 'r' }), customer, {}); },
-      () => { Reviews.paidInvoiceReviewSkip.mockReturnValue('not_completion_invoice'); Followups.activePaymentPlan.mockResolvedValue({ id: 'p' }); return effects.planChargeEffects(invoice(), customer, {}); },
-      () => { Followups.activePaymentPlan.mockResolvedValue(null); ReportHold.heldReportsForInvoice.mockResolvedValue(['x']); return effects.planChargeEffects(invoice(), customer, {}); },
-    ];
-    for (const change of changes) expect((await change()).digest).not.toBe(base);
+  test('the approved closeout target is the planned visit id, or none', async () => {
+    issuedCloseoutTarget.mockResolvedValue({ visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', resuming: true });
+    expect(effects.approvedCloseoutTarget((await effects.planSendEffects(invoice(), customer, {})).effects)).toBe('visit-1');
+    issuedCloseoutTarget.mockResolvedValue(null);
+    expect(effects.approvedCloseoutTarget((await effects.planSendEffects(invoice(), customer, {})).effects)).toBe('none');
   });
 });
 
@@ -248,7 +147,6 @@ const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`]
 const SIDE_EFFECT_CALL = /\b((?:convert|schedule|closeOut|enroll|stop|sync|complete|enqueue|notify|reset|mirror|record|autoApply|reverse|requeue|resolve|post|void|restore|release)[A-Za-z]*)\(/g;
 const callsIn = (text) => [...new Set([...code(text).matchAll(SIDE_EFFECT_CALL)].map((m) => m[1]))].sort();
 const invoiceSource = read('../services/invoice.js');
-const webhookSource = read('../routes/stripe-webhook.js');
 const slice = (text, from, to) => text.slice(text.indexOf(from), text.indexOf(to, text.indexOf(from)));
 
 describe('source contract', () => {
@@ -260,23 +158,11 @@ describe('source contract', () => {
     expect(unnamed).toEqual([]);
   });
 
-  test('every side-effect call in payment_intent.succeeded (handler and its paid-invoice steps) is named by the charge plan', () => {
-    const handler = slice(webhookSource, 'async function handlePaymentIntentSucceeded(', 'async function resetAchFailureStateForSucceededIntent(');
-    const steps = slice(webhookSource, 'async function closeOutVisitAfterPaidInvoice(', 'async function notifyPaymentSuccess(');
-    const calls = callsIn(handler + steps);
-    expect(calls).toEqual(expect.arrayContaining(['closeOutVisitAfterPaidInvoice', 'scheduleReviewAfterPaidInvoice', 'stopOnPayment', 'enqueueReceiptDelivery', 'completeActivePlansForInvoice']));
-    const unnamed = calls.filter((name) => !(name in effects.CHARGE_CALL_COVERAGE) && name !== 'closeOutVisitForIssuedInvoice' && !/^enrollForPaidInvoice$/.test(name));
-    expect(unnamed).toEqual([]);
-  });
-
   test('the coverage tables point at real effects, and each non-applying call states why', () => {
     const sendKeys = new Set(['delivery', 'attachments', 'closeout', 'lead_conversion', 'followups', 'review', 'credit']);
-    const chargeKeys = new Set(['credit', 'closeout', 'review', 'followup_stop', 'payment_plan', 'annual_prepay', 'held_report', 'receipt', 'admin_notice']);
-    for (const [table, keys] of [[effects.SEND_CALL_COVERAGE, sendKeys], [effects.CHARGE_CALL_COVERAGE, chargeKeys]]) {
-      for (const [name, entry] of Object.entries(table)) {
-        if (entry.effect) expect([name, keys.has(entry.effect)]).toEqual([name, true]);
-        else expect([name, String(entry.why || '').length > 10]).toEqual([name, true]);
-      }
+    for (const [name, entry] of Object.entries(effects.SEND_CALL_COVERAGE)) {
+      if (entry.effect) expect([name, sendKeys.has(entry.effect)]).toEqual([name, true]);
+      else expect([name, String(entry.why || '').length > 10]).toEqual([name, true]);
     }
   });
 
@@ -286,8 +172,6 @@ describe('source contract', () => {
     const followups = code(read('../services/invoice-followups.js'));
     expect(followups).toMatch(/if \(followupArmBlock\(preview\)\) return null;/);
     expect(followups).toMatch(/if \(followupArmBlock\(invoice\)\) return null;/);
-    expect(followups).toMatch(/if \(!stopOnPaymentVerdict\(seq\)\.stops\) return;/);
-    expect(code(read('../services/review-request.js'))).toMatch(/const skipped = paidInvoiceReviewSkip\(invoice, notes\);/);
     expect(code(read('../services/lead-estimate-link.js'))).toMatch(/const resolved = await resolveConversionLeads\(database, \{/);
   });
 });

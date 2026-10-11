@@ -12,7 +12,6 @@ jest.mock('../services/stripe', () => ({}));
 
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const Followups = require('../services/invoice-followups');
-const Reviews = require('../services/review-request');
 const Invoice = require('../services/invoice');
 const LeadLink = require('../services/lead-estimate-link');
 
@@ -59,27 +58,10 @@ describe('invoice-followups planFollowupSequence (scheduleForInvoice\'s own pred
       .resolves.toMatchObject({ arms: false, state: 'existing:stopped' });
   });
 
-  test('followupArmBlock and stopOnPaymentVerdict are the rules the handlers apply', () => {
+  test('followupArmBlock is the rule scheduleForInvoice applies', () => {
     expect(Followups.followupArmBlock(invoice())).toBeNull();
     expect(Followups.followupArmBlock(invoice({ status: 'void' }))).toBe('not_schedulable');
     expect(Followups.followupArmBlock(invoice({ payer_id: 'p' }))).toBe('payer_billed');
-    expect(Followups.stopOnPaymentVerdict(null)).toEqual({ stops: false, thankYou: false });
-    expect(Followups.stopOnPaymentVerdict({ status: 'completed', touches_sent: 3 }).stops).toBe(false);
-    expect(Followups.stopOnPaymentVerdict({ status: 'stopped', touches_sent: 3 }).stops).toBe(false);
-    expect(Followups.stopOnPaymentVerdict({ status: 'active', touches_sent: 0 })).toEqual({ stops: true, thankYou: false });
-    expect(Followups.stopOnPaymentVerdict({ status: 'paused', touches_sent: 2 }).stops).toBe(true);
-  });
-});
-
-describe('review-request paidInvoiceReviewSkip (enrollForPaidInvoice\'s own test)', () => {
-  test('a completion invoice enrolls unless the completion opted out or the visit did not complete', () => {
-    const completion = { customer_id: 'cust-1', service_record_id: 'rec-1' };
-    expect(Reviews.paidInvoiceReviewSkip(completion, {})).toBeNull();
-    expect(Reviews.paidInvoiceReviewSkip(completion, { requestReview: true, visitOutcome: 'completed' })).toBeNull();
-    expect(Reviews.paidInvoiceReviewSkip(completion, { requestReview: false })).toBe('completion_opted_out');
-    expect(Reviews.paidInvoiceReviewSkip(completion, { visitOutcome: 'no_access' })).toBe('visit_outcome');
-    expect(Reviews.paidInvoiceReviewSkip({ customer_id: 'cust-1', service_record_id: null }, {})).toBe('not_completion_invoice');
-    expect(Reviews.paidInvoiceReviewSkip({ customer_id: null, service_record_id: 'rec-1' }, {})).toBe('not_completion_invoice');
   });
 });
 

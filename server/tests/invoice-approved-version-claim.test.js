@@ -19,11 +19,14 @@ jest.mock('../services/estimate-deposits', () => ({
   assertInvoiceDepositSettlementReady: jest.fn(async () => undefined),
 }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn() }));
+// The closeout target pin is an audit row written inside the claim (its own tests cover the writer).
+jest.mock('../services/invoice-issued-closeout', () => ({ recordApprovedCloseoutTarget: jest.fn(async () => undefined) }));
 
 const db = require('../models/db');
 const { approvedInvoiceVersionDigest } = require('../services/invoice-helpers');
 const InvoiceService = require('../services/invoice');
 const { claimInvoiceForSend } = InvoiceService;
+const { recordApprovedCloseoutTarget } = require('../services/invoice-issued-closeout');
 
 const INVOICE_ID = 'aaaaaaaa-2222-4222-8222-222222222222';
 const EDITED_AT = new Date('2099-01-01T12:00:00.123Z');
@@ -158,6 +161,43 @@ describe('claimInvoiceForSend with an approved version', () => {
     const broken = makeDb(row);
     await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withEffects(async () => { throw new Error('read failed'); }) })).rejects.toMatchObject({ code: 'approved_version_changed' });
     expect(broken.currentRow().status).toBe('sent');
+  });
+
+  test('who owes the invoice is asked again on the claimed row: a customer passes, a payer or an unreadable answer hands the claim back with its own text', async () => {
+    const row = baseRow();
+    const seen = [];
+    const withOwner = (verifyOwner) => ({ ...approved(row), verifyOwner });
+    makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withOwner(async (claimed) => { seen.push(claimed.status); return null; }) }))
+      .resolves.toMatchObject({ claimed: true });
+    expect(seen).toEqual(['sent']);
+    const payer = makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withOwner(async () => 'This invoice is billed to a payer, not the customer.') }))
+      .rejects.toMatchObject({ code: 'approved_version_changed', message: 'This invoice is billed to a payer, not the customer.' });
+    expect(payer.currentRow().status).toBe('sent');
+    expect(payer.currentRow().send_claim_token).toBeNull();
+    // A check that throws fails closed: the claim is handed back with the "could not verify" text.
+    const broken = makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: withOwner(async () => { throw new Error('read failed'); }) }))
+      .rejects.toMatchObject({ code: 'approved_version_changed', message: expect.stringMatching(/could not verify who owes this invoice/) });
+    expect(broken.currentRow().status).toBe('sent');
+  });
+
+  test('the approved closeout target is written inside the claim; a pin that cannot be written hands the claim back; no target writes nothing', async () => {
+    const row = baseRow();
+    makeDb(row);
+    await claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), closeoutTarget: 'none' } });
+    expect(recordApprovedCloseoutTarget).toHaveBeenCalledWith(INVOICE_ID, 'none', expect.objectContaining({ priorInvoice: expect.objectContaining({ status: 'sent' }) }));
+    recordApprovedCloseoutTarget.mockClear();
+    makeDb(row);
+    await claimInvoiceForSend(INVOICE_ID, { expectedVersion: approved(row) });
+    expect(recordApprovedCloseoutTarget).not.toHaveBeenCalled();
+    recordApprovedCloseoutTarget.mockRejectedValueOnce(new Error('audit insert failed'));
+    const failed = makeDb(row);
+    await expect(claimInvoiceForSend(INVOICE_ID, { expectedVersion: { ...approved(row), closeoutTarget: 'visit-9' } }))
+      .rejects.toMatchObject({ code: 'approved_version_changed' });
+    expect(failed.currentRow().status).toBe('sent');
+    expect(failed.currentRow().send_claim_token).toBeNull();
   });
 
   test('a caller that passes no version is unchanged', async () => {

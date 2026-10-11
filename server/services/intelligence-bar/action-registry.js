@@ -127,7 +127,6 @@ const GATED_ACTIONS = {
   merge_customers: () => mergeCustomersEnabled(),
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
-  charge_invoice: () => invoiceActionsLive(),
 };
 
 function allowed(action, { role, context, fullAccess } = {}) {
@@ -205,8 +204,8 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
-  // send_invoice / charge_invoice (domain customers) also ride the Invoices / Revenue page and dashboard (owner 2026-10-07).
-  if (context === 'revenue' || context === 'dashboard') ['send_invoice', 'charge_invoice'].forEach((n) => common.add(n));
+  // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
+  if (context === 'revenue' || context === 'dashboard') common.add('send_invoice');
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');

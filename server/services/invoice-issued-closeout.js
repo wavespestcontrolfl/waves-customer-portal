@@ -380,6 +380,44 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
+// The visit an Intelligence Bar send's card said would be closed (a visit id) or 'none', kept as an audit row on
+// the INVOICE (no new column), written inside the send claim. The send's own closeout is handed the target
+// directly; this row lets the retry sweep, which re-enters with no caller, enforce the same target. The row also
+// records the newest delivery stamp the invoice had at claim time: a claim that delivered nothing leaves the stamps
+// where they were, and the sweep then ignores that row (the pin belongs to the delivery that followed it).
+const CLOSEOUT_PIN_ACTION = 'invoice.send_closeout_target_approved';
+const newestDeliveryMs = (row) => {
+  const stamps = [row?.sent_at, row?.sms_sent_at, row?.email_sent_at].filter(Boolean).map((v) => new Date(v).getTime());
+  return stamps.length ? Math.max(...stamps) : null;
+};
+async function recordApprovedCloseoutTarget(invoiceId, approvedTarget, { conn = db, priorInvoice = null, actorTechnicianId = null } = {}) {
+  const { recordAuditEvent } = require('./audit-log');
+  await recordAuditEvent({
+    actor_type: actorTechnicianId ? 'admin' : 'system',
+    actor_id: actorTechnicianId,
+    action: CLOSEOUT_PIN_ACTION,
+    resource_type: 'invoices',
+    resource_id: invoiceId,
+    metadata: { invoiceId: String(invoiceId), approvedTarget, priorDeliveredAtMs: newestDeliveryMs(priorInvoice) },
+    critical: true,
+    trx: conn,
+  });
+}
+
+// The pinned target for an invoice whose delivery followed the pin, or null. Throws on a failed read (the sweep
+// skips the row and the next pass re-reads).
+async function approvedCloseoutTargetFor(conn, invoiceId) {
+  const last = await conn('audit_log').where({ resource_type: 'invoices', resource_id: invoiceId, action: CLOSEOUT_PIN_ACTION })
+    .orderBy('created_at', 'desc').first('metadata');
+  if (!last) return null;
+  let meta = last.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+  if (!meta?.approvedTarget) return null;
+  const delivered = newestDeliveryMs(await conn('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'email_sent_at'));
+  const prior = meta.priorDeliveredAtMs;
+  return delivered !== null && (prior === null || prior === undefined || delivered > prior) ? meta.approvedTarget : null;
+}
+
 // The sweeps' PREFILTER for the prepayment rule (issuedCloseoutVisitRefusal,
 // `visit_prepaid`): a visit nobody arrived at whose invoice / statement was
 // NOT settled or delivered on a later ET day than the visit. The closeout
@@ -521,9 +559,20 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
       }
       if (last && !refusedForTheMoment(last)) continue;
     }
-    retried += 1;
     const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today });
+    // A bar send's card named the visit this closeout may close (or none): the sweep keeps to it. The pin covers the
+    // send's closeout only, so a settled invoice (trigger 'paid') is retried as the payment rails always do.
+    let approvedTarget = null;
+    if (trigger === 'sent') {
+      try {
+        approvedTarget = await approvedCloseoutTargetFor(conn, row.invoice_id);
+      } catch (err) {
+        logger.error(`[invoice-issued-closeout] issued-invoice retry: pin lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+        continue;
+      }
+    }
+    retried += 1;
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today, ...(approvedTarget ? { approvedTarget } : {}) });
     if (out?.closed) closed += 1;
   }
   if (retried) logger.info(`[invoice-issued-closeout] issued-invoice retry: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
@@ -618,14 +667,14 @@ async function resolveCloseoutTarget(run) {
   return { closed: false, reason: resolved.reason, visitId: null };
 }
 
-// An approved target (the Intelligence Bar's charge card: the visit id it said would be closed, or 'none'):
+// An approved target (the Intelligence Bar's send card: the visit id it said would be closed, or 'none'):
 // the closeout runs only for that visit. A different live visit is left open and audited as a refusal that
-// the retry sweeps do not reconsider (a person decides). A payment with no approved target is unchanged.
+// the retry sweeps do not reconsider (a person decides). A send with no approved target is unchanged.
 async function refuseUnapprovedTarget(run) {
   if (!run.approvedTarget || run.svc.id === run.approvedTarget) return null;
   logger.warn(`[invoice-issued-closeout] ${run.label} → approved_target_mismatch: approved ${run.approvedTarget}, live visit ${run.svc.id}; left open`);
   const audited = await auditCloseoutOutcome(run, { closed: false, visitId: run.svc.id, code: 'approved_target_mismatch' });
-  return { closed: false, reason: 'approved_target_mismatch', invoiceId: run.invoiceId, visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
+  return { closed: false, reason: 'approved_target_mismatch', visitId: run.svc.id, approvedTarget: run.approvedTarget, audited };
 }
 
 // Phase 3 — the canonical completion in its quiet backfill posture: no
@@ -758,4 +807,5 @@ module.exports = {
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,
   issuedCloseoutTarget,
+  recordApprovedCloseoutTarget,
 };

@@ -46,13 +46,6 @@ async function recoverStaleReleasingClaims() {
     });
 }
 
-// Projects whose report this invoice's payment releases: the held reports the sweep above picks up once
-// the invoice is paid (the same 'held' status it selects). Read-only; the Intelligence Bar's charge card names them.
-async function heldReportsForInvoice(invoiceId, database = db) {
-  const rows = await database('projects').where({ invoice_id: invoiceId, report_hold_status: 'held' }).select('id');
-  return rows.map((row) => String(row.id));
-}
-
 async function findDueHeldProjectIds(limit) {
   try {
     const rows = await db('projects as p')
@@ -117,7 +110,6 @@ function scheduleHoldReleaseSweep({ delayMs = 2000, limit = 5 } = {}) {
 }
 
 module.exports = {
-  heldReportsForInvoice,
   sweepHeldReportReleases,
   scheduleHoldReleaseSweep,
   _internals: { recoverStaleReleasingClaims, findDueHeldProjectIds, STALE_RELEASING_MINUTES },

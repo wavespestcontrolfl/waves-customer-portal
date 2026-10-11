@@ -1911,8 +1911,7 @@ router.post('/:id/charge-card-quote', async (req, res) => {
 // Body: { paymentMethodId } (our internal payment_methods.id).
 // The card must belong to the invoice customer. Succeeds by calling
 // Stripe off-session with confirm:true; webhook marks the invoice paid.
-router.post('/:id/charge-card', requireAdmin, invoiceChargeCardHandler);
-async function invoiceChargeCardHandler(req, res, next) {
+router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
   try {
     const { paymentMethodId, expectedTotal } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
@@ -1933,17 +1932,11 @@ async function invoiceChargeCardHandler(req, res, next) {
       // dispute hold is active, naming this admin.
       {
         expectedTotal,
-        // The Invoices page overrides a dispute hold and records it; the bar never does:
-        // with the override off, a held customer is refused inside the charge transaction
-        // before any override trail can be written.
-        operatorOverride: !req.ibChargeGuard,
+        operatorOverride: true,
         overrideTrail: {
           actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
           route: 'admin_invoice_charge_card', invoiceId: req.params.id,
         },
-        // Set only by chargeInvoiceFromBar (never an HTTP field): the bar's caps,
-        // rechecked under the charge lock, and the payment row's provenance stamp.
-        ...(req.ibChargeGuard ? { assertUnderChargeLock: req.ibChargeGuard, initiatedVia: 'intelligence_bar', expectedVersion: req.ibChargeVersion || null, approvedCloseoutTarget: req.ibCloseoutTarget || null, ibActionId: req.ibActionId || null } : {}),
       },
     );
     res.json({ success: true, ...result });
@@ -1971,11 +1964,6 @@ async function invoiceChargeCardHandler(req, res, next) {
         ambiguous: true,
       });
     }
-    // The bar's approved invoice version no longer matches the locked row: refused before
-    // any Stripe call (the same coded shape the bar's send claim refusal uses).
-    if (err.code === 'approved_version_changed') {
-      return res.status(400).json({ error: err.message, code: err.code });
-    }
     if (err.code === 'STRIPE_CHARGE_IN_PROGRESS') {
       return res.status(409).json({
         error: 'A saved-card charge is already in progress or awaiting reconciliation. DO NOT charge again until an admin verifies it.',
@@ -1985,7 +1973,7 @@ async function invoiceChargeCardHandler(req, res, next) {
     }
     res.status(400).json({ error: err.message });
   }
-}
+});
 
 // POST /:id/void — void invoice
 router.post('/:id/void', requireAdmin, async (req, res, next) => {
@@ -3760,9 +3748,8 @@ router._private = {
   stopInvoiceFollowupsForPaymentPlan,
 };
 
-// The Intelligence Bar's send_invoice / charge_invoice (owner ruling
-// 2026-10-07) run the SAME handlers as POST /:id/send and /:id/charge-card,
-// without an HTTP request (the #6086 adapter pattern): the handler gets the
+// The Intelligence Bar's send_invoice (owner ruling 2026-10-07) runs the
+// SAME handler as POST /:id/send, without an HTTP request (the #6086 adapter pattern): the handler gets the
 // only request fields it reads and a capture response, and the promise
 // resolves the reply it would send, { status, json }. An error passed to
 // next() rejects. The ib* fields exist only here, so the HTTP routes never
@@ -3784,15 +3771,7 @@ function barRequest(invoiceId, body, actor, extra) {
 function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
   return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
 }
-// chargeGuard: async (trx, { totalCents, invoice }) — the bar's caps, run under the charge lock.
-// version: { updatedAtMs, digest } — the invoice row the card showed, checked under the charge's invoice lock.
-// closeoutTarget: the visit id the approved plan would close out on payment, or 'none' (carried on the PaymentIntent).
-// ibActionId: the confirmed bar action making this charge; it rides on the PaymentIntent and on any orphan row.
-function chargeInvoiceFromBar({ invoiceId, body, actor, chargeGuard, version, closeoutTarget, ibActionId }) {
-  return runInvoiceHandler(invoiceChargeCardHandler, barRequest(invoiceId, body, actor, { ibChargeGuard: chargeGuard, ibChargeVersion: version || null, ibCloseoutTarget: closeoutTarget || null, ibActionId: ibActionId || null }));
-}
 
 module.exports = router;
 module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
-module.exports.chargeInvoiceFromBar = chargeInvoiceFromBar;
 module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;

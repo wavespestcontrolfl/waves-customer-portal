@@ -951,15 +951,6 @@ async function reviewAskDeliveryEvidenceFor(requests) {
 // is likewise the seam's releaseUnsent, called by requestId below.
 
 // ══════════════════════════════════════════════════════════════
-// Why a paid COMPLETION invoice's review ask is NOT enrolled, or null when it is: enrollForPaidInvoice's
-// own test, shared with the Intelligence Bar's effects plan. notes = the service record's stored notes.
-function paidInvoiceReviewSkip(invoice, notes = {}) {
-  if (!invoice?.customer_id || !invoice?.service_record_id) return "not_completion_invoice";
-  if (notes.requestReview === false) return "completion_opted_out";
-  if (notes.visitOutcome && notes.visitOutcome !== "completed") return "visit_outcome";
-  return null;
-}
-
 const ReviewService = {
   completionReviewDelay(notes = {}) {
     // The completion panel's explicit timing selection (Now / Tomorrow 8 AM
@@ -1888,19 +1879,6 @@ const ReviewService = {
     }
   },
 
-  /** The completion's stored notes (service_records.structured_notes) as an object; {} when absent. */
-  async completionNotes(serviceRecordId) {
-    const serviceRecord = await db("service_records")
-      .where({ id: serviceRecordId })
-      .select("structured_notes")
-      .first();
-    let notes = serviceRecord?.structured_notes || {};
-    if (typeof notes === "string") {
-      try { notes = JSON.parse(notes); } catch { notes = {}; }
-    }
-    return notes;
-  },
-
   /**
    * Post-PAYMENT enrollment for a COMPLETION invoice (has service_record_id)
    * whose review ask was deferred at delivery (unpaid-invoice hold). Shared
@@ -1919,12 +1897,25 @@ const ReviewService = {
         ? await Packets.enrollVisitCompletionReviewForInvoice(invoice.id)
         : (invoice?.visit_completion_packet_id ? await Packets.enrollVisitCompletionReview(invoice.visit_completion_packet_id) : null);
       if (packetResult) return packetResult;
-      const label = invoice?.invoice_number || invoice?.id;
-      const notes = invoice?.customer_id && invoice?.service_record_id ? await this.completionNotes(invoice.service_record_id) : {};
-      const skipped = paidInvoiceReviewSkip(invoice, notes);
-      if (skipped) {
-        if (skipped !== "not_completion_invoice") logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): ${skipped}`);
-        return { enrolled: false, reason: skipped };
+      if (!invoice?.customer_id || !invoice?.service_record_id) {
+        return { enrolled: false, reason: "not_completion_invoice" };
+      }
+      const label = invoice.invoice_number || invoice.id;
+      const serviceRecord = await db("service_records")
+        .where({ id: invoice.service_record_id })
+        .select("structured_notes")
+        .first();
+      let notes = serviceRecord?.structured_notes || {};
+      if (typeof notes === "string") {
+        try { notes = JSON.parse(notes); } catch { notes = {}; }
+      }
+      if (notes.requestReview === false) {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): completion opted out`);
+        return { enrolled: false, reason: "completion_opted_out" };
+      }
+      if (notes.visitOutcome && notes.visitOutcome !== "completed") {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): visit outcome ${notes.visitOutcome}`);
+        return { enrolled: false, reason: "visit_outcome" };
       }
       const delayMinutes = this.completionReviewDelay(notes);
       // Legacy create() dedupes by service_record_id; the cadence path
@@ -8113,4 +8104,3 @@ ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 ReviewService.reviewAskDeliveryEvidenceFor = reviewAskDeliveryEvidenceFor;
 
 module.exports = ReviewService;
-module.exports.paidInvoiceReviewSkip = paidInvoiceReviewSkip;

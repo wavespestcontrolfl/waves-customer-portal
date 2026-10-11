@@ -79,10 +79,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'resend_receipt',
   'remove_saved_payment_method',
   'correct_invoice_address',
-  // send_invoice / charge_invoice (owner ruling 2026-10-07): an existing invoice only,
-  // through the Invoices page's own send and charge-card handlers.
+  // send_invoice (owner ruling 2026-10-07): an existing invoice only,
+  // through the Invoices page's own send handler.
   'send_invoice',
-  'charge_invoice',
   'update_lead_contact',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',

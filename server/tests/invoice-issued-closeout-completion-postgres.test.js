@@ -176,13 +176,12 @@ describe('source contracts', () => {
   test('the Stripe webhook runs the paid closeout for every settled invoice, BEFORE its review step (owner 2026-10-04: card and bank payments close the visit too)', () => {
     const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     // The helper reads only a SETTLED invoice and asks for the 'paid' trigger.
-    expect(webhook).toMatch(/async function closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId = null, approvedTarget = null \} = \{\}\) \{\s*let out;\s*try \{[\s\S]{0,300}?\.whereIn\('status', \['paid', 'prepaid'\]\)[\s\S]{0,300}?out = await closeOutVisitForIssuedInvoice\(\{ invoiceId: paid\.id, trigger: 'paid', approvedTarget \}\);/);
+    expect(webhook).toMatch(/async function closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId = null \} = \{\}\) \{\s*let out;\s*try \{[\s\S]{0,300}?\.whereIn\('status', \['paid', 'prepaid'\]\)[\s\S]{0,300}?out = await closeOutVisitForIssuedInvoice\(\{ invoiceId: paid\.id, trigger: 'paid' \}\);/);
     // A failure with no audit row goes back to Stripe; an audited one is the sweep's.
-    expect(webhook).toMatch(/out = await closeOutVisitForIssuedInvoice\([^)]*\);\s*\} catch \(err\) \{[\s\S]{0,200}?throw err;\s*\}[\s\S]{0,460}?if \(out && !out\.closed && out\.audited === false\) \{[\s\S]{0,260}?throw new Error\(/);
+    expect(webhook).toMatch(/out = await closeOutVisitForIssuedInvoice\([^)]*\);\s*\} catch \(err\) \{[\s\S]{0,200}?throw err;\s*\}[\s\S]{0,300}?if \(out && !out\.closed && out\.audited === false\) \{[\s\S]{0,260}?throw new Error\(/);
     // Both settle paths: the combined PI (one call per settled invoice) and the single-invoice PI.
     expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);\s*await scheduleReviewAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);/);
-    // (a bar charge's PaymentIntent also carries the visit its card approved: invoice-issued-closeout-approved-target.test.js)
-    expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId, \{ approvedTarget: paymentIntent\.metadata\?\.approved_closeout_target \|\| null \}\);\s*await scheduleReviewAfterPaidInvoice\(piId\);/);
+    expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId\);\s*await scheduleReviewAfterPaidInvoice\(piId\);/);
     // Every review call has its closeout in front of it — a new settle path cannot add one without the other.
     const reviewCalls = webhook.match(/await scheduleReviewAfterPaidInvoice\(/g) || [];
     const closeoutCalls = webhook.match(/await closeOutVisitAfterPaidInvoice\(/g) || [];

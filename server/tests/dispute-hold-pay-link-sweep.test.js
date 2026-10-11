@@ -293,7 +293,6 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
       'services/completion-balance-sweep.js', // off-session charge sweep
       'services/customer-credit.js', // account-credit auto-apply (D9): a money lane
       'services/intelligence-bar/billing-reader-tools.js', // read-only owner reporting: names an active dispute hold; sends and charges nothing
-      'services/intelligence-bar/invoice-action-tools.js', // charge_invoice: a charge lane (its send reads the messaging predicate)
       'services/termite-annual-renewal-charge.js', // renewal charge / lapse / withdrawal (its pay-link legs read the messaging predicate)
       'services/termite-annual-signature-charge.js', // signature charge
     ]);

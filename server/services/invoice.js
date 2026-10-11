@@ -3060,6 +3060,11 @@ function approvedVersionMatchesTime(row, expectedVersion) {
   return at !== null && Math.floor(at) === Math.floor(expectedVersion.updatedAtMs);
 }
 
+// A refusal under the Intelligence Bar's approved claim with its own text; it takes the same code and result shape as a changed version.
+function approvedClaimRefusal(message) {
+  return Object.assign(new Error(message), { code: "approved_version_changed" });
+}
+
 // The send wrapper's refusal shape for approvedVersionChangedError (nothing was claimed or sent).
 function approvedVersionChangedResult(err) {
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
@@ -4658,6 +4663,27 @@ async function claimInvoiceForSend(invoiceId, {
     if (!sameEffects) {
       await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
       throw approvedVersionChangedError(invoice);
+    }
+  }
+  if (expectedVersion?.verifyOwner) {
+    // The Intelligence Bar sends only an invoice the customer owes. The payer columns are a snapshot from when it was
+    // minted, so the bar's resolver (live Bill-To) is asked again here, on the claimed row. A payer, or an answer that
+    // cannot be had, hands the claim back and sends nothing (fail closed).
+    let ownerRefusal = "The bar could not verify who owes this invoice, so it was not sent.";
+    try { ownerRefusal = await expectedVersion.verifyOwner({ ...invoice, status: current.status }, database); } catch { /* keep the fail-closed text */ }
+    if (ownerRefusal) {
+      await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+      throw approvedClaimRefusal(ownerRefusal);
+    }
+  }
+  if (expectedVersion?.closeoutTarget) {
+    // The visit the card said this send closes (or none), written on the invoice inside the claim: the send's own closeout
+    // is handed it, and the retry sweep reads it back. A pin that cannot be written hands the claim back.
+    try {
+      await require("./invoice-issued-closeout").recordApprovedCloseoutTarget(invoiceId, expectedVersion.closeoutTarget, { conn: database, priorInvoice: current });
+    } catch {
+      await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+      throw approvedClaimRefusal("The approved visit closeout could not be recorded, so the invoice was not sent.");
     }
   }
   // A first send that waited for the visit summary's handoff (which holds this invoice through the
@@ -8689,7 +8715,8 @@ const InvoiceService = {
     let issuedCloseout = null;
     if (ownedDeliveryFinalized) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+      // The Intelligence Bar's card named the visit this send closes (or none): the closeout runs for that visit only.
+      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId, approvedTarget: expectedVersion?.closeoutTarget || null });
     }
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the

@@ -1,28 +1,25 @@
 /**
- * Intelligence Bar — the ONE effects plan for send_invoice and charge_invoice
+ * Intelligence Bar — the ONE effects plan for send_invoice
  * server/services/intelligence-bar/invoice-action-effects.js
  *
- * A send or a charge does more than its headline: the Send handler's post-delivery block and the
- * payment_intent.succeeded handler each run a list of follow-on effects (lead conversion, billing
- * reminders, the visit closeout, review outreach, the receipt ...). This module lists ALL of them
- * for one invoice, in one place:
+ * A send does more than its headline: the Send handler's post-delivery block runs a list of follow-on
+ * effects (lead conversion, billing reminders, the visit closeout, review outreach ...). This module lists
+ * ALL of them for one invoice, in one place:
  *
- *   planSendEffects(invoice, customer, ctx)   - what sendViaSMSAndEmail does after a delivery
- *   planChargeEffects(invoice, customer, ctx) - what the paid-invoice handlers do after a charge
+ *   planSendEffects(invoice, customer, ctx) - what sendViaSMSAndEmail does after a delivery
  *
  * Each effect is { key, applies, state, line, kind }. `line` is the card sentence (null = nothing to
  * say), `state` is the short fact that decides the effect, and `applies` says whether it happens.
  * The card renders every line, `_version.effects` pins the digest of the whole list, and the
- * confirmed run recomputes the list under the invoice claim / charge lock and refuses as
+ * confirmed run recomputes the list under the invoice claim and refuses as
  * preview_changed on any difference.
  *
  * Nothing here re-implements a handler's test. Each effect calls the function the handler itself
  * calls (invoice.js leadConversionApplies / alreadyDeliveredForFirstSend, lead-estimate-link.js
- * invoiceSentConversionTargets, invoice-followups.js planFollowupSequence / stopOnPaymentVerdict,
- * review-request.js paidInvoiceReviewSkip, invoice-delivery-review.js reviewDecisionForInvoice,
- * invoice-issued-closeout.js issuedCloseoutTarget, project-report-hold.js heldReportsForInvoice).
+ * invoiceSentConversionTargets, invoice-followups.js planFollowupSequence,
+ * invoice-delivery-review.js reviewDecisionForInvoice, invoice-issued-closeout.js issuedCloseoutTarget).
  *
- * SEND_CALL_COVERAGE / CHARGE_CALL_COVERAGE name every side-effect call in those two handlers and the
+ * SEND_CALL_COVERAGE names every side-effect call in that handler and the
  * effect that represents it (or why it cannot apply to a bar action). A source-contract test reads
  * the handlers' code and fails when a call is not listed here, so a new effect cannot slip in
  * unnamed.
@@ -31,7 +28,6 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
 
-const money = (cents) => `$${(Math.round(Number(cents) || 0) / 100).toFixed(2)}`;
 const etStamp = (value) => {
   const at = new Date(value);
   return `${etDateString(at)} ${formatETTime(at)} ET`;
@@ -56,25 +52,6 @@ const SEND_CALL_COVERAGE = {
   restoreSendClaim: { effect: null, why: 'gives the send claim back after a failure; nothing is delivered' },
   requeueHeldInvoice: { effect: null, why: 'only on a collections-hold refusal, which the bar never overrides (holdExempt null)' },
   voidOpenInvoicesForCancelledService: { effect: null, why: 'only when the linked visit was cancelled; the bar sets refusalOnly and never voids' },
-};
-const CHARGE_CALL_COVERAGE = {
-  stopOnPayment: { effect: 'followup_stop' },
-  syncTermForInvoicePayment: { effect: 'annual_prepay' },
-  completeActivePlansForInvoice: { effect: 'payment_plan' },
-  closeOutVisitAfterPaidInvoice: { effect: 'closeout' },
-  scheduleReviewAfterPaidInvoice: { effect: 'review' },
-  enqueueReceiptDelivery: { effect: 'receipt' },
-  scheduleReceiptDeliveryDrain: { effect: 'receipt' },
-  scheduleHoldReleaseSweep: { effect: 'held_report' },
-  notifyPaymentSuccess: { effect: 'admin_notice' },
-  resetAchFailureStateForSucceededIntent: { effect: null, why: 'bank payments only; the bar charges cards' },
-  mirrorSavedMethodForSucceededIntent: { effect: null, why: 'needs save_card_opt_in on the PaymentIntent; a bar charge uses a card already saved' },
-  recordOrphanSucceededPaymentIntent: { effect: null, why: 'orphan fence for a PaymentIntent that matches no invoice; a bar charge is bound to its invoice' },
-  resolveSettledInvoiceSavedCardChargeAttempt: { effect: null, why: 'closes the charge path\'s own attempt claim; no customer-facing effect' },
-  resolveOrphanSucceededPaymentIntentIfSettled: { effect: null, why: 'clears an orphan fence for a settled intent; no customer-facing effect' },
-  recordCardHoldNoShowFeePayment: { effect: null, why: 'no-show fee intents only; a bar charge pays an invoice' },
-  recordAppointmentCardNoShowFeePayment: { effect: null, why: 'no-show fee intents only; a bar charge pays an invoice' },
-  postCreditMovement: { effect: null, why: 'statement and credit-intent payments only; a bar charge pays one invoice' },
 };
 
 const FOLLOWUP_STATE_TEXT = {
@@ -161,78 +138,10 @@ async function planSendEffects(invoice, customer, { database = db, requestReview
   ]);
 }
 
-// ── charge-only (everything below to the end of planChargeEffects goes with the charge tool) ──
-
-// syncTermForInvoicePayment does far more than a term update (it activates the annual plan), so the bar does
-// not charge an invoice that pays an annual-prepay term.
-const ANNUAL_PREPAY_REFUSAL = 'Annual-prepay invoices are charged from the Invoices page, not from the bar.';
-const annualPrepayRefusal = (invoice) => (invoice && invoice.annual_prepay_term_id ? ANNUAL_PREPAY_REFUSAL : null);
-
-// The visit the approved plan would close out, or 'none': what the PaymentIntent carries to the webhook.
+// The visit the approved plan would close out, or 'none': what the send hands its closeout as the approved target.
 function approvedCloseoutTarget(effects) {
   const closeout = (effects || []).find((e) => e.key === 'closeout');
   return closeout && closeout.applies ? String(closeout.state).split(':')[0] : 'none';
-}
-
-// The notes of the service record invoice-issued-closeout.js runQuietCloseout creates (requestReview: false).
-const CLOSEOUT_RECORD_NOTES = Object.freeze({ requestReview: false });
-
-// The paid-invoice effects, one builder each, in card order. c = { invoice, customer, database, creditCents, closeout }.
-const CHARGE_EFFECT_BUILDERS = [
-  async (c) => effect('credit', c.creditCents > 0, String(c.creditCents), c.creditCents > 0 ? `${money(c.creditCents)} of account credit is applied first` : null, 'billing'),
-  async (c) => c.closeout,
-  // The review step runs after the closeout and reads the record it links.
-  async (c) => {
-    const { invoice } = c;
-    // A record the closeout creates is stored with requestReview false (runQuietCloseout), so it reads as opted out.
-    const fromCloseout = !invoice.service_record_id && c.closeout.applies;
-    const recordId = invoice.service_record_id || (fromCloseout ? 'from_closeout' : null);
-    const packetId = invoice.visit_completion_packet_id || null;
-    const Reviews = require('../review-request');
-    const notes = invoice.service_record_id ? await Reviews.completionNotes(invoice.service_record_id) : (fromCloseout ? CLOSEOUT_RECORD_NOTES : {});
-    const skip = Reviews.paidInvoiceReviewSkip({ customer_id: invoice.customer_id, service_record_id: recordId }, notes);
-    const applies = Boolean(packetId) || !skip;
-    const line = packetId
-      ? 'Once the charge is paid, the payment may also enroll the customer in review outreach (the visit completion packet decides)'
-      : 'Once the charge is paid, the payment also enrolls the customer in review outreach (the review limits, such as an opt-out or a recent ask, can still hold it back)';
-    const optedOut = skip === 'completion_opted_out';
-    return effect('review', applies, packetId ? `packet:${packetId}` : (skip ? `skip:${skip}` : 'enrolls'),
-      applies ? line : (optedOut ? 'No review request is sent.' : null), 'comms');
-  },
-  async (c) => {
-    const followups = require('../invoice-followups');
-    const seq = await c.database('invoice_followup_sequences').where({ invoice_id: c.invoice.id }).first('status', 'touches_sent');
-    const verdict = followups.stopOnPaymentVerdict(seq);
-    // stopOnPayment texts the thank-you only to a customer with a phone on file.
-    const thanks = verdict.thankYou && Boolean(c.customer?.phone);
-    return effect('followup_stop', verdict.stops, verdict.stops ? `stops${thanks ? '+thank_you' : ''}` : 'none',
-      verdict.stops ? `Once the charge is paid, the payment also stops the billing reminders for this invoice${thanks ? ' and texts the customer a thank-you (a reminder was already sent)' : ''}` : null, 'comms');
-  },
-  async (c) => {
-    const plan = await require('../invoice-followups').activePaymentPlan(c.database, c.invoice.id);
-    return effect('payment_plan', Boolean(plan), plan ? 'completes' : 'none', plan ? 'Once the charge is paid, the payment also completes the active payment plan on this invoice' : null, 'billing');
-  },
-  // Never reached for a bar charge (annualPrepayRefusal refuses first); kept so a plan built for such an invoice
-  // states the refusal reason instead of staying silent about syncTermForInvoicePayment.
-  async (c) => effect('annual_prepay', Boolean(c.invoice.annual_prepay_term_id), c.invoice.annual_prepay_term_id || 'none',
-    c.invoice.annual_prepay_term_id ? ANNUAL_PREPAY_REFUSAL : null, 'billing'),
-  async (c) => {
-    const held = await require('../project-report-hold').heldReportsForInvoice(c.invoice.id, c.database);
-    return effect('held_report', held.length > 0, held.join(','),
-      held.length ? `Once the charge is paid, the payment also releases the held service report (project ${held.map(shortId).join(', ')}) to the customer` : null, 'comms');
-  },
-  async () => effect('receipt', true, 'enqueue',
-    'After the charge succeeds, the customer gets the payment receipt by email and/or text per their receipt settings; a text waits for 8 AM–8 PM ET.', 'comms'),
-  async () => effect('admin_notice', true, 'bell', 'The admin team gets a payment bell.'),
-];
-
-// What the paid-invoice handlers do after a saved-card charge settles. ctx.creditCents = the account credit
-// the charge applies first (the quote's projection, the same number the card shows).
-async function planChargeEffects(invoice, customer, { database = db, creditCents = 0 } = {}) {
-  const c = { invoice, customer, database, creditCents, closeout: await closeoutEffect(invoice, 'paid', 'Once the charge is paid, the payment') };
-  const effects = [];
-  for (const build of CHARGE_EFFECT_BUILDERS) effects.push(await build(c));
-  return finish(effects);
 }
 
 function finish(effects) {
@@ -241,13 +150,8 @@ function finish(effects) {
 
 module.exports = {
   planSendEffects,
-  planChargeEffects,
-  annualPrepayRefusal,
   approvedCloseoutTarget,
-  ANNUAL_PREPAY_REFUSAL,
-  CLOSEOUT_RECORD_NOTES,
   effectsDigest,
   closeoutLine,
   SEND_CALL_COVERAGE,
-  CHARGE_CALL_COVERAGE,
 };

@@ -2394,16 +2394,10 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
  * Called from the Stripe webhook the instant an invoice is paid.
  * Marks the sequence completed and optionally sends a thank-you.
  */
-// What a payment does to a sequence row: it completes a live one, and thanks the customer by text when a
-// reminder was already sent. stopOnPayment's own test, shared with the Intelligence Bar's charge card.
-function stopOnPaymentVerdict(seq) {
-  if (!seq || seq.status === 'completed' || seq.status === 'stopped') return { stops: false, thankYou: false };
-  return { stops: true, thankYou: seq.touches_sent > 0 && Boolean(config.thankYou.enabled) };
-}
-
 async function stopOnPayment(invoiceId) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
-  if (!stopOnPaymentVerdict(seq).stops) return;
+  if (!seq) return;
+  if (seq.status === 'completed' || seq.status === 'stopped') return;
 
   const sentAReminder = seq.touches_sent > 0;
 
@@ -3151,7 +3145,6 @@ async function isDunningStopped(invoiceId, database = db) {
 }
 
 module.exports = {
-  stopOnPaymentVerdict,
   activePaymentPlan,
   adoptOrphanInvoices,
   scheduleForInvoice,

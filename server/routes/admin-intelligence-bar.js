@@ -232,7 +232,7 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Mirror requireAdmin /api/admin/customers/:id/payment-methods/:methodId and
   // /api/admin/invoices/:id/receipt-address.
   ...BILLING_WRITE_TOOL_NAMES,
-  // send_invoice / charge_invoice run the requireAdmin invoice send and charge-card handlers.
+  // send_invoice runs the requireAdmin invoice send handler.
   ...INVOICE_ACTION_TOOL_NAMES,
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
@@ -882,13 +882,10 @@ const PINNED_DISPLAY_BUILDERS = {
       corrected_to: preview.after_correction_text,
     }
     : null),
-  // send_invoice / charge_invoice: the card names the invoice, the customer, the
+  // send_invoice: the card names the invoice, the customer, the
   // money and who is contacted; the full lines are curated in authorization-contract.js.
   send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
-    : null),
-  charge_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'charge_invoice'
-    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, card: preview.card, balance: preview.balance, surcharge: preview.surcharge, total_charged: preview.total_charged, bar_today: preview._charged_today }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
@@ -926,10 +923,9 @@ const VERIFIED_VERSION_PARAMS = {
   adjust_stock: '_verified_inventory_version',
   create_restock_request: '_verified_inventory_version',
   update_restock_request: '_verified_inventory_version',
-  // send_invoice / charge_invoice bind the invoice state, the recipients or the card,
-  // and the total the card showed (invoice-action-tools.js _version).
+  // send_invoice binds the invoice state, the recipients and the total the card
+  // showed (invoice-action-tools.js _version).
   send_invoice: '_verified_invoice_send_version',
-  charge_invoice: '_verified_invoice_charge_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -2010,15 +2006,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
-  // send_invoice / charge_invoice: the stored approval names the invoice (and the
-  // saved card) the preview resolved, never the number or last 4 the model sent.
-  if ((toolUse.name === 'send_invoice' || toolUse.name === 'charge_invoice') && preview?.preview === true && preview.invoice_id) {
+  // send_invoice: the stored approval names the invoice the preview resolved,
+  // never the number the model sent.
+  if (toolUse.name === 'send_invoice' && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
-    if (toolUse.name === 'charge_invoice' && preview.payment_method_id) {
-      params.payment_method_id = String(preview.payment_method_id);
-      delete params.card_last4;
-    }
   }
 
   if (task) {
@@ -2964,7 +2956,7 @@ function getToolsForContext(context, isAdmin = false, fullAccess = false) {
   return (mergeCustomersEnabled() ? offered : offered.filter(t => t.name !== 'merge_customers')).filter(t => deleteDuplicateCustomerEnabled() || t.name !== 'delete_duplicate_customer');
 }
 
-// send_invoice / charge_invoice (owner ruling 2026-10-07): offered to admins on the
+// send_invoice (owner ruling 2026-10-07): offered to admins on the
 // Customers, Invoices / Revenue and dashboard pages while GATE_IB_INVOICE_ACTIONS is
 // on; off, they are in no list (and refuse every call).
 const INVOICE_ACTION_CONTEXTS = new Set(['customers', 'revenue', 'dashboard']);
@@ -3267,7 +3259,7 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice and charge_invoice (when they are in your tools) act only on an EXISTING invoice — send it, or charge its open balance to a saved card (card only; at most $500 a charge and $1,500 a day from the bar). Never create an invoice, change an amount, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — send it to the customer. Never create an invoice, change an amount, charge a card, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
