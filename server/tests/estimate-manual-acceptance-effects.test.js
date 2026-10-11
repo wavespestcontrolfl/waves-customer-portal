@@ -395,6 +395,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
       { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'Free Look', amount: 0, consequence: 'schedule_by_hand_comped' },
     ]);
   });
 });
@@ -510,7 +511,7 @@ describe('round 11: a discount pooled into the one-time total is its own negativ
 });
 
 describe('finding 5 (round 6): the one-time amount is what the customer pays', () => {
-  test('a $100 line discounted to $90 is listed at $90; a line discounted to $0 is not listed', async () => {
+  test('a $100 line discounted to $90 is listed at $90; a line discounted to $0 is listed as comped work', async () => {
     const world = makeWorld({
       estimateOverrides: {
         onetime_total: '290.00',
@@ -525,9 +526,25 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       },
     });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
-    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([
-      ['German Roach Cleanout', 90],
-      ['Rodent Exclusion', 200],
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.consequence])).toEqual([
+      ['German Roach Cleanout', 90, 'schedule_and_invoice_by_hand'],
+      ['Wasp Nest Removal', 0, 'schedule_by_hand_comped'],
+      ['Rodent Exclusion', 200, 'schedule_and_invoice_by_hand'],
+    ]);
+  });
+  test('round 15: a line with no amount field at all is not listed; an explicit $0 is comped work to schedule', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: '0.00',
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [{ service: 'note', name: 'Just a note' }, { service: 'comp', name: 'Comped Flea Treatment', manualFinalOneTime: 0, price: 120 }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
+      { kind: 'one_time_line', name: 'Comped Flea Treatment', amount: 0, consequence: 'schedule_by_hand_comped' },
     ]);
   });
 
@@ -948,6 +965,17 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     const second = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: skipping, world: closed });
     expect(skipping.markLinkedLeadEstimateAccepted).toHaveBeenCalled();
     expect(second.result.warnings).toContain('The linked lead was not marked won: what it acts on changed after the accept. Complete it by hand.');
+  });
+  test('round 15: a membership email the sender did not send (ok: false) is a result warning; a sent one is not', async () => {
+    AccountMembershipEmail.sendMembershipStarted.mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
+    const warnings = [];
+    const ctx = { warnings, approvedEmail: 'send', conversion: { membershipEmail: { customerId: 'cust-1' } }, acceptedEstimate: { id: 'est-1', customer_id: 'cust-1' }, database: {} };
+    await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, ctx);
+    expect(warnings).toEqual(['The membership email was not sent (prefs_unavailable). Send it by hand.']);
+    AccountMembershipEmail.sendMembershipStarted.mockResolvedValueOnce({ ok: true });
+    const clean = [];
+    await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, { ...ctx, warnings: clean });
+    expect(clean).toEqual([]);
   });
   test('round 12: a multi-home flip that fails after the commit is a result warning', async () => {
     const refresh = jest.spyOn(Linkage, 'refreshHasMultiHome').mockRejectedValue(new Error('down'));

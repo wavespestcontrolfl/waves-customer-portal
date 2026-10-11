@@ -141,12 +141,16 @@ function conversionEffect(conversion) {
 // estimate's discount (the field the engine totals from), else the list price.
 // The first field that holds a number decides, so a line discounted to $0
 // reads $0 and is not listed at its list price.
+// An explicit $0 (manualFinalOneTime: 0, priceAfterDiscount: 0) is comped
+// work the customer was promised: it is listed at $0 with its own
+// consequence, so staff still schedule it; a line with no amount at all is
+// not listed.
 const ONE_TIME_AMOUNT_FIELDS = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'amount', 'total'];
-function positiveAmount(item) {
+function lineAmount(item) {
   for (const key of ONE_TIME_AMOUNT_FIELDS) {
     if (item?.[key] == null || item[key] === '') continue;
     const n = Number(item[key]);
-    if (Number.isFinite(n)) return n > 0 ? round2(n) : null;
+    if (Number.isFinite(n)) return n > 0 ? round2(n) : 0;
   }
   return null;
 }
@@ -183,9 +187,9 @@ function oneTimeLineEffects(estimate, converter) {
   const data = parseData(estimate.estimate_data);
   const items = converter.estimateOneTimeItemsFromData(data, { collapseMirrored: true });
   const lines = items
-    .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: positiveAmount(item) }))
+    .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: lineAmount(item) }))
     .filter((line) => line.amount != null)
-    .map((line) => ({ kind: 'one_time_line', ...line, consequence: 'schedule_and_invoice_by_hand' }));
+    .map((line) => ({ kind: 'one_time_line', ...line, consequence: line.amount > 0 ? 'schedule_and_invoice_by_hand' : 'schedule_by_hand_comped' }));
   const fee = membershipFeeLine(data);
   const listed = fee ? [...lines, fee] : lines;
   const discount = pooledDiscountLine(estimate, listed);
@@ -591,8 +595,20 @@ const POST_COMMIT_STEPS = {
       // address changed since the card (a fresh opt-out still vetoes there too).
       const key = step.target?.recipient_key;
       const payload = key ? { ...ctx.conversion.membershipEmail, recipientKey: key } : ctx.conversion.membershipEmail;
-      void AccountMembershipEmail.sendMembershipStarted(payload)
-        .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`));
+      // The card promised the email, so the send is awaited and anything but
+      // a sent result (provider refusal, transient prefs/database failure, a
+      // fresh opt-out) is a result warning the operator finishes by hand.
+      let result;
+      try {
+        result = await AccountMembershipEmail.sendMembershipStarted(payload);
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`);
+        result = { ok: false, error: err.message };
+      }
+      if (result?.ok === true || result?.sent === true) return;
+      const reason = result?.reason || result?.error || 'not_sent';
+      logger.warn(`[estimate-manual-acceptance] membership.started email not sent for estimate ${ctx.acceptedEstimate.id}: ${reason}`);
+      ctx.warnings?.push(`${STEP_LABELS.membership_email} (${reason}). Send it by hand.`);
     },
   },
   welcome_sms: {
