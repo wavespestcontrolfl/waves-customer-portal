@@ -2122,9 +2122,10 @@ describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / s
 // cover the card's exact service ask and time of day. These two rules close
 // the card on the work itself: a technician arrived inside the asked days
 // (staff_visit_arrived_after_card), or the calendar already shows the agreed
-// slot (agreed_slot_on_calendar). Fixtures synthetic.
-describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
-  const { arrivedVisitsAfterCard, agreedSlotVisit, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
+// slot. The agreed-slot rule was withdrawn after three Codex rounds (see the PR); only
+// the arrival rule ships. Fixtures synthetic.
+describe('staff_visit_arrived_after_card', () => {
+  const { arrivedVisitsAfterCard, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
   const ctxOf = (flags, id = 't1') => ({ evidence: new Map([[id, flags]]) });
   const CARD_AT = '2026-10-09T14:00:00Z';
   const after = (minutes) => new Date(new Date(CARD_AT).getTime() + minutes * 60 * 1000).toISOString();
@@ -2147,27 +2148,20 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
       const arrived = ctxOf({ staff_visit_arrived_after_card: true });
       expect(classifyTriageItem(notConfirmed(), arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
       expect(classifyTriageItem(ambiguous(), arrived, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_visit_arrived_after_card' });
-      const slot = ctxOf({ agreed_slot_on_calendar: true });
       const reschedule = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', {}, 'reschedule_requested') });
-      expect(classifyTriageItem(reschedule, slot, { now: NOW })).toEqual({ action: 'resolve', rule: 'agreed_slot_on_calendar' });
       // Neither flag does anything on another card type, or on the other rule's code.
       for (const code of ['cancellation_request', 'quote_promised', 'email_unverified', 'caller_not_authorized', 'commercial_requires_quote']) {
-        expect(classifyTriageItem(card({ reason_code: code }), ctxOf({ staff_visit_arrived_after_card: true, agreed_slot_on_calendar: true }), { now: NOW })).toBeNull();
+        expect(classifyTriageItem(card({ reason_code: code }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
       }
       expect(classifyTriageItem(reschedule, arrived, { now: NOW })).toBeNull();
-      expect(classifyTriageItem(notConfirmed(), slot, { now: NOW })).toBeNull();
-      expect(classifyTriageItem(ambiguous(), slot, { now: NOW })).toBeNull();
       // Gate off (no evidence): nothing.
       for (const c of [notConfirmed(), ambiguous(), reschedule]) expect(classifyTriageItem(c, noBookings, { now: NOW })).toBeNull();
       expect(RULE_NOTES.staff_visit_arrived_after_card).toMatch(/^Auto-resolved: /);
-      expect(RULE_NOTES.agreed_slot_on_calendar).toMatch(/^Auto-resolved: /);
     });
 
     test('a soft-deleted customer keeps the card', () => {
       expect(classifyTriageItem(notConfirmed({ customer_deleted_at: CARD_AT }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
       expect(classifyTriageItem(ambiguous({ customer_deleted_at: CARD_AT }), ctxOf({ staff_visit_arrived_after_card: true }), { now: NOW })).toBeNull();
-      const reschedule = card({ reason_code: 'reschedule_or_cancel', customer_deleted_at: CARD_AT, payload: askPayload('reschedule_or_cancel', {}, 'reschedule_requested') });
-      expect(classifyTriageItem(reschedule, ctxOf({ agreed_slot_on_calendar: true }), { now: NOW })).toBeNull();
     });
 
     test('a confirmed call whose appointment nobody booked keeps its not_confirmed card', () => {
@@ -2181,6 +2175,15 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
 
   describe('arrivedVisitsAfterCard', () => {
     const ids = (c, visits) => arrivedVisitsAfterCard(c, visits).map((v) => v.id);
+
+    // Codex r3: a day the caller ruled out is not a day the caller asked for.
+    test('a visit on a blackout day does not count', () => {
+      const ranged = (blackout) => notConfirmed({ payload: askPayload('not_confirmed', { requested_date_range_end: '2026-10-12', blackout_dates: blackout }) });
+      const onTheTenth = visit({ scheduled_date: '2026-10-10' });
+      expect(ids(ranged(['2026-10-10']), [onTheTenth])).toEqual([]);
+      expect(ids(ranged(['2026-10-11']), [onTheTenth])).toEqual(['v1']);
+      expect(ids(ranged([]), [onTheTenth])).toEqual(['v1']);
+    });
 
     test('audited shape 1: completed visit, other service, other time of day, one-day range', () => {
       expect(ids(notConfirmed(), [visit()])).toEqual(['v1']);
@@ -2235,94 +2238,15 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
     }
   });
 
-  describe('agreedSlotVisit', () => {
-    const slotOf = (c, visits, soleProperty = true) => agreedSlotVisit(c, visits, { soleProperty });
-    const resched = (windowOver = {}, status = 'reschedule_requested', over = {}) => card({
-      reason_code: 'reschedule_or_cancel',
-      payload: askPayload('reschedule_or_cancel', {
-        confirmed_start_at: '2026-10-09T16:00:00-04:00', requested_specific_service: 'Waves Assessment',
-        requested_service_categories: ['inspection_only', 'rodent', 'pest_general'], ...windowOver,
-      }, status),
-      ...over,
-    });
-    const slotVisit = (over = {}) => visit({ id: 's1', status: 'confirmed', created_at: after(-3 * 24 * 60), scheduled_date: '2026-10-09', window_start: '16:00:00', ...over });
-
-    // Codex r1: a lawn visit at 16:00 does not show that a pest visit moved to 16:00.
-    test('the visit must be for a service the call asked about', () => {
-      expect(slotOf(resched(), [slotVisit({ service_type: 'Every 6 Weeks Lawn Care Service' })])).toBeNull();
-      expect(slotOf(resched({ requested_specific_service: null, requested_service_categories: ['pest_general'] }), [slotVisit({ service_type: 'Every 6 Weeks Lawn Care Service' })])).toBeNull();
-      expect(slotOf(resched({ requested_specific_service: null, requested_service_categories: ['lawn_care'] }), [slotVisit({ service_type: 'Every 6 Weeks Lawn Care Service' })])?.id).toBe('s1');
-      // No snapshotted service ask proves nothing.
-      expect(slotOf(resched({ requested_specific_service: null, requested_service_categories: [] }), [slotVisit()])).toBeNull();
-      expect(slotOf(resched({ requested_specific_service: null, requested_service_categories: undefined }), [slotVisit()])).toBeNull();
-    });
-
-    // Codex r2: bind to the property, and account for every visit the call could mean.
-    test('a multi-property account keeps the card', () => {
-      expect(slotOf(resched(), [slotVisit()], false)).toBeNull();
-      expect(agreedSlotVisit(resched(), [slotVisit()])).toBeNull();
-    });
-
-    test('another upcoming visit that existed at filing time keeps the card; later or finished ones do not', () => {
-      const other = (over = {}) => slotVisit({ id: 'o1', scheduled_date: '2026-10-14', window_start: '09:00:00', status: 'pending', created_at: after(-5 * 24 * 60), ...over });
-      expect(slotOf(resched(), [slotVisit(), other()])).toBeNull();
-      expect(slotOf(resched(), [slotVisit(), other({ status: 'confirmed', recurring_parent_id: 'series-1' })])).toBeNull();
-      expect(slotOf(resched(), [slotVisit(), other({ created_at: CARD_AT })])).toBeNull();
-      // Booked after the card: new work, not a visit that waited for the move.
-      expect(slotOf(resched(), [slotVisit(), other({ created_at: after(240) })])?.id).toBe('s1');
-      // Already done, or before the card's day: nothing left to move.
-      expect(slotOf(resched(), [slotVisit(), other({ status: 'completed' })])?.id).toBe('s1');
-      expect(slotOf(resched(), [slotVisit(), other({ scheduled_date: '2026-10-02', status: 'confirmed' })])?.id).toBe('s1');
-    });
-
-    test('audited shape: a live visit already on the agreed hour, even one that predates the card', () => {
-      expect(slotOf(resched(), [slotVisit()])?.id).toBe('s1');
-      expect(slotOf(resched(), [slotVisit({ status: 'completed' })])?.id).toBe('s1');
-    });
-
-    test('a different start time or day keeps the card', () => {
-      expect(slotOf(resched(), [slotVisit({ window_start: '15:00:00' })])).toBeNull();
-      expect(slotOf(resched(), [slotVisit({ window_start: '16:30:00' })])).toBeNull();
-      expect(slotOf(resched(), [slotVisit({ window_start: null })])).toBeNull();
-      expect(slotOf(resched(), [slotVisit({ scheduled_date: '2026-10-10' })])).toBeNull();
-    });
-
-    test.each(['cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit is not on the calendar', (status) => {
-      expect(slotOf(resched(), [slotVisit({ status })])).toBeNull();
-    });
-
-    test('two live visits that day are ambiguous; a dead one beside the live one is not', () => {
-      expect(slotOf(resched(), [slotVisit(), slotVisit({ id: 's2', window_start: '09:00:00' })])).toBeNull();
-      expect(slotOf(resched(), [slotVisit(), slotVisit({ id: 's2', status: 'cancelled', window_start: '09:00:00' })])?.id).toBe('s1');
-    });
-
-    test('a follow-up child or series occurrence is not the agreed parent visit', () => {
-      expect(slotOf(resched(), [slotVisit({ parent_service_id: 'p' })])).toBeNull();
-      expect(slotOf(resched(), [slotVisit({ recurring_parent_id: 'p' })])).toBeNull();
-    });
-
-    test('a cancellation never closes, whichever status field says so', () => {
-      expect(slotOf(resched({}, 'canceled'), [slotVisit()])).toBeNull();
-      expect(slotOf(resched({ status: 'reschedule_requested' }, 'reschedule_requested', {
-        payload: { ...askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00' }, 'reschedule_requested'), scheduling_status: 'canceled' },
-      }), [slotVisit()])).toBeNull();
-      expect(slotOf(resched({}, 'requested'), [slotVisit()])).toBeNull();
-      expect(slotOf(resched({}, 'confirmed'), [slotVisit()])).toBeNull();
-    });
-
-    test('a missing or unparseable confirmed start keeps the card', () => {
-      expect(slotOf(resched({ confirmed_start_at: null }), [slotVisit()])).toBeNull();
-      expect(slotOf(resched({ confirmed_start_at: 'Friday afternoon' }), [slotVisit()])).toBeNull();
-      expect(slotOf(resched({ confirmed_start_at: '2026-10-09' }), [slotVisit()])).toBeNull();
-    });
-  });
-
   describe('loadEvidence', () => {
     const chainable = (rows) => {
       const c = { leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c, select: async () => rows };
       return c;
     };
-    const oneHome = [{ id: 'p1', customer_id: 'c1', address_line1: '1234 Sample Palm Dr', address_line2: null, city: 'Sampleton', zip: '34200' }];
+    const oneHome = [
+      { id: 'p1', customer_id: 'c1', address_line1: '1234 Sample Palm Dr', address_line2: null, city: 'Sampleton', zip: '34200' },
+      { id: 'p2', customer_id: 'c2', address_line1: '500 Sample Tower Blvd', address_line2: null, city: 'Sampleton', zip: '34200' },
+    ];
     const fakeConn = ({ visits = [], cards = [], throwOnCards = false, properties = oneHome }) => (table) => {
       if (table === 'customer_properties') return chainable(properties);
       if (table === 'scheduled_services') return chainable(visits);
@@ -2346,6 +2270,15 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
       }));
       expect(ev.get('t1')?.staff_visit_arrived_after_card).toBe(true);
       expect(ev.get('t2')?.staff_visit_arrived_after_card).toBe(true);
+    });
+
+    // Codex r3: with several homes the arrival may have been at another one.
+    test('an account with two active properties, or none on file, keeps the card', async () => {
+      const args = { visits: [visit()], cards: [claim('t1', 'call-1')] };
+      const second = { id: 'p9', customer_id: 'c1', address_line1: '77 Sample Shore Ln', address_line2: null, city: 'Sampleton', zip: '34200' };
+      expect((await run([notConfirmed()], fakeConn({ ...args, properties: [...oneHome, second] }))).get('t1')).toBeUndefined();
+      expect((await run([notConfirmed()], fakeConn({ ...args, properties: [] }))).get('t1')).toBeUndefined();
+      expect((await run([notConfirmed()], fakeConn(args))).get('t1')?.staff_visit_arrived_after_card).toBe(true);
     });
 
     test('a not_confirmed and an ambiguous card of the SAME call both close', async () => {
@@ -2374,18 +2307,6 @@ describe('staff_visit_arrived_after_card / agreed_slot_on_calendar', () => {
         visit({ source_call_log_id: 'call-9' }), visit({ parent_service_id: 'p' }), visit({ customer_id: 'c2' })]) {
         expect((await run([ambiguous()], fakeConn({ visits: [v], cards }))).get('t1')?.staff_visit_arrived_after_card).toBeUndefined();
       }
-    });
-
-    test('agreed slot: flags the audited shape, not two visits that day or another hour', async () => {
-      const r = card({ reason_code: 'reschedule_or_cancel', payload: askPayload('reschedule_or_cancel', { confirmed_start_at: '2026-10-09T16:00:00-04:00', requested_service_categories: ['rodent'] }, 'reschedule_requested') });
-      const slot = visit({ id: 's1', status: 'confirmed', created_at: after(-60), window_start: '16:00:00' });
-      expect((await run([r], fakeConn({ visits: [slot] }))).get('t1')?.agreed_slot_on_calendar).toBe(true);
-      expect((await run([r], fakeConn({ visits: [slot, visit({ id: 's2', status: 'confirmed', window_start: '09:00:00' })] }))).get('t1')).toBeUndefined();
-      expect((await run([r], fakeConn({ visits: [{ ...slot, window_start: '15:00:00' }] }))).get('t1')).toBeUndefined();
-      expect((await run([{ ...r, call_customer_id: null }], fakeConn({ visits: [slot] }))).get('t1')).toBeUndefined();
-      // Two active properties, or none on file: the slot cannot be bound to a home.
-      expect((await run([r], fakeConn({ visits: [slot], properties: [...oneHome, { ...oneHome[0], id: 'p2', address_line1: '500 Sample Tower Blvd' }] }))).get('t1')).toBeUndefined();
-      expect((await run([r], fakeConn({ visits: [slot], properties: [] }))).get('t1')).toBeUndefined();
     });
 
     test('the evidence gate off: no flag and no query', async () => {
