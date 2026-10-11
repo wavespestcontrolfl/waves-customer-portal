@@ -57,6 +57,7 @@ const REASON_LABELS = {
   spam_or_wrong_number: "Spam / wrong number",
   caller_phone_missing: "Caller phone missing",
   callback_number_needed: "Caller ID isn't theirs — need a callback number",
+  text_number_differs: "Caller's line can't get texts — fix the phones",
   do_not_contact_requested: "Do not contact",
   after_hours_emergency: "After-hours emergency",
   name_email_mismatch: "Name / email mismatch",
@@ -102,7 +103,29 @@ function parsePayload(payload) {
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null }) {
+const isOpenState = (s) => s === "open" || s === "in_progress";
+
+const RESOLVE_ONLY_LABELS = {
+  attached_booking_followup_unbooked: "Follow-up booked",
+  text_number_differs: "Phones are updated",
+};
+
+// text_number_differs (no-text line): the calling line, the number the caller gave (nothing is sent
+// to it), and the account phone. The account phone is the customer's LIVE phone from the list query,
+// never the snapshot taken at the call; the snapshot shows only when it differs.
+function textNumberRows(p, livePhone) {
+  if (p.ani_phone === undefined) return [];
+  const atCall = p.customer_phone_at_call && p.customer_phone_at_call !== livePhone ? p.customer_phone_at_call : null;
+  return [
+    { label: "What the caller said", value: p.note },
+    { label: "Called from (calls)", value: p.ani_phone || "unknown" },
+    { label: "Texts go to", value: p.text_phone || "no number given — ask for one" },
+    { label: "Account phone now", value: livePhone || "no primary phone" },
+    atCall && { label: "Account phone at the call", value: atCall },
+  ];
+}
+
+export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null, livePhone }) {
   const p = parsePayload(payload);
   if (!p) return null;
   // A missing-first-name task is owed on EVERY customer it lists (payload.customer_ids; a
@@ -150,6 +173,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
         + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
     },
+    ...textNumberRows(p, livePhone),
     // caller_phone_not_on_file: the mismatching caller number IS the card —
     // the header prefers the linked customer's on-file phone, so without
     // these rows the office sees the on-file identity but never the number
@@ -414,7 +438,7 @@ const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spe
 const NO_VERDICT_REASONS = new Set([
   "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
   "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
-  "auto_booking_skipped_after_approval", "name_spelling_differs",
+  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
 const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);
@@ -581,6 +605,61 @@ export function holdReadBackView(item) {
   };
 }
 
+// The actions of a Resolve-only card. A no-text line (text_number_differs) also gets its own
+// "Line can get texts" button (with its own confirm), apart from Resolve (phones updated: the line
+// stays blocked) and from the shared Dismiss (just closes the card).
+function ResolveOnlyActions({ item, busy, onResolve, onLineCanText }) {
+  return (
+    <>
+      <Button size="sm" variant="primary" disabled={busy} onClick={onResolve}>
+        <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+        {busy ? "Saving…" : RESOLVE_ONLY_LABELS[item.reason_code]}
+      </Button>
+      {item.reason_code === "text_number_differs" && (
+        <Button size="sm" variant="secondary" disabled={busy} onClick={onLineCanText}>Line can get texts</Button>
+      )}
+    </>
+  );
+}
+
+// On a card that is already closed (Resolve and Dismiss leave the hold in place), the same explicit
+// release stays available so a line that turns out to get texts is never stranded.
+function ClosedNoTextAction({ item, onLineCanText }) {
+  if (item.reason_code !== "text_number_differs" || !["resolved", "dismissed"].includes(item.status)) return null;
+  return (
+    <div className="mt-2">
+      <Button size="sm" variant="secondary" onClick={onLineCanText}>Line can get texts</Button>
+    </div>
+  );
+}
+
+function LineCanTextDialog({ item, actioning, onClose, onConfirm }) {
+  const busy = !!item && actioning === item.id;
+  const line = item ? parsePayload(item.payload)?.ani_phone : null;
+  return (
+    <Dialog open={!!item} onClose={onClose} size="sm">
+      {item && (
+        <>
+          <DialogHeader>
+            <DialogTitle>Line can get texts — {callerName(item)}</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <p className="text-13 text-ink-secondary">
+              Texts to {line || "the calling line"} will resume. Confirm only if you checked that this line can get texts.
+            </p>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => onConfirm(item)}>
+              {busy ? "Saving…" : "Texts will resume"}
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
 function HoldConfirmDialog({ item, readBack, onReadBackChange, actioning, onClose, onConfirm }) {
   const view = holdReadBackView(item);
   const busy = !!item && actioning === item.id;
@@ -645,6 +724,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
   const [error, setError] = useState("");
   const [actioning, setActioning] = useState(null);
   const [dismissFor, setDismissFor] = useState(null); // triage item being dismissed (note dialog)
+  const [lineCanTextFor, setLineCanTextFor] = useState(null); // no-text line card whose "Line can get texts" confirm is open
   const [confirmHoldFor, setConfirmHoldFor] = useState(null); // street-level address hold being confirmed (read-back dialog)
   const [holdReadBack, setHoldReadBack] = useState(false); // "I read this address back to the customer"
   const [denyFor, setDenyFor] = useState(null); // { item, kind } — field-picker dialog
@@ -844,14 +924,15 @@ export default function TriageInboxTabV2({ isAdmin }) {
   // Resolve a single item WITHOUT a call verdict — the action for
   // email_bounce_reverify cards, which aren't judgments on the call and are
   // rejected by the /verdict endpoint. Removes only the clicked row.
-  const resolveItem = (item) => {
+  const resolveItem = (item, extra, onDone) => {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
-      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+      body: JSON.stringify({ expected_updated_at: item.updated_at, ...extra }),
     })
-      .then(() => {
+      .then((res) => {
         setActioning(null);
+        if (onDone) onDone(res);
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -867,6 +948,30 @@ export default function TriageInboxTabV2({ isAdmin }) {
           setError("This card changed since it loaded — review the refreshed card before marking it handled.");
           return;
         }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
+      });
+  };
+
+  // "Line can get texts": on an open card it resolves the card and releases the hold; on a card that
+  // is already closed it only releases the hold (then reloads the list).
+  // The server can keep the hold (an open "not my number" card on the same call): the card still
+  // closes, but the inbox must say the line is still blocked instead of "texts will resume".
+  const lineCanGetTexts = (item) => {
+    const reportDeferred = (res) => {
+      if (res?.callback_number?.release === 'deferred' || (res?.callback_number && res.callback_number.disclaimed_number_hold !== 'cleared')) {
+        setError(res.callback_number.message || "The line stays blocked for texts: resolve this call's other card first.");
+      }
+    };
+    if (isOpenState(item.status)) { resolveItem(item, { line_can_get_texts: true }, reportDeferred); return; }
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/resolve`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true }),
+    })
+      .then((res) => { setActioning(null); reportDeferred(res); load(mode, status, autoOnly); })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409) { load(mode, status, autoOnly); setError("This card changed since it loaded — review the refreshed card first."); return; }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -1097,7 +1202,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // An owed follow-up visit (the primary booked; visit 2 is
                 // booked by hand) — settled by its own Resolve once booked,
                 // never by a call verdict (the server 400s /verdict on it).
-                const isFollowUpCard = isTriage && item.reason_code === "attached_booking_followup_unbooked";
+                // Both are settled by their own Resolve (never a call verdict; the server 400s /verdict).
+                // A no-text line's Resolve keeps the calling line blocked for texts; Dismiss releases it.
+                const isFollowUpCard = isTriage && Object.hasOwn(RESOLVE_ONLY_LABELS, item.reason_code);
                 // Accepting a house-number conflict stores a calibration
                 // `deny · address` on route_feedback; neither the settled
                 // conflict nor the recovery task it files is judged by it.
@@ -1239,15 +1346,12 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               </Button>
                             ) : null
                           ) : isFollowUpCard ? (
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actioning === busyKey}
-                              onClick={() => resolveItem(item)}
-                            >
-                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : "Follow-up booked"}
-                            </Button>
+                            <ResolveOnlyActions
+                              item={item}
+                              busy={actioning === busyKey}
+                              onResolve={() => resolveItem(item)}
+                              onLineCanText={() => setLineCanTextFor(item)}
+                            />
                           ) : (
                             <>
                               <Button
@@ -1274,7 +1378,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
+                    {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">
@@ -1370,6 +1475,13 @@ export default function TriageInboxTabV2({ isAdmin }) {
       </Dialog>
 
       {/* Street-level address hold: read the address back, then confirm the visit */}
+      <LineCanTextDialog
+        item={lineCanTextFor}
+        actioning={actioning}
+        onClose={() => setLineCanTextFor(null)}
+        onConfirm={(item) => { setLineCanTextFor(null); lineCanGetTexts(item); }}
+      />
+
       <HoldConfirmDialog
         item={confirmHoldFor}
         readBack={holdReadBack}

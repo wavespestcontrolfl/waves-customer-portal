@@ -1039,7 +1039,10 @@ postgres('membership dues — stale rate or lane at the mint, and Charge now (B0
       const lawn = await seedVisit(f, { label: 'Lawn Care' });
       beforeFirstMint(() => mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'per_visit' }));
       const key = randomUUID();
-      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      // The mint re-reads the billing type on the locked rows and finds it
+      // moved: a retryable 409 (BILLING_LANE_CHANGED), nothing written. Before
+      // that re-read existed, the coverage check caught the same drift as a 503.
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 409, body: { code: 'BILLING_LANE_CHANGED' } });
       expect(await invoicesFor(f)).toHaveLength(0);
       jest.restoreAllMocks();
       // per_visit: an unpriced visit bills nothing on the dues rate.

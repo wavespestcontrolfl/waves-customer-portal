@@ -953,6 +953,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // than a guide that claims a clean "no chinch rows staged".
     // GATE_LAWN_SPOT_TARGET: the context also carries the closed lists of a spot fungicide / insecticide row's target (lawn-spot-target.js).
     ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true, ...require('./lawn-spot-target').contextKey() } : {}),
+    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. The key exists only while the gate is live, so gate off is byte-identical.
+    ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
     // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
     ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed

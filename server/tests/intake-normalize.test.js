@@ -9,6 +9,7 @@ const {
   normalizeContactZip,
   normalizeContactStreet,
   normalizeContactStateField,
+  clearSharedPhoneMarkOnPhoneChange,
 } = require('../utils/intake-normalize');
 
 describe('intake contact normalization', () => {
@@ -319,5 +320,32 @@ describe('property-role fields (schema 1.9.0)', () => {
     const out = normalizeCallExtraction({ address_line1: '1 Main St' });
     expect(out.service_address_occupancy).toBeNull();
     expect(out.service_address_is_primary_residence).toBeNull();
+  });
+});
+
+describe('clearSharedPhoneMarkOnPhoneChange', () => {
+  const before = { phone: '+19415550100', sms_primary_for_shared_phone: true };
+  test('a new number drops the mark', () => {
+    const updates = { phone: '+19415550199' };
+    clearSharedPhoneMarkOnPhoneChange(updates, before);
+    expect(updates.sms_primary_for_shared_phone).toBe(false);
+  });
+  test('the same number in another format keeps it', () => {
+    const updates = { phone: '(941) 555-0100' };
+    clearSharedPhoneMarkOnPhoneChange(updates, before);
+    expect(updates).not.toHaveProperty('sms_primary_for_shared_phone');
+  });
+  test('a write that sets the mark itself is left alone', () => {
+    const updates = { phone: '+19415550199', sms_primary_for_shared_phone: true };
+    clearSharedPhoneMarkOnPhoneChange(updates, before);
+    expect(updates.sms_primary_for_shared_phone).toBe(true);
+  });
+  test('an unmarked row, or a write without a phone, is untouched', () => {
+    const a = { phone: '+19415550199' };
+    clearSharedPhoneMarkOnPhoneChange(a, { phone: '+19415550100', sms_primary_for_shared_phone: false });
+    expect(a).not.toHaveProperty('sms_primary_for_shared_phone');
+    const b = { email: 'x@example.com' };
+    clearSharedPhoneMarkOnPhoneChange(b, before);
+    expect(b).not.toHaveProperty('sms_primary_for_shared_phone');
   });
 });

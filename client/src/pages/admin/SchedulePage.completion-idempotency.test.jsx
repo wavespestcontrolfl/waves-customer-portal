@@ -10,13 +10,15 @@ import {
   pestRatingScaleCaptionText,
   completionResumeOwedError,
   completionReconcilePrompt,
-  completionReviewSuppressionReason,
   completionSideEffectsRetryPlan,
   completionStatusPlan,
-  completionTimeOnSiteBody,
-  completionWillReview,
   restoredBackfillChoices,
 } from "./SchedulePage.jsx";
+import {
+  completionReviewSuppressionReason,
+  completionTimeOnSiteBody,
+  completionWillReview,
+} from "../../lib/completion-review-timing";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 
 // Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT): the
