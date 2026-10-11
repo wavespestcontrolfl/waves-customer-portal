@@ -1287,7 +1287,10 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
   // the parent is an inbound VOICEMAIL, and the callback went to its number
   // or its customer. A callback from the Call Log action on an answered call
   // proves nothing about that call's asks.
-  const parents = new Map((await conn('call_log').whereIn('id', [...new Set(children.map((c) => String(c.parent_id)))])
+  // Share-locked like the children: inside the apply transaction a pass that
+  // would claim the parent (its token write) waits for the card write to
+  // commit, so a card never closes on a parent snapshot a pass is replacing.
+  const parents = new Map((await conn('call_log').whereIn('id', [...new Set(children.map((c) => String(c.parent_id)))]).forShare()
     .select('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'recording_sid', 'created_at', 'duration_seconds')).map((p) => [String(p.id), p]));
   const voicemail = (p) => p.call_outcome === 'voicemail' || p.answered_by === 'voicemail' || p.processing_status === 'voicemail';
   // The callback must postdate the voicemail's end (the processor's lockCallbackPair boundary).

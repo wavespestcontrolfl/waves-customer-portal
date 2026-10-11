@@ -2162,10 +2162,10 @@ function initScheduledJobs() {
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
     if (!require('./callback-cards').enabled()) {
-      // Cards off: the callback-spam settlement still owns a five-minute
-      // reconcile of its own (GATE_CALLBACK_SPAM_CLOSES_PARENT), so a lost
-      // settlement or correction never waits for the daily sweep.
-      if (!isEnabled('callbackSpamClosesParent')) return;
+      // Cards off: the callback-spam reconcile keeps its five-minute cadence
+      // on its own, gate or no gate (the reconciler itself gates only the
+      // forward settlements; its correction half runs through a rollback), so
+      // a lost settlement or correction never waits for the daily sweep.
       await require('../utils/cron-lock').runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
         .catch((err) => logger.warn(`[callback-verdict-reconcile] tick failed: ${err.message}`));
       return;

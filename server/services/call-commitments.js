@@ -2084,7 +2084,13 @@ const exhaustedExtractionSql = (t) => {
   const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require("../config/call-extraction-retry");
   return `(${t}.processing_status = 'extraction_failed' AND (COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`;
 };
-const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")}) OR ${exhaustedExtractionSql(t)}))`;
+// POSITIVE proof (the office returned the call, a conversation connected):
+// a genuinely processed call only. An exhausted failure is never evidence of
+// contact: its stale extraction fields say nothing about the last pass.
+const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")})))`;
+// TERMINAL for a correction: the same, plus an exhausted failure, which no
+// pass will revisit, so nothing it settled may wait on one.
+const terminalNonSpamCallbackSql = (t) => `(${settledNonSpamCallbackSql(t)} OR ${exhaustedExtractionSql(t)})`;
 function settledNonSpamCallback(b) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
   b.whereRaw(settledNonSpamCallbackSql("call_log"));
@@ -2099,6 +2105,11 @@ function isSettledParentRow(row) {
     && !(row?.processing_status == null && row?.recording_sid);
 }
 const settledParentSql = (t) => `(${t}.duration_seconds IS NOT NULL AND ${t}.processing_token IS NULL AND (${t}.processing_status IS NULL OR ${t}.processing_status NOT IN (${RETRYABLE_PARENT_STATUSES.map((v) => `'${v}'`).join(", ")})) AND NOT (${t}.processing_status IS NULL AND ${t}.recording_sid IS NOT NULL))`;
+// TERMINAL for a correction: settled, or an exhausted extraction failure (a
+// replacement recording's pass that ran out of retries: no pass will revisit
+// it, so an obsolete settlement must not wait on one). Never evidence for a
+// NEW settlement.
+const terminalParentSql = (t) => `(${settledParentSql(t)} OR (${t}.processing_token IS NULL AND ${exhaustedExtractionSql(t)}))`;
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
@@ -4123,6 +4134,8 @@ module.exports = {
   isSettledParentRow,
   settledParentSql,
   settledNonSpamCallbackSql,
+  terminalNonSpamCallbackSql,
+  terminalParentSql,
   UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,
