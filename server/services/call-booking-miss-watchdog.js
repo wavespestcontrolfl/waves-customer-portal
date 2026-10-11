@@ -36,8 +36,8 @@
  * pager then rang four times for a booked visit. A visit clears the miss
  * when it sits under ANOTHER live account with the same first and last name
  * (the linked customer's name, or the name the unlinked caller gave), on the
- * agreed ET date, within the window tolerance, active, and created AFTER the
- * call. An older visit of a namesake never clears. The bell for an unlinked
+ * agreed ET date, within the window tolerance, in a live status, and created
+ * AFTER the call. An older visit of a namesake never clears. The bell for an unlinked
  * call also names the one account that carries the caller's name.
  *
  * ET semantics: confirmed_start_at is parsed with the same wall-clock
@@ -61,6 +61,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
@@ -92,6 +93,10 @@ const REPEAT_DAY_END_HOUR_ET = 21;
 const REPEAT_LOOKBACK_DAYS = 30;
 // Statuses of a scheduled_services row the office has acted on and closed out.
 const INACTIVE_STATUSES = new Set(['cancelled', 'rescheduled']);
+// The only statuses a namesake account's visit may have to clear a miss: a
+// visit that is on the calendar or was done. An allow-list, so a skipped or
+// any later non-live outcome never counts.
+const NAMESAKE_LIVE_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site', 'completed']);
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -194,12 +199,13 @@ function rowClearsSlot(row, call, slot) {
 }
 
 // A visit the office booked after the call on a namesake account (same first
-// and last name as the call's customer or caller): the agreed ET date, an
-// active row, the window tolerance, and created strictly after the call. The
+// and last name as the call's customer or caller): the agreed ET date, a live
+// status (NAMESAKE_LIVE_STATUSES), the window tolerance, and created strictly
+// after the call. The
 // created-after fence is what the own-customer rule does not need: a namesake
 // may be another person, and only a booking made after this call answers it.
 function namesakeRowClearsSlot(row, call, slot) {
-  if (row.sched_date !== slot.dateET || INACTIVE_STATUSES.has(row.status)) return false;
+  if (row.sched_date !== slot.dateET || !NAMESAKE_LIVE_STATUSES.has(row.status)) return false;
   const startMinutes = windowStartMinutes(row.window_start);
   if (startMinutes === null || Math.abs(startMinutes - slot.minutes) > WINDOW_MATCH_TOLERANCE_MINUTES) return false;
   const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
@@ -239,26 +245,47 @@ function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes =
   return misses;
 }
 
+const squashName = (v) => String(v || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+
+// One comparable full name: "first last", trimmed, whitespace-collapsed,
+// lower-cased. Both parts are required.
 function nameKey(first, last) {
-  const norm = (v) => String(v || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
-  const f = norm(first);
-  const l = norm(last);
-  return f && l ? `${f}|${l}` : null;
+  const f = squashName(first);
+  const l = squashName(last);
+  return f && l ? `${f} ${l}` : null;
 }
 
+// The name the caller gave. The V2 schema lets either split field be null
+// beside a complete name_full, so a name_full of two or more words stands in
+// when a split part is missing. It is compared whole against "first last";
+// nothing is sliced out of it.
 function callerNameKey(extractionRaw) {
   let extraction = extractionRaw;
   if (typeof extraction === 'string') {
     try { extraction = JSON.parse(extraction); } catch { return null; }
   }
-  return nameKey(extraction?.caller?.first_name, extraction?.caller?.last_name);
+  const caller = extraction?.caller || {};
+  const split = nameKey(caller.first_name, caller.last_name);
+  if (split) return split;
+  const full = squashName(caller.name_full);
+  return full.includes(' ') ? full : null;
 }
 
-// The other live accounts that carry each missed call's name: the linked
+// The other accounts that carry each missed call's name: the linked
 // customer's first and last name, or for an unlinked call the name the caller
-// gave. Exact match on trimmed, whitespace-collapsed, lower-cased text; a
-// missing first or last name matches nothing. Returns
-// { namesakes: Map(call id -> Set(customer id)), accounts: Map(customer id -> row) }.
+// gave. Exact match on the squashed full name; a missing first or last name
+// on a record matches nothing.
+//
+// Scope: active, not soft-deleted, ANY pipeline stage. Not whereLiveCustomer
+// on purpose: a customer the call pipeline created stays at new_lead after
+// the office books it (customer-stages.js notes that the booking path does
+// not promote the stage), and that booked record is exactly the namesake the
+// audited call needed. A namesake row clears nothing by existing; only its
+// own live visit at the agreed slot, created after the call, does. The
+// likely-account hint is stricter and counts canonical live customers only
+// (`live`), so a lead row is never named as an account and never makes a
+// unique account look ambiguous.
+// Returns { namesakes: Map(call id -> Set(customer id)), accounts: Map(customer id -> row) }.
 async function loadNamesakeAccounts(misses) {
   const namesakes = new Map();
   const accounts = new Map();
@@ -278,13 +305,13 @@ async function loadNamesakeAccounts(misses) {
   const rows = await db('customers')
     .where('active', true)
     .whereNull('deleted_at')
-    .whereRaw(`(${squash('first_name')} || '|' || ${squash('last_name')}) = ANY(?)`, [keys])
-    .select('id', 'first_name', 'last_name', 'city');
+    .whereRaw(`(${squash('first_name')} || ' ' || ${squash('last_name')}) = ANY(?)`, [keys])
+    .select('id', 'first_name', 'last_name', 'city', 'pipeline_stage');
   const idsByKey = new Map();
   for (const r of rows) {
-    accounts.set(r.id, r);
     const key = nameKey(r.first_name, r.last_name);
     if (!key) continue;
+    accounts.set(r.id, { ...r, live: CUSTOMER_STAGES.includes(r.pipeline_stage) });
     if (!idsByKey.has(key)) idsByKey.set(key, new Set());
     idsByKey.get(key).add(r.id);
   }
@@ -305,12 +332,14 @@ function evidenceCustomerIds(misses, namesakes) {
   ])];
 }
 
-// An unlinked call whose caller's name is on exactly one live account: the
-// bell names that account, so the office can link the call and book.
+// An unlinked call whose caller's name is on exactly one canonical live
+// customer (customer-stages CUSTOMER_STAGES): the bell names that account, so
+// the office can link the call and book. Lead rows are not counted.
 function nameLikelyAccounts(misses, namesakes, accounts) {
   for (const m of misses) {
-    const ids = m.call.customer_id ? null : namesakes.get(m.call.id);
-    if (ids && ids.size === 1) m.likelyAccount = accounts.get([...ids][0]) || null;
+    if (m.call.customer_id) continue;
+    const live = [...(namesakes.get(m.call.id) || [])].map((id) => accounts.get(id)).filter((a) => a && a.live);
+    if (live.length === 1) m.likelyAccount = live[0];
   }
 }
 

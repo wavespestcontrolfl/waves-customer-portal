@@ -151,8 +151,9 @@ describe('booked on another account with the same name', () => {
     created_at: afterCall, source_call_log_id: null, notes: null, ...over,
   });
   const twoRecords = () => [
-    { id: 'cust-9', first_name: 'Robin', last_name: 'Example', city: 'Sampleton' },
-    { id: 'cust-first', first_name: ' robin ', last_name: 'EXAMPLE', city: 'Sampleton' },
+    { id: 'cust-9', first_name: 'Robin', last_name: 'Example', city: 'Sampleton', pipeline_stage: 'new_lead' },
+    // The first record is still at new_lead: the booking path does not promote the stage.
+    { id: 'cust-first', first_name: ' robin ', last_name: 'EXAMPLE', city: 'Sampleton', pipeline_stage: 'new_lead' },
   ];
 
   test('a visit booked after the call on the namesake account clears the miss', async () => {
@@ -169,6 +170,10 @@ describe('booked on another account with the same name', () => {
       namesakeVisit({ created_at: '2026-09-27T15:00:00Z' }),
       namesakeVisit({ created_at: CALL_AT }),
       namesakeVisit({ status: 'cancelled' }),
+      namesakeVisit({ status: 'rescheduled' }),
+      namesakeVisit({ status: 'skipped' }),
+      namesakeVisit({ status: 'no_show' }),
+      namesakeVisit({ status: undefined }),
       namesakeVisit({ sched_date: '2026-10-05' }),
       namesakeVisit({ window_start: '15:00:00' }),
       namesakeVisit({ created_at: null }),
@@ -193,25 +198,42 @@ describe('booked on another account with the same name', () => {
 
   test('an unlinked call is cleared by the same rule, through the name the caller gave', async () => {
     mockState.calls = [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller: { name_full: 'Robin Example', first_name: 'Robin', last_name: 'Example' } } })];
-    mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton' }];
+    mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton', pipeline_stage: 'active_customer' }];
     mockState.booked = [namesakeVisit()];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result.misses).toBe(0);
   });
 
+  test('a caller with only name_full (a split part missing) is matched on the whole name; one word matches nothing', async () => {
+    const withCaller = (caller) => [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller } })];
+    mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton', pipeline_stage: 'active_customer' }];
+    mockState.booked = [namesakeVisit()];
+    for (const caller of [{ name_full: 'Robin  Example' }, { name_full: 'robin example', first_name: 'Robin', last_name: null }]) {
+      mockState.calls = withCaller(caller);
+      expect((await runCallBookingMissWatchdog({ now: NOW })).misses).toBe(0);
+    }
+    mockState.calls = withCaller({ name_full: 'Robin' });
+    expect((await runCallBookingMissWatchdog({ now: NOW })).misses).toBe(1);
+  });
+
   test('the bell for an unlinked call names the one account that carries the caller\'s name', async () => {
     mockState.calls = [missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller: { name_full: 'Robin Example', first_name: 'Robin', last_name: 'Example' } } })];
-    mockState.customers = [{ id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton' }];
+    // A lead row with the same name is not an account: it is not named and does not make the name ambiguous.
+    mockState.customers = [
+      { id: 'cust-first', first_name: 'Robin', last_name: 'Example', city: 'Sampleton', pipeline_stage: 'active_customer' },
+      { id: 'lead-row', first_name: 'Robin', last_name: 'Example', city: 'Elsewhere', pipeline_stage: 'new_lead' },
+    ];
     await runCallBookingMissWatchdog({ now: NOW });
     const opts = NotificationService.notifyAdmin.mock.calls[0][3];
     expect(opts.detail).toMatch(/not linked to any customer\. One account carries this name: Robin Example \(Sampleton\)\. Confirm it is the same person, then link the call\./);
   });
 
-  test('no account is named when two carry the name, when the caller gave no last name, or when the call is linked', async () => {
+  test('no account is named when two live customers carry the name, when only a lead row does, when the caller gave no last name, or when the call is linked', async () => {
     const unlinked = (caller) => missCall({ customer_id: null, ai_extraction_enriched: { ...missCall().ai_extraction_enriched, caller } });
     const cases = [
-      { calls: [unlinked({ first_name: 'Robin', last_name: 'Example' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example' }, { id: 'b', first_name: 'Robin', last_name: 'Example' }] },
-      { calls: [unlinked({ first_name: 'Robin' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example' }] },
+      { calls: [unlinked({ first_name: 'Robin', last_name: 'Example' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example', pipeline_stage: 'active_customer' }, { id: 'b', first_name: 'Robin', last_name: 'Example', pipeline_stage: 'won' }] },
+      { calls: [unlinked({ first_name: 'Robin', last_name: 'Example' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example', pipeline_stage: 'new_lead' }] },
+      { calls: [unlinked({ first_name: 'Robin' })], customers: [{ id: 'a', first_name: 'Robin', last_name: 'Example', pipeline_stage: 'active_customer' }] },
       { calls: [missCall()], customers: twoRecords() },
     ];
     for (const c of cases) {
