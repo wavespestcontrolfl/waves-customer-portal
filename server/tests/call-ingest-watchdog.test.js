@@ -82,3 +82,22 @@ describe('runCallIngestWatchdog — gate', () => {
     expect(result).toEqual({ skipped: true, reason: 'gated_off' });
   });
 });
+
+describe('runCallIngestWatchdog — every bell bypasses the bell-policy filter', () => {
+  // Category 'alert' is silenced under GATE_ADMIN_BELL_POLICY unless the
+  // write carries bell: true (notification-bell-policy rule 1). This lane's
+  // only output is the bell, so a silenced write is an invisible ingest
+  // outage reported as "alerted" (Codex #6267 r1 P1). Static guard over the
+  // two notifyAdmin calls, like the stall and unrecorded watchdogs carry.
+  test('both notifyAdmin calls carry bell: true', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-ingest-watchdog.js'), 'utf8');
+    const calls = src.split('notifyAdmin(').slice(1);
+    expect(calls).toHaveLength(2);
+    for (const body of calls) {
+      const options = body.slice(0, body.indexOf(');'));
+      expect(options).toMatch(/bell: true/);
+    }
+  });
+});
