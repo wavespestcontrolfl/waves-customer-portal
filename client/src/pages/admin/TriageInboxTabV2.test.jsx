@@ -335,6 +335,30 @@ describe('no-text line card (text_number_differs)', () => {
     await waitFor(() => expect(loads).toBeGreaterThanOrEqual(3));
   });
 
+  it('when the server keeps the hold (open "not my number" card), the inbox says so instead of claiming texts resume (codex r10 P2)', async () => {
+    const kept = { ok: true, status: 'resolved', callback_number: { verdict: 'replacement_number', disclaimed_number_hold: 'kept', number_holds_cleared: 0, release: 'deferred',
+      message: 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first, then use Line can get texts on this card again.' } };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : kept));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    expect(await screen.findByText(/the line stays blocked for texts/)).toBeInTheDocument();
+  });
+
+  it('a cleared release shows no warning', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true, callback_number: { verdict: 'verified_same_number', disclaimed_number_hold: 'cleared', number_holds_cleared: 1 } }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', expect.anything()));
+    expect(screen.queryByText(/stays blocked for texts/)).toBeNull();
+  });
+
   it('Resolve ("Phones are updated") sends no line_can_get_texts, so the hold stays', async () => {
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
       ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));

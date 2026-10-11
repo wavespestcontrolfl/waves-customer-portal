@@ -889,14 +889,15 @@ export default function TriageInboxTabV2({ isAdmin }) {
   // Resolve a single item WITHOUT a call verdict — the action for
   // email_bounce_reverify cards, which aren't judgments on the call and are
   // rejected by the /verdict endpoint. Removes only the clicked row.
-  const resolveItem = (item, extra) => {
+  const resolveItem = (item, extra, onDone) => {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
       body: JSON.stringify({ expected_updated_at: item.updated_at, ...extra }),
     })
-      .then(() => {
+      .then((res) => {
         setActioning(null);
+        if (onDone) onDone(res);
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -918,14 +919,21 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
   // "Line can get texts": on an open card it resolves the card and releases the hold; on a card that
   // is already closed it only releases the hold (then reloads the list).
+  // The server can keep the hold (an open "not my number" card on the same call): the card still
+  // closes, but the inbox must say the line is still blocked instead of "texts will resume".
   const lineCanGetTexts = (item) => {
-    if (isOpenState(item.status)) { resolveItem(item, { line_can_get_texts: true }); return; }
+    const reportDeferred = (res) => {
+      if (res?.callback_number?.release === 'deferred' || (res?.callback_number && res.callback_number.disclaimed_number_hold !== 'cleared')) {
+        setError(res.callback_number.message || "The line stays blocked for texts: resolve this call's other card first.");
+      }
+    };
+    if (isOpenState(item.status)) { resolveItem(item, { line_can_get_texts: true }, reportDeferred); return; }
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
       body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true }),
     })
-      .then(() => { setActioning(null); load(mode, status, autoOnly); })
+      .then((res) => { setActioning(null); reportDeferred(res); load(mode, status, autoOnly); })
       .catch((err) => {
         setActioning(null);
         if (err?.status === 409) { load(mode, status, autoOnly); setError("This card changed since it loaded — review the refreshed card first."); return; }

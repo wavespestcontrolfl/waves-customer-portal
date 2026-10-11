@@ -188,7 +188,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.28.0 additive/optional (never `required`). true whenever the caller says the line they are calling from cannot receive text messages (a deaf relay service, an office landline, \"you can't text this one\"), WITH or WITHOUT naming another number for texts. null when nothing like that was said. Not caller_id_disclaimed: this caller still owns the line for calls."
+          "description": "1.28.0 additive/optional (never `required`). true whenever the caller says the line they are calling from cannot receive text messages (a deaf relay service, an office landline, \"you can't text this one\"), WITH or WITHOUT naming another number for texts. null when nothing like that was said. Independent of caller_id_disclaimed: both are true when the caller says the line is not their own AND cannot get texts; ani_cannot_text alone when they own a line that cannot get texts."
         },
         "text_phone_e164": {
           "type": [

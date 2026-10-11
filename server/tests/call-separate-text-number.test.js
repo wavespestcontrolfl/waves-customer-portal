@@ -174,15 +174,23 @@ describe('schema 1.28.0, normalizer, flat view, prompt, replay watch list', () =
     expect(normalizeExtractionV2(v2({ ani_cannot_text: true, text_phone_e164: 'call me' })).caller.text_phone_e164).toBeNull();
   });
 
-  test('prompt v29 carries the rule and keeps caller_id_disclaimed out of it', () => {
-    expect(PROMPT_VERSION).toBe('v29');
+  test('prompt v30 carries the rule and allows both flags on a shared line that cannot get texts (codex r10 P1)', () => {
+    expect(PROMPT_VERSION).toBe('v30');
     const prompt = buildExtractionPrompt('', '', '');
     expect(prompt).toMatch(/- ani_cannot_text: set true whenever the caller says the line they are calling from cannot receive text messages/);
     expect(prompt).toMatch(/WITH or WITHOUT naming another number to text/);
     expect(prompt).not.toMatch(/ani_cannot_text: set true ONLY/);
     expect(prompt).toMatch(/otherwise null \(ani_cannot_text stays true with no number\)/);
-    expect(prompt).toMatch(/do NOT set caller_id_disclaimed for it/);
+    expect(prompt).not.toMatch(/do NOT set caller_id_disclaimed for it/);
+    expect(prompt).toMatch(/set BOTH caller_id_disclaimed and ani_cannot_text/);
     expect(prompt).toMatch(/- text_phone_e164: /);
+    for (const schemaFile of ['../schemas/call-extraction.model-output.schema.json', '../schemas/call-extraction.persisted.schema.json']) {
+      const schema = JSON.parse(fs.readFileSync(path.join(__dirname, schemaFile), 'utf8'));
+      const caller = schema.properties.caller.properties;
+      expect(caller.ani_cannot_text.description).toMatch(/both are true when the caller says the line is not their own AND cannot get texts/);
+    }
+    const modelOut = JSON.parse(fs.readFileSync(path.join(__dirname, '../schemas/call-extraction.model-output.schema.json'), 'utf8'));
+    expect(modelOut.properties.caller.properties.caller_id_disclaimed.description).toMatch(/Independent of ani_cannot_text/);
   });
 
   test('the replay variance script watches both fields', () => {
@@ -257,6 +265,20 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     for (const line of ['v2SmsBlocked = true;', 'callbackNumberNeededHoldActive = true;', 'noTextHoldArming = true;',
       "if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2CanonicalExtraction }))) return abandonToPeer('the disclaimed-number hold write');",
       'await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });']) expect(section).toContain(line);
+  });
+
+  test('a non-workable voicemail that says the line cannot get texts arms the hold + card before the terminal write; spam does not (codex r10 P2)', () => {
+    const branch = src.indexOf('    // Skip spam and non-workable voicemail\n');
+    const terminal = src.indexOf('const terminalSettled = await db.transaction(', branch);
+    const arm = src.indexOf("if (!extracted.is_spam && aniCannotText(noTextSafeExtraction(v2Result)?.caller)) {", branch);
+    expect(arm).toBeGreaterThan(branch);
+    expect(arm).toBeLessThan(terminal);
+    const site = src.slice(arm, terminal);
+    expect(site).toContain('noTextHoldArming = true;');
+    expect(site).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');");
+    // the helpers are declared above the branch (no temporal dead zone)
+    expect(src.indexOf('const armCallbackNumberHoldAtDecision = async')).toBeLessThan(branch);
+    expect(src.indexOf('const fileTextNumberCard = async')).toBeLessThan(branch);
   });
 
   test('a "Line can get texts" release that lands during the pass is honored: the per-pass blockers go back to the pre-hold SMS verdict', () => {

@@ -129,7 +129,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.14.0 additive. true ONLY when the caller explicitly states the number reaching us is NOT their own — a shared/office line, a receptionist's desk phone, someone else's cell they borrowed. null when the call gives no signal either way; false is never set (the model omits the field or returns null instead — an unstated caller ID is not evidence it IS theirs). The Twilio ANI must not be trusted as a personal callback number when true and no spoken number backs it up; see phone_source and phone_note."
+          "description": "1.14.0 additive. true ONLY when the caller explicitly states the number reaching us is NOT their own — a shared/office line, a receptionist's desk phone, someone else's cell they borrowed. Independent of ani_cannot_text (set both when both facts were stated). null when the call gives no signal either way; false is never set (the model omits the field or returns null instead — an unstated caller ID is not evidence it IS theirs). The Twilio ANI must not be trusted as a personal callback number when true and no spoken number backs it up; see phone_source and phone_note."
         },
         "phone_note": {
           "type": [
@@ -144,7 +144,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.28.0 additive/optional (never `required`). true whenever the caller says the line they are calling from cannot receive text messages (a deaf relay service, an office landline, \"you can't text this one\"), WITH or WITHOUT naming another number for texts. null when nothing like that was said. Not caller_id_disclaimed: this caller still owns the line for calls."
+          "description": "1.28.0 additive/optional (never `required`). true whenever the caller says the line they are calling from cannot receive text messages (a deaf relay service, an office landline, \"you can't text this one\"), WITH or WITHOUT naming another number for texts. null when nothing like that was said. Independent of caller_id_disclaimed: both are true when the caller says the line is not their own AND cannot get texts; ani_cannot_text alone when they own a line that cannot get texts."
         },
         "text_phone_e164": {
           "type": [

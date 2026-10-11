@@ -10685,6 +10685,142 @@ const CallRecordingProcessor = {
       if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
     }
 
+    // (Hold helpers live above the voicemail terminal branch: a no-text voicemail arms the hold too; codex #6112 r10 P2.)
+    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
+    // the decision point — the same statement that flips the boolean above
+    // — before the card is published and before any further awaited work,
+    // so no sender (an invoice/estimate follow-up mid-flight, even at its
+    // provider check) sees the flag decided with no row. armDisclaimedNumber
+    // Hold serializes with the card's /resolve under the per-call triage
+    // lock and is the ONE write in this pass that may re-arm a cleared row
+    // (a genuine reprocess raising the flag again); every later write in
+    // the pass is ensure-only and cannot undo a clearance that lands after
+    // this decision. A failure fails the pass closed (the capped
+    // extraction_failed retry) — code/name only in the log (a Knex message
+    // can render the bound phone number).
+    //
+    // Round 8 P1: the write is FENCED to this pass's processing claim —
+    // armDisclaimedNumberHold verifies processing_token (+ generation)
+    // with a FOR UPDATE on call_log inside the same transaction as the
+    // insert (lock order: triage advisory lock → call_log row → hold row,
+    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
+    // lock first too). A superseded worker writes nothing and gets false
+    // back: the caller abandons the pass (abandonToPeer), the same
+    // outcome as the stillOwnsClaim boundaries — it must never arm, or
+    // re-arm over a human clearance, from a stale extraction.
+    let callbackNumberHoldArmed = false;
+    // Set by each decision point just before it arms: the hold rests on a VALID ani_cannot_text.
+    let noTextHoldArming = false;
+    // True once a no-text hold and its text_number_differs release card are COMMITTED together
+    // (the decision-point pair). Read by the post-customer write: a pass whose enforce routing
+    // threw before the decision point arms the pair there instead of refreshing a card that
+    // does not exist (codex r7 P1).
+    let noTextDecisionLanded = false;
+    // cardExtraction: on a no-text hold, the VALID extraction the release card is built from. The
+    // card insert runs INSIDE armDisclaimedNumberHold's transaction (afterArm), under the per-call
+    // triage lock and the processing-claim fence, so the hold and its only release card commit or
+    // roll back together (codex r7 P2): a failed card write leaves no hold behind, and a lost
+    // claim writes neither.
+    const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {
+      const wantsCard = noTextHoldArming && !!cardExtraction;
+      if (callbackNumberHoldArmed) {
+        // Armed earlier in this pass without the card (a hold decided before the no-text statement
+        // was read): the card is owed; its own fenced write fails closed.
+        if (wantsCard && !noTextDecisionLanded) {
+          await fileTextNumberCard(cardExtraction, call.customer_id || null, { failClosed: true });
+          noTextDecisionLanded = true;
+        }
+        return true;
+      }
+      try {
+        const item = wantsCard ? await buildTextNumberCardItem(cardExtraction, call.customer_id || null) : null;
+        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
+          procToken, procGeneration, noTextHold: noTextHoldArming,
+          afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,
+        });
+        if (armed?.claimLost) return false;
+        callbackNumberHoldArmed = true;
+        if (item) noTextDecisionLanded = true;
+        return true;
+      } catch (holdErr) {
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
+      }
+    };
+    // text_number_differs (owner ruling 2026-10-08): the card that releases the no-text hold. It is
+    // filed at the hold decision point too (before any hard-veto exit, so a durable hold never
+    // exists without the card that can release it) and refreshed with the final customer later.
+    // Idempotent per open card; never blocks the pass.
+    const buildTextNumberCardItem = async (ext, linkedCustomerId) => {
+        const callerForText = ext?.caller;
+        const aniPhone = firstExternalPhone(contactPhone);
+        const spokenText = isDialablePhone(callerForText?.text_phone_e164) && !samePhone(callerForText.text_phone_e164, aniPhone)
+          ? callerForText.text_phone_e164 : null;
+        const onFile = linkedCustomerId ? await db('customers').where({ id: linkedCustomerId }).first('phone') : null;
+        return buildTriageItem({
+          callLogId: call.id,
+          flag: 'text_number_differs',
+          extraction: ext,
+          severity: 'advisory',
+          extraPayload: {
+            ani_phone: aniPhone,
+            text_phone: spokenText,
+            // A snapshot only: the inbox shows the customer's LIVE phone (list query); this is the account phone at the time of the call.
+            customer_phone_at_call: onFile?.phone || null,
+            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.`,
+          },
+        });
+    };
+    // The card write itself. The caller holds the per-call triage lock and has verified the
+    // processing claim (armDisclaimedNumberHold's transaction, or fileTextNumberCard's own).
+    const writeTextNumberCard = async (trx, item, { refresh = false } = {}) => {
+      // A callback_number_needed card filed by an earlier pass (before this call was known to be a
+      // no-text line) keeps its old payload; mark it, or its Resolve could release the hold we arm now.
+      await trx('triage_items')
+        .where({ call_log_id: call.id, reason_code: 'callback_number_needed' })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ payload: trx.raw(NO_TEXT_MARK_SQL) });
+      if (refresh) {
+        // Refresh the OPEN card only: a card staff already resolved or dismissed stays settled.
+        await trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ payload: item.payload, updated_at: new Date() });
+      } else {
+        await trx('triage_items').insert(item)
+          .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+      }
+    };
+    const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {
+      try {
+        const item = await buildTextNumberCardItem(ext, linkedCustomerId);
+        // One transaction under the per-call triage lock (the contract every triage writer and the
+        // version-checked release share), fenced to this pass's processing claim: the card write cannot
+        // interleave with a release's version check, and a superseded worker writes nothing.
+        await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          const owner = await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+          if (!owner) return;
+          await writeTextNumberCard(trx, item, { refresh });
+        });
+      } catch (triageErr) {
+        const code = triageErr.code || triageErr.name || 'db_error';
+        if (failClosed) {
+          // The hold is already committed and callback_number_needed's card is suppressed for this
+          // case, so the release card must exist: abort the pass for the capped retry, like the
+          // hold write itself.
+          logger.error(`[call-proc] text-number card write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+          const closed = new Error(`text-number card write failed (${code})`);
+          closed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+          throw closed;
+        }
+        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${code}`);
+      }
+    };
     // Skip spam and non-workable voicemail
     if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
       // A retry newly classified spam/non-workable must first unlink any
@@ -10753,6 +10889,15 @@ const CallRecordingProcessor = {
       // between them left the call retryable while its funnel history was
       // already deleted. A 0-row terminal write throws inside the
       // transaction so the retire and stamp clear roll back with it.
+      // A non-workable VOICEMAIL that says the calling line cannot get texts (a valid V2
+      // ani_cannot_text) still needs the number-keyed hold and its release card: reminders and other
+      // automated texts to a known customer key on the number, not on this pass (codex #6112 r10 P2).
+      // Spam stays excluded. Armed BEFORE the terminal write, while this pass still owns the claim,
+      // with the same fence and the same abandon-on-lost-claim as the decision points.
+      if (!extracted.is_spam && aniCannotText(noTextSafeExtraction(v2Result)?.caller)) {
+        noTextHoldArming = true;
+        if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
+      }
       const terminalSettled = await db.transaction(async (trx) => {
         const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
         if (!settled) return false;
@@ -11018,141 +11163,6 @@ const CallRecordingProcessor = {
     // this pass is still running (codex #6112 r9 P2), so the per-pass blockers follow the durable hold.
     let v2SmsBlockedBeforeHold = false;
     let v2SmsClearedByImpliedConsentBeforeHold = false;
-    // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
-    // the decision point — the same statement that flips the boolean above
-    // — before the card is published and before any further awaited work,
-    // so no sender (an invoice/estimate follow-up mid-flight, even at its
-    // provider check) sees the flag decided with no row. armDisclaimedNumber
-    // Hold serializes with the card's /resolve under the per-call triage
-    // lock and is the ONE write in this pass that may re-arm a cleared row
-    // (a genuine reprocess raising the flag again); every later write in
-    // the pass is ensure-only and cannot undo a clearance that lands after
-    // this decision. A failure fails the pass closed (the capped
-    // extraction_failed retry) — code/name only in the log (a Knex message
-    // can render the bound phone number).
-    //
-    // Round 8 P1: the write is FENCED to this pass's processing claim —
-    // armDisclaimedNumberHold verifies processing_token (+ generation)
-    // with a FOR UPDATE on call_log inside the same transaction as the
-    // insert (lock order: triage advisory lock → call_log row → hold row,
-    // the mintEmailReviewCardsFenced order; /resolve takes the advisory
-    // lock first too). A superseded worker writes nothing and gets false
-    // back: the caller abandons the pass (abandonToPeer), the same
-    // outcome as the stillOwnsClaim boundaries — it must never arm, or
-    // re-arm over a human clearance, from a stale extraction.
-    let callbackNumberHoldArmed = false;
-    // Set by each decision point just before it arms: the hold rests on a VALID ani_cannot_text.
-    let noTextHoldArming = false;
-    // True once a no-text hold and its text_number_differs release card are COMMITTED together
-    // (the decision-point pair). Read by the post-customer write: a pass whose enforce routing
-    // threw before the decision point arms the pair there instead of refreshing a card that
-    // does not exist (codex r7 P1).
-    let noTextDecisionLanded = false;
-    // cardExtraction: on a no-text hold, the VALID extraction the release card is built from. The
-    // card insert runs INSIDE armDisclaimedNumberHold's transaction (afterArm), under the per-call
-    // triage lock and the processing-claim fence, so the hold and its only release card commit or
-    // roll back together (codex r7 P2): a failed card write leaves no hold behind, and a lost
-    // claim writes neither.
-    const armCallbackNumberHoldAtDecision = async ({ cardExtraction = null } = {}) => {
-      const wantsCard = noTextHoldArming && !!cardExtraction;
-      if (callbackNumberHoldArmed) {
-        // Armed earlier in this pass without the card (a hold decided before the no-text statement
-        // was read): the card is owed; its own fenced write fails closed.
-        if (wantsCard && !noTextDecisionLanded) {
-          await fileTextNumberCard(cardExtraction, call.customer_id || null, { failClosed: true });
-          noTextDecisionLanded = true;
-        }
-        return true;
-      }
-      try {
-        const item = wantsCard ? await buildTextNumberCardItem(cardExtraction, call.customer_id || null) : null;
-        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
-          phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
-          procToken, procGeneration, noTextHold: noTextHoldArming,
-          afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,
-        });
-        if (armed?.claimLost) return false;
-        callbackNumberHoldArmed = true;
-        if (item) noTextDecisionLanded = true;
-        return true;
-      } catch (holdErr) {
-        const code = holdErr.code || holdErr.name || 'db_error';
-        logger.error(`[call-proc] disclaimed-number hold write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
-        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
-        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
-        throw failClosed;
-      }
-    };
-    // text_number_differs (owner ruling 2026-10-08): the card that releases the no-text hold. It is
-    // filed at the hold decision point too (before any hard-veto exit, so a durable hold never
-    // exists without the card that can release it) and refreshed with the final customer later.
-    // Idempotent per open card; never blocks the pass.
-    const buildTextNumberCardItem = async (ext, linkedCustomerId) => {
-        const callerForText = ext?.caller;
-        const aniPhone = firstExternalPhone(contactPhone);
-        const spokenText = isDialablePhone(callerForText?.text_phone_e164) && !samePhone(callerForText.text_phone_e164, aniPhone)
-          ? callerForText.text_phone_e164 : null;
-        const onFile = linkedCustomerId ? await db('customers').where({ id: linkedCustomerId }).first('phone') : null;
-        return buildTriageItem({
-          callLogId: call.id,
-          flag: 'text_number_differs',
-          extraction: ext,
-          severity: 'advisory',
-          extraPayload: {
-            ani_phone: aniPhone,
-            text_phone: spokenText,
-            // A snapshot only: the inbox shows the customer's LIVE phone (list query); this is the account phone at the time of the call.
-            customer_phone_at_call: onFile?.phone || null,
-            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.`,
-          },
-        });
-    };
-    // The card write itself. The caller holds the per-call triage lock and has verified the
-    // processing claim (armDisclaimedNumberHold's transaction, or fileTextNumberCard's own).
-    const writeTextNumberCard = async (trx, item, { refresh = false } = {}) => {
-      // A callback_number_needed card filed by an earlier pass (before this call was known to be a
-      // no-text line) keeps its old payload; mark it, or its Resolve could release the hold we arm now.
-      await trx('triage_items')
-        .where({ call_log_id: call.id, reason_code: 'callback_number_needed' })
-        .whereIn('status', ['open', 'in_progress'])
-        .update({ payload: trx.raw(NO_TEXT_MARK_SQL) });
-      if (refresh) {
-        // Refresh the OPEN card only: a card staff already resolved or dismissed stays settled.
-        await trx('triage_items')
-          .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
-          .whereIn('status', ['open', 'in_progress'])
-          .update({ payload: item.payload, updated_at: new Date() });
-      } else {
-        await trx('triage_items').insert(item)
-          .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-      }
-    };
-    const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {
-      try {
-        const item = await buildTextNumberCardItem(ext, linkedCustomerId);
-        // One transaction under the per-call triage lock (the contract every triage writer and the
-        // version-checked release share), fenced to this pass's processing claim: the card write cannot
-        // interleave with a release's version check, and a superseded worker writes nothing.
-        await db.transaction(async (trx) => {
-          await lockTriageCall(trx, call.id);
-          const owner = await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
-          if (!owner) return;
-          await writeTextNumberCard(trx, item, { refresh });
-        });
-      } catch (triageErr) {
-        const code = triageErr.code || triageErr.name || 'db_error';
-        if (failClosed) {
-          // The hold is already committed and callback_number_needed's card is suppressed for this
-          // case, so the release card must exist: abort the pass for the capped retry, like the
-          // hold write itself.
-          logger.error(`[call-proc] text-number card write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
-          const closed = new Error(`text-number card write failed (${code})`);
-          closed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
-          throw closed;
-        }
-        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${code}`);
-      }
-    };
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent

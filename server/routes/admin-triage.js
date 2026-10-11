@@ -211,7 +211,8 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // Returns the reply for the route, or `prior` when nothing ran.
 async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineCanGetTexts) {
   if (item.reason_code !== 'text_number_differs' || !item.call_log_id || nextStatus !== 'resolved') return prior;
-  const release = lineCanGetTexts === true && !(await disclaimedCardOpen(trx, item.call_log_id));
+  const ownershipCardOpen = lineCanGetTexts === true && await disclaimedCardOpen(trx, item.call_log_id);
+  const release = lineCanGetTexts === true && !ownershipCardOpen;
   const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
     clearedBy: assignedTo,
     numberVerdict: release ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
@@ -233,7 +234,14 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
       cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
     }
   }
-  return callbackNumberReply(cleared.numberVerdict, cleared.numbers);
+  const reply = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
+  if (ownershipCardOpen) {
+    // The office asked for the release and did not get it: say exactly why, so the inbox never
+    // reports "texts will resume" over a line that is still held (codex #6112 r10 P2).
+    reply.release = 'deferred';
+    reply.message = 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first, then use Line can get texts on this card again.';
+  }
+  return reply;
 }
 
 // "Line can get texts" on a card that is ALREADY closed (Resolve and Dismiss both close it and leave the
