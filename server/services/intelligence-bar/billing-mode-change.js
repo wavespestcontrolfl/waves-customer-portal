@@ -307,23 +307,33 @@ async function chargeContext(dbh, customerId, row) {
 //                settles after the lane moves (retry-collectibility.js
 //                findCollectedMonthlyPayment, the cron's own already-collected
 //                predicate, narrowed to processing).
-const NO_FACTS = { roots: [], processing: [], openDues: [] };
+const NO_FACTS = { roots: [], processing: [], openDues: [], scopeGate: false };
 
 async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
   const ids = await require('../recurring-series-topup').eligibleSeriesParentIds(dbh, { customerId });
   if (!ids.length) return [];
   const q = dbh('scheduled_services').whereIn('id', ids).orderBy('id', 'asc').select('id', 'payer_id', 'service_type');
   const rows = await (lock ? q.forUpdate() : q);
+  // eligibleSeriesParentIds is the coarse selector; the nightly writer also skips a root for a
+  // deleted / held / inactive / churned customer and for an annual-prepay, plan-hold or
+  // duplicate series. Those roots are asked of the top-up's own two skip rules (admin-schedule.js
+  // splitRootsByTopupSkip) and kept out of the price, zero and payer checks, listed on the card.
+  const { seriesNextOccurrencesPrice, splitRootsByTopupSkip } = require('../../routes/admin-schedule');
+  const { skipped } = await splitRootsByTopupSkip(dbh, customerId, rows.map((r) => r.id));
+  const skipReason = new Map(skipped.map((x) => [String(x.id), x.reason]));
   // The price the top-up would copy onto each visit it mints from the root (its own
   // resolver, admin-schedule.js seriesNextOccurrencesPrice: extension price template +
   // due add-on lines, read after the root lock). A priced template is billing the new
   // lane would never see: completion prefers a visit's estimated_price over the
   // per-application fee.
-  const { seriesNextOccurrencesPrice } = require('../../routes/admin-schedule');
   const out = [];
   for (const r of rows) {
+    if (skipReason.has(String(r.id))) {
+      out.push({ ...r, payer_id: null, price: 0, unverified: false, explicitZero: false, skipped: skipReason.get(String(r.id)) });
+      continue;
+    }
     const verdict = await seriesNextOccurrencesPrice(dbh, r.id);
-    out.push({ ...r, price: verdict ? verdict.price : 0, unverified: !!(verdict && verdict.unverified) });
+    out.push({ ...r, price: verdict ? verdict.price : 0, unverified: !!(verdict && verdict.unverified), explicitZero: !!(verdict && verdict.explicitZero), skipped: null });
   }
   return out;
 }
@@ -360,7 +370,13 @@ async function processingDues(dbh, customerId) {
 
 async function billingFacts(dbh, customerId, row, fields, { lock = false } = {}) {
   const leaving = resolveBillingLane(row).mode === 'monthly_membership' && resolveBillingLane({ ...row, ...fields }).mode !== 'monthly_membership';
-  return { roots: await ongoingRoots(dbh, customerId, { lock }), processing: leaving ? await processingDues(dbh, customerId) : [] };
+  // The gate that makes an explicit $0 template override authoritative on minted visits is part
+  // of the card's pin, with the roots' own zero flags.
+  return {
+    roots: await ongoingRoots(dbh, customerId, { lock }),
+    processing: leaving ? await processingDues(dbh, customerId) : [],
+    scopeGate: require('../../config/feature-gates').isEnabled('editApptPriceServiceScope'),
+  };
 }
 
 // What the card was built from, as one string compared under the lock at commit:
@@ -370,10 +386,10 @@ async function billingFacts(dbh, customerId, row, fields, { lock = false } = {})
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status, d.credit_applied == null ? null : String(d.credit_applied)]);
   const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
-  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified']);
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id), String(r.price), r.unverified ? 'unverified' : 'verified', r.explicitZero ? 'zero' : '', r.skipped || '']);
   const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
-  return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing])}`;
+  return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing, +facts.scopeGate])}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -402,7 +418,7 @@ const SIDE_FLOW_CHECKS = [
   // every visit it mints, so the new lane would meet a payer-owned visit.
   ({ row, visits, facts }) => {
     if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer');
-    return facts.roots.some((r) => r.payer_id)
+    return facts.roots.some((r) => r.payer_id && !r.skipped)
       ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'billing_visits_payer_owned') : null;
   },
   // A move INTO monthly membership needs a customer the dues run would really
@@ -518,6 +534,10 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = 
   // prepayment, invoices, dues coverage all move completion's amount): a visit
   // that carries any of them keeps the change on the customer page, which shows
   // each visit's charge.
+  const zeroRoot = facts.roots.find((r) => r.explicitZero);
+  if (zeroRoot) {
+    return refuse(`This customer's ongoing ${zeroRoot.service_type || 'recurring'} plan has a $0.00 price override on each visit it adds; it would bill nothing. Change the billing type on the customer page. Nothing was changed.`, 'billing_visits_priced');
+  }
   const pricedRoot = facts.roots.find((r) => r.unverified || r.price > 0);
   if (pricedRoot) {
     const what = pricedRoot.unverified ? 'a schedule too long to check' : `a price of ${money(pricedRoot.price)} on each visit it adds`;
@@ -590,7 +610,7 @@ const duesStopLine = (openDues) => {
   return `Monthly dues stop: no new monthly dues charge runs. ${plural(openDues.length, 'open membership-dues invoice', 'open membership-dues invoices')} (${money(total)}) stay${openDues.length === 1 ? 's' : ''} collectible: their pay links and follow-ups continue. Dues already paid for this month are not refunded.`;
 };
 
-function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = []) {
+function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
   // one_time and any other explicit lane bill like per_visit.
@@ -604,6 +624,7 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
     head,
     ...tenderLines(laneAfter, charge),
     ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
+    ...facts.roots.filter((r) => r.skipped).map((r) => `Not extended: the ${r.service_type || 'recurring'} plan (${r.skipped.replace(/_/g, ' ')}); the nightly top-up adds no visits to it, so this change does not reach it.`),
   ];
 }
 
@@ -643,7 +664,7 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues),
+      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues, facts),
     },
   };
 }

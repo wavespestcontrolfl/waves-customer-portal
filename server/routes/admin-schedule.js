@@ -33,7 +33,7 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { seriesCustomerSkipReason } = require('../services/series-customer-eligibility');
+const { seriesCustomerSkipReason, SERIES_CUSTOMER_COLUMNS } = require('../services/series-customer-eligibility');
 const MODELS = require('../config/models');
 const { isAreaAddOnCatalogKey } = require('../services/pricing-engine/constants');
 
@@ -6145,12 +6145,19 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
 async function seriesNextOccurrencesPrice(conn, parentId) {
   const walk = await seriesVerdictWalk(conn, parentId);
   if (!walk) return null;
-  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0 };
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, explicitZero: false };
   const { parent, parentAddons } = walk;
   const prices = await seriesExtensionDatePrices(conn, {
     ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
   });
-  return { unverified: false, price: Math.max(0, ...prices) };
+  const price = Math.max(0, ...prices);
+  // An explicit $0 template override (written only by the price/service scope lane) stays an
+  // authoritative $0 on every visit the top-up mints (applyStoredVisitFinancials, same gate and
+  // same condition: the lines price to nothing and the override is exactly 0), so those visits
+  // bill nothing; kept apart from a root that is merely unpriced.
+  const explicitZero = price === 0 && isEnabled('editApptPriceServiceScope')
+    && parseTemplateOverrides(parent.recurring_template_overrides)?.estimated_price === 0;
+  return { unverified: false, price, explicitZero };
 }
 
 
@@ -21188,6 +21195,29 @@ async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
   return hits;
 }
 
+// Which of a customer's ongoing roots (eligibleSeriesParentIds, the coarse recurring_ongoing
+// selector) would the nightly top-up actually extend? Runs the top-up's own two skip rules:
+// the customer rules (topupCustomerSkipReason: deleted, held, inactive, churned) and each
+// root's series rules (topupSeriesSkipReason: annual prepay, plan hold, duplicate series),
+// the same calls topUpRecurringSeriesLocked makes. Read-only; used by billing checks that ask
+// "what would the next visit be" (billing-mode-rules.js unpricedOngoingSeries, the
+// Intelligence Bar billing type card) so a root the top-up skips never blocks them.
+// Returns { extend: [id], skipped: [{ id, reason }] }.
+async function splitRootsByTopupSkip(conn, customerId, ids) {
+  if (!ids.length) return { extend: [], skipped: [] };
+  const customer = await conn('customers').where({ id: customerId }).first(...SERIES_CUSTOMER_COLUMNS);
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) return { extend: [], skipped: ids.map((id) => ({ id, reason: customerSkip })) };
+  const cols = await conn('scheduled_services').columnInfo();
+  const out = { extend: [], skipped: [] };
+  for (const id of ids) {
+    const parent = await conn('scheduled_services').where({ id }).first();
+    const reason = parent ? await topupSeriesSkipReason(conn, parent, id, cols) : 'series_not_found';
+    if (reason) out.skipped.push({ id, reason }); else out.extend.push(id);
+  }
+  return out;
+}
+
 // Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
 // customer-comms-lock.js's own tryLockCustomerComms does (knex's raw()
 // result shape differs by driver/version — `{ rows: [...] }` vs a bare
@@ -28838,6 +28868,7 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 module.exports.topUpScopeInput = topUpScopeInput;
 module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
 module.exports.seriesNextOccurrencesPrice = seriesNextOccurrencesPrice;
+module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;

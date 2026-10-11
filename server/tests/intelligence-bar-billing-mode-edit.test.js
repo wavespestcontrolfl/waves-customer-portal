@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, unverifiedRoots: new Set(), holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -110,6 +110,13 @@ jest.mock('../routes/admin-schedule', () => ({
   seriesNextOccurrencesPrice: jest.fn(async (conn, id) => ({
     unverified: mockState.unverifiedRoots.has(String(id)),
     price: mockState.rootPrices[String(id)] || 0,
+    // The real one needs the price/service scope gate on AND an exact $0 override.
+    explicitZero: mockState.zeroRoots.has(String(id)) && require('../config/feature-gates').gates.editApptPriceServiceScope === true,
+  })),
+  // The top-up's own two skip rules, driven by state: mockState.topupSkips = { rootId: reason }.
+  splitRootsByTopupSkip: jest.fn(async (conn, customerId, ids) => ({
+    extend: ids.filter((id) => !mockState.topupSkips[String(id)]),
+    skipped: ids.filter((id) => mockState.topupSkips[String(id)]).map((id) => ({ id, reason: mockState.topupSkips[String(id)] })),
   })),
 }));
 // The collections hold the cron's own charge guard reads (collections/collection-hold.js).
@@ -173,6 +180,8 @@ beforeEach(() => {
   mockState.methodsBusy = false;
   mockState.methodsAdvisoryBusy = false;
   mockState.rootPrices = {};
+  mockState.zeroRoots = new Set();
+  mockState.topupSkips = {};
   mockState.unverifiedRoots = new Set();
   mockState.holdActive = false;
   mockState.traceTender = false;
@@ -1311,6 +1320,101 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
     });
   });
 
+  describe('Codex round 19: roots the top-up skips, and an explicit $0 override', () => {
+    const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
+    const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
+    const setup = () => {
+      mockState.customer = { ...BASE };
+      mockState.visits = [];
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [ROOT];
+      mockState.rootPrices = { 'root-1': 500 };
+    };
+
+    test('a root the top-up skips (churned customer, annual prepay) does not refuse and is listed as not extended; an active priced root still refuses', async () => {
+      setup();
+      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced' });
+      mockState.topupSkips = { 'root-1': 'customer_churned' };
+      const churned = await propose(PER_APP);
+      expect(churned.error).toBeUndefined();
+      expect(churned.display.next_visits).toContain('Not extended: the Pest Control plan (customer churned); the nightly top-up adds no visits to it, so this change does not reach it.');
+      mockState.topupSkips = { 'root-1': 'annual_prepay_series' };
+      const prepay = await propose(PER_APP);
+      expect(prepay.error).toBeUndefined();
+      expect(prepay.display.next_visits.join(' ')).toContain('annual prepay series');
+      // The skip state is pinned: a root that becomes extendable after the card refuses at commit.
+      mockState.topupSkips = {};
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: prepay.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('a skipped root does not carry a payer refusal either', async () => {
+      setup();
+      mockState.rootPrices = {};
+      mockState.roots = [{ ...ROOT, payer_id: 7 }];
+      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_payer_owned' });
+      mockState.topupSkips = { 'root-1': 'plan_hold' };
+      expect((await propose(PER_APP)).error).toBeUndefined();
+    });
+
+    test('source contract: the split runs the top-up\'s own two skip predicates, and both callers use it', () => {
+      const fs = require('fs');
+      const route = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+      const split = route.slice(route.indexOf('async function splitRootsByTopupSkip'), route.indexOf('// Reads a pg_try_advisory_xact_lock'));
+      expect(split).toContain('topupCustomerSkipReason(customer)');
+      expect(split).toContain('topupSeriesSkipReason(conn, parent, id, cols)');
+      expect(split).toContain('SERIES_CUSTOMER_COLUMNS');
+      // And those are the very calls the nightly writer makes.
+      const topUp = route.slice(route.indexOf('async function topUpRecurringSeriesLocked'));
+      expect(topUp).toContain('topupCustomerSkipReason(customer)');
+      expect(topUp).toContain('topupSeriesSkipReason(conn, parent, parentId, cols)');
+      expect(fs.readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8')).toContain('splitRootsByTopupSkip(');
+      expect(fs.readFileSync(require.resolve('../services/billing-mode-rules.js'), 'utf8')).toContain('splitRootsByTopupSkip(');
+    });
+
+    describe('explicit $0 override', () => {
+      const FG = require('../config/feature-gates');
+      let before;
+      beforeEach(() => { before = FG.gates.editApptPriceServiceScope; });
+      afterEach(() => { FG.gates.editApptPriceServiceScope = before; });
+
+      test('an explicit zero refuses a billing edit; an unpriced root passes', async () => {
+        setup();
+        mockState.rootPrices = {};
+        FG.gates.editApptPriceServiceScope = true;
+        mockState.zeroRoots = new Set(['root-1']);
+        expect(await propose(PER_APP)).toMatchObject({
+          code: 'billing_visits_priced',
+          error: expect.stringContaining('ongoing Pest Control plan has a $0.00 price override on each visit it adds; it would bill nothing'),
+        });
+        mockState.zeroRoots = new Set();
+        expect((await propose(PER_APP)).error).toBeUndefined();
+      });
+
+      test('the scope gate is pinned: a flip after the card refuses at commit', async () => {
+        setup();
+        mockState.rootPrices = {};
+        mockState.zeroRoots = new Set(['root-1']);
+        FG.gates.editApptPriceServiceScope = false;
+        const card = await propose(PER_APP);
+        expect(card.error).toBeUndefined();
+        FG.gates.editApptPriceServiceScope = true;
+        expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+          .toMatchObject({ preview_changed: true });
+        expect(customerWrites()).toHaveLength(0);
+      });
+
+      test('source contract: the zero comes from the top-up\'s own condition (gate + exact $0 override), kept apart from unpriced', () => {
+        const route = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+        const fn = route.slice(route.indexOf('async function seriesNextOccurrencesPrice'), route.indexOf('// GET /api/admin/schedule'));
+        expect(fn).toContain("isEnabled('editApptPriceServiceScope')");
+        expect(fn).toContain('parseTemplateOverrides(parent.recurring_template_overrides)?.estimated_price === 0');
+        expect(fn).toContain('explicitZero');
+      });
+    });
+  });
+
   describe('Codex round 14: an ongoing root whose template carries a price', () => {
     const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
     const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
@@ -1334,7 +1438,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.roots = [ROOT];
       const card = await propose(PER_APP);
       expect(card.error).toBeUndefined();
-      expect(card.pin).toContain('["root-1",null,"0","verified"]');
+      expect(card.pin).toContain('["root-1",null,"0","verified","",""]');
       mockState.rootPrices = { 'root-1': 500 };
       const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
       expect(stale).toMatchObject({ preview_changed: true });
@@ -1362,7 +1466,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       const priceFn = route.slice(route.indexOf('async function seriesNextOccurrencesPrice'), route.indexOf('// GET /api/admin/schedule'));
       expect(priceFn).toContain('seriesVerdictWalk(conn, parentId)');
       expect(priceFn).toContain('seriesExtensionDatePrices(');
-      expect(priceFn).not.toMatch(/estimated_price|calculateStoredVisitFinancials/);
+      expect(priceFn).not.toMatch(/calculateStoredVisitFinancials|storedOccurrenceFloorPrice/);
       expect(card).toContain('seriesNextOccurrencesPrice');
       expect(card).not.toMatch(/storedOccurrenceFloorPrice|calculateStoredVisitFinancials|resolveSeriesExtensionPriceTemplate/);
     });
@@ -1454,7 +1558,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.roots = [rootRow(null)];
       const card = await propose(LEAVE);
       expect(card.error).toBeUndefined();
-      expect(card.pin).toContain('[[["root-1",null,"0","verified"]],[]]');
+      expect(card.pin).toContain('[[["root-1",null,"0","verified","",""]],[],0]');
       mockState.log = [];
       expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
       expect(mockState.log).toContain('roots:lock');

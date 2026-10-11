@@ -1081,6 +1081,33 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
     });
   });
 
+  describe('Codex round 19: splitRootsByTopupSkip and the explicit $0 override', () => {
+    const { splitRootsByTopupSkip, seriesNextOccurrencesPrice } = require('../routes/admin-schedule');
+    const FG = require('../config/feature-gates');
+
+    test('the top-up\'s own customer and series rules decide: churned customer, annual-prepay series skip; an active series is extended', async () => {
+      expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { pipeline_stage: 'churned' } }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'customer_churned' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({ colsOverrides: { annual_prepay_term_id: {} }, stampedAnnualTermId: true }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'annual_prepay_series' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [10])).toEqual({ extend: [10], skipped: [] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [])).toEqual({ extend: [], skipped: [] });
+    });
+
+    test('an explicit $0 override reads as explicitZero only with the scope gate on; an unpriced root never does', async () => {
+      const before = FG.gates.editApptPriceServiceScope;
+      const zero = { parentOverrides: { estimated_price: null, create_invoice_on_complete: false, recurring_template_overrides: { estimated_price: 0 } }, colsOverrides: { recurring_template_overrides: {} } };
+      const unpriced = { parentOverrides: { estimated_price: null, create_invoice_on_complete: false }, colsOverrides: { recurring_template_overrides: {} } };
+      try {
+        FG.gates.editApptPriceServiceScope = true;
+        expect(await seriesNextOccurrencesPrice(topupScenario(zero).conn, 10)).toMatchObject({ price: 0, explicitZero: true, unverified: false });
+        expect(await seriesNextOccurrencesPrice(topupScenario(unpriced).conn, 10)).toMatchObject({ price: 0, explicitZero: false });
+        FG.gates.editApptPriceServiceScope = false;
+        expect(await seriesNextOccurrencesPrice(topupScenario(zero).conn, 10)).toMatchObject({ price: 0, explicitZero: false });
+      } finally { FG.gates.editApptPriceServiceScope = before; }
+    });
+  });
+
   test('the verdict function stays within the repository complexity limit (decisions, not a one-use helper)', () => {
     const { Linter } = require('eslint');
     const fs = require('fs');

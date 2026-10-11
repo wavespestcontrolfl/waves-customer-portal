@@ -67,8 +67,10 @@ async function unpricedFutureBillableVisits(dbh, customerId, { customerOverride 
 async function unpricedOngoingSeries(dbh, customerId, alreadyListed, customerOverride) {
   try {
     const { eligibleSeriesParentIds } = require('./recurring-series-topup');
-    const { seriesNextOccurrencesUnbillable } = require('../routes/admin-schedule');
-    const ids = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
+    const { seriesNextOccurrencesUnbillable, splitRootsByTopupSkip } = require('../routes/admin-schedule');
+    // Only the roots the nightly top-up would extend (its own customer and series skip rules).
+    const listed = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
+    const ids = (await splitRootsByTopupSkip(dbh, customerId, listed)).extend;
     const out = [];
     for (const id of ids) {
       // Any verdict blocks: no billable amount, or a plan that could not be verified.
