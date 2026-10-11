@@ -2195,6 +2195,12 @@ async function callbackSpamReopenCount(conn, commitmentId) {
   const row = await conn("audit_log").where({ resource_type: "call_commitment", resource_id: commitmentId, action: CALLBACK_SPAM_REOPEN_ACTION }).count({ n: "*" }).first();
   return Number(row?.n) || 0;
 }
+// The promise-chaser dedupe key's version segment for those reopens: empty
+// (the key every existing row already carries) until the first one.
+async function callbackSpamReopenKeySuffix(conn, commitmentId) {
+  const n = await callbackSpamReopenCount(conn, commitmentId);
+  return n ? `:r${n}` : "";
+}
 // Inside the correction's transaction: each row read FOR UPDATE and written
 // only as read (status, human state, evidence, version), so a staff edit of
 // the dismissed promise that landed first stands.
@@ -4111,6 +4117,7 @@ module.exports = {
   rejudgeCallbackSpamDismissals,
   RETRYABLE_PARENT_STATUSES,
   callbackSpamReopenCount,
+  callbackSpamReopenKeySuffix,
   isSettledParentRow,
   settledParentSql,
   settledNonSpamCallbackSql,

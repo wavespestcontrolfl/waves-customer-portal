@@ -363,8 +363,8 @@ async function ringForCall(call, now = new Date()) {
   // not a renewal boundary but is a new owing of the same obligation: the
   // earlier bell and delivery fact must not silence it. No reopen = the key
   // every existing row already carries.
-  const reopens = await require('./call-commitments').callbackSpamReopenCount(db, promise.id);
-  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(new Date(call.created_at))}${reopens ? `:r${reopens}` : ''}`;
+  const reopenVersion = await require('./call-commitments').callbackSpamReopenKeySuffix(db, promise.id);
+  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(new Date(call.created_at))}${reopenVersion}`;
 
   // A bell this callback already has for a DIFFERENT identity — another
   // promise that has since been kept, or an older version of this one — is

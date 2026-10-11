@@ -1130,7 +1130,8 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration, c
 // commitments watchdog calls this every tick: it finds every such callback
 // from the data itself (the parent still stamped with it, a promise still
 // dismissed on it, or a card the sweep closed on it; partial indexes in
-// migrations 20261010280000, 20261010290000 and 20261010310000) and runs
+// migrations 20261010280000, 20261010290000, 20261010310000 and
+// 20261010320000; every source bounded to rows changed in the last 30 days) and runs
 // the same correction. Converges: a correction clears the stamp and reopens
 // or re-points the dismissal, so the row leaves both scans.
 async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
@@ -1140,7 +1141,15 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   const { settledNonSpamCallbackSql, settledParentSql } = require('./call-commitments');
   // Settled on anything but spam, an exhausted extraction_failed included (no
   // pass will ever say spam about it): the same predicate the promise proof uses.
-  const settledNonSpam = (q) => q.whereRaw(settledNonSpamCallbackSql('cb')).whereNot('cb.processing_status', 'spam');
+  // Every source is bounded to rows that CHANGED inside the scan window (a
+  // reprocess or a replacement recording rewrites updated_at; indexes
+  // call_log_outbound_updated_at_index for the callback,
+  // call_log_callback_verdict_parent_updated_at_index for a stamped parent):
+  // the stamped and dismissed sets grow forever, the recent slice does not.
+  const RECONCILE_WINDOW_DAYS = 30;
+  const recentCb = (q) => q.whereRaw(`cb.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
+  const recentParent = (q) => q.whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
+  const settledNonSpam = (q) => q.modify(recentCb).whereRaw(settledNonSpamCallbackSql('cb')).whereNot('cb.processing_status', 'spam');
   const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
   const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
@@ -1150,7 +1159,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // longer applies (callbackReachedSolicitor refuses it), so the stamp, the
   // cards and the dismissal it holds are retired through the same correction
   // (standingSpamCallbacks is empty for a non-voicemail parent).
-  const notVoicemail = (q) => q.where('cb.processing_status', 'spam').whereNull('cb.processing_token')
+  const notVoicemail = (q) => q.modify(recentParent).where('cb.processing_status', 'spam').whereNull('cb.processing_token')
     // NULL-safe (adoption clears the markers to NULL): isVoicemailParent's twin.
     .whereRaw("p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail'")
     .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(settledParentSql('p'));
