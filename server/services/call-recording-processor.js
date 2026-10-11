@@ -516,6 +516,7 @@ const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an imp
 function transcriptRejectionUpdate(rejectionMeta) {
   return {
     processing_status: 'voicemail',
+    processed_at: new Date(),
     answered_by: 'voicemail',
     call_outcome: 'voicemail',
     transcription: TRANSCRIPTION_REJECTED_SENTINEL,
@@ -3083,6 +3084,8 @@ async function pushCallToRetryLaneAfterQuarantineFailure({
     }
     const pushedRows = await lastResortQ.update({
       processing_status: 'extraction_failed',
+      // A retry-lane row carries no verdict time (Codex #6269 r2).
+      processed_at: null,
       extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
       metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [String(reason), JSON.stringify(quarantineQueueEntry(reason, procGeneration))]),
       updated_at: new Date(),
@@ -9355,6 +9358,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
       transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
       sentiment: extracted.sentiment || null,
       processing_status: 'processed',
+      processed_at: new Date(),
       processing_token: null,
       metadata: db.raw(
         "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
@@ -9565,6 +9569,11 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // The verdict time belongs to the pass that lands it: a claim on a
+            // settled row (admin Reprocess) clears the old stamp, so a pass
+            // that ends in a retry lane never reports the previous verdict's
+            // time as its own (Codex #6269 r1).
+            processed_at: null,
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
             // already draining stamps itself IN the claim write, so the stamp
@@ -9634,6 +9643,11 @@ const CallRecordingProcessor = {
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
             processing_heartbeat_at: new Date(),
+            // The verdict time belongs to the pass that lands it: a claim on a
+            // settled row (admin Reprocess) clears the old stamp, so a pass
+            // that ends in a retry lane never reports the previous verdict's
+            // time as its own (Codex #6269 r1).
+            processed_at: null,
             // A deploy stamp (markInFlightForShutdown) is consumed by the
             // claim that takes the row. A claim taken while this process is
             // already draining stamps itself IN the claim write, so the stamp
@@ -10155,6 +10169,9 @@ const CallRecordingProcessor = {
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
+        // The claim cleared the verdict time; a restored terminal status gets
+        // its own stamp back, a NULL / pending status none (Codex #6269 r2).
+        processed_at: preClaimStatus ? (call.processed_at || null) : null,
         processing_token: null,
         updated_at: new Date(),
       });
@@ -10899,6 +10916,7 @@ const CallRecordingProcessor = {
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
+        processed_at: new Date(),
         processing_token: null,
         updated_at: new Date(),
       };
@@ -12589,6 +12607,7 @@ const CallRecordingProcessor = {
             sentiment: extracted.sentiment || null,
             lead_quality: extracted.lead_quality || null,
             processing_status: extracted.is_spam ? 'spam' : 'processed',
+            processed_at: new Date(),
             review_status: 'open',
             processing_token: null,
             // A definitive rejection that finalizes 'processed' (wrong
@@ -22393,6 +22412,9 @@ const CallRecordingProcessor = {
         .where('processing_token', procToken)
         .update({
           processing_status: finalStatus,
+          // Terminal verdict time (migration 20261010250000): the one plain
+          // column a report can order by; updated_at moves on every later write.
+          processed_at: new Date(),
           processing_token: null,
           // Address unverifiable / caller-not-owner / missing surname, or a
           // customer-less recovery lead that failed to persist → open the call for
