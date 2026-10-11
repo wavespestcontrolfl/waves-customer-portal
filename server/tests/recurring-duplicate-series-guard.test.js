@@ -785,11 +785,11 @@ describe('the series creators consume the guard (source guards)', () => {
     const parentInsert = scheduleSrc.indexOf("[svc] = await trx('scheduled_services').insert(adminCreateInsert)");
     expect(backstop).toBeGreaterThan(-1);
     expect(parentInsert).toBeGreaterThan(backstop);
-    expect(scheduleSrc).toContain('req.body.allowDuplicateSeries !== true');
+    expect(scheduleSrc).toContain('if (!(isRecurring && (!allowDuplicateSeries || separateProgram))) return;');
     expect(scheduleSrc).toContain('dupErr.duplicateRecurringSeries = matches;');
     // The POST preflight, the POST backstop, AND the update-details spawn
     // backstop each present the SAME 409 payload.
-    expect((scheduleSrc.match(/res\.status\(409\)\.json\(duplicateSeriesConflictBody\(/g) || []).length).toBe(3);
+    expect((scheduleSrc.match(/(?:res\.status\(409\)\.json\(|refuse\(409, )duplicateSeriesConflictBody\(/g) || []).length).toBe(3);
   });
 
   test('admin PUT /:id/update-details spawn: locked backstop inside the spawn trx, before the child insert, with the same escape hatch + 409', () => {

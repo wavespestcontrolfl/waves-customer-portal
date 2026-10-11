@@ -9061,7 +9061,7 @@ async function linkAttachedEstimateRows(c) {
       await db('scheduled_services')
         .whereIn('id', createdAppointments.map((a) => a.id))
         .update({ source_estimate_id: linkedEstimateId });
-      await stampCreatedRowsFromEstimateProperty();
+      await stampCreatedRowsFromEstimateProperty(c);
     } catch (e) {
       logger.warn(`[schedule] could not link appointment to attached estimate ${linkedEstimateId}: ${e.message}`);
     }

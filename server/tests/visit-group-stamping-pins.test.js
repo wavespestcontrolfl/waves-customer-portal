@@ -24,11 +24,12 @@ describe('every booking path stamps or deliberately skips', () => {
     expect((src.match(/maybeGroupRow\(/g) || []).length).toBe(count);
   });
 
-  test('admin-schedule.js stamps all eight insert sites', () => {
+  test('admin-schedule.js stamps all seven insert sites', () => {
     const src = read('routes/admin-schedule.js');
     // Insert seams pass the inserted row's id. The address-edit regroup
     // loop passes an existing id and is covered by update-details tests.
-    expect((src.match(/maybeGroupRow\(\w+\.id,/g) || []).length).toBe(8);
+    // The create path stamps the parent and, through one series-visit writer, every child and booster.
+    expect((src.match(/maybeGroupRow\(\w+\.id,/g) || []).length).toBe(7);
   });
 
   test('estimate-converter stamps all three paths (standalone unit + recurring unit + reserved start after catalog relink)', () => {

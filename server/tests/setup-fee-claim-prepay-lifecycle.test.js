@@ -617,7 +617,8 @@ describe('source contracts — where the lifecycle is wired', () => {
     // appointment standing when the attach loses a race or accept throws — so
     // accept-on-book series stamp too, and only an ALREADY-ACCEPTED linked
     // estimate (its accept billed the setup decision) skips.
-    expect(adminSchedule).toMatch(/if \(isRecurring && \(!linkedEstimateId \|\| acceptEstimateOnBook\)\) \{\s+const plans = require\('\.\.\/services\/secure-appointment-plans'\);\s+const owedSetup = await plans\.resolveDirectRodentSetupObligation\(trx, \{ id: svc\.id \}\);/);
+    expect(adminSchedule).toContain('{ when: (c) => c.isRecurring && (!c.linkedEstimateId || c.acceptEstimateOnBook), run: stampDirectRodentSetup },');
+    expect(adminSchedule).toMatch(/async function stampDirectRodentSetup\(trx, c\) \{[\s\S]{0,200}const plans = require\('\.\.\/services\/secure-appointment-plans'\);\s+const owedSetup = await plans\.resolveDirectRodentSetupObligation\(trx, \{ id: svc\.id \}\);/);
     // The stamp is recorded for the post-commit acceptance to retire…
     expect(adminSchedule).toMatch(/directRodentSetupStamp = owedSetup;/);
     // A PREVIOUSLY accepted estimate booked afterward stamps its DISCLOSED
@@ -626,11 +627,12 @@ describe('source contracts — where the lifecycle is wired', () => {
     // r75: the settled claim is re-verified under the claim invoice's row
     // lock before anchoring — a reversal that won makes the booking stamp
     // the disclosed figure instead of anchoring a dead claim.
-    expect(adminSchedule).toMatch(/\} else if \(isRecurring && linkedEstimateId\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const settledClaim = await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\);[\s\S]*?if \(settledClaim\) \{\s+await trx\('invoices'\)\.where\(\{ id: settledClaim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await plans\.settledSetupClaimForInvoice\(trx, settledClaim\.invoice_id\);\s+\}\s+if \(liveClaim\) \{[\s\S]*?if \(!liveClaim\.scheduled_service_id\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: liveClaim\.id, anchorId: svc\.id \}\);\s+\}\s+\} else if \(!\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
+    expect(adminSchedule).toContain('{ when: (c) => c.isRecurring && c.linkedEstimateId && !c.acceptEstimateOnBook, run: stampAcceptedEstimateRodentSetup },');
+    expect(adminSchedule).toMatch(/async function stampAcceptedEstimateRodentSetup\(trx, c\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const settledClaim = await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\);[\s\S]*?if \(settledClaim\) \{\s+await trx\('invoices'\)\.where\(\{ id: settledClaim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await plans\.settledSetupClaimForInvoice\(trx, settledClaim\.invoice_id\);\s+\}\s+if \(liveClaim\) \{[\s\S]*?if \(!liveClaim\.scheduled_service_id\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: liveClaim\.id, anchorId: svc\.id \}\);\s+\}\s+\} else if \(!\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
     // …and BOTH acceptance-success paths (main accept and the overlap-race
     // standard downgrade) retire it, CAS'd on the exact stamped amount.
-    expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(acceptResult\);/);
-    expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(retryResult\);/);
+    expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(c, acceptResult\);/);
+    expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(c, retryResult\);/);
     // …but only when the acceptance SETTLED the setup (codex #3591 r64 P1):
     // a standard verbal win converts with skipSetupInvoice, so the stamp
     // stays for the first completion; settlement evidence = the prepay
@@ -644,20 +646,20 @@ describe('source contracts — where the lifecycle is wired', () => {
     // DISCLOSED figure (engine result), not the wizard-only setupFeeQuote
     // (codex #3591 r65 P1). A disclosed-but-unbilled setup keeps the stamp,
     // aligned to the disclosed figure.
-    expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?acceptResult\?\.alreadyAccepted\s+\? await settledSetupClaimForEstimate\(db, linkedEstimateId\)\s+: await settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\);[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+return disclosed > 0 \? \{ disclosed \} : \{ waived: 'estimate_disclosed_no_setup' \};/);
+    expect(adminSchedule).toMatch(/async function rodentSetupSettledByAcceptance\(c, acceptResult\) \{[\s\S]*?acceptResult\?\.alreadyAccepted\s+\? await settledSetupClaimForEstimate\(db, linkedEstimateId\)\s+: await settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\);[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+return disclosed > 0 \? \{ disclosed \} : \{ waived: 'estimate_disclosed_no_setup' \};/);
     // r76: the retire + anchor run in ONE transaction, with the claim's
     // invoice row locked and liveness re-verified under the lock; a
     // reversal that won keeps the stamp for the first completion.
-    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}[\s\S]*?await db\.transaction\(async \(trx\) => \{\s+let liveClaim = null;\s+if \(settled\.claim\) \{[\s\S]*?await trx\('invoices'\)\.where\(\{ id: settled\.claim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await settledSetupClaimForInvoice\(trx, settled\.claim\.invoice_id\);\s+if \(!liveClaim\) \{[\s\S]*?return;\s+\}\s+\}\s+const retired = await trx\('scheduled_services'\)/);
+    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(c, acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}[\s\S]*?await db\.transaction\(async \(trx\) => \{\s+let liveClaim = null;\s+if \(settled\.claim\) \{[\s\S]*?await trx\('invoices'\)\.where\(\{ id: settled\.claim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await settledSetupClaimForInvoice\(trx, settled\.claim\.invoice_id\);\s+if \(!liveClaim\) \{[\s\S]*?return;\s+\}\s+\}\s+const retired = await trx\('scheduled_services'\)/);
     expect(adminSchedule).toMatch(/if \(liveClaim && !liveClaim\.scheduled_service_id\) \{[\s\S]*?await anchorSetupFeeClaim\(trx, \{ claimId: liveClaim\.id, anchorId: svc\.id \}\);/);
     expect(adminSchedule.includes("('setup_fee_claims')")).toBe(false);
-    expect(adminSchedule).toMatch(/const retired = await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
+    expect(adminSchedule).toMatch(/const retired = await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: c\.directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
     // A retire failure must warn about the double-bill hazard, never fail silently.
-    expect(adminSchedule).toMatch(/retireRodentSetupStampAfterAcceptance = async \(acceptResult\) => \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
+    expect(adminSchedule).toMatch(/async function retireRodentSetupStampAfterAcceptance\(c, acceptResult\) \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
     // A ZERO-row CAS is the consumed/refrozen-stamp race, not success (codex
     // #3591 r63 P1): it must warn and leave the local stamp un-cleared.
-    const retireBody = adminSchedule.slice(adminSchedule.indexOf('const retireRodentSetupStampAfterAcceptance = async'), adminSchedule.indexOf('await retireRodentSetupStampAfterAcceptance(acceptResult);'));
-    expect(retireBody).toMatch(/if \(Number\(retired\) !== 1\) \{[\s\S]*?logger\.error\([\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed[\s\S]*?return;\s*\}\s*directRodentSetupStamp = 0;/);
+    const retireBody = adminSchedule.slice(adminSchedule.indexOf('async function retireRodentSetupStampAfterAcceptance'), adminSchedule.indexOf('await retireRodentSetupStampAfterAcceptance(c, acceptResult);'));
+    expect(retireBody).toMatch(/if \(Number\(retired\) !== 1\) \{[\s\S]*?logger\.error\([\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed[\s\S]*?return;\s*\}\s*c\.directRodentSetupStamp = 0;/);
   });
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
@@ -738,8 +740,8 @@ describe('source contracts — where the lifecycle is wired', () => {
     const scheduleSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     // Both accept sites key the retire on the link result — an unlinked
     // series keeps the stamp as provenance and pages the operator.
-    expect((scheduleSrc.match(/if \(await linkCreatedRowsToEstimate\(\)\) \{\s+await retireRodentSetupStampAfterAcceptance\(/g) || []).length).toBe(2);
-    expect(scheduleSrc).not.toMatch(/await linkCreatedRowsToEstimate\(\);\s*\n\s*await retireRodentSetupStampAfterAcceptance/);
+    expect((scheduleSrc.match(/if \(await linkCreatedRowsToEstimate\(c\)\) \{\s+await retireRodentSetupStampAfterAcceptance\(/g) || []).length).toBe(2);
+    expect(scheduleSrc).not.toMatch(/await linkCreatedRowsToEstimate\(c\);\s*\n\s*await retireRodentSetupStampAfterAcceptance/);
     // Make-this-recurring derives the obligation and stamps (or anchors a
     // coverage claim) exactly like the creation path.
     expect(scheduleSrc).toMatch(/makeRecurringPreRow && makeRecurringPreRow\.is_recurring !== true && !makeRecurringPreRow\.recurring_parent_id/);

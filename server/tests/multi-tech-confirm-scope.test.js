@@ -163,8 +163,9 @@ describe('wiring', () => {
   // and stay tech-blind.
   test('admin create and series probes pass the row technician (advisory, gate-scoped in occupancy.js)', () => {
     const src = read('routes/admin-schedule.js');
-    for (const pin of ['technicianId: insertData.technician_id || null', 'technicianId: childData.technician_id || null',
-      'technicianId: boosterData.technician_id || null', 'technicianId: row.technician_id || null']) {
+    // One probe (warnIfOverlapping) serves the parent, the children and the boosters; each caller hands it the row it inserts.
+    for (const pin of ['technicianId: data.technician_id || null', 'await warnIfOverlapping(trx, c, insertData,', 'await warnIfOverlapping(trx, c, row, date);',
+      'technicianId: row.technician_id || null']) {
       expect(src).toContain(pin);
     }
   });

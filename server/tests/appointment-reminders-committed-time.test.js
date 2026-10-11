@@ -159,7 +159,7 @@ describe('admin-schedule registers spawned and created visits from the committed
   });
 
   test('the POST create path opts each created appointment into fromCommittedRow', () => {
-    const at = src.indexOf("serviceType, 'admin_manual',\n            { sendConfirmation: !!appt.confirmation, deferConfirmation: true, closeReminderWindows: !windowStart, fromCommittedRow: true }");
+    const at = src.indexOf("serviceType, 'admin_manual',\n          { sendConfirmation: !!appt.confirmation, deferConfirmation: true, closeReminderWindows: !windowStart, fromCommittedRow: true }");
     expect(at).toBeGreaterThan(0);
   });
 });

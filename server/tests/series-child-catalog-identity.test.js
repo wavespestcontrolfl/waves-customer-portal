@@ -261,9 +261,11 @@ describe('admin-schedule child-insert sites (source)', () => {
     // Create path: resolved from the inserted parent, and ONLY when a child
     // or booster will be inserted (no catalog read on one-off bookings; a
     // failed read inside trx cannot poison the parent insert).
-    expect(src).toContain('const childIdentity = (plannedChildDates.length || plannedBoosterDates.length)\n        ? await resolveSeriesChildIdentity(trx, svc)\n        : null;');
-    expect(src.match(/service_type: childIdentity\.service_type/g)).toHaveLength(7);
-    expect(src.match(/classifyAppointmentTag\(childIdentity\.service_type\)/g)).toHaveLength(7);
+    expect(src).toContain('const childIdentity = (c.plannedChildDates.length || c.plannedBoosterDates.length)\n    ? await resolveSeriesChildIdentity(trx, c.svc)\n    : null;');
+    expect(src.match(/service_type: childIdentity\.service_type/g)).toHaveLength(5);
+    // The create path's children and boosters read the resolved identity through their row kinds.
+    expect(src.match(/service_type: identity\.service_type, status: 'pending'/g)).toHaveLength(2);
+    expect(src.match(/classifyAppointmentTag\((?:d\.)?childIdentity\.service_type\)/g)).toHaveLength(6);
     expect(src).not.toMatch(/classifyAppointmentTag\(parent\.service_type\)/);
     // Parent-driven sites: link from the resolver; a successful resolution
     // stamps ITS key AFTER the parent-field copy (which writes the parent's
@@ -279,10 +281,8 @@ describe('admin-schedule child-insert sites (source)', () => {
     // Create path: resolver identity outranks the optional request serviceId
     // and pricing's primary key alike (both describe the same just-inserted
     // parent; the resolver read the catalog last).
-    for (const v of ['childData', 'boosterData']) {
-      expect(src).toContain(`if (cols.service_id && (childIdentity.service_id || serviceId)) ${v}.service_id = childIdentity.service_id || serviceId;`);
-      expect(src).toContain(`if (cols.service_key_snapshot) ${v}.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;`);
-    }
+    expect(src).toContain('service_id: (d) => orSkip(d.childIdentity.service_id || d.serviceId),');
+    expect(src).toContain('service_key_snapshot: (d) => d.childIdentity.service_key || d.pricing.primaryServiceKey || null,');
     // The only `service_type: serviceType, status: 'pending'` left is the
     // PARENT insert on the create path — the request's own label.
     expect(src.match(/service_type:\s*serviceType,\s*status:\s*'pending'/g)).toHaveLength(1);

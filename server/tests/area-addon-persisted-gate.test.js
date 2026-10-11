@@ -129,6 +129,6 @@ describe('booking from a linked estimate (admin schedule)', () => {
     expect(call).toBeGreaterThan(0);
     expect(call).toBeLessThan(firstTransaction);
     expect(src.slice(call, call + 300)).toContain("checkRecurring: linkedEstimate.status !== 'accepted'");
-    expect(src.slice(call, call + 500)).toMatch(/status\(409\)\.json\(\{ error: addOnRefusal\.message, code: addOnRefusal\.code \}\)/);
+    expect(src.slice(call, call + 500)).toMatch(/refuse\(409, \{ error: addOnRefusal\.message, code: addOnRefusal\.code \}\)/);
   });
 });

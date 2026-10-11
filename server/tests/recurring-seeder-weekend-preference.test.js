@@ -160,9 +160,8 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
   });
   test('stamped flags carry operator intent only — no path persists the preference', () => {
     // Stamps write the raw/Stamp variants, never the preference-ORed value.
-    expect(src).toContain('insertData.skip_weekends = !!skipWeekends;');
-    expect(src).toContain('childData.skip_weekends = !!skipWeekends;');
-    expect(src).toContain('boosterData.skip_weekends = !!skipWeekends;');
+    // The create path stamps the parent, the children and the boosters from the raw checkbox (three column tables).
+    expect(src.match(/skip_weekends: \(d\) => !!d\.skipWeekends,/g)).toHaveLength(3);
     expect(src).toContain('childUpdates.skip_weekends = skipChildStamp;');
     expect(src).toContain('childData.skip_weekends = skipChildStamp;');
     expect(src).toContain('data.skip_weekends = skipParentStamp;');
