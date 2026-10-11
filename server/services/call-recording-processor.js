@@ -1221,6 +1221,10 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
       // callback and not renewed (a staff reopen / edit, obligationRenewedAt's
       // events) since it; a renewed promise is owed and never refills the batch.
       this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' })
+        // ...and one THIS callback is linked to (callbackReachedSolicitor's
+        // linkage arm): a card callback names its promise; a Call Log callback
+        // (no relatedCommitmentId) covers the call's promises.
+        .whereRaw("(cb.metadata->>'relatedCommitmentId' = cc.id::text OR (cb.metadata->>'relatedCommitmentId' IS NULL AND cb.metadata->>'relatedCallId' = p.id::text))")
         .whereRaw('cc.created_at < cb.created_at')
         .whereNotExists(function renewedSince() {
           this.select(db.raw('1')).from('audit_log as a').whereRaw("a.resource_type = 'call_commitment' AND a.resource_id = cc.id").whereIn('a.action', ['callback_edit', 'callback_reopen']).whereRaw('a.created_at > cb.created_at');
