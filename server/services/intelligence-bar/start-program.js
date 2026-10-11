@@ -574,6 +574,19 @@ async function openInspectionCredit(customerId) {
   return { amount };
 }
 
+// Who the booking's confirmation and the welcome will reach, read through the senders' own lookups
+// (booking-contact-state.js). The card names them masked and pins a hash; the CONTACT_CHANGED rail re-reads it after
+// the customer row lock, and the deferred sends check it again. A read that fails refuses: "could not look" must not
+// read as "same recipients".
+async function contactPin(customerId) {
+  const BookingContact = require('../booking-contact-state');
+  const state = await BookingContact.bookingContactState(customerId);
+  if (state.unavailable) {
+    return refusal('Could not verify who the booking confirmation and welcome would reach. Try again in a moment. Nothing was proposed.', 'program_contact_unverified');
+  }
+  return { state, key: BookingContact.contactKey(state) };
+}
+
 // The booking's consultation-win hook (the Schedule handler's insertParentRow -> markWonForCustomer) flips an open
 // warm, cold or lost consultation outcome from the last 90 days to won. The card discloses the SAME selection
 // (openConsultationCandidates, not a copy) and pins each row's id and outcome; a rail recomputes it under the
@@ -638,6 +651,7 @@ const PLAN_STEPS = [
   ['welcome', (o) => welcomeVerdict(o.args)],
   ['credit', (o) => openInspectionCredit(o.args.customerId)],
   ['consultations', (o) => consultationPins(o.args.customerId)],
+  ['contact', (o) => contactPin(o.args.customerId)],
 ];
 
 async function runPlanSteps(steps, ...extra) {
@@ -668,6 +682,7 @@ async function buildProgramPlan(input, actionContext) {
   const { welcomeCandidate } = welcome;
   const inspectionCredit = out.credit.amount;
   const consultations = out.consultations.pins;
+  const contact = out.contact;
 
   // update_customer's implied-lane rule (#3140): a write that turns a row
   // into an inferred monthly member stamps the lane. A customer this tool
@@ -686,7 +701,7 @@ async function buildProgramPlan(input, actionContext) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, consultations, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
+      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, consultations, contact, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -695,7 +710,7 @@ async function buildProgramPlan(input, actionContext) {
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, catalogRow.name, catalogRow.updated_at || null, family, args.tier, args.cadence, args.firstDate,
         window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, techNoticeFor(techPin, actionContext),
-        overlap.map((o) => o.fact), planSync.updates, consultations,
+        overlap.map((o) => o.fact), planSync.updates, consultations, contact.key,
       ])).digest('hex'),
     },
   };
@@ -760,6 +775,7 @@ function cardLines(plan) {
   } else {
     add('comms', 'Texts: no booking confirmation is sent (send texts is off)');
   }
+  for (const text of require('../booking-contact-state').contactCardLines(plan.contact.state, { sendTexts: plan.sendTexts, welcome: plan.welcomeCandidate })) add('comms', text);
   add('comms', plan.welcomeCandidate
     ? `Texts and email: the new-customer welcome is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`
     : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
@@ -957,6 +973,8 @@ async function bookSeries(plan, actionContext) {
       approvedVisitDates: plan.visitDates,
       // The consultations the card said it marks won; the handler refuses any other set under the lock.
       approvedConsultations: consultationPinKeys(plan.consultations),
+      // Who the confirmation and welcome reach, as the card showed; re-read under the customer lock (CONTACT_CHANGED).
+      approvedContact: plan.contact.key,
       // Re-run the open-estimate check inside the booking transaction.
       approvedNoOpenEstimate: true,
       // The welcome verdict the card pinned: the handler and the appointment tagger use it, no second lookup.
@@ -978,7 +996,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }

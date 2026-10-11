@@ -41,6 +41,7 @@ const InspectionCredit = require('../services/inspection-credit');
 const TechNotices = require('../services/tech-visit-notifications');
 const Seeder = require('../services/recurring-appointment-seeder');
 const FeatureGates = require('../config/feature-gates');
+const BookingContact = require('../services/booking-contact-state');
 const Schedule = require('../routes/admin-schedule');
 const { createScheduleBooking } = require('../routes/admin-schedule');
 const { executeCustomerLifecycleTool, CUSTOMER_LIFECYCLE_TOOLS } = require('../services/intelligence-bar/customer-lifecycle-tools');
@@ -118,6 +119,14 @@ function bookWithPlanSync(reply) {
   });
 }
 
+let contactState;
+function contactStateFixture(overrides = {}) {
+  return {
+    unavailable: false, textTo: ['9415550134'], emailTo: ['lee@example.com'], holder: { phone: '9415550134', email: 'lee@example.com' },
+    toggles: { channel: 'sms', confirmation: true, sms: true, email: true }, ...overrides,
+  };
+}
+
 const run = (input, ctx = {}) => executeCustomerLifecycleTool('start_program', input, ctx);
 
 beforeEach(() => {
@@ -136,6 +145,8 @@ beforeEach(() => {
     technicians: [{ id: TECH_ID, name: 'Sam Tech', employment_status: 'active', field_dispatchable: true, active: true }],
     estimates: [],
   };
+  contactState = contactStateFixture();
+  jest.spyOn(BookingContact, 'bookingContactState').mockImplementation(async () => contactState);
   fakeDb();
   jest.spyOn(PlanRateLedger, 'loadComponents').mockResolvedValue(PEST_LINE);
   jest.spyOn(PlanRateLedger, 'setLineForScalarWrite').mockResolvedValue(undefined);
@@ -194,6 +205,7 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     expect(lines(preview, 'operational')[1]).toBe('First visit: Tue, Mar 3, 2099, 9:00 AM-10:00 AM, technician Sam Tech, at 1 Example St, Sarasota, FL 34201');
     expect(lines(preview, 'comms')).toEqual([
       'Texts: a booking confirmation for the first visit goes out by text or email, per their settings. It gives the arrival window Tue, Mar 3, 2099, 9:00 AM - 11:00 AM',
+      'Confirmation goes to ***0134 by text',
       'Texts and email: no welcome text or welcome email (this customer already had a recurring service)',
       'Texts: visit reminders before each visit, set up as the Schedule screen sets them up',
       'Email: the membership-started email is not sent',
@@ -286,6 +298,67 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'consultations changed', code: 'CONSULTATIONS_CHANGED' } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ code: 'CONSULTATIONS_CHANGED', preview_changed: true, nothing_changed: true });
+  });
+
+  test('the card names who the confirmation reaches, masked, and never an address or a full number', async () => {
+    contactState = contactStateFixture({ toggles: { channel: 'both', confirmation: true, sms: true, email: true } });
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'comms')).toContain('Confirmation goes to ***0134 by text and l***@example.com by email');
+    expect(JSON.stringify(preview)).not.toContain('lee@example.com');
+    expect(JSON.stringify(preview)).not.toContain('9415550134');
+  });
+
+  test('the card says why no confirmation goes out: texts off, email off, or confirmations off', async () => {
+    contactState = contactStateFixture({ toggles: { channel: 'sms', confirmation: true, sms: false, email: true } });
+    expect(lines(await run(BASE_INPUT), 'comms')).toContain('No confirmation message: texts are off');
+    contactState = contactStateFixture({ toggles: { channel: 'email', confirmation: true, sms: true, email: false } });
+    expect(lines(await run(BASE_INPUT), 'comms')).toContain('No confirmation message: email is off');
+    contactState = contactStateFixture({ toggles: { channel: 'sms', confirmation: false, sms: true, email: true } });
+    expect(lines(await run(BASE_INPUT), 'comms')).toContain('No confirmation message: the customer turned appointment confirmations off');
+  });
+
+  test('a new-customer welcome line names its masked recipients too', async () => {
+    jest.spyOn(Welcome, 'isNewRecurringSignupCandidate').mockResolvedValue(true);
+    const preview = await run({ ...BASE_INPUT, send_texts: true });
+    expect(lines(preview, 'comms')).toContain('Welcome goes to ***0134 by text and l***@example.com by email');
+  });
+
+  test('the booking carries the contact pin the card showed', async () => {
+    const version = (await run(BASE_INPUT))._version;
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
+    await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
+    expect(createScheduleBooking.mock.calls[0][0].approvedContact).toBe(BookingContact.contactKey(contactStateFixture()));
+  });
+
+  test('a phone or email change after the card refuses with preview_changed', async () => {
+    const version = (await run(BASE_INPUT))._version;
+    contactState = contactStateFixture({ textTo: ['9415550199'], holder: { phone: '9415550199', email: 'lee@example.com' } });
+    const phone = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(phone.preview_changed).toBe(true);
+    contactState = contactStateFixture({ emailTo: ['new@example.com'], holder: { phone: '9415550134', email: 'new@example.com' } });
+    const email = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(email.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('a notification setting that flips after the card refuses with preview_changed', async () => {
+    const version = (await run(BASE_INPUT))._version;
+    contactState = contactStateFixture({ toggles: { channel: 'sms', confirmation: true, sms: false, email: true } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('a contact lookup that fails refuses the proposal instead of guessing', async () => {
+    contactState = { unavailable: true };
+    expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_contact_unverified' });
+  });
+
+  test('the handler\'s locked contact rail refuses as preview_changed', async () => {
+    const version = (await run(BASE_INPUT))._version;
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'contact changed', code: 'CONTACT_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'CONTACT_CHANGED', preview_changed: true, nothing_changed: true });
   });
 
   test('a catalog rename between the card and the commit refuses with preview_changed (the booking would send the new name)', async () => {

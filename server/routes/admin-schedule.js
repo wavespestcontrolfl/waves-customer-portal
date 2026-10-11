@@ -114,7 +114,6 @@ const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = 
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
-  sendNewRecurringWelcome,
 } = require('../services/new-recurring-welcome-sms');
 const {
   recordTrackTransitionFailure,
@@ -9159,8 +9158,23 @@ async function queueTechVisitNotice(c) {
   }
 }
 
+// A card-booked visit (req.approvedContact) sends its confirmation and welcome only to the recipients the card showed.
+// The rail checked under the lock; this checks again just before the sends, which read the live record. Once per
+// booking. Drift skips the sends and warns; the stranded-confirmation sweep still delivers the confirmation to the
+// live recipients later, and the welcome is not queued.
+async function bookingContactDrifted(c) {
+  if (typeof c.req.approvedContact !== 'string') return false;
+  if (c.contactDrifted === undefined) {
+    const key = await require('../services/booking-contact-state').currentContactKey(c.customerId);
+    c.contactDrifted = key !== c.req.approvedContact;
+    if (c.contactDrifted) logger.warn(`[schedule] customer ${c.customerId}: phone, email or notification settings changed after the card; the booking confirmation and welcome were not sent`);
+  }
+  return c.contactDrifted;
+}
+
 async function sendDeferredConfirmations(c) {
   const { createdAppointments } = c;
+  if (await bookingContactDrifted(c)) return;
   // Fire the deferred confirmation SMS for any appointment that wants one
   // (the reminder rows were already inserted durably above). This is the
   // slow, Twilio-bound step: landline lookup + send.
@@ -9197,7 +9211,8 @@ async function requestCardOnFileLink(c) {
 async function sendRecurringWelcome(c) {
   const { customer, recurringPattern, req, svc } = c;
   try {
-    await sendNewRecurringWelcome({
+    if (await bookingContactDrifted(c)) return;
+    await require('../services/new-recurring-welcome-sms').sendNewRecurringWelcome({
       customer,
       scheduledServiceId: svc.id,
       recurringPattern,
@@ -9306,7 +9321,9 @@ async function tagScheduledService(c) {
 try {
   const AppointmentTagger = require('../services/appointment-tagger');
   // A pinned verdict reaches the tagger too, so it does not re-run the lookup.
-  await AppointmentTagger.onServiceScheduled(svc.id, ...(typeof req.approvedWelcome === 'boolean' ? [{ approvedWelcome: req.approvedWelcome }] : []));
+  // A contact change after the card withholds the pinned welcome (the tagger would otherwise queue it for the new recipients).
+  const welcomeVerdict = (await bookingContactDrifted(c)) ? false : req.approvedWelcome;
+  await AppointmentTagger.onServiceScheduled(svc.id, ...(typeof welcomeVerdict === 'boolean' ? [{ approvedWelcome: welcomeVerdict }] : []));
 } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 }
 
@@ -10522,9 +10539,11 @@ async function scheduleCreateHandler(req, res, next) {
 // new-customer welcome verdict the card pinned; the handler and the appointment tagger use it
 // instead of looking again (page bookings pass nothing and look as before). approvedConsultations: the
 // open consultation outcomes ("<id>:<outcome>") the card said the booking marks won; CONSULTATIONS_CHANGED on any difference.
+// approvedContact: the recipient key (booking-contact-state.js) the card pinned; CONTACT_CHANGED on any difference under the
+// lock, and the deferred confirmation and welcome re-check it before they send.
 async function createScheduleBooking({
   body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling,
-  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome, approvedConsultations,
+  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome, approvedConsultations, approvedContact,
 }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
@@ -10535,6 +10554,7 @@ async function createScheduleBooking({
     ...(approvedBilling ? { approvedBilling } : {}),
     ...(Array.isArray(approvedVisitDates) ? { approvedVisitDates } : {}),
     ...(Array.isArray(approvedConsultations) ? { approvedConsultations } : {}),
+    ...(typeof approvedContact === 'string' ? { approvedContact } : {}),
     ...(approvedNoOpenEstimate === true ? { approvedNoOpenEstimate: true } : {}),
     ...(typeof approvedWelcome === 'boolean' ? { approvedWelcome } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
@@ -28860,6 +28880,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  bookingContactDrifted, sendDeferredConfirmations, sendRecurringWelcome,
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
   areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,

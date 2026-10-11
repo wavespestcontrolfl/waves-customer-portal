@@ -231,6 +231,51 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(inserts).toEqual([]);
     });
 
+    test('approvedContact threads to the rail: a recipient key that moved refuses with CONTACT_CHANGED', async () => {
+      const Contact = require('../services/booking-contact-state');
+      const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-b');
+      const refused = await createScheduleBooking({ body: oneOff, actor, approvedContact: 'key-a' });
+      expect(refused.status).toBe(409);
+      expect(refused.json.code).toBe('CONTACT_CHANGED');
+      expect(inserts).toEqual([]);
+      spy.mockResolvedValue('key-a');
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedContact: 'key-a' })).status).toBe(201);
+      spy.mockRestore();
+    });
+
+    test('the deferred confirmation and welcome go to the pinned recipients only: drift after the commit skips both and warns', async () => {
+      const Contact = require('../services/booking-contact-state');
+      const AppointmentReminders = require('../services/appointment-reminders');
+      const Welcome = require('../services/new-recurring-welcome-sms');
+      const logger = require('../services/logger');
+      const { sendDeferredConfirmations, sendRecurringWelcome, bookingContactDrifted } = require('../routes/admin-schedule')._test;
+      const keySpy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+      const confirmSpy = jest.spyOn(AppointmentReminders, 'sendConfirmation').mockResolvedValue(true);
+      const welcomeSpy = jest.spyOn(Welcome, 'sendNewRecurringWelcome').mockResolvedValue({ queued: true });
+      const booked = () => ({ customerId: 'cust-1', customer: { id: 'cust-1' }, svc: { id: 'visit-1' }, recurringPattern: 'monthly', createdAppointments: [{ id: 'visit-1', confirmation: true }], req: { approvedContact: 'key-a' } });
+      // Same recipients: both go out, and the confirmation names the booked visit.
+      const same = booked();
+      await sendDeferredConfirmations(same);
+      await sendRecurringWelcome(same);
+      expect(confirmSpy).toHaveBeenCalledWith('visit-1');
+      expect(welcomeSpy).toHaveBeenCalledTimes(1);
+      // Changed after the lock: neither goes out, the check runs once, and the log names the customer.
+      confirmSpy.mockClear(); welcomeSpy.mockClear(); keySpy.mockClear(); logger.warn.mockClear();
+      keySpy.mockResolvedValue('key-b');
+      const moved = booked();
+      await sendDeferredConfirmations(moved);
+      await sendRecurringWelcome(moved);
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(welcomeSpy).not.toHaveBeenCalled();
+      expect(keySpy).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('cust-1'));
+      // A Schedule-page booking pins nothing and reads nothing.
+      keySpy.mockClear();
+      expect(await bookingContactDrifted({ ...booked(), req: {} })).toBe(false);
+      expect(keySpy).not.toHaveBeenCalled();
+      keySpy.mockRestore(); confirmSpy.mockRestore(); welcomeSpy.mockRestore();
+    });
+
     test('approvedConsultations threads to the rail: a consultation the card did not list refuses with CONSULTATIONS_CHANGED', async () => {
       const Consultations = require('../services/consultation-outcomes');
       const spy = jest.spyOn(Consultations, 'openConsultationCandidates').mockResolvedValue([{ outcome_id: 9, outcome: 'warm' }]);
@@ -286,7 +331,9 @@ describe('createScheduleBooking runs the POST / handler', () => {
       await newRecurringWelcomeVerdict({}, 'cust-1');
       expect(db.mock.calls.length).toBeGreaterThan(callsBefore);
       const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
-      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof req\.approvedWelcome === 'boolean' \? \[\{ approvedWelcome: req\.approvedWelcome \}\] : \[\]\)\)/);
+      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof welcomeVerdict === 'boolean' \? \[\{ approvedWelcome: welcomeVerdict \}\] : \[\]\)\)/);
+      // The pinned verdict is withheld (false) when the customer's contact changed after the card.
+      expect(src).toContain('const welcomeVerdict = (await bookingContactDrifted(c)) ? false : req.approvedWelcome;');
     });
 
     test('an explicit propertyId stamps that property on the visit with GATE_EDIT_APPT_ADDRESS off (a programmatic booking is exempt)', async () => {

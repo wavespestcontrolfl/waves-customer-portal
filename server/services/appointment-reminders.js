@@ -5870,6 +5870,8 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // The visit-aware prefs row for the call-booking confirmation email and the
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
+// The confirmation and reminder toggles and channel, as the senders read them (booking-contact-state.js pins them).
+AppointmentReminders.getReminderPrefs = getReminderPrefs;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({

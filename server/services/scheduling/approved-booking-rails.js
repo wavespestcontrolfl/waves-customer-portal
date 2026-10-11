@@ -79,6 +79,18 @@ const RAILS = [
     approved: (ctx) => ctx.req.approvedConsultations.join(','),
   },
   {
+    // Who the booking confirmation and the welcome reach, and whether those messages are on: the recipient
+    // key the card pinned (booking-contact-state.js, read through the senders' own lookups). Re-read after the
+    // customer row lock, so a phone, email or notification-setting change that committed while the booking
+    // waited is seen.
+    code: 'CONTACT_CHANGED',
+    message: 'The customer\'s phone, email or notification settings changed since the card was shown. Nothing was booked.',
+    applies: (ctx) => typeof ctx.req.approvedContact === 'string',
+    lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
+    read: async (_trx, ctx) => require('../booking-contact-state').currentContactKey(ctx.customerId),
+    approved: (ctx) => ctx.req.approvedContact,
+  },
+  {
     // The card's open-estimate check: the SAME any-open condition the card's own check uses
     // (openEstimateForCustomer; no service-family reading). Every estimate insert and reopening
     // for a customer takes this lock first (utils/customer-estimate-lock.js),

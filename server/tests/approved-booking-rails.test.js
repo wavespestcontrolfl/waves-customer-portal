@@ -39,6 +39,7 @@ const BILLING = { payer_id: null, billing_mode: 'monthly_membership', per_applic
 
 beforeEach(() => {
   log = [];
+  jest.spyOn(require('../services/booking-contact-state'), 'currentContactKey').mockImplementation(async () => { log.push('read:contact'); return 'key-a'; });
   jest.spyOn(require('../services/consultation-outcomes'), 'openConsultationCandidates').mockImplementation(async () => { log.push('read:consultations'); return []; });
   billingRow = { ...BILLING };
   jest.spyOn(EstimateLock, 'lockCustomerEstimates').mockImplementation(async () => { log.push('lock:estimates-advisory'); });
@@ -54,7 +55,7 @@ const codeOf = async (promise) => { try { await promise; return null; } catch (e
 
 test('the table names every rail code once', () => {
   expect(RAILS.map((r) => r.code)).toEqual([
-    'BILLING_CHANGED', 'CONSULTATIONS_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
+    'BILLING_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
   ]);
 });
 
@@ -114,6 +115,19 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     expect(await codeOf(run({}))).toBeNull();
     expect(spy).not.toHaveBeenCalled();
   });
+  test('CONTACT_CHANGED (the recipient key moves under the lock; a pinned booking reads it, an unpinned one does not)', async () => {
+    const Contact = require('../services/booking-contact-state');
+    const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+    expect(await codeOf(run({ approvedContact: 'key-a' }))).toBeNull();
+    spy.mockResolvedValue('key-b');
+    expect(await codeOf(run({ approvedContact: 'key-a' }))).toBe('CONTACT_CHANGED');
+    // An unreadable lookup reads as null, which never equals a pinned key.
+    spy.mockResolvedValue(null);
+    expect(await codeOf(run({ approvedContact: 'key-a' }))).toBe('CONTACT_CHANGED');
+    spy.mockClear();
+    expect(await codeOf(run({}))).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+  });
   test('INSPECTION_CREDIT_CHANGED', async () => {
     InspectionCredit.projectRedeemableOfferAmount.mockResolvedValue({ amount: 25 });
     expect(await codeOf(run({ creditFreeCard: true }))).toBe('INSPECTION_CREDIT_CHANGED');
@@ -146,7 +160,7 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
 
 test('every lock is taken before any read, and the estimate lock is the last lock', async () => {
   await run({
-    approvedBilling: BILLING, approvedNoOpenEstimate: true, creditFreeCard: true, approvedConsultations: [],
+    approvedBilling: BILLING, approvedNoOpenEstimate: true, creditFreeCard: true, approvedConsultations: [], approvedContact: 'key-a',
     approvedVisitDates: ['2099-03-03', '2099-04-07'],
     approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' }, approvedOverlapFacts: [],
   });
@@ -154,7 +168,7 @@ test('every lock is taken before any read, and the estimate lock is the last loc
   const lastLock = log.map((e) => e.startsWith('lock:')).lastIndexOf(true);
   expect(lastLock).toBeLessThan(firstRead);
   // Both customer row locks (billing, consultations) come before the estimate lock, which is a leaf.
-  expect(log.slice(0, 3)).toEqual(['lock:customers', 'lock:customers', 'lock:estimates-advisory']);
+  expect(log.slice(0, 4)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:estimates-advisory']);
   // The billing read comes after the customer row lock.
   expect(log.indexOf('lock:customers')).toBeLessThan(log.indexOf('read:customers'));
   expect(log.indexOf('lock:estimates-advisory')).toBeLessThan(log.indexOf('read:open-estimate'));
