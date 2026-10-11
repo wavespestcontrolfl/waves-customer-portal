@@ -144,7 +144,9 @@ describe('case: the caller proposes the time, staff accept and close (call 07c4b
   });
 
   test('the prompt keeps it open with no closing commitment, a promised callback, a different time, a range, or an off-hour time', () => {
+    expect(PROMPT).toContain('for ONE day the caller chose');
     for (const guard of [
+      'two or more days were named and the caller picked none of them',
       'staff never gave the closing commitment',
       'staff said they would check, text or call back with a time',
       'staff named a different time afterward',
