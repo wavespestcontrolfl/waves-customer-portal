@@ -6255,6 +6255,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
             });
           }
+          // Billing-lane drift (Codex round 7 on #6118), judged on the LOCKED rows of the
+          // transaction that commits the visit as completed: the customer row is held FOR
+          // SHARE and the visit FOR UPDATE from here to the commit, the locks the Intelligence
+          // Bar billing-type card's commit needs (customer row FOR UPDATE, then its live
+          // visits FOR UPDATE by id). Edit first: it committed before the customer lock above
+          // was granted, the lane read here is the new one, and the completion refuses with the
+          // retryable 409 BILLING_LANE_CHANGED (nothing written; the retry bills on the new
+          // lane). Completion first: the visit is completed when the card re-reads, no longer
+          // live, so the card's visit pin refuses (preview_changed). Either way no completion
+          // decides "no invoice" on a lane the customer has already left. Nothing but this
+          // read happens here: no text, email or bell.
+          await refuseBillingLaneDriftInTrx(trx, svc);
           // The add-on each application row belongs to was resolved BEFORE this lock. An Update Details save that removed or
           // replaced an add-on (or moved the visit's own service) in between would leave rows tagged to work the visit no
           // longer carries: resolved again on the LOCKED visit, and any difference rolls the record back as a changed visit
@@ -8635,6 +8647,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'service_reassigned',
           } });
         }
+        if (err && err.code === 'BILLING_LANE_CHANGED') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: { error: err.message, code: 'BILLING_LANE_CHANGED' } });
+        }
         if (err && (err.code === 'lawn_bermuda_limit_reached' || err.code === 'lawn_bermuda_pair_required')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 400, body: { error: err.message, code: err.code } });
@@ -10494,17 +10510,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       : (resumingCommittedCompletion || completionTaxAuthorityError
         ? undefined
         : (completionResolvedPayer?.payerId || null));
-    // Billing-lane drift is rechecked BEFORE the invoice decision, on every
-    // completion path (Codex round 6 on #6118): the decision below reads the
-    // lane snapshot taken at entry, and an unpriced monthly visit that the
-    // decision declines to bill never reaches the mint's own recheck, so a
-    // concurrent switch to per-application would finish it unbilled. The
-    // read takes the customer row KEY SHARE, so it waits for a switch still
-    // committing. A moved lane throws the retryable 409 out of the completion:
-    // the attempt is released for resume and the retry decides on the new lane.
-    if (!packetEffects) {
-      await db.transaction((trx) => refuseBillingLaneDriftInTrx(trx, svc, { lock: true }));
-    }
     // Auto-invoice eligibility. With GATE_AUTOINVOICE_PRICED_VISITS on, an
     // explicitly-priced visit also qualifies even without the scheduler's
     // create_invoice_on_complete flag or a WaveGuard tier — closing the leak

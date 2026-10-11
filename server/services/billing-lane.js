@@ -1813,11 +1813,9 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
 // and the customer lock the mint takes (invoice.js recheckInTrx): it re-reads
 // the lane and refuses with a retryable 409 when it moved, so the retry bills
 // on the new lane. Skipped when the entry read did not carry the lane columns.
-async function refuseBillingLaneDriftInTrx(trx, svc, { lock = false } = {}) {
+async function refuseBillingLaneDriftInTrx(trx, svc) {
   if (!svc || !svc.customer_id || svc.cust_billing_mode === undefined) return;
-  const q = trx('customers').where({ id: svc.customer_id });
-  if (lock && typeof q.forKeyShare === 'function') q.forKeyShare();
-  const live = await q.first('billing_mode', 'per_application_fee');
+  const live = await trx('customers').where({ id: svc.customer_id }).first('billing_mode', 'per_application_fee');
   if (!live) return;
   const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
   const modeMoved = (live.billing_mode || null) !== (svc.cust_billing_mode || null);
