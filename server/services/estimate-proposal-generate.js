@@ -862,7 +862,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     const noRecurringEvidence = rowIsExplicitlyOneTime(line)
       || (!rowHasAnnualCadence(line) && !(recurringLineAnnualAmount(line) > 0));
     return noRecurringEvidence
-      && num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
+      && num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
   });
   const work = [];
   const comped = [];
@@ -887,7 +887,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     ?? item.priceAfterDiscount ?? item.amountAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
     ?? item.installation?.price);
   const rawResolvedAmount = (line) => num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
-    ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
+    ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
   const serviceIdOf = (row) => String(row.service || row.name || '').toLowerCase();
   const rawPool = fromLineItems.map((line) => ({ line, used: false }));
   for (const item of fromOneTime) {

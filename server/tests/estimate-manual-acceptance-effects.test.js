@@ -476,6 +476,19 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(totaled, fakeConverter(totaled), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Rodent Exclusion', 350], ['Discount applied to the one-time total', -50]]);
   });
+  test('round 26: a raw engine row with a gross price and a totalAfterDiscount net lists the net, with no aggregate', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          engineResult: { lineItems: [{ service: 'german_roach', label: 'German Roach Cleanout', price: 150, totalAfterDiscount: 80, billingCadence: 'one_time' }] },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['German Roach Cleanout', 80]]);
+  });
   test('round 20: a $0 (comped) row refuses as one_time_unrepresentable instead of being dropped from the card', async () => {
     const world = makeWorld({
       estimateOverrides: {

@@ -276,7 +276,7 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   return null;
 }
 // The raw row's amount, in the extractor's own alias order (rawResolvedAmount).
-const RAW_ONE_TIME_AMOUNT_FIELDS = ['manualFinalOneTime', 'oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'price', 'total'];
+const RAW_ONE_TIME_AMOUNT_FIELDS = ['manualFinalOneTime', 'oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount', 'price', 'total'];
 function rawLineAmount(line) {
   for (const key of RAW_ONE_TIME_AMOUNT_FIELDS) {
     if (line?.[key] == null || line[key] === '') continue;
