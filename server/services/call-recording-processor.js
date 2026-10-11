@@ -1177,7 +1177,14 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .whereRaw("(p.metadata->'callback_verdict'->>'at')::timestamptz > now() - interval '7 days'")
     .where({ 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
     .whereExists(function openCallbackPromise() {
-      this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' });
+      // ...a promise that callback could still dismiss: made before the
+      // callback and not renewed (a staff reopen / edit, obligationRenewedAt's
+      // events) since it; a renewed promise is owed and never refills the batch.
+      this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' })
+        .whereRaw('cc.created_at < cb.created_at')
+        .whereNotExists(function renewedSince() {
+          this.select(db.raw('1')).from('audit_log as a').whereRaw("a.resource_type = 'call_commitment' AND a.resource_id = cc.id").whereIn('a.action', ['callback_edit', 'callback_reopen']).whereRaw('a.created_at > cb.created_at');
+        });
     })
     .limit(limit).distinct('p.id');
   const refreshed = [];
@@ -1262,6 +1269,10 @@ async function settleParentForCallbackVerdict(call, { callSid = null, procGenera
 // (settled, no live token, dialed to the same number or customer). The
 // parent's verdict is the set of them, not the last stamp written.
 async function standingSpamCallbacks(trx, parent, exceptCallId) {
+  // Today's parent eligibility first: a parent that no longer reads as a
+  // settled inbound voicemail (a replaced recording, a pass in flight) has no
+  // standing verdict, whatever its other callbacks say.
+  if (!isVoicemailParent(parent) || parent.duration_seconds == null || parent.processing_token) return [];
   const rows = await trx('call_log')
     .where('direction', 'like', 'outbound%')
     .where({ source: 'admin-callback', processing_status: 'spam' })

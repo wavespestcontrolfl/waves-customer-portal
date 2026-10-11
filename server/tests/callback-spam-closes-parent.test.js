@@ -497,14 +497,18 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     await insertChild(FWD_CHILD_SID, parentId, { to_phone: '+15555550129' });
     expect(await close(FWD_CHILD_SID)).toMatchObject({ applied: true, cards: 1, promises: 0 });
     // The promise the lost refresh never judged (inserted after the settlement to stand in for it).
-    const [{ id: promiseId }] = await db('call_commitments').insert([promise(parentId, 'cb-fwd')]).returning('id');
+    const [{ id: promiseId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-fwd'), created_at: new Date(Date.now() - 30 * 60 * 1000) }]).returning('id');
     const { ROLLING_KEY } = require('../services/followup-sla-watcher');
     const [{ id: listId }] = await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: '2 missed follow-ups', body: 'test', metadata: JSON.stringify({ dedupeKey: `${ROLLING_KEY}:fixture`, missed_commitment_ids: [promiseId, UUID] }) }).returning('id');
     const run = await processor.reconcileCorrectedCallbackVerdicts();
     expect(run.refreshed.find((r) => r.callLogId === parentId)).toMatchObject({ fulfilled: 1 });
     expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('dismissed');
+    // The list named the settled promise: closed (its text is stale), the remaining member recorded for the next sweep's post.
     const list = await db('notifications').where({ id: listId }).first();
-    expect([list.done_at, list.metadata.missed_commitment_ids]).toEqual([null, [UUID]]);
+    expect([list.done_by, list.metadata.missed_commitment_ids, list.metadata.emptied]).toEqual(['callback:spam', [UUID], true]);
+    // A promise staff renewed after the callback is owed and never re-enters the forward batch.
+    const [{ id: renewedId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-fwd-renewed'), human_state: 'confirmed', created_at: new Date(Date.now() - 30 * 60 * 1000) }]).returning('id');
+    await db('audit_log').insert({ actor_type: 'technician', action: 'callback_reopen', resource_type: 'call_commitment', resource_id: renewedId, metadata: JSON.stringify({ renewed_at: new Date().toISOString() }) });
     expect((await processor.reconcileCorrectedCallbackVerdicts()).refreshed.find((r) => r.callLogId === parentId)).toBeUndefined();
   });
 

@@ -2122,9 +2122,11 @@ async function closeCallbackReminders(conn, commitmentId) {
     .modify((q) => notifications.openToCloser(q, "callback:spam"))
     .update(notifications.doneColumns({ by: "callback:spam", resolution: "Callback reached a solicitor; the voicemail was spam", at: now, keepExisting: true, conn }));
   // The rolling missed-follow-up list (followup-sla-watcher) names its
-  // members in metadata.missed_commitment_ids: this promise leaves the list
-  // now (the watcher's next tick rewrites the text), and a list it emptied
-  // closes, as the watcher closes one whose every promise was followed up.
+  // members in metadata.missed_commitment_ids and its text lists them. A
+  // list naming this promise closes here, marked emptied with the members
+  // that remain recorded: the watcher's next tick posts an accurate list
+  // of those (its text is composed from rows this file does not load), as
+  // it does for a list whose every promise was followed up.
   const { ROLLING_KEY } = require("./followup-sla-watcher");
   const rolling = await conn("notifications").where({ recipient_type: "admin" }).whereNull("done_at")
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
@@ -2134,10 +2136,10 @@ async function closeCallbackReminders(conn, commitmentId) {
   for (const row of rolling) {
     const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata || {});
     const rest = (meta.missed_commitment_ids || []).map(String).filter((v) => v !== id);
-    const patch = rest.length
-      ? { metadata: JSON.stringify({ ...meta, missed_commitment_ids: rest }) }
-      : { ...notifications.doneColumns({ by: "callback:spam", resolution: "Every listed promise was followed up or settled", at: now, keepExisting: true, conn }), metadata: JSON.stringify({ ...meta, missed_commitment_ids: [], emptied: true }) };
-    await conn("notifications").where({ id: row.id }).update(patch);
+    await conn("notifications").where({ id: row.id }).update({
+      ...notifications.doneColumns({ by: "callback:spam", resolution: rest.length ? "A listed promise was settled; the list is posted again on the next sweep" : "Every listed promise was followed up or settled", at: now, keepExisting: true, conn }),
+      metadata: JSON.stringify({ ...meta, missed_commitment_ids: rest, emptied: true }),
+    });
   }
   return closed;
 }
@@ -2153,9 +2155,19 @@ function callbackSpamDismissalsQ(conn, callLogId, callbackCallId) {
 }
 // The correction: that callback reprocessed into anything but spam, and no
 // other spam callback stands. The dismissal it produced is owed again.
+// Inside the correction's transaction: each row read FOR UPDATE and written
+// only as read (status, human state, evidence, version), so a staff edit of
+// the dismissed promise that landed first stands.
 async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
-  return callbackSpamDismissalsQ(conn, callLogId, callbackCallId)
-    .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+  const rows = await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).forUpdate().select("id", "human_state", "updated_at");
+  let reopened = 0;
+  for (const row of rows) {
+    reopened += await callbackSpamDismissalsQ(conn, callLogId, callbackCallId).where({ id: row.id })
+      .whereRaw("human_state IS NOT DISTINCT FROM ?", [row.human_state ?? null])
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
+      .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+  }
+  return reopened;
 }
 // The correction while OTHER spam callbacks may still stand: each dismissal
 // the corrected callback produced is judged again with the FULL proof

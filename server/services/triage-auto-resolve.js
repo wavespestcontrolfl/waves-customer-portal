@@ -1273,6 +1273,10 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
     .whereNull('processing_token')
     .whereRaw("metadata->>'placed_by_role' = 'admin'")
     .whereIn(conn.raw("metadata->>'relatedCallId'"), callIds)
+    // Share-locked: inside the apply transaction (the re-verify under the call
+    // locks) a reprocess that would claim the callback waits for the card
+    // write to commit, so a card never closes on a verdict a pass is replacing.
+    .forShare()
     .select('to_phone', 'customer_id', 'created_at', conn.raw("metadata->>'relatedCallId' as parent_id"));
   if (!children.length) return;
   // The same eligibility the processor's writer applies (lockCallbackPair):
