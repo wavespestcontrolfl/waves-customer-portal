@@ -54,7 +54,8 @@ describe('every terminal-verdict write stamps processed_at', () => {
     for (const status of ['no_transcription', 'extraction_failed']) {
       src.forEach((l, i) => {
         if (l.includes(`processing_status: '${status}'`)) {
-          expect(src.slice(i, i + 6).join('\n')).not.toMatch(/processed_at/);
+          // A retry lane may CLEAR the stamp (processed_at: null); it never sets one.
+          expect(src.slice(i, i + 6).join('\n')).not.toMatch(/processed_at: new Date\(\)/);
         }
       });
     }
