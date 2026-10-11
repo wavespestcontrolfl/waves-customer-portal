@@ -69,6 +69,10 @@ const NOOP_PARENT_SID = sid('pk');
 const NOOP_CHILD_SID = sid('co');
 const NOEND_PARENT_SID = sid('pl');
 const NOEND_CHILD_SID = sid('cp');
+const EXHAUST_PARENT_SID = sid('pm');
+const EXHAUST_CHILD_SID = sid('cq');
+const QUEUED_PARENT_SID = sid('pn');
+const QUEUED_CHILD_SID = sid('cr');
 const UUID = '11111111-1111-4111-8111-111111111111';
 
 describe('closeParentOnCallbackSpam without a database', () => {
@@ -133,7 +137,7 @@ describe('closeParentOnCallbackSpam without a database', () => {
 maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () => {
   let db;
   let processor;
-  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID, SWEPT_PLAIN_PARENT_SID, SWEPT_PLAIN_CHILD_SID, TWICE_PARENT_SID, TWICE_CHILD_A_SID, TWICE_CHILD_B_SID, SIBLING_PARENT_SID, SIBLING_CHILD_A_SID, SIBLING_CHILD_B_SID, RENEW_PARENT_SID, RENEW_CHILD_A_SID, RENEW_CHILD_B_SID, RENEW_CHILD_C_SID, LOST_PARENT_SID, LOST_CHILD_SID, UNSTAMPED_PARENT_SID, UNSTAMPED_CHILD_SID, KEPT_SPAM_PARENT_SID, KEPT_SPAM_CHILD_SID, UNVM_PARENT_SID, UNVM_CHILD_SID, FWD_PARENT_SID, FWD_CHILD_SID, LOSTSTAMP_PARENT_SID, LOSTSTAMP_CHILD_SID, ROLLBACK_PARENT_SID, ROLLBACK_CHILD_SID, NOOP_PARENT_SID, NOOP_CHILD_SID, NOEND_PARENT_SID, NOEND_CHILD_SID];
+  const ALL_SIDS = [PARENT_SID, CHILD_SID, OTHER_PARENT_SID, KEPT_PARENT_SID, KEPT_CHILD_SID, PLAIN_PARENT_SID, PLAIN_CHILD_SID, FAR_CHILD_SID, ORPHAN_CHILD_SID, FIXED_PARENT_SID, FIXED_CHILD_SID, SWEPT_PARENT_SID, SWEPT_CHILD_SID, SWEPT_PLAIN_PARENT_SID, SWEPT_PLAIN_CHILD_SID, TWICE_PARENT_SID, TWICE_CHILD_A_SID, TWICE_CHILD_B_SID, SIBLING_PARENT_SID, SIBLING_CHILD_A_SID, SIBLING_CHILD_B_SID, RENEW_PARENT_SID, RENEW_CHILD_A_SID, RENEW_CHILD_B_SID, RENEW_CHILD_C_SID, LOST_PARENT_SID, LOST_CHILD_SID, UNSTAMPED_PARENT_SID, UNSTAMPED_CHILD_SID, KEPT_SPAM_PARENT_SID, KEPT_SPAM_CHILD_SID, UNVM_PARENT_SID, UNVM_CHILD_SID, FWD_PARENT_SID, FWD_CHILD_SID, LOSTSTAMP_PARENT_SID, LOSTSTAMP_CHILD_SID, ROLLBACK_PARENT_SID, ROLLBACK_CHILD_SID, NOOP_PARENT_SID, NOOP_CHILD_SID, NOEND_PARENT_SID, NOEND_CHILD_SID, EXHAUST_PARENT_SID, EXHAUST_CHILD_SID, QUEUED_PARENT_SID, QUEUED_CHILD_SID];
   const readCall = (s) => db('call_log').where({ twilio_call_sid: s }).first();
   // A voicemail an hour ago: the promise lifecycle counts evidence from the
   // end of the call, so the callback (now) is after it.
@@ -583,6 +587,27 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     await db('call_log').where({ id: parentId }).update({ processing_status: 'processed' });
     await commitments.refreshFulfillment(db, parentId);
     expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('dismissed');
+  });
+
+  test('a callback whose extraction retries are exhausted is a correction: the settlement is retired', async () => {
+    const parentId = await insertCall(EXHAUST_PARENT_SID, { from_phone: '+15555550135' });
+    await db('triage_items').insert([card(parentId, 'missing_service_address')]);
+    const childId = await insertChild(EXHAUST_CHILD_SID, parentId, { to_phone: '+15555550135' });
+    expect(await close(EXHAUST_CHILD_SID)).toMatchObject({ applied: true, cards: 1 });
+    // Force-reprocessed, extraction failed three times: the sweep retries it no more, and no pass will say spam.
+    await db('call_log').where({ id: childId }).update({ processing_status: 'extraction_failed', extraction_attempts: 3 });
+    const run = await processor.reconcileCorrectedCallbackVerdicts();
+    expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1 });
+    expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
+    expect((await readCall(EXHAUST_PARENT_SID)).metadata.callback_verdict).toBeUndefined();
+  });
+
+  test('a parent with an adopted recording still waiting for its pass is not settled', async () => {
+    const parentId = await insertCall(QUEUED_PARENT_SID, { from_phone: '+15555550136', processing_status: null, recording_sid: 'RE' + 'f'.repeat(32) });
+    await db('triage_items').insert([card(parentId, 'missing_service_address')]);
+    await insertChild(QUEUED_CHILD_SID, parentId, { to_phone: '+15555550136' });
+    expect(await close(QUEUED_CHILD_SID)).toEqual({ applied: false, reason: 'parent_not_settled' });
+    expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
   });
 
   test('the nightly sweep re-closes a moot card a reprocess filed again after the callback verdict', async () => {

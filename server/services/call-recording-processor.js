@@ -1072,13 +1072,9 @@ function callbackAfterCallEnd(child, parent) {
 function isVoicemailParent(row) {
   return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
 }
-// Settled: ended (a reported duration), no pass holding its token, and not in
-// a retryable state (call-commitments RETRYABLE_PARENT_STATUSES) a retry may
-// yet read as an answered call.
-function isSettledParent(row) {
-  const { RETRYABLE_PARENT_STATUSES } = require('./call-commitments');
-  return row?.duration_seconds != null && !row?.processing_token && !RETRYABLE_PARENT_STATUSES.includes(row?.processing_status);
-}
+// Settled (call-commitments isSettledParentRow, the one definition): ended,
+// no pass holding its token, not retryable, no adopted recording waiting.
+function isSettledParent(row) { return require('./call-commitments').isSettledParentRow(row); }
 // The office callback this verdict belongs to, or null: an OUTBOUND row the
 // admin "Call back" action wrote (call_log.source admin-callback +
 // metadata.relatedCallId naming the voicemail).
@@ -1103,7 +1099,7 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration, c
   const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at', 'metadata');
   if (!child || child.source !== 'admin-callback') return { reason: 'verdict_superseded' };
   const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
-    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'metadata', 'created_at', 'duration_seconds');
+    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'recording_sid', 'metadata', 'created_at', 'duration_seconds');
   if (!parent) return { reason: 'parent_not_found' };
   // A CORRECTION retires whatever this callback settled, whether or not the
   // parent still qualifies today (a replaced recording may have cleared its
@@ -1141,8 +1137,10 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // The correction half runs whatever the gate says (a rollback must not
   // strand what the feature closed); the forward halves below are gated.
   const gateOn = isEnabled('callbackSpamClosesParent');
-  const { UNSETTLED_CALLBACK_STATUSES } = require('./call-commitments');
-  const settledNonSpam = (q) => q.whereNull('cb.processing_token').whereNotNull('cb.processing_status').whereNotIn('cb.processing_status', UNSETTLED_CALLBACK_STATUSES);
+  const { settledNonSpamCallbackSql, settledParentSql } = require('./call-commitments');
+  // Settled on anything but spam, an exhausted extraction_failed included (no
+  // pass will ever say spam about it): the same predicate the promise proof uses.
+  const settledNonSpam = (q) => q.whereRaw(settledNonSpamCallbackSql('cb')).whereNot('cb.processing_status', 'spam');
   const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
   const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
@@ -1219,8 +1217,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
     .whereRaw("cb.created_at > now() - interval '7 days'")
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
-    .where({ 'p.direction': 'inbound' }).whereNull('p.processing_token').whereNotNull('p.duration_seconds')
-    .where((q) => q.whereNull('p.processing_status').orWhereNotIn('p.processing_status', require('./call-commitments').RETRYABLE_PARENT_STATUSES))
+    .where({ 'p.direction': 'inbound' }).whereRaw(settledParentSql('p'))
     .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
     .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(0, p.duration_seconds))")
     .whereRaw(`${phoneKey('cb.to_phone')} <> '' AND ${phoneKey('cb.to_phone')} = ${phoneKey('p.from_phone')}`)

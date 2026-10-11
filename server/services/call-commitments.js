@@ -2077,12 +2077,28 @@ const UNSETTLED_CALLBACK_STATUSES = ["spam", "pending", "processing", "extractio
 const RETRYABLE_PARENT_STATUSES = ["pending", "processing", "extraction_failed", "no_transcription"];
 // SQL twin over a call_log alias, for the lapse scan (constants inlined: the
 // scan's raw query binds by position).
-const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")})))`;
+// An extraction_failed row the sweep no longer retries (config/call-extraction-retry:
+// attempts at the cap, or older than the window) is SETTLED, not spam: no pass
+// will ever say spam about it, so nothing it settled may wait on one.
+const exhaustedExtractionSql = (t) => {
+  const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require("../config/call-extraction-retry");
+  return `(${t}.processing_status = 'extraction_failed' AND (COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} OR ${t}.created_at < now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`;
+};
+const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")}) OR ${exhaustedExtractionSql(t)}))`;
 function settledNonSpamCallback(b) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
-  b.whereNull("processing_token")
-    .whereRaw("((processing_status IS NULL AND recording_sid IS NULL) OR processing_status NOT IN (" + UNSETTLED_CALLBACK_STATUSES.map(() => "?").join(", ") + "))", UNSETTLED_CALLBACK_STATUSES);
+  b.whereRaw(settledNonSpamCallbackSql("call_log"));
 }
+// The PARENT voicemail, settled: ended (a reported duration), no pass holding
+// its token, not in a retryable state, and no adopted recording still waiting
+// for its pass (status null with a recording_sid). JS and SQL twins; every
+// settlement site (processor, promise proof, sweep) reads one of them.
+function isSettledParentRow(row) {
+  return row?.duration_seconds != null && !row?.processing_token
+    && !RETRYABLE_PARENT_STATUSES.includes(row?.processing_status)
+    && !(row?.processing_status == null && row?.recording_sid);
+}
+const settledParentSql = (t) => `(${t}.duration_seconds IS NOT NULL AND ${t}.processing_token IS NULL AND (${t}.processing_status IS NULL OR ${t}.processing_status NOT IN (${RETRYABLE_PARENT_STATUSES.map((v) => `'${v}'`).join(", ")})) AND NOT (${t}.processing_status IS NULL AND ${t}.recording_sid IS NOT NULL))`;
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
@@ -2102,12 +2118,10 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     .whereExists(function parentIsVoicemail() {
       this.select(conn.raw("1")).from("call_log as parent").where({ "parent.id": commitment.call_log_id, "parent.direction": "inbound" })
         .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')")
-        // ...with a reliable end (lockCallbackPair's parent_not_settled): a
-        // reported duration and no pass holding its token. Without the
+        // ...and settled (lockCallbackPair's parent_not_settled): without the
         // duration the boundary reads the call as ended at its start, and a
         // callback placed while the caller was still recording would count.
-        .whereNotNull("parent.duration_seconds").whereNull("parent.processing_token")
-        .whereRaw("(parent.processing_status IS NULL OR parent.processing_status NOT IN (" + RETRYABLE_PARENT_STATUSES.map(() => "?").join(", ") + "))", RETRYABLE_PARENT_STATUSES);
+        .whereRaw(settledParentSql("parent"));
     })
     .modify((b) => phoneWhere(b, "to_phone", phone))
     .orderBy("created_at", "asc")
@@ -3043,7 +3057,34 @@ const cardLegSql = (t) => `(${t}.v2_extraction_status = 'valid'
   AND CASE WHEN ${t}.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (${t}.metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END)`;
 
 async function listLapsedEvidenceClosedCallIds(conn) {
-  if (!promiseEvidenceCloseLive()) return [];
+  const ids = promiseEvidenceCloseLive() ? await listLapsedAssociationCloses(conn) : [];
+  // A promise kept on a DIRECT outbound-call proof (resolveCallback's, no
+  // closed_by marker) whose call is no longer a settled non-spam call: it was
+  // reprocessed to spam, or is back in a pass that may yet say so. Listed so
+  // refreshFulfillment (keptOnCall) judges it again. Partial index
+  // call_commitments_direct_call_proof_index (migration 20261010300000).
+  // Under the callback gate alone: the association kill switch above is
+  // not this proof's.
+  if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) {
+    // Driven from the evidence side: outbound calls changed inside the scan
+    // window (a reprocess rewrites updated_at; call_log_outbound_updated_at_index)
+    // that are not settled non-spam, joined to the promises kept on them
+    // through the partial index's expression. Never a walk of every proof.
+    const direct = await conn.raw(
+      `SELECT DISTINCT cc.call_log_id
+         FROM call_log ev
+         JOIN call_commitments cc ON (cc.fulfillment ->> 'record_id') = ev.id::text
+          AND cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
+          AND (cc.fulfillment ->> 'kind') = 'outbound_call'
+        WHERE ev.direction LIKE 'outbound%' AND ev.updated_at > ?
+          AND NOT ${settledNonSpamCallbackSql("ev")}`,
+      [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000)],
+    );
+    for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
+  }
+  return ids;
+}
+async function listLapsedAssociationCloses(conn) {
   // The recent automatic closes first (a handful, off the partial index
   // call_commitments_evidence_closed_idx — closed_by inlined as a constant so
   // the planner can match it), then each joined to its visit or customer by
@@ -3145,30 +3186,7 @@ async function listLapsedEvidenceClosedCallIds(conn) {
               AND (cc.fulfillment ->> 'matched_at') <= to_char(cc.due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))`,
     [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000).toISOString(), CUSTOMER_LEFT, SLOT_OFF_BOOKS_STATUSES, CUSTOMER_LEFT, CUSTOMER_LEFT],
   );
-  const ids = (rows?.rows || []).map((r) => r.call_log_id);
-  // A promise kept on a DIRECT outbound-call proof (resolveCallback's, no
-  // closed_by marker) whose call is no longer a settled non-spam call: it was
-  // reprocessed to spam, or is back in a pass that may yet say so. Listed so
-  // refreshFulfillment (keptOnCall) judges it again. Partial index
-  // call_commitments_direct_call_proof_index (migration 20261010300000).
-  if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) {
-    // Driven from the evidence side: outbound calls changed inside the scan
-    // window (a reprocess rewrites updated_at; call_log_outbound_updated_at_index)
-    // that are not settled non-spam, joined to the promises kept on them
-    // through the partial index's expression. Never a walk of every proof.
-    const direct = await conn.raw(
-      `SELECT DISTINCT cc.call_log_id
-         FROM call_log ev
-         JOIN call_commitments cc ON (cc.fulfillment ->> 'record_id') = ev.id::text
-          AND cc.status = 'fulfilled' AND (cc.fulfillment ->> 'record_type') = 'call_log' AND (cc.fulfillment ->> 'strength') = 'direct'
-          AND (cc.fulfillment ->> 'kind') = 'outbound_call'
-        WHERE ev.direction LIKE 'outbound%' AND ev.updated_at > ?
-          AND NOT ${settledNonSpamCallbackSql("ev")}`,
-      [new Date(Date.now() - LAPSE_SCAN_DAYS * 24 * 60 * 60 * 1000)],
-    );
-    for (const r of direct?.rows || []) if (!ids.includes(r.call_log_id)) ids.push(r.call_log_id);
-  }
-  return ids;
+  return (rows?.rows || []).map((r) => r.call_log_id);
 }
 
 // ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
@@ -4072,6 +4090,9 @@ module.exports = {
   reopenCallbackSpamDismissals,
   rejudgeCallbackSpamDismissals,
   RETRYABLE_PARENT_STATUSES,
+  isSettledParentRow,
+  settledParentSql,
+  settledNonSpamCallbackSql,
   UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,
