@@ -1075,8 +1075,10 @@ function isVoicemailParent(row) {
 // The office callback this verdict belongs to, or null: an OUTBOUND row the
 // admin "Call back" action wrote (call_log.source admin-callback +
 // metadata.relatedCallId naming the voicemail).
-function callbackParentId(call) {
-  if (!isEnabled('callbackSpamClosesParent')) return null;
+// A CORRECTION reads through the gate: turning the gate off blocks new
+// settlements; it never strands cards and promises a settlement already closed.
+function callbackParentId(call, { correction = false } = {}) {
+  if (!correction && !isEnabled('callbackSpamClosesParent')) return null;
   if (!isOutboundCall(call) || call?.source !== 'admin-callback' || !call?.id) return null;
   const parentId = callMetadataObject(call).relatedCallId;
   return parentId && CALLBACK_PARENT_UUID_RE.test(String(parentId)) ? String(parentId) : null;
@@ -1129,7 +1131,9 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration, c
 // the same correction. Converges: a correction clears the stamp and reopens
 // or re-points the dismissal, so the row leaves both scans.
 async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
-  if (!isEnabled('callbackSpamClosesParent')) return { skipped: true, reason: 'gated_off' };
+  // The correction half runs whatever the gate says (a rollback must not
+  // strand what the feature closed); the forward halves below are gated.
+  const gateOn = isEnabled('callbackSpamClosesParent');
   const { UNSETTLED_CALLBACK_STATUSES } = require('./call-commitments');
   const settledNonSpam = (q) => q.whereNull('cb.processing_token').whereNotNull('cb.processing_status').whereNotIn('cb.processing_status', UNSETTLED_CALLBACK_STATUSES);
   const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
@@ -1172,7 +1176,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // closed and the stamp written, the callback still settled spam, a callback
   // promise still open). Recent stamps only (7 days), judged again by
   // refreshFulfillment under this gate alone, whatever the commitments gate.
-  const forward = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+  const forward = !gateOn ? [] : await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
     .whereRaw("(p.metadata->'callback_verdict'->>'at')::timestamptz > now() - interval '7 days'")
     .where({ 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
@@ -1198,11 +1202,20 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // a moot card or a callback promise it could settle, run through the same
   // closeParentOnCallbackSpam (every eligibility check again, under the
   // locks; a settled parent is stamped and leaves this source).
-  const unsettled = await db('call_log as cb').join('call_log as p', db.raw("p.id::text = cb.metadata->>'relatedCallId'"))
+  // lockCallbackPair's eligibility mirrored in SQL, so a callback that can
+  // settle nothing (answered parent, another number, placed before the
+  // voicemail ended) never occupies the batch.
+  const phoneKey = (col) => `(CASE WHEN length(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g')) = 11 AND left(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 1) = '1' THEN substr(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 2) ELSE regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g') END)`;
+  const unsettled = !gateOn ? [] : await db('call_log as cb').join('call_log as p', db.raw("p.id::text = cb.metadata->>'relatedCallId'"))
     .where({ 'cb.source': 'admin-callback', 'cb.processing_status': 'spam' }).whereNull('cb.processing_token')
+    .where('cb.direction', 'like', 'outbound%')
     .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
     .whereRaw("cb.created_at > now() - interval '7 days'")
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .where({ 'p.direction': 'inbound' }).whereNull('p.processing_token').whereNotNull('p.duration_seconds')
+    .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
+    .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(0, p.duration_seconds))")
+    .whereRaw(`${phoneKey('cb.to_phone')} <> '' AND ${phoneKey('cb.to_phone')} = ${phoneKey('p.from_phone')}`)
     .where((q) => {
       q.whereExists(function mootCard() {
         this.select(db.raw('1')).from('triage_items as t').whereRaw('t.call_log_id = p.id').whereIn('t.status', ['open', 'in_progress']).whereIn('t.reason_code', [...CALLBACK_SPAM_MOOT_CODES]);
@@ -1223,7 +1236,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     results.push({ callbackCallId: cb.id, ...result });
     if (result.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} reconciled after a lost correction: cards=${result.cards} promises=${result.promises}`);
   }
-  return { skipped: false, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results, refreshed, settled };
+  return { skipped: false, gateOn, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results, refreshed, settled };
 }
 // The callback promise is NOT written here. It belongs to call-commitments'
 // fulfillment lifecycle: resolveCallback reads the spam callback as a
@@ -1285,7 +1298,7 @@ async function closeParentOnCallbackSpam(call, { callSid = null, procGeneration 
 // them) gives back what an earlier spam verdict closed. `status` is the
 // processing_status this pass just wrote; the pair read fences on it.
 async function settleParentForCallbackVerdict(call, { callSid = null, procGeneration = null, status }) {
-  if (!callbackParentId(call)) return { applied: false, reason: 'no_parent' };
+  if (!callbackParentId(call, { correction: status !== 'spam' })) return { applied: false, reason: 'no_parent' };
   return status === 'spam'
     ? closeParentOnCallbackSpam(call, { callSid, procGeneration })
     : reopenParentOnCallbackCorrected(call, { callSid, procGeneration, status });
@@ -1298,6 +1311,8 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
   // settled inbound voicemail (a replaced recording, a pass in flight) has no
   // standing verdict, whatever its other callbacks say.
   if (!isVoicemailParent(parent) || parent.duration_seconds == null || parent.processing_token) return [];
+  // Gate off: no settlement stands (a correction then reopens everything).
+  if (!isEnabled('callbackSpamClosesParent')) return [];
   const rows = await trx('call_log')
     .where('direction', 'like', 'outbound%')
     .where({ source: 'admin-callback', processing_status: 'spam' })
@@ -1325,7 +1340,7 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
 // (reopenCallbackSpamDismissals; human verdicts stand). Nothing else about
 // the parent is touched.
 async function reopenParentOnCallbackCorrected(call, { callSid = null, procGeneration = null, status = 'processed' } = {}) {
-  const parentId = callbackParentId(call);
+  const parentId = callbackParentId(call, { correction: true });
   if (!parentId) return { applied: false, reason: 'no_parent' };
   try {
     const undone = await db.transaction(async (trx) => {

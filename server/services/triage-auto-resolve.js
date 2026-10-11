@@ -1154,10 +1154,14 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
 
 async function runTriageAutoResolve({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
+  const { runExclusive } = require('../utils/cron-lock');
   if (!isEnabled('triageAutoResolve')) {
+    // callback_spam answers to GATE_CALLBACK_SPAM_CLOSES_PARENT alone: with
+    // the master gate off, the sweep still re-closes the moot cards a
+    // reprocess filed again after a standing callback verdict, that rule only.
+    if (isEnabled('callbackSpamClosesParent')) return runExclusive('triage-auto-resolve', () => sweep({ now, only: 'callback_spam' }));
     return { skipped: true, reason: 'gated_off' };
   }
-  const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('triage-auto-resolve', () => sweep({ now }));
 }
 
@@ -2626,14 +2630,14 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
   return evidence;
 }
 
-async function sweep({ now = new Date() } = {}) {
+async function sweep({ now = new Date(), only = null } = {}) {
   const items = await loadCandidateItems(db);
   const evidence = await loadEvidence(db, items);
 
   const decisions = [];
   for (const item of items) {
     const decision = classifyTriageItem(item, { evidence }, { now });
-    if (decision) decisions.push({ item, ...decision });
+    if (decision && (!only || decision.rule === only)) decisions.push({ item, ...decision });
   }
   const applied = decisions.slice(0, MAX_TRANSITIONS_PER_RUN);
   const deferred = decisions.length - applied.length;

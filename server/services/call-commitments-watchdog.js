@@ -82,12 +82,12 @@ async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
   // A callback-spam settlement whose callback since settled on another
   // verdict but whose correction was lost (crash or failed transaction
   // between the two writes) is corrected on this tick, before the promises
-  // are judged. GATE_CALLBACK_SPAM_CLOSES_PARENT alone: it closes triage
-  // cards too, so it does not wait on the commitments gate below.
-  if (isEnabled('callbackSpamClosesParent')) {
-    await runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
-      .catch((err) => logger.warn(`[call-commitments-watchdog] callback verdict reconcile failed: ${err.message}`));
-  }
+  // are judged. It closes triage cards too, so it does not wait on the
+  // commitments gate below.
+  // Every tick, gate or no gate: with the gate off only the correction half
+  // runs (a rollback must not strand what the feature closed).
+  await runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
+    .catch((err) => logger.warn(`[call-commitments-watchdog] callback verdict reconcile failed: ${err.message}`));
   if (!isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
   return runExclusive('call-commitments-watchdog', async () => {
     const result = await runInner({ now });
