@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1053,17 +1053,12 @@ function callMetadataObject(call) {
     return {};
   }
 }
-// The asks a return call would have answered. A solicitor's voicemail makes
-// these moot; cards that judge on-file customer data, authorization, email or
-// a property role are human verdicts and stay (codex #6271 r1).
-const CALLBACK_SPAM_MOOT_CODES = new Set([
-  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
-  'address_unverified', 'address_validation_unavailable', 'address_not_validated',
-  'missing_first_name', 'missing_last_name', 'missing_required_customer_fields',
-  'not_confirmed', 'quote_promised', 'callback_number_needed',
-  'ambiguous_pest_or_service', 'ambiguous_scheduling', 'low_extraction_confidence',
-  'call_dropped_mid_intake',
-]);
+// A reprocess of the parent honors the verdict: dropUnneededCallCards skips the
+// CALLBACK_SPAM_MOOT_CODES cards (call-triage-flags.js) when the call carries
+// metadata.callback_verdict.spam, so the settlement is not undone (codex r3).
+function callbackVerdictSpam(call) {
+  return isEnabled('callbackSpamClosesParent') && callMetadataObject(call).callback_verdict?.spam === true;
+}
 function isVoicemailParent(row) {
   return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
 }
@@ -11808,7 +11803,7 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1, callbackSpam: callbackVerdictSpam(call) }).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier
@@ -23973,6 +23968,7 @@ CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
 // Callback-spam parent settlement: on the module surface for its live-PG
 // suite (callback-spam-closes-parent.test.js), which drives it directly.
 CallRecordingProcessor.closeParentOnCallbackSpam = closeParentOnCallbackSpam;
+CallRecordingProcessor.callbackVerdictSpam = callbackVerdictSpam;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

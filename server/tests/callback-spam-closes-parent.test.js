@@ -57,6 +57,17 @@ describe('closeParentOnCallbackSpam without a database', () => {
     expect(await close({ id: UUID, direction: 'outbound', source: 'admin-callback', metadata: JSON.stringify({ relatedCallId: 'undefined' }) })).toEqual({ applied: false, reason: 'no_parent' });
     expect(await close({ id: UUID, direction: 'outbound-api', source: 'admin-callback', metadata: 'not json' })).toEqual({ applied: false, reason: 'no_parent' });
   });
+
+  test('a reprocess of the parent reads the stamped verdict (gate on only)', () => {
+    let on; let off;
+    jest.isolateModules(() => { process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT = 'true'; on = require('../services/call-recording-processor'); });
+    jest.isolateModules(() => { delete process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT; off = require('../services/call-recording-processor'); });
+    const stamped = { metadata: JSON.stringify({ callback_verdict: { spam: true, callback_call_log_id: UUID } }) };
+    expect(on.callbackVerdictSpam(stamped)).toBe(true);
+    expect(on.callbackVerdictSpam({ metadata: { callback_verdict: { spam: false } } })).toBe(false);
+    expect(on.callbackVerdictSpam({ metadata: {} })).toBe(false);
+    expect(off.callbackVerdictSpam(stamped)).toBe(false);
+  });
 });
 
 maybeDescribe('closeParentOnCallbackSpam on real rows (live Postgres)', () => {

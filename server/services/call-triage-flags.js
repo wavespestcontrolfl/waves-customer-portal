@@ -818,6 +818,20 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
 const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
 const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address']);
+// The asks a return call would have answered. When the office's callback to a
+// voicemail reached a solicitor (call_log.metadata.callback_verdict.spam, written
+// by closeParentOnCallbackSpam), these cards are moot on the voicemail: the
+// settlement resolves them, and a later reprocess of the voicemail files none
+// of them again (codex #6271 r3). Cards that judge on-file data, authorization,
+// email or a property role are human verdicts and are not in this set.
+const CALLBACK_SPAM_MOOT_CODES = new Set([
+  'missing_service_address', 'low_confidence_address', 'address_unverifiable',
+  'address_unverified', 'address_validation_unavailable', 'address_not_validated',
+  'missing_first_name', 'missing_last_name', 'missing_required_customer_fields',
+  'not_confirmed', 'quote_promised', 'callback_number_needed',
+  'ambiguous_pest_or_service', 'ambiguous_scheduling', 'low_extraction_confidence',
+  'call_dropped_mid_intake',
+]);
 const AUTHORIZED_THIRD_PARTY_RELATIONSHIPS = new Set(['family_member', 'employee']);
 
 function callMakesNoServiceAsk(extraction) {
@@ -828,10 +842,13 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
+function dropUnneededCallCards(flags, extraction, { canonicalStreet = null, callbackSpam = false } = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
+  // The voicemail's callback reached a solicitor: a reprocess must not re-file
+  // the asks that verdict already closed.
+  if (callbackSpam) for (const f of CALLBACK_SPAM_MOOT_CODES) dropped.add(f);
   if (has('cancellation_request')) {
     dropped.add('reschedule_or_cancel');
     dropped.add('existing_appointment_coordination');
@@ -3343,6 +3360,7 @@ module.exports = {
   deriveEmailReview,
   spelledEmailSettled,
   dropUnneededCallCards,
+  CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,

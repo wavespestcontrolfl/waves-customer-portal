@@ -26,6 +26,18 @@ describe('dropUnneededCallCards', () => {
     expect(r.dropped.sort()).toEqual(['existing_appointment_coordination', 'reschedule_or_cancel']);
   });
 
+  test('a voicemail whose callback reached a solicitor files none of the asks the verdict closed, keeps the human verdicts', () => {
+    const r = dropUnneededCallCards(
+      ['missing_service_address', 'missing_last_name', 'not_confirmed', 'on_file_house_number_conflict', 'missing_unit_number'],
+      ext({ status: 'requested' }),
+      { callbackSpam: true },
+    );
+    expect(r.flags).toEqual(['on_file_house_number_conflict', 'missing_unit_number']);
+    expect(r.dropped.sort()).toEqual(['missing_last_name', 'missing_service_address', 'not_confirmed']);
+    // Without the verdict the same call keeps its asks.
+    expect(dropUnneededCallCards(['missing_last_name', 'not_confirmed'], ext({ status: 'requested' })).dropped).toEqual([]);
+  });
+
   test('a reschedule keeps reschedule_or_cancel and drops the coordination duplicate', () => {
     const r = dropUnneededCallCards(['reschedule_or_cancel', 'existing_appointment_coordination'], ext({ status: 'reschedule_requested' }));
     expect(r.flags).toEqual(['reschedule_or_cancel']);
