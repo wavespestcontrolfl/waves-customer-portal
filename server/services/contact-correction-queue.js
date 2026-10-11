@@ -390,15 +390,25 @@ async function staleLinkageRefusal(knex, job, smsLog) {
   if (smsLog && String(smsLog.customer_id || '') !== String(job.customer_id)) return 'stale_route_unlinked';
   const senderKey = tail10(job.sender_phone);
   if (!senderKey) return null;
-  const live = await knex('customers')
-    .whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
-    .limit(2)
-    .select('id');
-  if (live.length < 2) return null;
-  const link = require('./shared-phone-link');
-  const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
-  return picked.customer && String(picked.customer.id) === String(job.customer_id) ? null : 'stale_link_mismatch';
+  try {
+    const live = await knex('customers')
+      .whereNull('deleted_at')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+      .limit(2)
+      .select('id');
+    if (live.length < 2) return null;
+    const link = require('./shared-phone-link');
+    const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
+    return picked.customer && String(picked.customer.id) === String(job.customer_id) ? null : 'stale_link_mismatch';
+  } catch (err) {
+    // Knex formats bindings into a failed query's message, which would put
+    // the sender's full number in the log (codex #6268 r12). Re-throw a
+    // sanitized error: the sweep's catch logs it and the job stays reserved
+    // for the next pass — never promoted on an unanswered linkage check.
+    const safe = new Error(`shared-phone linkage lookup failed (${err.code || err.name || 'unknown'})`);
+    safe.code = err.code;
+    throw safe;
+  }
 }
 
 /**

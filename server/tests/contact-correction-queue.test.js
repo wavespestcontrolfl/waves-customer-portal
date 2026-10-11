@@ -1039,6 +1039,31 @@ test('a dead reservation the route logged as unlinked (or linked elsewhere) is n
   expect(knex._data.contact_correction_jobs[0].sms_log_id).toBe('s1');
 });
 
+test('a failed shared-phone linkage lookup leaves the reservation untouched and logs no phone digits', async () => {
+  mockDetectIntent.mockReturnValue(true);
+  const logger = require('../services/logger');
+  logger.warn.mockClear();
+  const knex = makeStubKnex({
+    contact_correction_jobs: [jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 })],
+    messages: [{ id: 'm1', twilio_sid: 'SM-test-1', channel: 'sms', direction: 'inbound' }],
+    sms_log: [{ id: 's1', twilio_sid: 'SM-test-1', direction: 'inbound', customer_id: CUSTOMER_ID, created_at: Date.now() }],
+  });
+  const real = knex;
+  const failing = (table) => {
+    const chain = real(table);
+    if (table === 'customers') {
+      chain.whereRaw = () => { const e = new Error('select * from customers where RIGHT(...) = \'5550001111\' - timeout'); e.code = 'ETIMEDOUT'; throw e; };
+    }
+    return chain;
+  };
+  Object.assign(failing, real);
+  expect(await queue._internals.promoteStaleReservations(failing)).toBe(0);
+  expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
+  const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+  expect(logged).toContain('ETIMEDOUT');
+  expect(logged).not.toContain('5550001111');
+});
+
 test('a dead reservation without an inbox source cannot run a correction', async () => {
   const knex = makeStubKnex({
     contact_correction_jobs: [jobRow({ status: 'reserved', customer_id: CUSTOMER_ID, created_at: Date.now() - 20 * 60_000 })],
