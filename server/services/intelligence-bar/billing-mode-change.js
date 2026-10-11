@@ -221,27 +221,68 @@ function stillDue(prediction) {
 }
 
 // How completion would collect: Auto Pay chargeable (the saved-method walk
-// the dues run and charge() use) and GATE_COMPLETION_AUTOPAY_CHARGE. Both
-// feed predictCompletionBilling's invoice-versus-auto-charge choice, so the
-// card names the method the way completion will pick it. Pinned with the card.
-const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false };
+// the dues run and charge() use), GATE_COMPLETION_AUTOPAY_CHARGE, the tender
+// family of the method the walk picks (card or bank/ACH), and the sales-tax rate
+// completion would put on each service type. All of it feeds the card's wording
+// and is pinned with the card.
+const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false, family: null, last4: null, methodId: null, taxRates: {} };
 
 const AUTOPAY_UNVERIFIED = 'Could not verify Auto Pay eligibility. Try again in a moment. Nothing was changed.';
+const TAX_UNVERIFIED = 'Could not verify sales tax for this customer. Try again in a moment. Nothing was changed.';
 
-// The saved-method lookup runs in its fail-closed mode (customerOnAutopay
-// failClosed: a broken read throws instead of reading as "no saved method"),
-// so a card never says "invoiced" while completion may still charge the saved
-// card. An unreadable lookup throws an error carrying `autopayUnverified`.
-async function chargeContext(dbh, customerId, row) {
+const unverified = (message, code) => Object.assign(new Error(message), { billingUnverified: { message, code } });
+
+// The chargeable saved method's tender family and last four. The same walk
+// completion's auto-charge uses (autopay-eligibility getChargeableAutopayMethod,
+// bank = isBankMethodType, the rule charge() classifies by), read fail-closed.
+async function savedMethodFacts(dbh, customerId) {
+  const { getChargeableAutopayMethod, isBankMethodType } = require('../autopay-eligibility');
+  const method = await getChargeableAutopayMethod({ id: customerId }, dbh, { rethrow: true });
+  if (!method) return { family: null, last4: null, methodId: null };
+  const detail = await dbh('payment_methods').where({ id: method.id }).first('last_four', 'bank_last_four');
+  const bank = isBankMethodType(method.method_type);
+  const last4 = (bank ? detail?.bank_last_four || detail?.last_four : detail?.last_four) || null;
+  return { family: bank ? 'bank' : 'card', last4: last4 ? String(last4) : null, methodId: String(method.id) };
+}
+
+// The completion invoice's tax rate per service type of `visits`
+// (tax-calculator.js completionTaxRate, the derivation the completion route
+// uses): it depends on the customer's ZIP, property type, exemption and the
+// service type, none of which the card has to guess. Rates above 0 only.
+async function taxRatesFor(dbh, customerId, visits) {
+  const TaxCalculator = require('../tax-calculator');
+  const customer = await dbh('customers').where({ id: customerId }).first('property_type');
+  const rates = {};
+  for (const type of new Set((visits || []).filter((v) => !v.is_callback).map((v) => v.service_type || ''))) {
+    const rate = await TaxCalculator.completionTaxRate({
+      customerId, serviceType: type || null, propertyType: customer?.property_type, subtotal: 0, database: dbh,
+    });
+    if (rate > 0) rates[type] = rate;
+  }
+  return rates;
+}
+
+// Both lookups run fail-closed: a broken read throws an error carrying
+// `billingUnverified` ({ message, code }), so the card never says "invoiced" or
+// quotes a pre-tax amount on a guess.
+async function chargeContext(dbh, customerId, row, visits = []) {
   let autopayActive;
+  let method = { family: null, last4: null, methodId: null };
   try {
     autopayActive = await require('../autopay-eligibility').customerOnAutopay({
       id: customerId, autopay_enabled: row.autopay_enabled, autopay_paused_until: row.autopay_paused_until,
     }, { db: dbh, failClosed: true });
+    if (autopayActive) method = await savedMethodFacts(dbh, customerId);
   } catch (e) {
-    throw Object.assign(new Error(AUTOPAY_UNVERIFIED), { autopayUnverified: true, cause: e });
+    throw Object.assign(unverified(AUTOPAY_UNVERIFIED, 'billing_autopay_unverified'), { cause: e });
   }
-  return { autopayActive: !!autopayActive, gate: !!require('../../config/feature-gates').isEnabled('completionAutopayCharge') };
+  let taxRates;
+  try {
+    taxRates = await taxRatesFor(dbh, customerId, visits);
+  } catch (e) {
+    throw Object.assign(unverified(TAX_UNVERIFIED, 'billing_tax_unverified'), { cause: e });
+  }
+  return { autopayActive: !!autopayActive, gate: !!require('../../config/feature-gates').isEnabled('completionAutopayCharge'), ...method, taxRates };
 }
 
 const dayOf = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10));
@@ -271,7 +312,15 @@ function visitPrediction(customer, v, charge = NO_CHARGE_CONTEXT) {
   });
 }
 
-const METHOD_WORDS = { auto_charge: 'charged to the saved card', invoice: 'invoiced' };
+// How a collection is worded, by the tender family of the saved method:
+// "charged to the saved card ending 1234" / "debited from the saved bank account
+// ending 1234 (ACH)".
+function savedMethodWords(charge) {
+  const end = charge.last4 ? ` ending ${charge.last4}` : '';
+  return charge.family === 'bank' ? `debited from the saved bank account${end} (ACH)` : `charged to the saved card${end}`;
+}
+
+const methodWords = (kind, charge) => (kind === 'auto_charge' ? savedMethodWords(charge) : 'invoiced');
 
 // Upcoming visits with their own positive price that completion will still
 // collect under `customer`'s lane: { date, service, price, prepaid, due,
@@ -283,13 +332,20 @@ function pricedVisitCharges(customer, visits, charge) {
     const p = visitPrediction(customer, v, charge);
     const due = stillDue(p);
     if (!(due > 0)) continue;
+    // Completion adds sales tax to the amount (tax-calculator.js completionTaxRate,
+    // rounded to cents the way the invoice does), so the charge is due + tax.
+    const rate = (charge.taxRates || {})[v.service_type || ''] || 0;
+    const tax = Math.round(due * rate * 100) / 100;
     out.push({
+      id: String(v.id),
       date: dayOf(v.scheduled_date),
       service: v.service_type || 'Visit',
       price: Number(v.estimated_price),
       prepaid: Number(v.prepaid_amount) > 0 ? Number(v.prepaid_amount) : 0,
       due,
-      method: METHOD_WORDS[p.kind] || 'invoiced',
+      tax,
+      total: Math.round((due + tax) * 100) / 100,
+      method: methodWords(p.kind, charge),
     });
   }
   return out;
@@ -321,7 +377,12 @@ function balanceChanges(row, fields, visits, charge) {
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = []) {
   const balances = balanceChanges(row, fields, visits, charge).map((b) => [b.id, b.before, b.after]);
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status]);
-  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}|${+charge.autopayActive}${+charge.gate}|${JSON.stringify(dues)}`;
+  // The tender family, last four and id of the saved method; the sales-tax rate
+  // per service type; and each taxed visit's tax-inclusive charge.
+  const method = [charge.family || '', charge.last4 || '', charge.methodId || ''];
+  const rates = Object.entries(charge.taxRates || {}).sort(([x], [y]) => x.localeCompare(y));
+  const taxed = pricedVisitCharges({ ...row, ...fields }, visits, charge).filter((v) => v.tax > 0).map((v) => [v.id, v.total]);
+  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}|${+charge.autopayActive}${+charge.gate}|${JSON.stringify(dues)}|${JSON.stringify([method, rates, taxed])}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -471,14 +532,14 @@ const sum = (items, key) => items.reduce((n, i) => n + i[key], 0);
 // One renderer for every lane that collects per visit. Data, not branches:
 // the head line each lane opens with, and the detail builders each lane adds.
 const LANE_HEAD = {
-  per_application: ({ after }) => `Each completed visit is charged its own scheduled price, or ${money(after.per_application_fee)} when it has none — auto-charged to the saved card when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.`,
+  per_application: ({ after, charge }) => `Each completed visit is charged its own scheduled price, or ${money(after.per_application_fee)} when it has none — ${charge.family === 'bank' ? 'debited from the saved bank account (ACH)' : 'auto-charged to the saved card'} when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.`,
   monthly_membership: ({ after, dues }) => (dues && !dues.eligible
     // Promised only when the dues run really charges this customer
     // (monthly-dues-eligibility.js); a move into monthly is refused unless
     // they are collectible, a customer already monthly is checked here.
     ? `The ${money(after.monthly_rate)} monthly rate is NOT charged by the dues run right now. ${dues.message} Recurring plan visits are not covered by dues until that is fixed.`
     : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run. Recurring plan visits are covered while Auto Pay is on or that month's dues are paid; a one-off visit with its own price still bills that price.`),
-  per_visit: ({ charge }) => `Each completed visit is ${charge.autopayActive && charge.gate ? 'charged to the saved card' : 'invoiced'} at its own scheduled price. No monthly dues charge.`,
+  per_visit: ({ charge }) => `Each completed visit is ${charge.autopayActive && charge.gate ? savedMethodWords(charge) : 'invoiced'} at its own scheduled price. No monthly dues charge.`,
 };
 
 // Lines for a per application customer's unpriced visits (counts) and for
@@ -498,11 +559,19 @@ const feeCountLines = ({ after, visits }) => {
   return [parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.'];
 };
 
+const taxPart = (v) => (v.tax > 0 ? ` (${money(v.due)} + ${money(v.tax)} tax = ${money(v.total)})` : '');
+
 const pricedLines = ({ after, visits, charge }) => capped(
   pricedVisitCharges(after, visits, charge),
-  (v) => `Priced visit on ${v.date} (${v.service}): ${money(v.price)} scheduled${v.prepaid > 0 ? `, ${money(v.due)} remaining after ${money(v.prepaid)} paid` : ''} — ${v.method} at completion.`,
-  (rest) => `${plural(rest.length, 'more priced visit', 'more priced visits')}: ${money(sum(rest, 'due'))} ${rest.some((v) => v.prepaid > 0) ? 'remaining' : 'scheduled'} in all — ${[...new Set(rest.map((v) => v.method))].join(' or ')} at completion.`,
+  (v) => `Priced visit on ${v.date} (${v.service}): ${money(v.price)} scheduled${v.prepaid > 0 ? `, ${money(v.due)} remaining after ${money(v.prepaid)} paid` : ''}${taxPart(v)} — ${v.method} at completion.`,
+  (rest) => `${plural(rest.length, 'more priced visit', 'more priced visits')}: ${money(sum(rest, 'due'))} ${rest.some((v) => v.prepaid > 0) ? 'remaining' : 'scheduled'}${sum(rest, 'tax') > 0 ? ` + ${money(sum(rest, 'tax'))} tax = ${money(sum(rest, 'total'))}` : ''} in all — ${[...new Set(rest.map((v) => v.method))].join(' or ')} at completion.`,
 );
+
+// Sales tax completion adds on taxable visits (every visit at the fee too).
+const taxLines = ({ charge }) => {
+  const rates = [...new Set(Object.values(charge.taxRates || {}).map((r) => `${Math.round(r * 10000) / 100}%`))];
+  return rates.length ? [`Sales tax (${rates.join(' or ')}) is added at completion on taxable visits, so a charge is the amount plus tax.`] : [];
+};
 
 // The balance a partly prepaid visit still has due, before -> after.
 const balanceLines = ({ row, fields, visits, charge }) => capped(
@@ -512,8 +581,8 @@ const balanceLines = ({ row, fields, visits, charge }) => capped(
 );
 
 const LANE_DETAILS = {
-  per_application: [feeCountLines, pricedLines],
-  per_visit: [pricedLines],
+  per_application: [feeCountLines, pricedLines, taxLines],
+  per_visit: [pricedLines, taxLines],
 };
 
 const DUES_STOP = 'Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.';
@@ -569,9 +638,9 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     : null;
   let charge;
   try {
-    charge = await chargeContext(dbh, customerId, row);
+    charge = await chargeContext(dbh, customerId, row, visits);
   } catch (e) {
-    if (e && e.autopayUnverified) return refuse(AUTOPAY_UNVERIFIED, 'billing_autopay_unverified');
+    if (e && e.billingUnverified) return refuse(e.billingUnverified.message, e.billingUnverified.code);
     throw e;
   }
   const openDues = await require('../billing-lane').openStampedDuesInvoices(dbh, customerId);
@@ -656,9 +725,9 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   }
   let charge;
   try {
-    charge = await chargeContext(trx, customerId, lockedBefore);
+    charge = await chargeContext(trx, customerId, lockedBefore, visits);
   } catch (e) {
-    if (e && e.autopayUnverified) throw changed(AUTOPAY_UNVERIFIED);
+    if (e && e.billingUnverified) throw changed(e.billingUnverified.message);
     throw e;
   }
   if (cardPin(lockedBefore, visits, fields, charge, openDues) !== pin) {

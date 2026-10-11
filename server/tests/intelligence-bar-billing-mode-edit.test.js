@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, unbillableSeries: new Set(), covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -31,6 +31,7 @@ jest.mock('../models/db', () => {
         return mockState.customer ? { ...mockState.customer, version: mockState.version } : null;
       }
       if (table === 'annual_prepay_terms') return mockState.term;
+      if (table === 'payment_methods') return mockState.methodDetail;
       if (table === 'scheduled_services') return mockState.roots[0] || null;
       if (table === 'payments') return mockState.armed;
       return null;
@@ -78,6 +79,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/autopay-eligibility', () => ({
   ...jest.requireActual('../services/autopay-eligibility'),
+  getChargeableAutopayMethod: jest.fn(async () => mockState.method),
   customerOnAutopay: jest.fn(async () => { if (mockState.autopayUnreadable) throw new Error('payment_methods read failed'); return mockState.chargeable; }),
 }));
 jest.mock('../utils/customer-billing-lock', () => ({
@@ -134,6 +136,10 @@ beforeEach(() => {
   mockState.unbillableSeries = new Set();
   mockState.invoiceBusy = false;
   mockState.autopayUnreadable = false;
+  mockState.method = { id: 'pm-1', method_type: 'card' };
+  mockState.methodDetail = { last_four: null, bank_last_four: null };
+  mockState.taxRate = 0;
+  jest.spyOn(require('../services/tax-calculator'), 'calculateTax').mockImplementation(async () => ({ rate: mockState.taxRate }));
   mockState.seriesIds = [];
   mockState.covered = new Set();
   mockState.pending = new Set();
@@ -144,7 +150,14 @@ beforeEach(() => {
 afterAll(() => { delete process.env.GATE_IB_BILLING_MODE_EDIT; });
 
 // The card pin with the collection context the mocks produce (Auto Pay chargeable, gate off).
-const pinFor = (row, visits, fields = {}) => BillingModeChange.cardPin(row, visits, fields, { autopayActive: mockState.chargeable, gate: false });
+const pinFor = (row, visits, fields = {}) => BillingModeChange.cardPin(row, visits, fields, {
+  autopayActive: mockState.chargeable,
+  gate: false,
+  family: mockState.chargeable ? (mockState.method.method_type === 'card' ? 'card' : 'bank') : null,
+  last4: mockState.chargeable ? (mockState.methodDetail.last_four || mockState.methodDetail.bank_last_four || null) : null,
+  methodId: mockState.chargeable ? mockState.method.id : null,
+  taxRates: {},
+});
 const propose = (updates) => BillingModeChange.billingEditProposal(CUSTOMER_ID, updates);
 const customerWrites = () => mockState.updates.filter((u) => u.table === 'customers');
 
@@ -906,6 +919,67 @@ describe('Codex round 7 on #6118', () => {
     expect(busy).toMatchObject({ preview_changed: true });
     expect(busy.error).toMatch(/invoice on this customer is being changed right now/);
     expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('P1: a taxable visit shows and pins the tax-inclusive total; recomputed at the commit; a non-taxable one is unchanged', async () => {
+    const visits = [{ id: 'tv1', status: 'confirmed', scheduled_date: '2099-07-01', estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
+    const commercial = { ...MONTHLY, property_type: 'commercial' };
+    mockState.customer = commercial;
+    mockState.visits = visits;
+    mockState.taxRate = 0.07;
+    const taxed = await propose(LEAVE);
+    expect(taxed.display.next_visits).toContain('Priced visit on 2099-07-01 (Pest Control): $100.00 scheduled ($100.00 + $7.00 tax = $107.00) — charged to the saved card at completion.');
+    expect(taxed.display.next_visits.join(' ')).toContain('Sales tax (7%) is added at completion on taxable visits');
+    const commit = () => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: taxed.pin });
+    // The county rate moved between the card and the commit: the tax-inclusive total changed, so it refuses.
+    mockState.taxRate = 0.075;
+    expect(await commit()).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    mockState.taxRate = 0.07;
+    mockState.customer = { ...commercial };
+    expect((await commit()).error).toBeUndefined();
+    // Non-taxable (residential or a zero rate): the line has no tax part and the pin is the no-tax pin.
+    mockState.customer = { ...MONTHLY };
+    mockState.taxRate = 0;
+    const plain = await propose(LEAVE);
+    expect(plain.display.next_visits).toContain('Priced visit on 2099-07-01 (Pest Control): $100.00 scheduled — charged to the saved card at completion.');
+    expect(plain.display.next_visits.join(' ')).not.toMatch(/tax/);
+    expect(plain.pin).toBe(pinFor(MONTHLY, visits, LEAVE));
+    expect(plain.pin).not.toBe(taxed.pin);
+  });
+
+  test('P1: an unreadable tax lookup fails closed in the proposal and at the commit', async () => {
+    mockState.customer = { ...MONTHLY, property_type: 'commercial' };
+    mockState.visits = [{ id: 'tv2', status: 'confirmed', scheduled_date: '2099-07-01', estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
+    mockState.taxRate = 0.07;
+    const card = await propose(LEAVE);
+    require('../services/tax-calculator').calculateTax.mockRejectedValue(new Error('tax_rates read failed'));
+    expect(await propose(LEAVE)).toEqual({ error: 'Could not verify sales tax for this customer. Try again in a moment. Nothing was changed.', code: 'billing_tax_unverified' });
+    expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+      .toMatchObject({ preview_changed: true, error: 'Could not verify sales tax for this customer. Try again in a moment. Nothing was changed.' });
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('P2: an ACH method reads "debited from the saved bank account ... (ACH)" and pins bank; a card reads card; a switch refuses', async () => {
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [{ id: 'av1', status: 'confirmed', scheduled_date: '2099-08-01', estimated_price: '90.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
+    mockState.methodDetail = { last_four: '4242', bank_last_four: null };
+    const card = await propose(LEAVE);
+    expect(card.display.next_visits).toContain('Priced visit on 2099-08-01 (Pest Control): $90.00 scheduled — charged to the saved card ending 4242 at completion.');
+    expect(card.pin).toContain('["card","4242","pm-1"]');
+    mockState.method = { id: 'pm-2', method_type: 'us_bank_account' };
+    mockState.methodDetail = { last_four: null, bank_last_four: '6789' };
+    const bank = await propose(LEAVE);
+    expect(bank.display.next_visits).toContain('Priced visit on 2099-08-01 (Pest Control): $90.00 scheduled — debited from the saved bank account ending 6789 (ACH) at completion.');
+    expect(bank.display.next_visits[0]).toContain('debited from the saved bank account (ACH)');
+    expect(bank.pin).toContain('["bank","6789","pm-2"]');
+    expect(bank.pin).not.toBe(card.pin);
+    // The card was shown with a saved card; the customer has since moved to a bank account: refuse.
+    const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+    expect(stale).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    mockState.customer = { ...MONTHLY };
+    expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: bank.pin })).error).toBeUndefined();
   });
 
   test('P2: an unreadable saved-method lookup fails closed in the proposal and at the confirmation; a readable one is unchanged', async () => {

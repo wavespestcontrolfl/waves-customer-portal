@@ -5058,26 +5058,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (!completionTaxDerivation) {
         completionTaxDerivation = (async () => {
           if (completionTaxAuthorityError) throw completionTaxAuthorityError;
-          // Payer-billed: the payer's own tax_exempt flag governs. Exempt
-          // payer → 0; non-exempt payer → county/service rate with the
-          // service customer's certificate EXCLUDED (skipCustomerExemption).
-          if (completionPayerTaxExempt) return 0;
-          // Residential-zero policy (r11 P0): InvoiceService.create forces
-          // tax to zero for non-commercial customers regardless of
-          // taxability rows — the frozen rate must encode the same rule,
-          // or a required residential completion would freeze a county
-          // rate that create's frozen authority then honors.
-          if (!['commercial', 'business'].includes(svc.property_type)) return 0;
-          const TaxCalculator = require('../services/tax-calculator');
-          const taxResult = await TaxCalculator.calculateTax(
-            svc.customer_id,
-            svc.service_type,
-            Number(invoiceAmount) || 0,
-            { database: db, skipCustomerExemption: visitIsPayerBilled },
-          );
-          const r = Number(taxResult?.rate);
-          if (Number.isFinite(r) && r >= 0 && r < 1) return r;
-          throw new Error(`completion tax derivation returned unusable rate ${taxResult?.rate} for service ${svc.id} — refusing to freeze a guessed rate`);
+          // The derivation is TaxCalculator.completionTaxRate, shared with the
+          // Intelligence Bar billing-type card: exempt payer -> 0, residential-zero
+          // policy (r11 P0), else the calculator's rate with the service customer's
+          // certificate skipped for a payer-billed visit (r3 P0: never a guessed rate).
+          return require('../services/tax-calculator').completionTaxRate({
+            customerId: svc.customer_id,
+            serviceType: svc.service_type,
+            propertyType: svc.property_type,
+            subtotal: invoiceAmount,
+            payerBilled: visitIsPayerBilled,
+            payerTaxExempt: completionPayerTaxExempt,
+            database: db,
+          });
         })();
       }
       return completionTaxDerivation;
