@@ -74,6 +74,44 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   also appends a deterministic coaching line ("Caller said this number isn't
   theirs — ask for a cell before ending the call") when the call ends with
   the flag set and no cell captured.
+- **Line that cannot get texts** (schema 1.25.0, owner ruling 2026-10-08, CARD-ONLY) —
+  `caller.ani_cannot_text` + `caller.text_phone_e164`. A deaf relay service, an office
+  landline, "you can't text this one". It is NOT `caller_id_disclaimed`: the caller still
+  owns that line for calls, so the disclaimed consumers (crm_notes stamp, CSR coaching,
+  the booking-link `caller_id_disclaimed` skip) never read it. **Automation never uses the
+  dictated text number**: no `customers.phone`/`secondary_phone` write, no confirmation or
+  booking-link text to it (a caller can name any third party's mobile, and a text number in
+  `customers.phone` would make callbacks and collections dial it). Instead:
+  `computeDeterministicTriageFlags` raises `callback_number_needed` for the call, which arms
+  the existing number-keyed SMS hold on the calling line (confirmation, reminders and every
+  other sender skip it; a customer whose `customers.phone` is that line is held with it).
+  The booking-link lane skips (`ani_cannot_text`). The processor files one advisory
+  `text_number_differs` card for a new or an existing customer (payload `ani_phone`,
+  `text_phone` only when dialable, `customer_phone`, `note`: "caller said this line cannot
+  get texts — texts go to X, calls to Y; update the customer's phones"). The
+  `callback_number_needed` card is dropped for this case (same ask), kept if the caller also
+  disclaimed the number. `text_number_differs` has its own Resolve; a call verdict on a
+  sibling card does not sweep it. RESOLVE ("Resolve when the phones are updated — the calling line stays blocked for texts") keeps the
+  number-keyed SMS hold on the calling line and lifts only the visits' clearance; DISMISS just closes
+  the card (nothing changes). Exactly ONE action releases the hold: the card's own "Line can get texts"
+  button (confirm copy "Texts to <number> will resume"; `PUT /:id/resolve` with `line_can_get_texts: true`),
+  so a line wrongly marked no-text is never held forever (the button stays on a card already closed by Resolve or Dismiss: version-checked, the card stays closed). Both cards of a no-text hold carry
+  `payload.no_text_hold` (stamped in `call-routing-gates.js`): closing `callback_number_needed` on a
+  marked card never releases it, in either close order and whatever the text card's state; the
+  explicit action also defers to a plain disclaimed `callback_number_needed` card that is still open.
+  The card is version-bound (`expected_updated_at`). Same tech-or-admin access as the
+  `callback_number_needed` card. A call
+  vetoed for spam, out-of-area or do-not-contact gets neither the hold nor the card in ENFORCE mode;
+  in SHADOW mode the legacy pipeline still runs, so the hold is armed regardless, and the
+  `text_number_differs` release card is filed WITH it in the same transaction (a hold never exists
+  without the card that releases it). A non-workable voicemail that says the line cannot get texts
+  arms the hold and card too; spam does not. The model sets `ani_cannot_text` whenever the caller says the
+  line cannot get texts, with or without another number; it is independent of `caller_id_disclaimed`
+  (both are set for a borrowed line that cannot get texts) (prompt v30). "Line can get texts" while
+  this call's "not my number" card is still open closes the text card but keeps the hold, and the
+  inbox says so. The inbox shows
+  the customer's live phone, with the phone at the time of the call only when it differs. The appointment-contact backfill never saves a no-text
+  line into a blank `customers.phone`. The office updates the phones by hand.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner
