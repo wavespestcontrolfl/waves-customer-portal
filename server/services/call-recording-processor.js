@@ -9231,6 +9231,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
       transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
       sentiment: extracted.sentiment || null,
       processing_status: 'processed',
+      processed_at: new Date(),
       processing_token: null,
       metadata: db.raw(
         "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
@@ -10775,6 +10776,7 @@ const CallRecordingProcessor = {
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
+        processed_at: new Date(),
         processing_token: null,
         updated_at: new Date(),
       };
@@ -12465,6 +12467,7 @@ const CallRecordingProcessor = {
             sentiment: extracted.sentiment || null,
             lead_quality: extracted.lead_quality || null,
             processing_status: extracted.is_spam ? 'spam' : 'processed',
+            processed_at: new Date(),
             review_status: 'open',
             processing_token: null,
             // A definitive rejection that finalizes 'processed' (wrong
@@ -22257,6 +22260,9 @@ const CallRecordingProcessor = {
         .where('processing_token', procToken)
         .update({
           processing_status: finalStatus,
+          // Terminal verdict time (migration 20261010250000): the one plain
+          // column a report can order by; updated_at moves on every later write.
+          processed_at: new Date(),
           processing_token: null,
           // Address unverifiable / caller-not-owner / missing surname, or a
           // customer-less recovery lead that failed to persist → open the call for
