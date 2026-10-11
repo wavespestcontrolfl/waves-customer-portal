@@ -1758,7 +1758,7 @@ async function returnedOutboundCall(conn, { after, until = null, phone, customer
     // only once SETTLED and not spam: a pass still holding the row's token
     // may yet write the spam verdict, and a refresh that ran meanwhile would
     // have recorded a solicitor call as the office keeping its word.
-    .modify((b) => { if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) b.whereNull("processing_token").whereRaw("processing_status IS DISTINCT FROM 'spam'"); })
+    .modify(settledNonSpamCallback)
     .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomerWhere(b, "customer_id", customerId); afterCursor(b, "call_log", cursor); })
     .orderBy([{ column: "created_at", order: "asc" }, { column: "id", order: "asc" }])
     .limit(size)
@@ -2063,6 +2063,19 @@ const CUSTOMER_LEFT = "customer_left";
 // callback processor asks for the refresh the moment the verdict lands
 // (closeParentOnCallbackSpam); the watchdog's sweep is the fallback.
 const CALLBACK_SPAM = "callback_spam";
+// Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
+// only once SETTLED and not spam: no pass holds its token, and its status is
+// not spam nor one a later pass may still turn into spam (processing, and
+// the retry states extraction_failed / no_transcription; a row never
+// processed counts only while it has no recording to process). Otherwise a
+// refresh that ran mid-pass would record a solicitor call as the office
+// keeping its word, and the spam settlement scans open promises only.
+const UNSETTLED_CALLBACK_STATUSES = ["spam", "processing", "extraction_failed", "no_transcription"];
+function settledNonSpamCallback(b) {
+  if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return;
+  b.whereNull("processing_token")
+    .whereRaw("((processing_status IS NULL AND recording_sid IS NULL) OR processing_status NOT IN (" + UNSETTLED_CALLBACK_STATUSES.map(() => "?").join(", ") + "))", UNSETTLED_CALLBACK_STATUSES);
+}
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
@@ -2123,22 +2136,25 @@ async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
 // A standing proof keeps the promise dismissed on that callback's evidence,
 // so correcting that one later reopens it; none, and the promise is owed
 // again. The corrected callback no longer reads spam, so it never proves.
+// Runs inside the correction's transaction: each row is read FOR UPDATE and
+// written only while it still is the dismissal that was read (status, human
+// state and evidence re-asserted), so a staff action on the ledger that
+// landed first (a fulfil, a dismissal, an edit, a reopen) stands.
 async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId) {
-  const rows = await callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).select("id");
+  const rows = await callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).forUpdate().select("*");
   if (!rows.length) return { repointed: 0, reopened: 0 };
   const call = await conn("call_log").where({ id: callLogId }).first("id", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds");
   let repointed = 0;
   let reopened = 0;
-  for (const { id } of rows) {
-    const commitment = await conn("call_commitments").where({ id }).first();
+  for (const commitment of rows) {
     const after = await evidenceBoundary(conn, commitment, call);
     const proof = after ? await callbackReachedSolicitor(conn, commitment, { after, phone: contactPhoneOf(call) }) : null;
+    const target = callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).where({ id: commitment.id, human_state: commitment.human_state })
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [commitment.updated_at]);
     if (proof) {
-      repointed += await conn("call_commitments").where({ id })
-        .update({ fulfillment: JSON.stringify(storedProof(proof, call.customer_id)), updated_at: new Date() });
+      repointed += await target.update({ fulfillment: JSON.stringify(storedProof(proof, call.customer_id)), updated_at: new Date() });
     } else {
-      reopened += await conn("call_commitments").where({ id })
-        .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+      reopened += await target.update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
     }
   }
   return { repointed, reopened };
@@ -2274,7 +2290,7 @@ async function cardConnectedCall(conn, commitment, { after, until = null, phone,
     // only once SETTLED and not spam: a pass still holding the row's token
     // may yet write the spam verdict, and a refresh that ran meanwhile would
     // have recorded a solicitor call as the office keeping its word.
-    .modify((b) => { if (require('../config/feature-gates').isEnabled('callbackSpamClosesParent')) b.whereNull('processing_token').whereRaw('processing_status IS DISTINCT FROM \'spam\''); })
+    .modify(settledNonSpamCallback)
     .modify((b) => { phoneWhere(b, 'to_phone', phone); if (customerId) b.where('customer_id', customerId); })
     .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
 }
@@ -3948,6 +3964,7 @@ module.exports = {
   callbackReachedSolicitor,
   reopenCallbackSpamDismissals,
   rejudgeCallbackSpamDismissals,
+  UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,
   buildCallOutcomes,

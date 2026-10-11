@@ -1054,13 +1054,19 @@ function callMetadataObject(call) {
     return {};
   }
 }
+// The parent's end is reliable only once Twilio reported its duration: the
+// voice webhook marks a voicemail before the recorder runs, with duration
+// still null, and a callback started while the caller is still recording
+// says nothing about what the voicemail then captured.
 function callEndOf(row) {
+  if (row?.duration_seconds == null) return null;
   const started = new Date(row?.created_at || 0).getTime();
-  return started + Math.max(0, Number(row?.duration_seconds) || 0) * 1000;
+  return started + Math.max(0, Number(row.duration_seconds) || 0) * 1000;
 }
 function callbackAfterCallEnd(child, parent) {
   const at = new Date(child?.created_at || 0).getTime();
-  return Number.isFinite(at) && at > callEndOf(parent);
+  const ended = callEndOf(parent);
+  return ended != null && Number.isFinite(at) && at > ended;
 }
 function isVoicemailParent(row) {
   return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
@@ -1087,9 +1093,12 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
   const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at');
   if (!child || child.source !== 'admin-callback') return { reason: 'verdict_superseded' };
   const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
-    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'metadata', 'created_at', 'duration_seconds');
+    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'metadata', 'created_at', 'duration_seconds');
   if (!parent) return { reason: 'parent_not_found' };
   if (!isVoicemailParent(parent)) return { reason: 'parent_not_voicemail' };
+  // The parent must have ended and settled: a reported duration (callEndOf)
+  // and no pass still holding its token.
+  if (parent.duration_seconds == null || parent.processing_token) return { reason: 'parent_not_settled' };
   // The callback must postdate the voicemail's end: a callback started while
   // the inbound call was still underway says nothing about what the
   // voicemail then recorded (same boundary as the promise lifecycle's).
@@ -1099,6 +1108,32 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration })
   // parent would take it away with no path back for the closed cards.
   if (!samePhone(parent.from_phone, child.to_phone)) return { reason: 'parent_mismatch' };
   return { child, parent };
+}
+// Durability of the correction (codex #6271 r13): a callback's non-spam
+// terminal write commits before settleParentForCallbackVerdict runs and that
+// call is fail-soft, so a crash or a failed transaction in between would
+// leave the parent settled on a callback that no longer reads spam. The
+// commitments watchdog calls this every tick: it finds every such callback
+// from the data itself (the parent still stamped with it, or a promise still
+// dismissed on it; both partial indexes in migration 20261010280000) and runs
+// the same correction. Converges: a correction clears the stamp and reopens
+// or re-points the dismissal, so the row leaves both scans.
+async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
+  if (!isEnabled('callbackSpamClosesParent')) return { skipped: true, reason: 'gated_off' };
+  const { UNSETTLED_CALLBACK_STATUSES } = require('./call-commitments');
+  const settledNonSpam = (q) => q.whereNull('cb.processing_token').whereNotNull('cb.processing_status').whereNotIn('cb.processing_status', UNSETTLED_CALLBACK_STATUSES);
+  const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).limit(limit).select('cb.*');
+  const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
+    .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(settledNonSpam).limit(limit).select('cb.*');
+  const callbacks = new Map([...stamped, ...dismissed].map((cb) => [cb.id, cb]));
+  const results = [];
+  for (const cb of callbacks.values()) {
+    const result = await reopenParentOnCallbackCorrected(cb, { callSid: cb.twilio_call_sid, status: cb.processing_status });
+    results.push({ callbackCallId: cb.id, ...result });
+    if (result.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} reconciled after a lost correction: cards=${result.cards} promises=${result.promises}`);
+  }
+  return { skipped: false, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results };
 }
 // The callback promise is NOT written here. It belongs to call-commitments'
 // fulfillment lifecycle: resolveCallback reads the spam callback as a
@@ -24502,6 +24537,7 @@ CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
 CallRecordingProcessor.closeParentOnCallbackSpam = closeParentOnCallbackSpam;
 CallRecordingProcessor.reopenParentOnCallbackCorrected = reopenParentOnCallbackCorrected;
 CallRecordingProcessor.settleParentForCallbackVerdict = settleParentForCallbackVerdict;
+CallRecordingProcessor.reconcileCorrectedCallbackVerdicts = reconcileCorrectedCallbackVerdicts;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

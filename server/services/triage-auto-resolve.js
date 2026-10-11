@@ -1279,10 +1279,12 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
   // or its customer. A callback from the Call Log action on an answered call
   // proves nothing about that call's asks.
   const parents = new Map((await conn('call_log').whereIn('id', [...new Set(children.map((c) => String(c.parent_id)))])
-    .select('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'created_at', 'duration_seconds')).map((p) => [String(p.id), p]));
+    .select('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'created_at', 'duration_seconds')).map((p) => [String(p.id), p]));
   const voicemail = (p) => p.call_outcome === 'voicemail' || p.answered_by === 'voicemail' || p.processing_status === 'voicemail';
   // The callback must postdate the voicemail's end (the processor's lockCallbackPair boundary).
-  const afterEnd = (c, p) => new Date(c.created_at).getTime() > new Date(p.created_at).getTime() + Math.max(0, Number(p.duration_seconds) || 0) * 1000;
+  // ...and the parent must have ended and settled (a reported duration, no live token), as lockCallbackPair requires.
+  const afterEnd = (c, p) => p.duration_seconds != null && !p.processing_token
+    && new Date(c.created_at).getTime() > new Date(p.created_at).getTime() + Math.max(0, Number(p.duration_seconds) || 0) * 1000;
   const key = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length === 11 && d.startsWith('1') ? d.slice(1) : d; };
   for (const item of candidates) {
     const parent = parents.get(String(item.call_log_id));

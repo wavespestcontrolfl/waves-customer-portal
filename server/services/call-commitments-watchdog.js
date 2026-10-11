@@ -81,6 +81,14 @@ async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
   if (!isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('call-commitments-watchdog', async () => {
+    // A callback-spam settlement whose callback since settled on another
+    // verdict but whose correction was lost (crash or failed transaction
+    // between the two writes) is corrected here, before the promises are
+    // judged (GATE_CALLBACK_SPAM_CLOSES_PARENT; a no-op while it is off).
+    if (isEnabled('callbackSpamClosesParent')) {
+      await require('./call-recording-processor').reconcileCorrectedCallbackVerdicts()
+        .catch((err) => logger.warn(`[call-commitments-watchdog] callback verdict reconcile failed: ${err.message}`));
+    }
     const result = await runInner({ now });
     // Reconciliation already committed verified work. Report partial proof
     // failures to job health without rolling those notifications back.
