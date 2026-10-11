@@ -71,7 +71,7 @@ jest.setTimeout(60000);
       id text PRIMARY KEY, metadata jsonb, processing_generation integer, processing_token text,
       processing_status text, extraction_attempts integer DEFAULT 0, created_at timestamptz DEFAULT now(),
       twilio_call_sid text, ai_extraction jsonb, ai_extraction_enriched jsonb, v2_extraction_status text,
-      updated_at timestamptz)`, [schema]);
+      processed_at timestamptz, updated_at timestamptz)`, [schema]);
     await mockDatabase.raw(`CREATE TABLE ??.estimates (
       id text PRIMARY KEY, status text, archived_at timestamptz, estimate_data jsonb,
       scheduled_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz)`, [schema]);
@@ -270,6 +270,7 @@ jest.setTimeout(60000);
 
       const live = await liveCall(callId);
       expect(live.processing_status).toBe('extraction_failed');
+      expect(live.processed_at).toBeNull(); // a retry lane carries no verdict time (#6269)
       expect(live.extraction_attempts).toBe(CALL_EXTRACTION_MAX_ATTEMPTS);
       expect(claimSql.callReprocessInFlight(live)).toBe(false);
       expect(live.metadata.estimator_quarantine_queue).toMatchObject({ price_agreed_on_call: { generation: 7 } });
