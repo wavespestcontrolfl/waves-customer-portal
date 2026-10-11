@@ -71,10 +71,11 @@ async function unpricedOngoingSeries(dbh, customerId, alreadyListed, customerOve
     const ids = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
     const out = [];
     for (const id of ids) {
+      // Any verdict blocks: no billable amount, or a plan that could not be verified.
       const verdict = await seriesNextOccurrencesUnbillable(dbh, id, { customerOverride });
-      if (!verdict || verdict.code !== 'RECURRING_WITHOUT_BILLABLE_AMOUNT') continue;
+      if (!verdict) continue;
       const root = await dbh('scheduled_services').where({ id }).first('id', 'service_type', 'is_callback', 'scheduled_date');
-      if (root) out.push({ ...root, series: true });
+      if (root) out.push({ ...root, series: true, unverified: verdict.code === 'RECURRING_BILLING_UNVERIFIED' });
     }
     return out;
   } catch { return []; }
@@ -105,6 +106,9 @@ function unpricedVisitsRefusal(mode, billable) {
   const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
   const visits = billable.filter((r) => !r.series);
   const series = billable.length - visits.length;
+  if (billable.some((r) => r.unverified)) {
+    return `${laneLabel} bills each visit's own price — could not verify that ${series === 1 ? 'an ongoing recurring plan' : `${series} ongoing recurring plans`} will bill under it (the schedule is too long to check). Change the billing type on the customer page.`;
+  }
   if (!series) {
     const plural = visits.length !== 1;
     return `${laneLabel} bills each visit's own price — ${visits.length} upcoming visit${plural ? 's' : ''} (first ${visits[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`;

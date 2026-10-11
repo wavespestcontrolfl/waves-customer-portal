@@ -981,6 +981,40 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
     } finally { jest.useRealTimers(); }
   });
 
+  test('a daily series whose add-on stops at day 109 refuses: the walk covers the whole horizon, not the first 60 dates', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
+    try {
+      const seasonal = { id: 'a4', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
+      const fixture = {
+        parentOverrides: { recurring_pattern: 'daily', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00' },
+        seriesDates: ['2026-07-15'],
+        addons: [seasonal],
+      };
+      // Every date through Oct 31 (days 1-108) carries the add-on; from Nov 1 none does.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      // A base price that stands alone keeps every phase billable.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario({ ...fixture, parentOverrides: { ...fixture.parentOverrides, estimated_price: '120.00' } }).conn, 10, { customerOverride: PER_VISIT }))
+        .toBeNull();
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('the next occurrence is validated even when it falls beyond the horizon', async () => {
+    const before = process.env.RECURRING_TOPUP_HORIZON_DAYS;
+    process.env.RECURRING_TOPUP_HORIZON_DAYS = '30';
+    try {
+      // Quarterly: the next visit is about 91 days out, past the 30-day horizon.
+      const unpriced = { parentOverrides: { recurring_pattern: 'quarterly', create_invoice_on_complete: false, estimated_price: null } };
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(unpriced).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      const priced = { parentOverrides: { recurring_pattern: 'quarterly', create_invoice_on_complete: false, estimated_price: '150.00' } };
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(priced).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    } finally {
+      if (before === undefined) delete process.env.RECURRING_TOPUP_HORIZON_DAYS; else process.env.RECURRING_TOPUP_HORIZON_DAYS = before;
+    }
+  });
+
   test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
     const flat = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' } });
     expect(await seriesNextOccurrencesUnbillable(flat.conn, 10, { customerOverride: PER_VISIT })).toBeNull();

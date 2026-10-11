@@ -6031,10 +6031,12 @@ async function seriesExtensionUnbillable(conn, {
   });
 }
 
-// Bounds on the verdict's cadence walk: dates examined, and cadence steps tried
-// (steps skipped as past or too close do not count as dates).
-const SERIES_VERDICT_MAX_DATES = 60;
-const SERIES_VERDICT_MAX_ATTEMPTS = 400;
+// Bound on the verdict's cadence walk: cadence steps tried (steps skipped as
+// past or too close count too). The walk covers the whole top-up horizon (up to
+// 730 days), so a daily cadence needs about 730 steps; there is no cap on the
+// dates validated. A walk that hits this bound without finishing is refused as
+// unverified, never passed.
+const SERIES_VERDICT_MAX_ATTEMPTS = 3000;
 
 // The billable-amount verdict (seriesExtensionUnbillable, the one the nightly
 // top-up asks per candidate date) for every visit the top-up would mint
@@ -6045,7 +6047,17 @@ const SERIES_VERDICT_MAX_ATTEMPTS = 400;
 // (nextRecurringDate / seasonalSafeShift / too-close / not-past), the add-ons
 // due on each date, the stored discount scope and the sibling-resolved
 // create-invoice stamp. Dates are the cadence dates only: occupancy clashes
-// move a visit, not its price. Read-only (the legacy cap freeze the extension
+// move a visit, not its price.
+//
+// The walk covers the COMPLETE horizon, and always at least the next cadence
+// occurrence even when it falls beyond the horizon (a yearly plan whose next
+// visit is past the top-up's reach is still the visit that would be minted).
+// A date's price depends only on the add-ons due on it (and the series' stored
+// discount scope, which is the same for every date), so dates are grouped by
+// that set and one representative per distinct set is priced: a daily series
+// costs a handful of verdicts, not one per day. seriesExtensionUnbillable
+// takes the minimum over the dates it is given, so the verdict is the same one
+// the per-date walk would give. Read-only (the legacy cap freeze the extension
 // writes is skipped). Null when the series has nothing to extend or bills.
 async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
@@ -6063,24 +6075,36 @@ async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverrid
   const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
   const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
   const blackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
-  // Every cadence date the top-up would mint inside its horizon (the same
-  // RECURRING_TOPUP_HORIZON_DAYS the nightly loop fills to), so every seasonal
-  // phase of an add-on is priced, not only the first few dates. Capped so a
-  // daily cadence stays bounded.
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
   const { horizonDaysFromEnv } = require('../services/recurring-series-topup');
   const horizonEnd = etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), horizonDaysFromEnv()));
-  const dates = [];
-  for (let attempt = 1; attempt <= SERIES_VERDICT_MAX_ATTEMPTS && dates.length < SERIES_VERDICT_MAX_DATES; attempt += 1) {
+  const today = etDateString();
+  // One representative date per distinct set of due add-ons.
+  const byPricing = new Map();
+  let walked = false;
+  for (let attempt = 1; attempt <= SERIES_VERDICT_MAX_ATTEMPTS; attempt += 1) {
     const candidate = seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, blackoutDates);
-    if (candidate && candidate > horizonEnd) break;
-    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate) || candidate <= etDateString()) continue;
-    dates.push(candidate);
+    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate) || candidate <= today) continue;
+    const beyondHorizon = candidate > horizonEnd;
+    // Past the horizon the walk stops, once something is priced.
+    if (beyondHorizon && byPricing.size) { walked = true; break; }
+    const due = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent);
+    const key = due.map((addon) => parentAddons.indexOf(addon)).join(',');
+    if (!byPricing.has(key)) byPricing.set(key, candidate);
+    // Nothing fell inside the horizon: the next occurrence beyond it is priced alone.
+    if (beyondHorizon) { walked = true; break; }
   }
-  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+  if (!walked) {
+    return {
+      error: 'Could not verify whether this recurring plan will bill — its schedule is too long to check. Change the billing type on the customer page.',
+      code: 'RECURRING_BILLING_UNVERIFIED',
+      fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+    };
+  }
   const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
   const seriesCioc = cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined;
   return seriesExtensionUnbillable(conn, {
-    parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc, customerOverride,
+    parent, dates: [...byPricing.values()], cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc, customerOverride,
   });
 }
 

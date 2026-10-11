@@ -28,18 +28,27 @@
  *         guards: Auto Pay off or paused, inactive or service-paused, annual
  *         prepay covering or pending, no chargeable saved method);
  *       * leaving monthly membership while a failed MONTHLY dues payment's
- *         retry is armed (the retry ladder stops for a non-monthly lane).
- *   - The card shows the billing type and fee before -> after in words, what
- *     the next visits are charged (billing-lane.js completion rules), and that
- *     no customer message is sent.
+ *         retry is armed (the retry ladder stops for a non-monthly lane), or
+ *         while this month's dues charge has an unsettled Stripe outcome
+ *         (retry-collectibility.js hasUnresolvedSiblingStripeOutcome).
+ *   - Refused too: any live upcoming visit that carries a price, a prepayment,
+ *     create-invoice-on-complete or an invoice of any kind (billing_visits_priced).
+ *     The card does not predict per-visit charges (price, tax, surcharge,
+ *     prepayment, invoices and dues coverage all move completion's amount); the
+ *     customer page shows each visit's charge.
+ *   - The card shows the billing type and fee before -> after in words, the
+ *     rule the new lane applies (no amounts), the saved method future charges
+ *     go to by tender family, and that no customer message is sent.
  *   - Pinned with the customer version: the billing fields, payer and Auto Pay
- *     state, and each upcoming visit's billing fields (the projection). At
- *     commit, under the customer row lock, a changed pin or a rule that no
- *     longer holds refuses as preview_changed. The commit also holds the
- *     customer's billing-collection claim (customer-billing-lock.js, the key
- *     the dues cron and the retry sweep hold while they collect) and locks the
- *     upcoming visits FOR UPDATE (the Schedule save's own row lock), so no
- *     collector and no visit edit lands between the final check and the write.
+ *     state, each upcoming visit's billing columns and invoices, the count of
+ *     visits that carry billing, the saved method's family / last four / id,
+ *     and the call-time state of the gates the wording reads. At commit, under
+ *     the customer row lock, a changed pin or a rule that no longer holds
+ *     refuses as preview_changed. The commit also holds the customer's
+ *     billing-collection claim (customer-billing-lock.js, the key the dues cron
+ *     and the retry sweep hold while they collect) and locks the upcoming
+ *     visits FOR UPDATE (the Schedule save's own row lock), so no collector and
+ *     no visit edit lands between the final check and the write.
  *
  * The write is the two columns only. The customer page's save also writes a
  * sensitive-field audit row for billing_mode and may send the membership
@@ -48,7 +57,7 @@
  */
 const db = require('../../models/db');
 const BillingModeRules = require('../billing-mode-rules');
-const { resolveBillingLane, predictCompletionBilling } = require('../billing-lane');
+const { resolveBillingLane } = require('../billing-lane');
 
 const BILLING_EDIT_FIELDS = ['billing_mode', 'per_application_fee'];
 // decimal(10,2) — migration 20260709000010.
@@ -143,38 +152,55 @@ function billingPin(row) {
 // The upcoming visits the card's projection and the payer check read, in a
 // stable order. Their billing fields are pinned (visitsPin) with the card.
 const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'primary_line_price',
-  'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id', 'is_recurring'];
+  'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id', 'is_recurring',
+  'create_invoice_on_complete', 'source_estimate_id'];
 
 // No cut on the card or the pin: every live visit is projected, pinned and
 // locked, so a visit past any page size still counts for the payer rule and the
 // totals. Past this many the card is refused instead of read in part.
 const VISIT_HARD_LIMIT = 2000;
 
-// A visit that already carries an invoice is not minted a new one: completion
-// reuses the live invoice, or parks the visit for the office when a refunded
-// invoice sits on it (completion-invoice-candidate.js, whose reconciliation
-// decides). Each visit gets that outcome and the deciding invoice's id, total
-// and status, so the card predicts no new charge, says which of the two it is,
-// and the pin changes when an invoice appears or its outcome moves.
-async function withVisitInvoices(dbh, visits, { lock = false } = {}) {
-  const { completionInvoicesOnVisits, completionInvoiceOutcome } = require('../completion-invoice-candidate');
+// A visit that already carries an invoice is not minted a new one, whatever the
+// invoice's state: the card refuses it (pricedVisitCount) rather than predict
+// completion's reuse / park outcome. Detection is completion's own: the
+// invoices attached to the visit (completionInvoicesOnVisits) and the sibling
+// first-application invoice of the same estimate and day
+// (estimate-first-application-invoice.js, the lookup completion asks, which also
+// finds a combined invoice another visit of the estimate carries). Each visit
+// gets invoice_id / sibling_invoice_id, which are pinned with the card.
+async function withVisitInvoices(dbh, visits, customerId, { lock = false } = {}) {
+  const { completionInvoicesOnVisits } = require('../completion-invoice-candidate');
+  const { findFirstApplicationInvoiceForEstimateService } = require('../estimate-first-application-invoice');
   const rows = await completionInvoicesOnVisits(dbh, visits.map((v) => v.id), { lock });
-  const byVisit = new Map();
-  for (const r of rows) {
-    const key = String(r.scheduled_service_id);
-    byVisit.set(key, [...(byVisit.get(key) || []), r]);
+  const own = new Map();
+  for (const r of rows) if (!own.has(String(r.scheduled_service_id))) own.set(String(r.scheduled_service_id), r.id);
+  const out = [];
+  for (const v of visits) {
+    const row = { ...v, invoice_id: own.get(String(v.id)) ?? null, sibling_invoice_id: null };
+    // Only a visit from an accepted estimate can have a sibling invoice, and one
+    // that carries nothing yet is the only one that needs the lookup.
+    if (v.source_estimate_id && !hasOwnBilling(row)) {
+      const prior = await findFirstApplicationInvoiceForEstimateService({ ...v, customer_id: customerId }, dbh, lock ? { lockRows: true, noWait: true } : {});
+      row.sibling_invoice_id = [prior.invoice, prior.liveBeside, prior.canceledSetupFee].find(Boolean)?.id ?? null;
+    }
+    out.push(row);
   }
-  return visits.map((v) => {
-    const { outcome, row } = completionInvoiceOutcome(byVisit.get(String(v.id)));
-    return {
-      ...v,
-      invoice_outcome: outcome === 'mint_new' ? null : outcome,
-      invoice_id: row ? row.id : null,
-      invoice_total: row ? row.total : null,
-      invoice_status: row ? row.status : null,
-    };
-  });
+  return out;
 }
+
+const positive = (x) => x != null && x !== '' && Number(x) > 0;
+
+// A visit's own money, read off its row: a price (or the base price a discount
+// froze to $0), a deliberate $0 stamp, a prepayment, an invoice created on
+// completion, or an invoice already attached.
+function hasOwnBilling(v) {
+  const stampedZero = v.estimated_price != null && v.estimated_price !== '' && Number(v.estimated_price) === 0 && !v.is_callback;
+  return positive(v.estimated_price) || positive(v.primary_line_price) || stampedZero || positive(v.prepaid_amount)
+    || v.create_invoice_on_complete === true || !!v.invoice_id;
+}
+
+// Upcoming visits that carry a price, a prepayment or an invoice of any kind.
+const pricedVisitCount = (visits) => (visits || []).filter((v) => hasOwnBilling(v) || v.sibling_invoice_id).length;
 
 async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   const { etDateString } = require('../../utils/datetime-et');
@@ -187,7 +213,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
     .where({ customer_id: customerId })
     .where(function live() { whereVisitRowLive(this, today); })
     .select(VISIT_COLUMNS);
-  const ordered = async () => withVisitInvoices(dbh, await base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1), { lock });
+  const ordered = async () => withVisitInvoices(dbh, await base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1), customerId, { lock });
   if (!lock) return ordered();
   // At commit: lock every candidate visit FOR UPDATE, the row lock the
   // Schedule save takes (admin-schedule.js PUT /:id/update-details: customer
@@ -201,7 +227,7 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
   return ordered();
 }
 
-const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_outcome', 'invoice_id', 'invoice_total', 'invoice_status'];
+const PIN_COLUMNS = [...VISIT_COLUMNS, 'invoice_id', 'sibling_invoice_id'];
 
 function visitsPin(visits) {
   return JSON.stringify((visits || []).map((v) => PIN_COLUMNS.map((c) => {
@@ -211,26 +237,16 @@ function visitsPin(visits) {
   })));
 }
 
-// What completing each partly prepaid visit would still collect, before and
-// after the edit, from the completion path's own math
-// (billing-lane.js predictCompletionBilling: the same precedence completion
-// uses, prepayment netted once). Only visits whose balance moves.
-function stillDue(prediction) {
-  return ['invoice', 'auto_charge', 'payer'].includes(prediction.kind)
-    ? Math.round((Number(prediction.amount) || 0) * 100) / 100 : 0;
-}
-
-// How completion would collect: Auto Pay chargeable (the saved-method walk
-// the dues run and charge() use), GATE_COMPLETION_AUTOPAY_CHARGE, the tender
-// family of the method the walk picks (card or bank/ACH), and the sales-tax rate
-// completion would put on each service type. All of it feeds the card's wording
-// and is pinned with the card.
-const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false, family: null, last4: null, methodId: null, taxRates: {} };
+// The collection context the card words and pins: Auto Pay chargeable (the
+// saved-method walk the dues run and charge() use), the tender family, last four
+// and id of the method that walk picks (card or bank/ACH), and the call-time
+// state of every gate the card's wording depends on: GATE_COMPLETION_AUTOPAY_CHARGE
+// (whether a per-visit lane charges the saved method at completion) and
+// GATE_STAMPED_ZERO_FREE (billing-lane.js, how a stamped $0 reads). Enumerated
+// from billing-lane.js and monthly-dues-eligibility.js, which read no other gate.
+const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false, stampedZero: false, family: null, last4: null, methodId: null };
 
 const AUTOPAY_UNVERIFIED = 'Could not verify Auto Pay eligibility. Try again in a moment. Nothing was changed.';
-const TAX_UNVERIFIED = 'Could not verify sales tax for this customer. Try again in a moment. Nothing was changed.';
-
-const unverified = (message, code) => Object.assign(new Error(message), { billingUnverified: { message, code } });
 
 // The chargeable saved method's tender family and last four. The same walk
 // completion's auto-charge uses (autopay-eligibility getChargeableAutopayMethod,
@@ -245,27 +261,12 @@ async function savedMethodFacts(dbh, customerId) {
   return { family: bank ? 'bank' : 'card', last4: last4 ? String(last4) : null, methodId: String(method.id) };
 }
 
-// The completion invoice's tax rate per service type of `visits`
-// (tax-calculator.js completionTaxRate, the derivation the completion route
-// uses): it depends on the customer's ZIP, property type, exemption and the
-// service type, none of which the card has to guess. Rates above 0 only.
-async function taxRatesFor(dbh, customerId, visits) {
-  const TaxCalculator = require('../tax-calculator');
-  const customer = await dbh('customers').where({ id: customerId }).first('property_type');
-  const rates = {};
-  for (const type of new Set((visits || []).filter((v) => !v.is_callback).map((v) => v.service_type || ''))) {
-    const rate = await TaxCalculator.completionTaxRate({
-      customerId, serviceType: type || null, propertyType: customer?.property_type, subtotal: 0, database: dbh,
-    });
-    if (rate > 0) rates[type] = rate;
-  }
-  return rates;
-}
-
-// Both lookups run fail-closed: a broken read throws an error carrying
-// `billingUnverified` ({ message, code }), so the card never says "invoiced" or
-// quotes a pre-tax amount on a guess.
-async function chargeContext(dbh, customerId, row, visits = []) {
+// The lookup runs fail-closed (customerOnAutopay failClosed: a broken read
+// throws instead of reading as "no saved method"), so the card never says
+// "invoiced" while completion may still charge the saved method. An unreadable
+// lookup throws an error carrying `billingUnverified` ({ message, code }).
+async function chargeContext(dbh, customerId, row) {
+  const gates = require('../../config/feature-gates');
   let autopayActive;
   let method = { family: null, last4: null, methodId: null };
   try {
@@ -274,115 +275,25 @@ async function chargeContext(dbh, customerId, row, visits = []) {
     }, { db: dbh, failClosed: true });
     if (autopayActive) method = await savedMethodFacts(dbh, customerId);
   } catch (e) {
-    throw Object.assign(unverified(AUTOPAY_UNVERIFIED, 'billing_autopay_unverified'), { cause: e });
+    throw Object.assign(new Error(AUTOPAY_UNVERIFIED), { billingUnverified: { message: AUTOPAY_UNVERIFIED, code: 'billing_autopay_unverified' }, cause: e });
   }
-  let taxRates;
-  try {
-    taxRates = await taxRatesFor(dbh, customerId, visits);
-  } catch (e) {
-    throw Object.assign(unverified(TAX_UNVERIFIED, 'billing_tax_unverified'), { cause: e });
-  }
-  return { autopayActive: !!autopayActive, gate: !!require('../../config/feature-gates').isEnabled('completionAutopayCharge'), ...method, taxRates };
+  return {
+    autopayActive: !!autopayActive,
+    gate: !!gates.isEnabled('completionAutopayCharge'),
+    stampedZero: !!gates.stampedZeroFreeLive(),
+    ...method,
+  };
 }
 
-const dayOf = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10));
-
-const ALREADY_INVOICED = { kind: 'existing_invoice', amount: 0, grossAmount: 0 };
-const PARKED = { kind: 'parked_manual', amount: 0, grossAmount: 0 };
-
-function visitPrediction(customer, v, charge = NO_CHARGE_CONTEXT) {
-  // Completion reuses the visit's live invoice, or parks it for the office.
-  if (v.invoice_outcome === 'parked_manual') return PARKED;
-  if (v.invoice_outcome === 'reuse_invoice') return ALREADY_INVOICED;
-  return predictCompletionBilling({
-    lane: resolveBillingLane(customer).mode,
-    billingMode: customer.billing_mode || null,
-    autopayActive: charge.autopayActive,
-    completionAutopayChargeEnabled: charge.gate,
-    estimatedPrice: v.estimated_price,
-    primaryLinePrice: v.primary_line_price,
-    monthlyRate: customer.monthly_rate,
-    perApplicationFee: customer.per_application_fee,
-    isRecurring: !!v.is_recurring,
-    isCallback: !!v.is_callback,
-    serviceType: v.service_type,
-    payerBilled: false,
-    prepaidAmount: v.prepaid_amount,
-    prepaidMethod: v.prepaid_method,
-  });
-}
-
-// How a collection is worded, by the tender family of the saved method:
-// "charged to the saved card ending 1234" / "debited from the saved bank account
-// ending 1234 (ACH)".
-function savedMethodWords(charge) {
-  const end = charge.last4 ? ` ending ${charge.last4}` : '';
-  return charge.family === 'bank' ? `debited from the saved bank account${end} (ACH)` : `charged to the saved card${end}`;
-}
-
-const methodWords = (kind, charge) => (kind === 'auto_charge' ? savedMethodWords(charge) : 'invoiced');
-
-// Upcoming visits with their own positive price that completion will still
-// collect under `customer`'s lane: { date, service, price, prepaid, due,
-// method }, all from the one prediction.
-function pricedVisitCharges(customer, visits, charge) {
-  const out = [];
-  for (const v of visits || []) {
-    if (!(Number(v.estimated_price) > 0)) continue;
-    const p = visitPrediction(customer, v, charge);
-    const due = stillDue(p);
-    if (!(due > 0)) continue;
-    // Completion adds sales tax to the amount (tax-calculator.js completionTaxRate,
-    // rounded to cents the way the invoice does), so the charge is due + tax.
-    const rate = (charge.taxRates || {})[v.service_type || ''] || 0;
-    const tax = Math.round(due * rate * 100) / 100;
-    out.push({
-      id: String(v.id),
-      date: dayOf(v.scheduled_date),
-      service: v.service_type || 'Visit',
-      price: Number(v.estimated_price),
-      prepaid: Number(v.prepaid_amount) > 0 ? Number(v.prepaid_amount) : 0,
-      due,
-      tax,
-      total: Math.round((due + tax) * 100) / 100,
-      method: methodWords(p.kind, charge),
-    });
-  }
-  return out;
-}
-
-function balanceChanges(row, fields, visits, charge) {
-  const after = { ...row, ...fields };
-  const out = [];
-  for (const v of visits || []) {
-    if (!(Number(v.prepaid_amount) > 0)) continue;
-    const before = visitPrediction(row, v, charge);
-    const next = visitPrediction(after, v, charge);
-    if (stillDue(before) === stillDue(next)) continue;
-    out.push({
-      id: String(v.id),
-      date: dayOf(v.scheduled_date),
-      service: v.service_type || 'Visit',
-      prepaid: Number(v.prepaid_amount),
-      before: stillDue(before),
-      after: stillDue(next),
-      coveredByDues: before.kind === 'covered_membership',
-    });
-  }
-  return out;
-}
-
-// `fields` (the edit) and `charge` make the pin carry those balances and the
-// collection method too.
+// What the card was built from, as one string compared under the lock at commit:
+// the billing fields, every upcoming visit's billing columns and invoices, the
+// count of visits that carry billing (always 0 on a card that was shown), the
+// collection context, and the open membership-dues invoices.
 function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = []) {
-  const balances = balanceChanges(row, fields, visits, charge).map((b) => [b.id, b.before, b.after]);
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status]);
-  // The tender family, last four and id of the saved method; the sales-tax rate
-  // per service type; and each taxed visit's tax-inclusive charge.
   const method = [charge.family || '', charge.last4 || '', charge.methodId || ''];
-  const rates = Object.entries(charge.taxRates || {}).sort(([x], [y]) => x.localeCompare(y));
-  const taxed = pricedVisitCharges({ ...row, ...fields }, visits, charge).filter((v) => v.tax > 0).map((v) => [v.id, v.total]);
-  return `${billingPin(row)}|${visitsPin(visits)}|${JSON.stringify(balances)}|${+charge.autopayActive}${+charge.gate}|${JSON.stringify(dues)}|${JSON.stringify([method, rates, taxed])}`;
+  const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
+  return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -395,6 +306,9 @@ function startsMembership(before, after) {
   const member = (row) => hasMembership(row) && !isAutoDerivedTierLabelRow(row);
   return !member(before) && member(after);
 }
+
+// '2026-10' -> 'October 2026'.
+const monthLabel = (key) => new Date(`${key}-01T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
 // Refusals where the bar would have to reproduce what another flow does.
 // Each check gets { dbh, customerId, row, after, fields, visits, laneBefore,
@@ -425,12 +339,22 @@ const SIDE_FLOW_CHECKS = [
   // (retry-collectibility.js armedRetryQuery) narrowed by its own monthly
   // classifier (isMonthlyObligationRow): a failed one-time or per-application
   // charge keeps retrying whatever the lane, so it does not block the change.
+  // It also waits for a dues charge whose Stripe outcome is not settled: the
+  // cron's own verdict (retry-collectibility.js hasUnresolvedSiblingStripeOutcome)
+  // for this ET month's dues, which covers an unresolved invoice-less
+  // stripe_orphan_charges row and a failed dues attempt parked with
+  // metadata.ambiguous_outcome.
   async ({ dbh, customerId, laneBefore, laneAfter }) => {
     if (laneBefore !== 'monthly_membership' || laneAfter === 'monthly_membership') return null;
-    const { armedRetryQuery, isMonthlyObligationRow } = require('../retry-collectibility');
+    const { armedRetryQuery, isMonthlyObligationRow, hasUnresolvedSiblingStripeOutcome } = require('../retry-collectibility');
     const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');
-    return (armed || []).some(isMonthlyObligationRow)
-      ? refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed') : null;
+    if ((armed || []).some(isMonthlyObligationRow)) {
+      return refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed');
+    }
+    const monthKey = require('../../utils/datetime-et').etDateString().slice(0, 7);
+    const outcome = await hasUnresolvedSiblingStripeOutcome(customerId, monthKey, dbh);
+    return outcome.blocked
+      ? refuse(`A dues charge for ${monthLabel(monthKey)} is still being reconciled with Stripe; try again after it settles. Nothing was proposed.`, 'dues_outcome_unresolved') : null;
   },
   // The customer page's save sends the membership welcome email when an edit
   // turns a non-member into a member (admin-customers.js PUT, the
@@ -469,6 +393,14 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits) {
   if (await BillingModeRules.liveAnnualPrepayTerm(dbh, customerId)) {
     return refuse('This customer has an annual prepay term covering today, so the billing type is not changed from the bar. Nothing was proposed.', 'live_annual_prepay_term');
   }
+  // The card does not predict per-visit charges (price, tax, surcharge,
+  // prepayment, invoices, dues coverage all move completion's amount): a visit
+  // that carries any of them keeps the change on the customer page, which shows
+  // each visit's charge.
+  const priced = pricedVisitCount(visits);
+  if (priced > 0) {
+    return refuse(`This customer has ${plural(priced, 'upcoming visit', 'upcoming visits')} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`, 'billing_visits_priced');
+  }
   const pageRefusal = await customerPageRefusal(dbh, customerId, row, fields);
   if (pageRefusal) return pageRefusal;
   const after = { ...row, ...fields };
@@ -483,107 +415,43 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits) {
   return null;
 }
 
-// Upcoming visits under the per-application rule, each predicted with the
-// completion path's own rules (billing-lane.js predictCompletionBilling, the
-// per_application lane with the card's fee): a visit's own price wins, else
-// the fee; a prepayment is netted and covers the visit only when it covers the
-// whole amount; callbacks, free visit types and $0 bill nothing.
-function perApplicationVisitCounts(rows, fee) {
-  const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0, invoiced: 0, invoicedTotal: 0, parked: 0 };
-  for (const r of rows) {
-    if (r.invoice_outcome === 'parked_manual') {
-      counts.parked += 1;
-      continue;
-    }
-    if (r.invoice_outcome === 'reuse_invoice') {
-      counts.invoiced += 1;
-      counts.invoicedTotal += Number(r.invoice_total) || 0;
-      continue;
-    }
-    const p = predictCompletionBilling({
-      lane: 'per_application', billingMode: 'per_application', perApplicationFee: fee, monthlyRate: 0,
-      estimatedPrice: r.estimated_price, primaryLinePrice: r.primary_line_price, isCallback: !!r.is_callback,
-      serviceType: r.service_type, prepaidAmount: r.prepaid_amount, prepaidMethod: r.prepaid_method,
-    });
-    if (p.kind === 'prepaid') counts.prepaid += 1;
-    else if (!(p.amount > 0)) counts.none += 1;
-    else if (p.grossAmount > p.amount) counts.partly += 1;
-    else if (Number(r.estimated_price) > 0) counts.own += 1;
-    else counts.fee += 1;
-  }
-  return counts;
-}
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-const BALANCE_LINES = 5;
-
-function plural(n, one, many) {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
-// Up to BALANCE_LINES lines, then one exact aggregate line (count and total).
-function capped(items, lineOf, restOf) {
-  const lines = items.slice(0, BALANCE_LINES).map(lineOf);
-  if (items.length > BALANCE_LINES) lines.push(restOf(items.slice(BALANCE_LINES)));
-  return lines;
-}
-
-const sum = (items, key) => items.reduce((n, i) => n + i[key], 0);
-
-// One renderer for every lane that collects per visit. Data, not branches:
-// the head line each lane opens with, and the detail builders each lane adds.
+// One renderer for every lane. Data, not branches: the line each lane opens
+// with. No per-visit amount is projected (see billingEditRefusal): the card
+// states the rule, and a customer with any priced, prepaid or invoiced upcoming
+// visit never reaches it.
+const SALES_TAX = 'Sales tax is added where it applies.';
 const LANE_HEAD = {
-  per_application: ({ after, charge }) => `Each completed visit is charged its own scheduled price, or ${money(after.per_application_fee)} when it has none — ${charge.family === 'bank' ? 'debited from the saved bank account (ACH)' : 'auto-charged to the saved card'} when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.`,
-  monthly_membership: ({ after, dues }) => (dues && !dues.eligible
+  per_application: ({ after }) => `Each completed visit is charged the ${money(after.per_application_fee)} per-application fee. Callbacks and free visit types bill nothing. No monthly dues charge. ${SALES_TAX}`,
+  monthly_membership: ({ after, dues, visits }) => (dues && !dues.eligible
     // Promised only when the dues run really charges this customer
     // (monthly-dues-eligibility.js); a move into monthly is refused unless
     // they are collectible, a customer already monthly is checked here.
     ? `The ${money(after.monthly_rate)} monthly rate is NOT charged by the dues run right now. ${dues.message} Recurring plan visits are not covered by dues until that is fixed.`
-    : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run. Recurring plan visits are covered while Auto Pay is on or that month's dues are paid; a one-off visit with its own price still bills that price.`),
-  per_visit: ({ charge }) => `Each completed visit is ${charge.autopayActive && charge.gate ? savedMethodWords(charge) : 'invoiced'} at its own scheduled price. No monthly dues charge.`,
+    // No upcoming visit carries a price here, and Auto Pay (pinned) is on, so
+    // billing-lane.js membershipDuesCoverVisit covers every one of them.
+    : `The ${money(after.monthly_rate)} monthly rate is charged each month by the dues run.${visits.length ? ` ${plural(visits.length, 'upcoming visit has', 'upcoming visits have')} no price today and ${visits.length === 1 ? 'is' : 'are'} covered by dues.` : ''}`),
+  per_visit: () => `Each completed visit is charged its own scheduled price. No monthly dues charge. ${SALES_TAX}`,
 };
 
-// Lines for a per application customer's unpriced visits (counts) and for
-// every collected-per-visit lane's priced visits (each one, from the same
-// predictCompletionBilling result as the counts and the pin).
-const feeCountLines = ({ after, visits }) => {
-  const c = perApplicationVisitCounts(visits, after.per_application_fee);
-  const parts = [
-    c.fee && `${plural(c.fee, 'visit', 'visits')} at ${money(after.per_application_fee)}`,
-    c.own && `${plural(c.own, 'visit', 'visits')} at its own price`,
-    c.partly && `${plural(c.partly, 'visit is', 'visits are')} partly prepaid (the rest is charged)`,
-    c.none && `${plural(c.none, 'visit bills', 'visits bill')} nothing`,
-    c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
-    c.parked && `${plural(c.parked, 'visit is', 'visits are')} parked: a refunded invoice sits on ${c.parked === 1 ? 'it' : 'them'}, completion will not bill ${c.parked === 1 ? 'it' : 'them'}, bill by hand`,
-    c.invoiced && `${plural(c.invoiced, 'visit already has', 'visits already have')} an invoice (${money(c.invoicedTotal)} in all) and ${c.invoiced === 1 ? 'is' : 'are'} billed through it, not charged again`,
-  ].filter(Boolean);
-  return [parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.'];
+// Who gets the charges, and how: the saved method Auto Pay would use, by tender
+// family, with no amount. Dues always go to the saved method; a per-application
+// charge goes there while Auto Pay is on, a per-visit charge only with
+// GATE_COMPLETION_AUTOPAY_CHARGE; otherwise charges are invoiced.
+const TENDER_WORDS = {
+  card: (end) => `the saved card${end}`,
+  bank: (end) => `the saved bank account${end} (ACH)`,
 };
+const CARD_SURCHARGE = 'Credit-card charges carry the configured card surcharge.';
 
-const taxPart = (v) => (v.tax > 0 ? ` (${money(v.due)} + ${money(v.tax)} tax = ${money(v.total)})` : '');
-
-const pricedLines = ({ after, visits, charge }) => capped(
-  pricedVisitCharges(after, visits, charge),
-  (v) => `Priced visit on ${v.date} (${v.service}): ${money(v.price)} scheduled${v.prepaid > 0 ? `, ${money(v.due)} remaining after ${money(v.prepaid)} paid` : ''}${taxPart(v)} — ${v.method} at completion.`,
-  (rest) => `${plural(rest.length, 'more priced visit', 'more priced visits')}: ${money(sum(rest, 'due'))} ${rest.some((v) => v.prepaid > 0) ? 'remaining' : 'scheduled'}${sum(rest, 'tax') > 0 ? ` + ${money(sum(rest, 'tax'))} tax = ${money(sum(rest, 'total'))}` : ''} in all — ${[...new Set(rest.map((v) => v.method))].join(' or ')} at completion.`,
-);
-
-// Sales tax completion adds on taxable visits (every visit at the fee too).
-const taxLines = ({ charge }) => {
-  const rates = [...new Set(Object.values(charge.taxRates || {}).map((r) => `${Math.round(r * 10000) / 100}%`))];
-  return rates.length ? [`Sales tax (${rates.join(' or ')}) is added at completion on taxable visits, so a charge is the amount plus tax.`] : [];
-};
-
-// The balance a partly prepaid visit still has due, before -> after.
-const balanceLines = ({ row, fields, visits, charge }) => capped(
-  balanceChanges(row, fields, visits, charge),
-  (b) => `Partly prepaid visit on ${b.date} (${b.service}): ${money(b.prepaid)} paid; still due at completion ${money(b.before)}${b.coveredByDues ? ' (covered by monthly dues)' : ''} → ${money(b.after)}.`,
-  (rest) => `${plural(rest.length, 'more partly prepaid visit', 'more partly prepaid visits')}: still due at completion ${money(sum(rest, 'before'))} → ${money(sum(rest, 'after'))} in all.`,
-);
-
-const LANE_DETAILS = {
-  per_application: [feeCountLines, pricedLines, taxLines],
-  per_visit: [pricedLines, taxLines],
-};
+function tenderLines(laneAfter, charge) {
+  const toSavedMethod = charge.autopayActive && charge.family
+    && (laneAfter === 'monthly_membership' || laneAfter === 'per_application' || charge.gate);
+  if (!toSavedMethod) return laneAfter === 'monthly_membership' ? [] : ['Future charges under this type are invoiced.'];
+  const end = charge.last4 ? ` ending ${charge.last4}` : '';
+  return [`Future charges under this type go to ${TENDER_WORDS[charge.family](end)}.`, ...(charge.family === 'card' ? [CARD_SURCHARGE] : [])];
+}
 
 const DUES_STOP = 'Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.';
 
@@ -605,12 +473,10 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
     // A fee-only edit on a customer not billed per application.
     return [`The fee is used only while the customer is billed per application. This customer stays ${laneWords(row)}, so their next visits are charged the same as today.`];
   }
-  const key = LANE_HEAD[laneAfter] ? laneAfter : 'per_visit';
-  const ctx = { row, fields, after, visits, dues, charge };
+  const head = LANE_HEAD[LANE_HEAD[laneAfter] ? laneAfter : 'per_visit']({ after, dues, visits });
   return [
-    LANE_HEAD[key](ctx),
-    ...(LANE_DETAILS[key] || []).flatMap((build) => build(ctx)),
-    ...balanceLines(ctx),
+    head,
+    ...tenderLines(laneAfter, charge),
     ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
   ];
 }
@@ -638,7 +504,7 @@ async function billingEditProposal(customerId, updates, dbh = db) {
     : null;
   let charge;
   try {
-    charge = await chargeContext(dbh, customerId, row, visits);
+    charge = await chargeContext(dbh, customerId, row);
   } catch (e) {
     if (e && e.billingUnverified) return refuse(e.billingUnverified.message, e.billingUnverified.code);
     throw e;
@@ -725,7 +591,7 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   }
   let charge;
   try {
-    charge = await chargeContext(trx, customerId, lockedBefore, visits);
+    charge = await chargeContext(trx, customerId, lockedBefore);
   } catch (e) {
     if (e && e.billingUnverified) throw changed(e.billingUnverified.message);
     throw e;

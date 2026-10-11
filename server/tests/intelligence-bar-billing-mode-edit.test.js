@@ -5,14 +5,14 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
     // whereRaw notes the dues stamp, so the open-dues query is told apart from the visits' invoices.
-    q.whereRaw = (sql) => { if (String(sql).includes('membership_dues_month')) q.duesQuery = true; return q; };
+    q.whereRaw = (sql) => { if (String(sql).includes('membership_dues_month')) q.duesQuery = true; if (String(sql).includes('ambiguous_outcome')) q.ambiguousQuery = true; return q; };
     for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orderBy']) q[m] = () => q;
     // limit is honoured, so a card that cut the visits at a page size would show it.
     q.limit = (n) => { q.cap = n; return q; };
@@ -33,7 +33,8 @@ jest.mock('../models/db', () => {
       if (table === 'annual_prepay_terms') return mockState.term;
       if (table === 'payment_methods') return mockState.methodDetail;
       if (table === 'scheduled_services') return mockState.roots[0] || null;
-      if (table === 'payments') return mockState.armed;
+      if (table === 'stripe_orphan_charges') return mockState.orphan;
+      if (table === 'payments') return q.ambiguousQuery ? mockState.ambiguous : mockState.armed;
       return null;
     };
     q.then = (resolve, reject) => {
@@ -86,6 +87,10 @@ jest.mock('../utils/customer-billing-lock', () => ({
   withCustomerBillingLock: jest.fn(),
   tryClaimCustomerCollectionInTrx: jest.fn(async () => { mockState.log.push('claim'); return !mockState.claimHeld; }),
 }));
+// The sibling first-application invoice lookup completion asks (estimate-first-application-invoice.js).
+jest.mock('../services/estimate-first-application-invoice', () => ({
+  findFirstApplicationInvoiceForEstimateService: jest.fn(async (svc) => mockState.siblingInvoices[String(svc.id)] || { invoice: null, liveBeside: null, canceledSetupFee: null }),
+}));
 jest.mock('../services/recurring-series-topup', () => ({ eligibleSeriesParentIds: jest.fn(async () => mockState.seriesIds) }));
 // The top-up's own billable-amount verdict (admin-schedule.js), with its own tests in recurring-series-topup.test.js.
 jest.mock('../routes/admin-schedule', () => ({
@@ -134,6 +139,9 @@ beforeEach(() => {
   mockState.invoices = [];
   mockState.dues = [];
   mockState.unbillableSeries = new Set();
+  mockState.siblingInvoices = {};
+  mockState.orphan = null;
+  mockState.ambiguous = null;
   mockState.invoiceBusy = false;
   mockState.autopayUnreadable = false;
   mockState.method = { id: 'pm-1', method_type: 'card' };
@@ -156,7 +164,7 @@ const pinFor = (row, visits, fields = {}) => BillingModeChange.cardPin(row, visi
   family: mockState.chargeable ? (mockState.method.method_type === 'card' ? 'card' : 'bank') : null,
   last4: mockState.chargeable ? (mockState.methodDetail.last_four || mockState.methodDetail.bank_last_four || null) : null,
   methodId: mockState.chargeable ? mockState.method.id : null,
-  taxRates: {},
+  stampedZero: false,
 });
 const propose = (updates) => BillingModeChange.billingEditProposal(CUSTOMER_ID, updates);
 const customerWrites = () => mockState.updates.filter((u) => u.table === 'customers');
@@ -243,7 +251,7 @@ describe('refusals added in Codex round 1 on #6118', () => {
     mockState.customer = { ...BASE, payer_id: 7 };
     expect((await propose({ billing_mode: 'per_application', per_application_fee: 147 })).code).toBe('bill_to_payer');
     mockState.customer = { ...BASE };
-    mockState.visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '90.00', payer_id: 9 }];
+    mockState.visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: null, payer_id: 9 }];
     const r = await propose({ per_application_fee: 147 });
     expect(r).toMatchObject({ code: 'bill_to_payer', error: expect.stringContaining('This customer has a Bill-To payer — change billing on the customer page') });
   });
@@ -270,16 +278,12 @@ describe('refusals added in Codex round 1 on #6118', () => {
 });
 
 describe('card text', () => {
-  test('monthly member to per application at $147: type, fee, next visits, dues stop, no message', async () => {
+  test('monthly member to per application at $147: type, fee, the rule, the saved card, dues stop, no message', async () => {
     mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    mockState.methodDetail = { last_four: '4242', bank_last_four: null };
     mockState.visits = [
       { id: 'v1', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
-      { id: 'v2', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
-      { scheduled_date: '2099-01-06', estimated_price: '120.00', primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Lawn Care' },
-      { estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: true, service_type: 'Pest Control' },
-      // $100 paid in cash against the new $147 fee: $47 still collects.
-      { estimated_price: null, primary_line_price: null, prepaid_amount: '100.00', prepaid_method: 'cash', is_callback: false, service_type: 'Pest Control' },
-      { estimated_price: null, primary_line_price: null, prepaid_amount: '147.00', prepaid_method: 'cash', is_callback: false, service_type: 'Pest Control' },
+      { id: 'v2', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: true, service_type: 'Pest Control' },
     ];
     const proposal = await propose({ billing_mode: 'per_application', per_application_fee: 147 });
     expect(proposal.error).toBeUndefined();
@@ -295,10 +299,11 @@ describe('card text', () => {
     const labels = contract.effects.map((e) => e.label);
     expect(labels).toContain('Billing type: billed by monthly membership (dues each month) → billed per application (each visit)');
     expect(labels).toContain('Per-application fee: none on file → $147.00');
-    expect(labels).toContain('Each completed visit is charged its own scheduled price, or $147.00 when it has none — auto-charged to the saved card when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.');
-    expect(labels).toContain('Upcoming visits now on the schedule: 2 visits at $147.00, 1 visit at its own price, 1 visit is partly prepaid (the rest is charged), 1 visit bills nothing, 1 visit is fully prepaid.');
-    // The $120 visit's own price is listed, not just counted.
-    expect(labels).toContain('Priced visit on 2099-01-06 (Lawn Care): $120.00 scheduled — charged to the saved card at completion.');
+    expect(labels).toContain('Each completed visit is charged the $147.00 per-application fee. Callbacks and free visit types bill nothing. No monthly dues charge. Sales tax is added where it applies.');
+    expect(labels).toContain('Future charges under this type go to the saved card ending 4242.');
+    expect(labels).toContain('Credit-card charges carry the configured card surcharge.');
+    // No per-visit amount is projected.
+    expect(labels.join(' ')).not.toMatch(/Priced visit|partly prepaid|remaining after/);
     expect(labels).toContain('Monthly dues stop: the monthly dues charge and any retry of a failed dues charge no longer run. Dues already paid for this month are not refunded.');
     expect(labels).toContain('No customer message is sent');
   });
@@ -491,7 +496,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
 
     test('an unchanged projection commits, and the proposal reads without locking', async () => {
       mockState.customer = { ...BASE };
-      const visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '120.00', payer_id: null }];
+      const visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: null, payer_id: null }];
       mockState.visits = visits;
       expect((await propose(LEAVE)).error).toBeUndefined();
       expect(mockState.log).toEqual(['visits:read']);
@@ -612,56 +617,6 @@ describe('Codex round 4 on #6118', () => {
     expect(sql).toContain("\"status\" = 'pending'");
   });
 
-  test('a $100 prepayment on an unpriced visit: the card shows the balance moving from $0.00 to $47.00, and the pin carries it', async () => {
-    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
-    const visit = {
-      id: 'v7', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: null, primary_line_price: null,
-      prepaid_amount: '100.00', prepaid_method: 'cash', is_callback: false, service_type: 'Pest Control', payer_id: null, is_recurring: true,
-    };
-    mockState.visits = [visit];
-    const proposal = await propose(LEAVE);
-    expect(proposal.error).toBeUndefined();
-    expect(proposal.display.next_visits).toContain('Partly prepaid visit on 2099-01-05 (Pest Control): $100.00 paid; still due at completion $0.00 (covered by monthly dues) → $47.00.');
-    // Pinned: the same visit with a different prepayment changes the balance, so the pin differs.
-    const pinTwo = pinFor(mockState.customer, [{ ...visit, prepaid_amount: '120.00' }], LEAVE);
-    expect(pinTwo).not.toBe(proposal.pin);
-    expect(proposal.pin).toContain('"v7",0,47');
-    // Commit with the same state succeeds; a changed prepayment refuses.
-    const ok = await executeTool('update_customer', {
-      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
-    });
-    expect(ok.error).toBeUndefined();
-    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
-    mockState.visits = [{ ...visit, prepaid_amount: '120.00' }];
-    const stale = await executeTool('update_customer', {
-      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
-    });
-    expect(stale).toMatchObject({ preview_changed: true });
-  });
-
-  test('priced visits are listed up to five, then one exact aggregate line; a partial prepayment shows what is left', async () => {
-    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
-    const priced = (n, price, extra = {}) => ({ id: `p${n}`, status: 'confirmed', scheduled_date: `2099-02-0${n}`, estimated_price: price, prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null, ...extra });
-    mockState.visits = [1, 2, 3, 4, 5].map((n) => priced(n, '100.00')).concat([priced(6, '90.00'), priced(7, '60.00', { prepaid_amount: '20.00', prepaid_method: 'cash' })]);
-    const proposal = await propose(LEAVE);
-    const lines = proposal.display.next_visits;
-    expect(lines.filter((l) => l.startsWith('Priced visit'))).toHaveLength(5);
-    expect(lines).toContain('Priced visit on 2099-02-01 (Pest Control): $100.00 scheduled — charged to the saved card at completion.');
-    expect(lines).toContain('2 more priced visits: $130.00 remaining in all — charged to the saved card at completion.');
-    // A partial prepayment on a priced visit shows the amount left.
-    mockState.visits = [priced(7, '60.00', { prepaid_amount: '20.00', prepaid_method: 'cash' })];
-    expect((await propose(LEAVE)).display.next_visits).toContain('Priced visit on 2099-02-07 (Pest Control): $60.00 scheduled, $40.00 remaining after $20.00 paid — charged to the saved card at completion.');
-    // The price is pinned: a visit price edit changes the pin.
-    expect(pinFor(mockState.customer, [priced(1, '100.00')], LEAVE))
-      .not.toBe(pinFor(mockState.customer, [priced(1, '110.00')], LEAVE));
-  });
-
-  test('a priced visit with a partial prepayment shows no balance line (its own price wins in every lane)', async () => {
-    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
-    mockState.visits = [{ id: 'v8', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '120.00', prepaid_amount: '50.00', prepaid_method: 'cash', service_type: 'Pest Control' }];
-    const lines = (await propose(LEAVE)).display.next_visits;
-    expect(lines.some((l) => l.startsWith('Partly prepaid visit'))).toBe(false);
-  });
 });
 
 describe('Codex round 5 on #6118', () => {
@@ -669,35 +624,6 @@ describe('Codex round 5 on #6118', () => {
   const priced = { id: 'pv1', status: 'confirmed', scheduled_date: '2099-03-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null };
   const gateFlags = () => require('../config/feature-gates').gates;
   afterEach(() => { gateFlags().completionAutopayCharge = false; });
-
-  test('per visit: the head and each priced visit name the method completion will use (charged to the saved card vs invoiced)', async () => {
-    mockState.customer = { ...MONTHLY };
-    mockState.visits = [priced];
-    // Gate off: completion invoices a per-visit lane.
-    let lines = (await propose({ billing_mode: 'per_visit' })).display.next_visits;
-    expect(lines).toContain('Each completed visit is invoiced at its own scheduled price. No monthly dues charge.');
-    expect(lines).toContain('Priced visit on 2099-03-01 (Pest Control): $120.00 scheduled — invoiced at completion.');
-    // Gate on + Auto Pay chargeable: it auto-charges the saved method.
-    gateFlags().completionAutopayCharge = true;
-    lines = (await propose({ billing_mode: 'per_visit' })).display.next_visits;
-    expect(lines).toContain('Each completed visit is charged to the saved card at its own scheduled price. No monthly dues charge.');
-    expect(lines).toContain('Priced visit on 2099-03-01 (Pest Control): $120.00 scheduled — charged to the saved card at completion.');
-    // Gate on, no chargeable method: invoiced again. The method is part of the pin.
-    mockState.chargeable = false;
-    lines = (await propose({ billing_mode: 'per_visit' })).display.next_visits;
-    expect(lines).toContain('Priced visit on 2099-03-01 (Pest Control): $120.00 scheduled — invoiced at completion.');
-    expect(BillingModeChange.cardPin(MONTHLY, [priced], { billing_mode: 'per_visit' }, { autopayActive: true, gate: true }))
-      .not.toBe(BillingModeChange.cardPin(MONTHLY, [priced], { billing_mode: 'per_visit' }, { autopayActive: false, gate: true }));
-  });
-
-  test('remaining-amount wording: scheduled price and remaining after the prepayment, with the method (never "collected")', async () => {
-    mockState.customer = { ...MONTHLY };
-    mockState.chargeable = false;
-    mockState.visits = [{ ...priced, prepaid_amount: '20.00', prepaid_method: 'cash', estimated_price: '60.00' }];
-    const lines = (await propose({ billing_mode: 'per_application', per_application_fee: 147 })).display.next_visits;
-    expect(lines).toContain('Priced visit on 2099-03-01 (Pest Control): $60.00 scheduled, $40.00 remaining after $20.00 paid — invoiced at completion.');
-    expect(lines.join(' ')).not.toMatch(/collected/);
-  });
 
   test('an ongoing recurring plan with no live visit left and no price refuses per_visit / one_time (the top-up\'s own series selector)', async () => {
     mockState.customer = { ...MONTHLY };
@@ -749,7 +675,7 @@ describe('Codex round 5 on #6118', () => {
 describe('Codex round 6 on #6118: no cut on the visits the card and the pin cover', () => {
   const LEAVE = { billing_mode: 'per_application', per_application_fee: 147 };
   const MONTHLY = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
-  const visit = (n, extra = {}) => ({ id: `w${String(n).padStart(5, '0')}`, status: 'confirmed', scheduled_date: '2099-04-01', estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null, ...extra });
+  const visit = (n, extra = {}) => ({ id: `w${String(n).padStart(5, '0')}`, status: 'confirmed', scheduled_date: '2099-04-01', estimated_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null, ...extra });
   const many = (count, extraFor = () => ({})) => Array.from({ length: count }, (_, i) => visit(i + 1, extraFor(i + 1)));
 
   test('250 visits: the card counts all of them and the pin covers all of them', async () => {
@@ -758,11 +684,9 @@ describe('Codex round 6 on #6118: no cut on the visits the card and the pin cove
     mockState.visits = visits;
     const proposal = await propose(LEAVE);
     expect(proposal.error).toBeUndefined();
-    expect(proposal.display.next_visits).toContain('Upcoming visits now on the schedule: 250 visits at its own price.');
-    expect(proposal.display.next_visits).toContain('245 more priced visits: $24500.00 scheduled in all — charged to the saved card at completion.');
     expect(proposal.pin).toBe(pinFor(MONTHLY, visits, LEAVE));
     // A change to visit 250 (past any 200-row page) changes the pin: the commit refuses it.
-    const edited = visits.map((v, i) => (i === 249 ? { ...v, estimated_price: '90.00' } : v));
+    const edited = visits.map((v, i) => (i === 249 ? { ...v, scheduled_date: '2099-04-02' } : v));
     mockState.visits = edited;
     const stale = await executeTool('update_customer', {
       customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: proposal.pin,
@@ -821,33 +745,6 @@ describe('Codex round 7 on #6118', () => {
     );
   });
 
-  test('P2: a live visit with an existing invoice is not predicted as a new charge, and the pin carries the invoice', async () => {
-    mockState.customer = { ...MONTHLY };
-    const visits = [
-      { id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null },
-      { id: 'iv2', status: 'confirmed', scheduled_date: '2099-05-08', estimated_price: '80.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null },
-    ];
-    mockState.visits = visits;
-    const before = await propose(LEAVE);
-    expect(before.display.next_visits.filter((l) => l.startsWith('Priced visit'))).toHaveLength(2);
-    // A pre-minted (Charge now) invoice on visit 1: it bills through that invoice.
-    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'sent' }];
-    const after = await propose(LEAVE);
-    const priced = after.display.next_visits.filter((l) => l.startsWith('Priced visit'));
-    expect(priced).toEqual(['Priced visit on 2099-05-08 (Pest Control): $80.00 scheduled — charged to the saved card at completion.']);
-    expect(after.display.next_visits.join(' ')).toContain('1 visit already has an invoice ($120.00 in all) and is billed through it, not charged again');
-    // The invoice is in the pin: one created after the card was shown refuses the commit.
-    expect(after.pin).not.toBe(before.pin);
-    mockState.invoices = [];
-    const stale = await executeTool('update_customer', {
-      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: after.pin,
-    });
-    expect(stale).toMatchObject({ preview_changed: true });
-    expect(customerWrites()).toHaveLength(0);
-    // A void invoice does not count (the query leaves it out): the same as no invoice.
-    expect((await propose(LEAVE)).pin).toBe(before.pin);
-  });
-
   test('P2: an open membership-dues invoice is named instead of the flat promise, pinned, and a new one refuses the commit; none keeps the old line', async () => {
     mockState.customer = { ...MONTHLY };
     mockState.visits = [];
@@ -868,124 +765,10 @@ describe('Codex round 7 on #6118', () => {
     expect((await commit(withDues.pin)).error).toBeUndefined();
   });
 
-  test('P2: each visit with an invoice reads what completion decides: a live one is reused, a refunded one (alone or beside a live one) is parked for the office', async () => {
-    mockState.customer = { ...MONTHLY };
-    const visit = (n) => ({ id: `ov${n}`, status: 'confirmed', scheduled_date: `2099-06-0${n}`, estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null });
-    mockState.visits = [visit(1), visit(2), visit(3), visit(4)];
-    mockState.invoices = [
-      { id: 'live-1', scheduled_service_id: 'ov1', total: '100.00', status: 'sent' },
-      { id: 'ref-2', scheduled_service_id: 'ov2', total: '100.00', status: 'refunded' },
-      { id: 'ref-3', scheduled_service_id: 'ov3', total: '100.00', status: 'refunded' },
-      { id: 'live-3', scheduled_service_id: 'ov3', total: '100.00', status: 'paid' },
-    ];
-    const card = await propose(LEAVE);
-    const text = card.display.next_visits.join(' ');
-    expect(text).toContain('1 visit already has an invoice ($100.00 in all) and is billed through it, not charged again');
-    expect(text).toContain('2 visits are parked: a refunded invoice sits on them, completion will not bill them, bill by hand');
-    // Only the visit with no invoice is a new charge.
-    expect(card.display.next_visits.filter((l) => l.startsWith('Priced visit'))).toEqual(
-      ['Priced visit on 2099-06-04 (Pest Control): $100.00 scheduled — charged to the saved card at completion.'],
-    );
-    // A live invoice that is refunded after the card changes the outcome, so the pin refuses.
-    mockState.invoices = mockState.invoices.map((r) => (r.id === 'live-1' ? { ...r, status: 'refunded' } : r));
-    const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
-    expect(stale).toMatchObject({ preview_changed: true });
-    expect(customerWrites()).toHaveLength(0);
-  });
-
-  test('P2: the commit locks the visits\' invoices last (customers, claim, visits, invoices), re-reads them locked, and a retotal refuses', async () => {
-    mockState.customer = { ...MONTHLY };
-    const visit = { id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null };
-    mockState.visits = [visit];
-    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'sent' }];
-    const card = await propose(LEAVE);
-    const commit = () => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
-    mockState.log = [];
-    expect((await commit()).error).toBeUndefined();
-    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'invoices:lock']);
-    // An invoice edit that retotaled it between the card and the commit (read back from the locked row).
-    mockState.updates = [];
-    mockState.customer = { ...MONTHLY };
-    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '150.00', status: 'sent' }];
-    expect(await commit()).toMatchObject({ preview_changed: true });
-    expect(customerWrites()).toHaveLength(0);
-    // A void between the card and the commit changes the pin too.
-    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'void' }];
-    expect(await commit()).toMatchObject({ preview_changed: true });
-    // An invoice held by another transaction is never waited on with the customer row held.
-    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'sent' }];
-    mockState.invoiceBusy = true;
-    const busy = await commit();
-    expect(busy).toMatchObject({ preview_changed: true });
-    expect(busy.error).toMatch(/invoice on this customer is being changed right now/);
-    expect(customerWrites()).toHaveLength(0);
-  });
-
-  test('P1: a taxable visit shows and pins the tax-inclusive total; recomputed at the commit; a non-taxable one is unchanged', async () => {
-    const visits = [{ id: 'tv1', status: 'confirmed', scheduled_date: '2099-07-01', estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
-    const commercial = { ...MONTHLY, property_type: 'commercial' };
-    mockState.customer = commercial;
-    mockState.visits = visits;
-    mockState.taxRate = 0.07;
-    const taxed = await propose(LEAVE);
-    expect(taxed.display.next_visits).toContain('Priced visit on 2099-07-01 (Pest Control): $100.00 scheduled ($100.00 + $7.00 tax = $107.00) — charged to the saved card at completion.');
-    expect(taxed.display.next_visits.join(' ')).toContain('Sales tax (7%) is added at completion on taxable visits');
-    const commit = () => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: taxed.pin });
-    // The county rate moved between the card and the commit: the tax-inclusive total changed, so it refuses.
-    mockState.taxRate = 0.075;
-    expect(await commit()).toMatchObject({ preview_changed: true });
-    expect(customerWrites()).toHaveLength(0);
-    mockState.taxRate = 0.07;
-    mockState.customer = { ...commercial };
-    expect((await commit()).error).toBeUndefined();
-    // Non-taxable (residential or a zero rate): the line has no tax part and the pin is the no-tax pin.
-    mockState.customer = { ...MONTHLY };
-    mockState.taxRate = 0;
-    const plain = await propose(LEAVE);
-    expect(plain.display.next_visits).toContain('Priced visit on 2099-07-01 (Pest Control): $100.00 scheduled — charged to the saved card at completion.');
-    expect(plain.display.next_visits.join(' ')).not.toMatch(/tax/);
-    expect(plain.pin).toBe(pinFor(MONTHLY, visits, LEAVE));
-    expect(plain.pin).not.toBe(taxed.pin);
-  });
-
-  test('P1: an unreadable tax lookup fails closed in the proposal and at the commit', async () => {
-    mockState.customer = { ...MONTHLY, property_type: 'commercial' };
-    mockState.visits = [{ id: 'tv2', status: 'confirmed', scheduled_date: '2099-07-01', estimated_price: '100.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
-    mockState.taxRate = 0.07;
-    const card = await propose(LEAVE);
-    require('../services/tax-calculator').calculateTax.mockRejectedValue(new Error('tax_rates read failed'));
-    expect(await propose(LEAVE)).toEqual({ error: 'Could not verify sales tax for this customer. Try again in a moment. Nothing was changed.', code: 'billing_tax_unverified' });
-    expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
-      .toMatchObject({ preview_changed: true, error: 'Could not verify sales tax for this customer. Try again in a moment. Nothing was changed.' });
-    expect(customerWrites()).toHaveLength(0);
-  });
-
-  test('P2: an ACH method reads "debited from the saved bank account ... (ACH)" and pins bank; a card reads card; a switch refuses', async () => {
-    mockState.customer = { ...MONTHLY };
-    mockState.visits = [{ id: 'av1', status: 'confirmed', scheduled_date: '2099-08-01', estimated_price: '90.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
-    mockState.methodDetail = { last_four: '4242', bank_last_four: null };
-    const card = await propose(LEAVE);
-    expect(card.display.next_visits).toContain('Priced visit on 2099-08-01 (Pest Control): $90.00 scheduled — charged to the saved card ending 4242 at completion.');
-    expect(card.pin).toContain('["card","4242","pm-1"]');
-    mockState.method = { id: 'pm-2', method_type: 'us_bank_account' };
-    mockState.methodDetail = { last_four: null, bank_last_four: '6789' };
-    const bank = await propose(LEAVE);
-    expect(bank.display.next_visits).toContain('Priced visit on 2099-08-01 (Pest Control): $90.00 scheduled — debited from the saved bank account ending 6789 (ACH) at completion.');
-    expect(bank.display.next_visits[0]).toContain('debited from the saved bank account (ACH)');
-    expect(bank.pin).toContain('["bank","6789","pm-2"]');
-    expect(bank.pin).not.toBe(card.pin);
-    // The card was shown with a saved card; the customer has since moved to a bank account: refuse.
-    const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
-    expect(stale).toMatchObject({ preview_changed: true });
-    expect(customerWrites()).toHaveLength(0);
-    mockState.customer = { ...MONTHLY };
-    expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: bank.pin })).error).toBeUndefined();
-  });
-
   test('P2: an unreadable saved-method lookup fails closed in the proposal and at the confirmation; a readable one is unchanged', async () => {
     const { customerOnAutopay } = require('../services/autopay-eligibility');
     mockState.customer = { ...MONTHLY };
-    mockState.visits = [{ id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
+    mockState.visits = [{ id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
     const card = await propose(LEAVE);
     expect(card.error).toBeUndefined();
     expect(customerOnAutopay).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ failClosed: true }));
@@ -1012,6 +795,216 @@ describe('Codex round 7 on #6118', () => {
     // All exempt: nothing blocks.
     mockState.unpriced = exempt;
     expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
+  });
+});
+
+describe('Codex round 11 on #6118: no per-visit charge is projected; a visit with billing keeps the change on the customer page', () => {
+  const LEAVE = { billing_mode: 'per_application', per_application_fee: 147 };
+  const MONTHLY = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+  const clean = (id = 'c1', extra = {}) => ({ id, status: 'confirmed', scheduled_date: '2099-09-01', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null, is_recurring: true, create_invoice_on_complete: false, source_estimate_id: null, ...extra });
+  const gateFlags = () => require('../config/feature-gates').gates;
+  const refusedWith = (count) => ({
+    code: 'billing_visits_priced',
+    error: `This customer has ${count === 1 ? '1 upcoming visit' : `${count} upcoming visits`} with a price, a prepayment or an invoice. The bar changes the billing type only when no upcoming visit carries one; change it on the customer page, which shows each visit's charge. Nothing was changed.`,
+  });
+  afterEach(() => { gateFlags().completionAutopayCharge = false; require('../config/feature-gates').gates.stampedZeroFree = false; });
+
+  describe('each thing a visit can carry refuses, at the card and under the lock', () => {
+    const TRIGGERS = {
+      'a price': { estimated_price: '120.00' },
+      'a price that a discount froze to $0 (base price on file)': { estimated_price: '0.00', primary_line_price: '120.00' },
+      'a deliberate $0 stamp': { estimated_price: '0.00' },
+      'a prepayment': { prepaid_amount: '20.00', prepaid_method: 'cash' },
+      'create-invoice-on-complete': { create_invoice_on_complete: true },
+      'a callback with a price': { is_callback: true, estimated_price: '40.00' },
+    };
+    test.each(Object.entries(TRIGGERS))('%s', async (name, extra) => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [clean('c1'), clean('t1', extra)];
+      expect(await propose(LEAVE)).toEqual(refusedWith(1));
+      // Under the lock the same rule runs on the locked rows, whatever pin the card had.
+      const result = await executeTool('update_customer', {
+        customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: pinFor(MONTHLY, mockState.visits, LEAVE),
+      });
+      expect(result).toMatchObject({ preview_changed: true, error: expect.stringContaining('with a price, a prepayment or an invoice') });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('an invoice attached to a visit, of any state the completion query keeps (the pre-minted and the refunded alike)', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [clean('i1'), clean('i2'), clean('i3')];
+      mockState.invoices = [
+        { id: 'inv-1', scheduled_service_id: 'i1', total: '100.00', status: 'sent' },
+        { id: 'inv-2', scheduled_service_id: 'i2', total: '100.00', status: 'refunded' },
+      ];
+      expect(await propose(LEAVE)).toEqual(refusedWith(2));
+    });
+
+    test('a sibling or combined first-application invoice of the same estimate (completion\'s own lookup)', async () => {
+      const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [clean('s1', { source_estimate_id: 'est-1' }), clean('s2', { source_estimate_id: 'est-1' }), clean('s3')];
+      mockState.siblingInvoices = { s1: { invoice: { id: 'combined-1' }, liveBeside: null }, s2: { invoice: null, liveBeside: { id: 'beside-1' } } };
+      expect(await propose(LEAVE)).toEqual(refusedWith(2));
+      // Only a visit from an accepted estimate asks the lookup.
+      expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledTimes(2);
+      expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(expect.objectContaining({ id: 's1', customer_id: CUSTOMER_ID }), expect.anything(), {});
+      // A canceled setup-fee row counts as well.
+      mockState.siblingInvoices = { s1: { invoice: null, liveBeside: null, canceledSetupFee: { id: 'fee-1' } } };
+      expect(await propose(LEAVE)).toEqual(refusedWith(1));
+    });
+
+    test('the count names every such visit, not only the first', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [clean('a', { estimated_price: '10.00' }), clean('b', { prepaid_amount: '5.00' }), clean('c'), clean('d', { create_invoice_on_complete: true })];
+      expect(await propose(LEAVE)).toEqual(refusedWith(3));
+    });
+  });
+
+  test('the clean case passes: unpriced, unprepaid, uninvoiced visits, a callback with no price, a $0 callback', async () => {
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [clean('c1'), clean('c2'), clean('cb1', { is_callback: true }), clean('cb2', { is_callback: true, estimated_price: '0.00' })];
+    const card = await propose(LEAVE);
+    expect(card.error).toBeUndefined();
+    expect(card.pin).toBe(pinFor(MONTHLY, mockState.visits, LEAVE));
+    expect(card.pin).toContain('|0|');
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin,
+    });
+    expect(result.error).toBeUndefined();
+    expect(customerWrites()).toHaveLength(1);
+  });
+
+  test('a visit priced after the card was shown refuses at the commit, whatever else is unchanged; nothing is written', async () => {
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [clean('c1'), clean('c2')];
+    const card = await propose(LEAVE);
+    expect(card.error).toBeUndefined();
+    mockState.visits = [clean('c1'), clean('c2', { estimated_price: '120.00' })];
+    const stale = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin,
+    });
+    expect(stale).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    // The count is in the pin itself.
+    expect(pinFor(MONTHLY, [clean('c1'), clean('c2', { estimated_price: '120.00' })], LEAVE)).toContain('|1|');
+  });
+
+  test('an attached invoice another transaction holds is never waited on under the customer row (NOWAIT): refuse', async () => {
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [clean('i1')];
+    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'i1', total: '120.00', status: 'sent' }];
+    mockState.invoiceBusy = true;
+    const busy = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: pinFor(MONTHLY, mockState.visits, LEAVE),
+    });
+    expect(busy).toMatchObject({ preview_changed: true, error: expect.stringMatching(/invoice on this customer is being changed right now/) });
+    // Customers, claim, visits, then the invoices last (NOWAIT).
+    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'invoices:lock']);
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('both gates the billing rules read are in the pin: GATE_STAMPED_ZERO_FREE and GATE_COMPLETION_AUTOPAY_CHARGE', async () => {
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [clean('c1')];
+    const off = await propose(LEAVE);
+    require('../config/feature-gates').gates.stampedZeroFree = true;
+    // stampedZeroFreeLive() is the canonical call-time reader.
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    try {
+      const stampedOn = await propose(LEAVE);
+      expect(stampedOn.pin).not.toBe(off.pin);
+      // A card shown with the gate off refuses once it is on.
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: off.pin }))
+        .toMatchObject({ preview_changed: true });
+    } finally { delete process.env.GATE_STAMPED_ZERO_FREE; }
+    gateFlags().completionAutopayCharge = true;
+    expect((await propose(LEAVE)).pin).not.toBe(off.pin);
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  describe('the saved-method line states the tender family and no amount', () => {
+    const lines = async (updates = LEAVE) => (await propose(updates)).display.next_visits;
+
+    test('a card: ending digits, and the surcharge sentence', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.methodDetail = { last_four: '4242', bank_last_four: null };
+      const l = await lines();
+      expect(l).toContain('Future charges under this type go to the saved card ending 4242.');
+      expect(l).toContain('Credit-card charges carry the configured card surcharge.');
+      expect(l.join(' ')).not.toMatch(/\$(?!147\.00)\d/);
+    });
+
+    test('an ACH bank account: debit wording, no surcharge sentence; the family and last four are pinned and a switch refuses', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.methodDetail = { last_four: '4242', bank_last_four: null };
+      const card = await propose(LEAVE);
+      mockState.method = { id: 'pm-2', method_type: 'us_bank_account' };
+      mockState.methodDetail = { last_four: null, bank_last_four: '6789' };
+      const bank = await propose(LEAVE);
+      expect(bank.display.next_visits).toContain('Future charges under this type go to the saved bank account ending 6789 (ACH).');
+      expect(bank.display.next_visits.join(' ')).not.toMatch(/surcharge|saved card/);
+      expect(bank.pin).toContain('["bank","6789","pm-2"]');
+      expect(card.pin).toContain('["card","4242","pm-1"]');
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+      mockState.customer = { ...MONTHLY };
+      expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: bank.pin })).error).toBeUndefined();
+    });
+
+    test('per visit goes to the saved method only with GATE_COMPLETION_AUTOPAY_CHARGE; otherwise charges are invoiced', async () => {
+      mockState.customer = { ...MONTHLY };
+      expect(await lines({ billing_mode: 'per_visit' })).toContain('Future charges under this type are invoiced.');
+      gateFlags().completionAutopayCharge = true;
+      expect(await lines({ billing_mode: 'per_visit' })).toContain('Future charges under this type go to the saved card.');
+      mockState.chargeable = false;
+      expect(await lines({ billing_mode: 'per_visit' })).toContain('Future charges under this type are invoiced.');
+    });
+
+    test('moving into monthly: the upcoming unpriced visits are exactly "covered by dues"', async () => {
+      mockState.customer = { ...BASE, billing_mode: 'per_visit', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+      mockState.visits = [clean('m1'), clean('m2'), clean('m3')];
+      const l = await lines({ billing_mode: 'monthly_membership' });
+      expect(l[0]).toBe('The $55.00 monthly rate is charged each month by the dues run. 3 upcoming visits have no price today and are covered by dues.');
+      mockState.visits = [clean('m1')];
+      expect((await lines({ billing_mode: 'monthly_membership' }))[0]).toMatch(/1 upcoming visit has no price today and is covered by dues\.$/);
+    });
+  });
+
+  describe('leaving monthly membership waits for a dues charge whose Stripe outcome is not settled (retry-collectibility hasUnresolvedSiblingStripeOutcome)', () => {
+    const LEAVE_MONTHLY = { billing_mode: 'per_application', per_application_fee: 147 };
+    const message = /A dues charge for [A-Z][a-z]+ \d{4} is still being reconciled with Stripe; try again after it settles\./;
+
+    test('an unresolved invoice-less stripe_orphan_charges row', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.orphan = { id: 'orph-1', stripe_payment_intent_id: 'pi_1' };
+      expect(await propose(LEAVE_MONTHLY)).toMatchObject({ code: 'dues_outcome_unresolved', error: expect.stringMatching(message) });
+    });
+
+    test('a failed dues attempt parked with metadata.ambiguous_outcome', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.ambiguous = { id: 'pay-amb' };
+      expect(await propose(LEAVE_MONTHLY)).toMatchObject({ code: 'dues_outcome_unresolved', error: expect.stringMatching(message) });
+    });
+
+    test('settled: neither blocks; a state that appears after the card refuses under the lock', async () => {
+      mockState.customer = { ...MONTHLY };
+      const card = await propose(LEAVE_MONTHLY);
+      expect(card.error).toBeUndefined();
+      mockState.ambiguous = { id: 'pay-amb' };
+      const result = await executeTool('update_customer', {
+        customer_id: CUSTOMER_ID, updates: LEAVE_MONTHLY, _ib_customer_version: 'v1', _ib_billing_pin: card.pin,
+      });
+      expect(result).toMatchObject({ preview_changed: true, error: expect.stringMatching(message) });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('a customer who is not leaving monthly is not held up by it', async () => {
+      mockState.customer = { ...BASE };
+      mockState.orphan = { id: 'orph-1' };
+      expect((await propose(LEAVE_MONTHLY)).error).toBeUndefined();
+    });
   });
 });
 
