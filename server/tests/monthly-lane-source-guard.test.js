@@ -41,11 +41,12 @@ const SERVER_ROOT = path.join(__dirname, '..');
 // exact predicate line, and why the raw predicate is legitimate there.
 const ALLOWLIST = [
   {
-    file: 'services/billing-cron.js',
+    file: 'services/monthly-dues-eligibility.js',
     match: ".where('monthly_rate', '>', 0)",
     context: ".whereNull('service_paused_at')",
     count: 1,
-    // The dues cron deliberately SELECTS the wide rate-bearing population,
+    // The dues cron (its cohort lives in applyDuesCohort, shared with the Intelligence Bar
+    // billing type card) deliberately SELECTS the wide rate-bearing population,
     // then runs every row through resolveBillingLane (GUARD 3b/3c) before
     // charging — the JS resolver is the lane filter, applied per row with
     // billing_mode always in the select (autopay-lane-guards-fail-closed).

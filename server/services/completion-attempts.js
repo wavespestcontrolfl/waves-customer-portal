@@ -254,6 +254,40 @@ async function hasCommittedCompletionAttempt(serviceId, knex = db) {
   return Boolean(record);
 }
 
+// Whether a completion for any visit of this customer has COMMITTED its record
+// and not yet finished its billing step: the attempt row the completing
+// transaction itself moves to side_effects_running (side_effects_pending for a
+// grouped closeout) together with the visit's completed status, and that
+// markCompletionAttemptSucceeded (or a release for resume) leaves. This is the
+// durable "billing is not settled" mark: until it clears, the process that
+// committed the record still holds the billing type it read at entry, so a
+// billing-type edit landing now would not reach it (the visit is completed, so
+// no visit-based check sees it either). It carries NO age window: claimSideEffectsRun
+// resumes a pending row at any age and reclaims a stale running row, both with the frozen
+// required amount, so an unfinished attempt fences until it is finished or released (an
+// abandoned one blocks a billing edit, by design: a money edit fails closed). Writers that
+// hold the customer row FOR UPDATE (the Intelligence Bar
+// billing-type commit) cannot race the transition into this state: the
+// completing transaction holds the customer FOR SHARE from before its first
+// write to its commit.
+async function customerCompletionInFlightState(customerId, knex = db) {
+  // No age window, for either state (fail closed, owner/coordinator ruling): claimSideEffectsRun
+  // accepts a `side_effects_pending` row at any age and reclaims a stale `side_effects_running`
+  // row, and both resume with the frozen required amount. So an unfinished attempt of either
+  // kind can still mint the old invoice after an edit; it fences until it is finished or released.
+  const rows = await knex('service_completion_attempts as a')
+    .join('scheduled_services as s', 's.id', 'a.service_id')
+    .where('s.customer_id', customerId)
+    .whereIn('a.status', ['side_effects_running', 'side_effects_pending'])
+    .select('a.status');
+  if (rows.some((r) => r.status === 'side_effects_pending')) return 'pending';
+  return rows.length ? 'running' : null;
+}
+
+async function customerHasCompletionInFlight(customerId, knex = db) {
+  return Boolean(await customerCompletionInFlightState(customerId, knex));
+}
+
 // Read-only status for the panel's lightweight side-effects poll (codex P1
 // #3187 r11): reports where the service's completion stands so the client
 // re-POSTs the media-bearing completion body only to claim/resume, never as
@@ -846,6 +880,8 @@ module.exports = {
   hasCompletionAttemptForKey,
   withoutPhotoBytes,
   hasCommittedCompletionAttempt,
+  customerHasCompletionInFlight,
+  customerCompletionInFlightState,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency
   // hash and the authorization gate can never disagree about what counts

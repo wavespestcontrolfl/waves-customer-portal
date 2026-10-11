@@ -146,6 +146,18 @@ describe('eligibleSeriesParentIds', () => {
     expect(ids).toEqual([]);
     expect(mockPluck).not.toHaveBeenCalled();
   });
+
+  test('narrows to one customer when asked (billing-mode-rules reads the same selector); the sweep passes none', async () => {
+    const where = jest.fn().mockReturnThis();
+    const q = { where, whereNull: jest.fn().mockReturnThis(), pluck: jest.fn().mockResolvedValue(['root-1']) };
+    mockColumnInfo.mockResolvedValue({ recurring_ongoing: {} });
+    const asConn = jest.fn(() => Object.assign(q, { columnInfo: mockColumnInfo }));
+    expect(await eligibleSeriesParentIds(asConn, { customerId: 'c1' })).toEqual(['root-1']);
+    expect(where).toHaveBeenCalledWith('customer_id', 'c1');
+    where.mockClear();
+    await eligibleSeriesParentIds(asConn);
+    expect(where).not.toHaveBeenCalledWith('customer_id', expect.anything());
+  });
 });
 
 describe('horizonDaysFromEnv', () => {

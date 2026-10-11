@@ -3,6 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
+const { lockCustomerPaymentMethods } = require('../utils/payment-method-lock');
 const { assertNoCollectionHold, recordHoldOverride, excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
@@ -1072,6 +1073,9 @@ const StripeService = {
       let saved;
       try {
         saved = await db.transaction(async trx => {
+          // Serialize behind a reader of this customer's method set (the Intelligence Bar
+          // billing type edit holds this key at commit): utils/payment-method-lock.js.
+          await lockCustomerPaymentMethods(trx, customerId);
           const [inserted] = await trx('payment_methods').insert(record).returning('*');
           if (makeDefault) {
             await trx('payment_methods')

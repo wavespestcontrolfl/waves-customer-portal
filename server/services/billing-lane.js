@@ -1087,11 +1087,12 @@ async function findCollectedDuesPayment(dbConn, customerId, monthKey) {
 // shares — completion, the monthly cron, the retry sweep's classifier — so a
 // month a stamped invoice already bills is never charged a second time.
 // `openInvoiceCovers: false` keeps only invoices that are paid / prepaid /
-// processing.
+// processing; `processingOnly` narrows that to processing (an ACH debit not yet settled).
 async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   excludeScheduledServiceId = null,
   excludeInvoiceId = null,
   openInvoiceCovers = true,
+  processingOnly = false,
 } = {}) {
   // Lazy, like the status vocabulary below: invoice.js requires this module.
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
@@ -1104,7 +1105,7 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   if (openInvoiceCovers) {
     invoiceQuery.whereRaw(`status NOT IN (${placeholders(CANCELLED_SERVICE_RESOLVED_STATUSES)})`, CANCELLED_SERVICE_RESOLVED_STATUSES);
   } else {
-    const paid = ['paid', 'prepaid', 'processing'];
+    const paid = processingOnly ? ['processing'] : ['paid', 'prepaid', 'processing'];
     invoiceQuery.whereRaw(`status IN (${placeholders(paid)})`, paid);
   }
   // A PAYER-billed invoice is a third party's obligation, never the customer's
@@ -1118,6 +1119,49 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   }
   if (excludeInvoiceId) invoiceQuery.whereNot({ id: excludeInvoiceId });
   return (await invoiceQuery.first('id', 'status', 'scheduled_service_id', 'invoice_number')) || null;
+}
+
+// Every open membership-dues invoice a customer has, any month: the invoices
+// carrying the completion/cron dues stamp (MEMBERSHIP_DUES_LINE_KEY in
+// line_items, the one findLiveStampedDuesInvoice reads) that can still be
+// collected (not paid, prepaid, processing, void, refunded or canceled:
+// invoice-helpers INVOICE_UNCOLLECTIBLE_STATUSES) and are the customer's own
+// (payer_id IS NULL). Rows: id, total, status, ordered by id. `lock` takes them
+// FOR UPDATE NOWAIT (id order) and reads them again from the locked rows, so a
+// total or status moved by an invoice edit is seen as committed; a busy row
+// fails with Postgres 55P03 instead of waiting.
+async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}) {
+  const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
+  const stamped = `CASE WHEN jsonb_typeof(line_items::jsonb) = 'array'
+    THEN EXISTS (SELECT 1 FROM jsonb_array_elements(line_items::jsonb) AS li(item) WHERE jsonb_exists(li.item, '${MEMBERSHIP_DUES_LINE_KEY}'))
+    ELSE false END`;
+  const placeholders = INVOICE_UNCOLLECTIBLE_STATUSES.map(() => '?').join(', ');
+  const open = (q) => q
+    .where({ customer_id: customerId })
+    .whereRaw(stamped)
+    .whereRaw(`status NOT IN (${placeholders})`, [...INVOICE_UNCOLLECTIBLE_STATUSES])
+    .whereRaw('payer_id IS NULL');
+  // amount_due is the collectible amount: invoice-helpers.js invoiceAmountDue, the charge base
+  // every collection path prices from (total less credit_applied), not the gross total.
+  const { invoiceAmountDue } = require('./invoice-helpers');
+  // dues_month: the month the stamp names, for wording ('YYYY-MM', null when unreadable).
+  const duesMonthOf = (raw) => {
+    try {
+      const items = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const item = (Array.isArray(items) ? items : []).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+      return item ? String(item[MEMBERSHIP_DUES_LINE_KEY]) : null;
+    } catch { return null; }
+  };
+  const shape = ({ id, total, status, credit_applied: creditApplied, line_items: lineItems }) => ({
+    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied }), dues_month: duesMonthOf(lineItems),
+  });
+  const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'line_items');
+  if (!lock || !rows.length) return rows.map(shape);
+  const locked = await dbConn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait()
+    .select('id', 'total', 'status', 'credit_applied', 'line_items', 'customer_id', 'payer_id');
+  return locked
+    .filter((r) => String(r.customer_id) === String(customerId) && r.payer_id == null && !INVOICE_UNCOLLECTIBLE_STATUSES.includes(r.status))
+    .map(shape);
 }
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
@@ -1805,7 +1849,32 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
   };
 }
 
+// Completion's in-lock lane check. Completion reads the customer's billing type
+// and per-application fee at entry and decides the invoice amount from them,
+// minutes before the mint; a lane edit (the customer page's save or the
+// Intelligence Bar card) committing in between would settle the visit on the
+// OLD lane. Call this inside the mint transaction, under the visit row lock
+// and the customer lock the mint takes (invoice.js recheckInTrx): it re-reads
+// the lane and refuses with a retryable 409 when it moved, so the retry bills
+// on the new lane. Skipped when the entry read did not carry the lane columns.
+async function refuseBillingLaneDriftInTrx(trx, svc) {
+  if (!svc || !svc.customer_id || svc.cust_billing_mode === undefined) return;
+  const live = await trx('customers').where({ id: svc.customer_id }).first('billing_mode', 'per_application_fee');
+  if (!live) return;
+  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+  const modeMoved = (live.billing_mode || null) !== (svc.cust_billing_mode || null);
+  const feeMoved = live.billing_mode === 'per_application'
+    && cents(live.per_application_fee) !== cents(svc.cust_per_application_fee);
+  if (!modeMoved && !feeMoved) return;
+  const e = new Error("This customer's billing type changed while the visit was being completed — nothing was billed. Complete it again.");
+  e.status = 409;
+  e.statusCode = 409;
+  e.code = 'BILLING_LANE_CHANGED';
+  throw e;
+}
+
 module.exports = {
+  refuseBillingLaneDriftInTrx,
   stampedZeroFreeLive,
   BILLING_MODES,
   hasAuthoritativeZeroPrice,
@@ -1828,6 +1897,7 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   findLiveStampedDuesInvoice,
+  openStampedDuesInvoices,
   findCollectedDuesPayment,
   tryAcquireMembershipDuesMonthLock,
   acquireMembershipDuesMonthLockBounded,

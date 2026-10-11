@@ -773,8 +773,16 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     // (restackStoredVisitFinancials when the gate is live), falling back to
     // calculateStoredVisitFinancials only when that restack itself defers.
     const helper = src.slice(src.indexOf('async function seriesExtensionUnbillable('), src.indexOf("router.get('/', async (req, res, next) => {"));
-    expect(helper).toContain('storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps)');
-    expect(helper).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+    // The per-date pricing lives in seriesExtensionDatePrices (shared with the Intelligence
+    // Bar billing type card's price check); the verdict takes its minimum.
+    expect(helper).toContain('await seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate })');
+    // seriesExtensionDatePrices is the price-only view of seriesExtensionDateVerdicts (the same
+    // per-date calculation plus the line price the Intelligence Bar card reads).
+    expect(src).toMatch(/async function seriesExtensionDatePrices\(conn, args\) \{\s*return \(await seriesExtensionDateVerdicts\(conn, args\)\)\.map\(\(v\) => v\.price\);/);
+    const datePrices = src.slice(src.indexOf('async function seriesExtensionDateVerdicts('), src.indexOf('async function seriesExtensionUnbillable('));
+    expect(datePrices).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+    expect(datePrices).toMatch(/storedOccurrenceFloorVerdict\(\s*gatePriceParent,[\s\S]*?parentAddons, storedDiscountScope, discountCaps,\s*\)/);
+    expect(datePrices).toContain('filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent)');
     const floorHelper = src.slice(src.indexOf('function storedOccurrenceFloorPrice('), src.indexOf('\nasync function loadStoredDiscountScope('));
     expect(floorHelper).toContain('restackStoredVisitFinancials(parent, dueAddons, discountScope, discountCaps)');
     expect(floorHelper).toContain('calculateStoredVisitFinancials(parent, dueAddons, allParentAddons, discountScope)');

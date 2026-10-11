@@ -33,7 +33,7 @@ const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
-const { seriesCustomerSkipReason } = require('../services/series-customer-eligibility');
+const { seriesCustomerSkipReason, SERIES_CUSTOMER_COLUMNS } = require('../services/series-customer-eligibility');
 const MODELS = require('../config/models');
 const { isAreaAddOnCatalogKey } = require('../services/pricing-engine/constants');
 
@@ -4520,6 +4520,20 @@ function storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discount
   return Number(price) > 0 ? Number(price) : 0;
 }
 
+// The same price plus the LINE price behind it: what the visit's lines come to before any
+// discount, from the same calculation with the discount fields cleared. Tells a root that is
+// unpriced (no line price) from one whose known line price is discounted to $0. Read-only
+// companion for the Intelligence Bar billing type card; storedOccurrenceFloorPrice, and so
+// what the top-up stamps, is unchanged.
+function storedOccurrenceFloorVerdict(parent, dueAddons, allParentAddons, discountScope, discountCaps) {
+  const price = storedOccurrenceFloorPrice(parent, dueAddons, allParentAddons, discountScope, discountCaps);
+  const undiscounted = {
+    ...parent, discount_type: null, discount_amount: null, discount_max_dollars: null, line_discount_dollars: null,
+  };
+  const line = calculateStoredVisitFinancials(undiscounted, dueAddons, allParentAddons, discountScope).price;
+  return { price, linePrice: Number(line) > 0 ? Number(line) : 0 };
+}
+
 async function loadStoredDiscountScope(_database, parent, addonRows = []) {
   const serviceKeyFilter = parent?.discount_service_key_filter || null;
   const serviceCategoryFilter = parent?.discount_service_category_filter || null;
@@ -5953,6 +5967,38 @@ function recurringWithoutBillableAmount({
   };
 }
 
+// The price each date's extension row would carry, one entry per date: the series
+// price template (resolveSeriesExtensionPriceTemplate) plus the add-on lines due on
+// that date, through storedOccurrenceFloorPrice. The one read seriesExtensionUnbillable
+// takes its minimum from and the Intelligence Bar billing type card takes its maximum
+// from (seriesNextOccurrencesPrice): the price the top-up copies onto the visits it mints.
+async function seriesExtensionDatePrices(conn, args) {
+  return (await seriesExtensionDateVerdicts(conn, args)).map((v) => v.price);
+}
+
+async function seriesExtensionDateVerdicts(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate = null }) {
+  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+  // Codex pre-push audit P1 (deferred fast-follow): routed through
+  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
+  // pricing + real catalog caps every extension write site's own
+  // applyDiscountStackRestack already stamps rows with — see that
+  // function's own comment for the concrete under-count this fixes.
+  // discountCaps is gated so the gate-off path makes no extra query, and
+  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
+  // once per date: gatePriceParent's line_discount_id is fixed and
+  // parentAddons is a superset of every date's own dueAddons, so the whole
+  // cap set is knowable up front — a validation guard that can be asked
+  // about many dates has no reason to repeat the same catalog read.
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
+    : null;
+  return dates.map((d) => storedOccurrenceFloorVerdict(
+    gatePriceParent,
+    filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent),
+    parentAddons, storedDiscountScope, discountCaps,
+  ));
+}
+
 // The SAME billable-amount verdict for every OFFICE writer that grows an
 // existing series — the Edit Appointment count raise and fixed→ongoing flip
 // (reconcileRecurringSeriesVisitCount) and the recurring-plan alert actions
@@ -5981,31 +6027,15 @@ async function seriesExtensionUnbillable(conn, {
   // The cancel-reseed's in-term placement selects add-ons by the replaced
   // occurrence, not the visit's own day — the check reads the same set.
   addonDate = null,
+  // The billing fields the customer WOULD have (a pending lane edit asking
+  // whether the series stays billable under it); merged over the live row.
+  customerOverride = null,
 }) {
   if (!dates.length) return null;
-  const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
-  if (!gateCustomer) return null;
-  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
-  // Codex pre-push audit P1 (deferred fast-follow): routed through
-  // storedOccurrenceFloorPrice so this guard reads the SAME restacked
-  // pricing + real catalog caps every extension write site's own
-  // applyDiscountStackRestack already stamps rows with — see that
-  // function's own comment for the concrete under-count this fixes.
-  // discountCaps is gated so the gate-off path makes no extra query, and
-  // (Codex pre-push audit P1, round 14) fetched ONCE before the loop, not
-  // once per date: gatePriceParent's line_discount_id is fixed and
-  // parentAddons is a superset of every date's own dueAddons, so the whole
-  // cap set is knowable up front — a validation guard that can be asked
-  // about many dates has no reason to repeat the same catalog read.
-  const discountCaps = discountStackingLive()
-    ? await loadDiscountCapsById(conn, [gatePriceParent.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
-    : null;
-  let floor = Infinity;
-  for (const d of dates) {
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent);
-    const price = storedOccurrenceFloorPrice(gatePriceParent, dueAddons, parentAddons, storedDiscountScope, discountCaps);
-    floor = Math.min(floor, price);
-  }
+  const liveCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
+  if (!liveCustomer) return null;
+  const gateCustomer = customerOverride ? { ...liveCustomer, ...customerOverride } : liveCustomer;
+  const floor = Math.min(...await seriesExtensionDatePrices(conn, { parent, dates, parentAddons, storedDiscountScope, blackoutDates, skipParent, addonDate }));
   const extendProfile = await resolveCompletionProfileForScheduledService(parent, conn).catch(() => null);
   // The PARENT's own label — asks whether the series' service is always-free;
   // children still resolve the live catalog identity at insert (same
@@ -6026,6 +6056,150 @@ async function seriesExtensionUnbillable(conn, {
     serviceType: extendSeriesServiceType,
   });
 }
+
+// Bound on the verdict's cadence walk: cadence steps tried (steps skipped as
+// past or too close count too). The walk covers the whole top-up horizon (up to
+// 730 days), so a daily cadence needs about 730 steps; there is no cap on the
+// dates validated. A walk that hits this bound without finishing is refused as
+// unverified, never passed.
+const SERIES_VERDICT_MAX_ATTEMPTS = 3000;
+const SERIES_VERDICT_UNVERIFIED = {
+  error: 'Could not verify whether this recurring plan will bill — its schedule is too long to check. Change the billing type on the customer page.',
+  code: 'RECURRING_BILLING_UNVERIFIED',
+  fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+};
+
+// The billable-amount verdict (seriesExtensionUnbillable, the one the nightly
+// top-up asks per candidate date) for every visit the top-up would mint
+// within its horizon on series `parentId`, optionally under billing fields the customer
+// does not have yet (`customerOverride`: a pending lane edit). Inputs are
+// gathered exactly as extendSeriesOnceLocked gathers them: the root with its
+// series template overlaid, the latest live visit's anchor, the cadence walk
+// (nextRecurringDate / seasonalSafeShift / too-close / not-past), the add-ons
+// due on each date, the stored discount scope and the sibling-resolved
+// create-invoice stamp. Dates are the cadence dates only: occupancy clashes
+// move a visit, not its price.
+//
+// The walk covers the COMPLETE horizon, and always at least the next cadence
+// occurrence even when it falls beyond the horizon (a yearly plan whose next
+// visit is past the top-up's reach is still the visit that would be minted).
+// A date's price depends only on the add-ons due on it (and the series' stored
+// discount scope, which is the same for every date), so dates are grouped by
+// that set and one representative per distinct set is priced: a daily series
+// costs a handful of verdicts, not one per day. seriesExtensionUnbillable
+// takes the minimum over the dates it is given, so the verdict is the same one
+// the per-date walk would give. Read-only (the legacy cap freeze the extension
+// writes is skipped). Null when the series has nothing to extend or bills.
+// A rider series (rides_parent_id, GATE_PEST_RIDES_LAWN_AT_ACCEPT + visit groups) seeds
+// its next visit on a lawn host date before it walks its own cadence
+// (walkExtensionCandidates -> rideLawnExtension), and an add-on can price one date and
+// not the other. So the host date the top-up would ride, from the top-up's own candidate
+// function (rideLawnCandidate, read-only), is validated too; when that answer is
+// unknown the verdict is unverified.
+async function seriesWalkWithRide(conn, walk, latest, horizonEnd) {
+  const { parent, cols } = walk;
+  if (!(cols.rides_parent_id && parent.rides_parent_id)) return walk;
+  // Every host date the top-up would ride in one run, not only the first: it re-selects a host
+  // after each insert (up to TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN), and each insert becomes the
+  // latest visit and an occupied date for the next pick. The same read-only selector is asked
+  // for each, with the inserts it would have made so far.
+  const existingDates = new Set(await loadActiveSeriesDates(conn, parent.id));
+  let anchor = latest;
+  const rideDates = [];
+  for (;;) {
+    const ride = await rideLawnCandidate({
+      conn, parent, parentId: parent.id, cols, latest: anchor, opts: { maxDate: horizonEnd }, existingDates,
+    });
+    if (!ride) break;
+    if (ride.unanswered || rideDates.length >= TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN) return SERIES_VERDICT_UNVERIFIED;
+    rideDates.push(ride.date);
+    existingDates.add(ride.date);
+    anchor = { ...anchor, scheduled_date: ride.date };
+  }
+  return rideDates.length ? { ...walk, dates: [...new Set([...walk.dates, ...rideDates])], rideDates } : walk;
+}
+
+async function seriesVerdictWalk(conn, parentId) {
+  const cols = await conn('scheduled_services').columnInfo();
+  let parent = await conn('scheduled_services').where({ id: parentId }).first();
+  if (!parent?.is_recurring || !parent.recurring_pattern) return null;
+  parent = overlayRecurringTemplateOverrides(parent, cols);
+  const latest = await latestLiveSeriesVisit(conn, parentId);
+  if (!latest) return null;
+  const pattern = parent.recurring_pattern;
+  const rOpts = {
+    ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  const latestStr = seriesExtendAnchor(latest, pattern, rOpts);
+  const skipParent = (cols.skip_weekends && !!parent.skip_weekends) || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const dirParent = cols.weekend_shift && parent.weekend_shift === 'back' ? 'back' : 'forward';
+  const blackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+  const { horizonDaysFromEnv } = require('../services/recurring-series-topup');
+  const today = etDateString();
+  const horizonEnd = etDateString(addETDays(parseETDateTime(`${today}T12:00`), horizonDaysFromEnv()));
+  // One representative date per distinct set of due add-ons. A date past the horizon is
+  // priced only while nothing inside it was (the next occurrence is always validated), and
+  // the first date past the horizon ends the walk with the verdict.
+  const byPricing = new Map();
+  for (let attempt = 1; attempt <= SERIES_VERDICT_MAX_ATTEMPTS; attempt += 1) {
+    const candidate = seasonalSafeShift(nextRecurringDate(latestStr, pattern, attempt, rOpts), pattern, skipParent, dirParent, blackoutDates);
+    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, pattern, candidate) || candidate <= today) continue;
+    const past = candidate > horizonEnd;
+    const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
+      .map((addon) => parentAddons.indexOf(addon)).join(',');
+    if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
+    if (past) return seriesWalkWithRide(conn, { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent }, latest, horizonEnd);
+  }
+  // The attempt cap ended the walk before the horizon: unverified, never passed.
+  return SERIES_VERDICT_UNVERIFIED;
+}
+
+async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk || walk === SERIES_VERDICT_UNVERIFIED) return walk;
+  const { parent, cols, parentAddons } = walk;
+  return seriesExtensionUnbillable(conn, {
+    ...walk, customerOverride,
+    storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+    seriesCioc: cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined,
+  });
+}
+
+// The highest price the top-up would copy onto a visit it mints on series `parentId`
+// within the same walk (seriesVerdictWalk, the verdict's own): the extension price
+// template + the add-on lines due on each date (seriesExtensionDatePrices, the read
+// seriesExtensionUnbillable takes its minimum from). `{ unverified: true }` when the walk
+// could not finish; null when the series has nothing to extend.
+async function seriesNextOccurrencesPrice(conn, parentId) {
+  const walk = await seriesVerdictWalk(conn, parentId);
+  if (!walk) return null;
+  if (walk === SERIES_VERDICT_UNVERIFIED) return { unverified: true, price: 0, linePrice: 0, zero: null, explicitZero: false, hosts: [] };
+  const { parent, parentAddons } = walk;
+  const verdicts = await seriesExtensionDateVerdicts(conn, {
+    ...walk, storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+  });
+  const price = Math.max(0, ...verdicts.map((v) => v.price));
+  const linePrice = Math.max(0, ...verdicts.map((v) => v.linePrice));
+  // The lawn host dates a rider series would ride (seriesWalkWithRide), each with its own price
+  // and zero kind, so the caller can name the date and pin the list.
+  const hosts = (walk.rideDates || []).map((date) => {
+    const v = verdicts[walk.dates.indexOf(date)];
+    return { date, price: v.price, linePrice: v.linePrice };
+  });
+  // An explicit $0 template override (written only by the price/service scope lane) stays an
+  // authoritative $0 on every visit the top-up mints (applyStoredVisitFinancials, same gate and
+  // same condition: the lines price to nothing and the override is exactly 0), so those visits
+  // bill nothing; kept apart from a root that is merely unpriced.
+  const explicitZero = price === 0 && isEnabled('editApptPriceServiceScope')
+    && parseTemplateOverrides(parent.recurring_template_overrides)?.estimated_price === 0;
+  // Which kind of zero: the override above, a known line price discounted away, or no price at all.
+  let zero = null;
+  if (price === 0) zero = explicitZero ? 'override' : (linePrice > 0 ? 'discounted' : 'unpriced');
+  return { unverified: false, price, linePrice, zero, explicitZero, hosts };
+}
+
 
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
@@ -20255,7 +20429,13 @@ async function placeGroupedExtension(ctx, dateStr, mustShare, stop) {
 // scope, lawn-service identity of the host and of each occurrence, blackouts and
 // weekend opt-out are all its rules (RIDE_BLOCKING_REASONS lists the reasons
 // that rule a ride out). null = no ride: the caller walks its normal cadence.
-async function rideLawnExtension(ctx) {
+// The read-only half of the ride: the lawn occurrence the rider's next visit would
+// join, with no write. null = no ride (gate off, not a rider, a blocking reason, or no
+// date the plan still wants); { unanswered: true } = the pair preview failed, so the
+// answer is not known (rideLawnExtension then walks the cadence, as the top-up does;
+// the Intelligence Bar's verdict refuses as unverified instead). Also the one function
+// the billing-type verdict (seriesVerdictWalk) asks which date a rider series seeds on.
+async function rideLawnCandidate(ctx) {
   const {
     conn, parent, parentId, cols, opts, latest, existingDates,
   } = ctx;
@@ -20269,7 +20449,7 @@ async function rideLawnExtension(ctx) {
     plan = await conn.transaction((sp) => Preview.previewRiderPair(sp, { riderParentId: parentId }));
   } catch (err) {
     logger.warn(`[recurring] rider preview failed for parent=${parentId} (walking the normal cadence): ${err.message}`);
-    return null;
+    return { unanswered: true };
   }
   if (plan.reasons.some((r) => Preview.RIDE_BLOCKING_REASONS.has(r))) return null;
   // The preview's insert list assumes its proposed MOVES happen too; this
@@ -20281,7 +20461,15 @@ async function rideLawnExtension(ctx) {
   const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
   // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
   const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);
-  const window = host && normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
+  return host ? { date, host } : null;
+}
+
+async function rideLawnExtension(ctx) {
+  const { parent } = ctx;
+  const ride = await rideLawnCandidate(ctx);
+  if (!ride || ride.unanswered) return null;
+  const { date, host } = ride;
+  const window = normalizeTopUpWindow(normalizeHHMM(host.window_start), parent.estimated_duration_minutes, null);
   if (!window || window.unplaceable) return null;
   return placeGroupedExtension(ctx, date, [host.id], {
     technicianId: host.technician_id || null,
@@ -21045,6 +21233,33 @@ async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
     if (await test(conn, parent, parentId, cols)) hits.push(reason);
   }
   return hits;
+}
+
+// Which of a customer's ongoing roots (eligibleSeriesParentIds, the coarse recurring_ongoing
+// selector) would the nightly top-up extend NOW? Runs the top-up's own two skip rules: the
+// customer rules (topupCustomerSkipReason: deleted, held, inactive, churned) and each root's
+// series rules (topupSeriesSkipReason: annual prepay, plan hold, duplicate series), the same
+// calls topUpRecurringSeriesLocked makes. Read-only. A skip is a state of the moment, not a
+// verdict on the root: any of them can clear later (a hold lifts, a customer reactivates, a
+// duplicate closes, a term ends), so callers keep checking a skipped root's real terms and
+// only report and pin the skip. There is deliberately no list of "permanent" reasons.
+// Returns { extend: [id], skipped: [{ id, reason }] }.
+async function splitRootsByTopupSkip(conn, customerId, ids) {
+  const out = { extend: [], skipped: [] };
+  if (!ids.length) return out;
+  const place = (id, reason) => (reason ? out.skipped.push({ id, reason }) : out.extend.push(id));
+  const customer = await conn('customers').where({ id: customerId }).first(...SERIES_CUSTOMER_COLUMNS);
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) {
+    ids.forEach((id) => place(id, customerSkip));
+    return out;
+  }
+  const cols = await conn('scheduled_services').columnInfo();
+  for (const id of ids) {
+    const parent = await conn('scheduled_services').where({ id }).first();
+    place(id, parent ? await topupSeriesSkipReason(conn, parent, id, cols) : 'series_not_found');
+  }
+  return out;
 }
 
 // Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
@@ -28695,6 +28910,9 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // address resolver, so "same property" can never mean something different
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
+module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
+module.exports.seriesNextOccurrencesPrice = seriesNextOccurrencesPrice;
+module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;

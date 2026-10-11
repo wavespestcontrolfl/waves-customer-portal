@@ -9,7 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const BillingRetryEmail = require('./billing-retry-email-obligation');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-const { resolveBillingLane, findLiveStampedDuesInvoice } = require('./billing-lane');
+const { resolveBillingLane } = require('./billing-lane');
 const {
   REASONS: RETRY_REASONS,
   DISPOSITIONS: RETRY_DISPOSITIONS,
@@ -18,6 +18,7 @@ const {
   classifyFailedPaymentRetry,
   hasUnresolvedSiblingStripeOutcome,
   deriveMonthlyChargeIdempotencyKey,
+  findCollectedMonthlyPayment,
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
 const { isCollectionHoldRefusal } = require('./collections/collection-hold');
@@ -37,7 +38,7 @@ const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 
 const { isBillingDayMatch } = require('./billing-helpers');
-const { isPaused } = require('./autopay-eligibility');
+const DuesEligibility = require('./monthly-dues-eligibility');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 
@@ -190,33 +191,6 @@ async function renderTemplate(templateKey, vars, context = {}) {
 const MONTHLY_LOCK_RETRY_ATTEMPTS = 3;
 const MONTHLY_LOCK_RETRY_DELAY_MS = 3000;
 
-// The monthly already-collected predicate — ONE definition shared by the
-// locked read and the post-contention recheck. Metadata-first
-// (billed_month stamp), payment_date window + description marker as the
-// legacy fallback; exactly the dedupe charge-now and the retry classifier
-// (retry-collectibility.js) apply.
-async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }) {
-  const payment = await db('payments')
-    .where({ customer_id: customerId })
-    .whereIn('status', ['paid', 'processing'])
-    .where(function () {
-      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-        .orWhere(function () {
-          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-            .andWhere('payment_date', '>=', monthStart)
-            .andWhere('payment_date', '<=', monthEnd)
-            .andWhere('description', 'like', '%WaveGuard Monthly%');
-        });
-    })
-    .first();
-  if (payment) return payment;
-  // A live completion-minted dues invoice (paid, processing or still open)
-  // IS this month's bill — an unpaid one is collected by the invoice
-  // follow-up ladder, never by a second charge. No payment row to name.
-  const duesInvoice = await findLiveStampedDuesInvoice(db, customerId, monthKey);
-  return duesInvoice ? { id: null, dues_invoice_id: duesInvoice.id } : undefined;
-}
-
 // Run fn() under the per-customer collection lock; the lock closes the
 // check-then-charge race against charge-now and the retry sweep. Resolves
 // to exactly one of { alreadyCollected } | { unresolvedOutcome } |
@@ -232,6 +206,18 @@ function collectMonthlyDuesUnderLock(customer, period) {
     // Stripe outcome — do not charge again until it reconciles.
     const unresolvedOutcome = await hasUnresolvedSiblingStripeOutcome(customer.id, period.monthKey, db);
     if (unresolvedOutcome.blocked) return { unresolvedOutcome };
+
+    // The cohort and lane guards ran on the run-start row, before this lock.
+    // A billing-type edit (customer page, Intelligence Bar) or an Auto Pay /
+    // service-pause change committed since would otherwise charge dues on a
+    // stale lane: re-read the customer under the claim and re-run the shared
+    // guards (monthly-dues-eligibility.js) on the fresh row.
+    const freshCustomer = await DuesEligibility.applyDuesCohort(db('customers').where('id', customer.id))
+      .first(...DuesEligibility.DUES_COHORT_COLUMNS);
+    const guardSkip = freshCustomer
+      ? (DuesEligibility.autopayGuard(freshCustomer, new Date()) || DuesEligibility.laneGuard(freshCustomer))
+      : { event: 'skipped_not_in_dues_cohort' };
+    if (guardSkip) return { guardSkip };
 
     const service = await require('./stripe');
     // Codex round-1 P1: shared attempt-scoped key derivation
@@ -487,16 +473,11 @@ const BillingCron = {
     // monthly lane and charged them. If the column were ever missing the
     // select throws and the whole run aborts — no charge is safer than a
     // wrong one.
-    const customers = await db('customers')
-      .where({ active: true })
-      .where('monthly_rate', '>', 0)
-      .whereNull('service_paused_at')
-      .whereNull('deleted_at')
-      .select(
-        'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
-        'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
-        'billing_day', 'billing_mode',
-      );
+    // The cohort and guards below are monthly-dues-eligibility.js — shared with
+    // the Intelligence Bar's billing type card so it never promises a charge
+    // this run skips.
+    const customers = await DuesEligibility.applyDuesCohort(db('customers'))
+      .select(...DuesEligibility.DUES_COHORT_COLUMNS);
 
     // Annual-prepay customers paid for the whole period up front. The paid
     // coverage term is the source of truth for billing suppression — they keep
@@ -522,17 +503,10 @@ const BillingCron = {
     for (const customer of customers) {
       try {
         // GUARD 1: autopay disabled — skip, log
-        if (customer.autopay_enabled === false) {
-          await logAutopay(customer.id, 'skipped_disabled');
-          skipped++;
-          continue;
-        }
-
         // GUARD 2: autopay paused — skip, log
-        if (isPaused(customer, now)) {
-          await logAutopay(customer.id, 'skipped_paused', {
-            details: { paused_until: customer.autopay_paused_until },
-          });
+        const autopaySkip = DuesEligibility.autopayGuard(customer, now);
+        if (autopaySkip) {
+          await logAutopay(customer.id, autopaySkip.event, autopaySkip.details ? { details: autopaySkip.details } : undefined);
           skipped++;
           continue;
         }
@@ -568,10 +542,9 @@ const BillingCron = {
         // 'per_visit' and 'one_time' are explicit owner-set lanes (billing
         // lane build, 2026-07-17): a customer classified into either must
         // never be monthly-charged no matter what tier/rate fields linger.
-        if (['per_application', 'annual_prepay', 'per_visit', 'one_time'].includes(customer.billing_mode)) {
-          await logAutopay(customer.id, 'skipped_billing_mode', {
-            details: { billing_mode: customer.billing_mode },
-          });
+        const laneSkip = DuesEligibility.laneGuard(customer);
+        if (laneSkip && laneSkip.event === 'skipped_billing_mode') {
+          await logAutopay(customer.id, laneSkip.event, { details: laneSkip.details });
           skipped++;
           continue;
         }
@@ -587,11 +560,8 @@ const BillingCron = {
         // divergence by construction. The skip is logged loudly so an
         // unclassified customer who enables autopay surfaces for the owner
         // to classify instead of silently double-billing.
-        const resolvedLane = resolveBillingLane(customer);
-        if (resolvedLane.mode !== 'monthly_membership') {
-          await logAutopay(customer.id, 'skipped_unclassified_lane', {
-            details: { resolved_mode: resolvedLane.mode, waveguard_tier: customer.waveguard_tier || null },
-          });
+        if (laneSkip) {
+          await logAutopay(customer.id, laneSkip.event, { details: laneSkip.details });
           skipped++;
           continue;
         }
@@ -599,8 +569,9 @@ const BillingCron = {
         // GUARD 4: active annual-prepay coverage — the customer paid for this
         // period up front. Skip even when active + monthly_rate > 0 + autopay
         // on; charging here would double-bill on top of the prepayment.
-        if (annualPrepayCoveredIds.has(String(customer.id))) {
-          await logAutopay(customer.id, 'skipped_annual_prepay');
+        const prepaySkip = DuesEligibility.prepayGuard(customer, annualPrepayCoveredIds, annualPrepayPendingIds);
+        if (prepaySkip && prepaySkip.event === 'skipped_annual_prepay') {
+          await logAutopay(customer.id, prepaySkip.event);
           skipped++;
           continue;
         }
@@ -608,8 +579,8 @@ const BillingCron = {
         // GUARD 5: pending annual-prepay commitment — office/customer still
         // needs to complete or cancel the annual invoice. Do not monthly-charge
         // in the meantime, even though active coverage has not started.
-        if (annualPrepayPendingIds.has(String(customer.id))) {
-          await logAutopay(customer.id, 'skipped_annual_prepay_pending');
+        if (prepaySkip) {
+          await logAutopay(customer.id, prepaySkip.event);
           skipped++;
           continue;
         }
@@ -641,6 +612,12 @@ const BillingCron = {
         // claim keeps it until a confirmed collection or a durable deferral row (below); a
         // hold skip manages it inside deferMonthlyForCollectionHold.
         if (!lockOutcome.holdSkipped && !lockOutcome.claimHeldElsewhere) pendingHoldDeferrals.delete(String(customer.id));
+
+        if (lockOutcome.guardSkip) {
+          await logAutopay(customer.id, lockOutcome.guardSkip.event, lockOutcome.guardSkip.details ? { details: lockOutcome.guardSkip.details } : undefined);
+          skipped++;
+          continue;
+        }
 
         if (lockOutcome.unresolvedOutcome) {
           await alertUnresolvedMonthlyOutcome(customer, monthKey, lockOutcome.unresolvedOutcome);
@@ -1307,7 +1284,11 @@ const BillingCron = {
           // of charged again.
           const lockOutcome = await withCustomerBillingLock(payment.customer_id, async () => {
             if (obligationMonth) {
-              const recheck = await classifyFailedPaymentRetry({ payment, customer, ctx });
+              // The customer row is re-read under the lock: a lane edit since
+              // the sweep's first read must change this verdict (the
+              // classifier's LANE_NOT_MONTHLY / paused / disabled guards).
+              const lockedCustomer = await db('customers').where({ id: payment.customer_id }).first();
+              const recheck = await classifyFailedPaymentRetry({ payment, customer: lockedCustomer || customer, ctx });
               if (recheck.reason === RETRY_REASONS.ALREADY_COLLECTED) {
                 return { alreadyCollected: recheck.collectedByPaymentId || payment.id };
               }

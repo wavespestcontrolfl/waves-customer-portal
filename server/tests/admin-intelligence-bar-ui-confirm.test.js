@@ -45,6 +45,11 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 })));
 
 jest.mock('../models/db', () => jest.fn(() => ({ insert: mockDbInsert })));
+const mockBillingEditProposal = jest.fn();
+jest.mock('../services/intelligence-bar/billing-mode-change', () => ({
+  ...jest.requireActual('../services/intelligence-bar/billing-mode-change'),
+  billingEditProposal: (...a) => mockBillingEditProposal(...a),
+}));
 jest.mock('../services/intelligence-bar/rate-change', () => ({
   rateChangeProposal: (...a) => mockRateChangeProposal(...a),
   money: (n) => `$${Number(n || 0).toFixed(2)}`,
@@ -1678,6 +1683,84 @@ describe('update_customer monthly-rate proposals', () => {
       const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
       expect(params).not.toHaveProperty('_tier_upgrade_email');
       expect(contract.effects.map((e) => e.label)).toContain(NO_NOTICE);
+    });
+  });
+});
+
+
+// Owner D5 2026-10-06: update_customer may change the billing type and
+// per-application fee behind GATE_IB_BILLING_MODE_EDIT (billing-mode-change.js
+// has the rules; this is the wiring).
+describe('update_customer billing type proposals', () => {
+  const billingCall = { customer_id: 'c1', updates: { billing_mode: 'per_application', per_application_fee: 147 } };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_IB_UI_CONFIRM = 'true';
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+  afterEach(() => {
+    delete process.env.GATE_IB_UI_CONFIRM;
+    delete process.env.GATE_IB_BILLING_MODE_EDIT;
+  });
+
+  test('gate off: billing_mode and per_application_fee stay refused as unsupported fields, no card', async () => {
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: billingCall }],
+      [{ type: 'text', text: 'Not supported.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'switch to per application at 147', context: 'customers' });
+      expect(mockBillingEditProposal).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const toolResult = JSON.stringify(mockMessagesCreate.mock.calls[1][0].messages);
+      expect(toolResult).toContain('These fields cannot be updated by this tool: billing_mode, per_application_fee');
+    });
+  });
+
+  test('gate on: a refused billing edit makes no card', async () => {
+    process.env.GATE_IB_BILLING_MODE_EDIT = 'true';
+    mockBillingEditProposal.mockResolvedValueOnce({ error: 'Set a per-application fee first.', code: 'billing_mode_rule' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: billingCall }],
+      [{ type: 'text', text: 'Refused.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'switch to per application', context: 'customers' });
+      expect(mockBillingEditProposal).toHaveBeenCalledWith('c1', billingCall.updates);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('gate on: the card pins the billing fields and the customer version and shows the change in words', async () => {
+    process.env.GATE_IB_BILLING_MODE_EDIT = 'true';
+    mockBillingEditProposal.mockResolvedValueOnce({
+      pin: '["per_visit",null,"0.00",null,null]',
+      version: '2026-10-07 10:00:00.000001+00',
+      display: {
+        billing_type: { before: "billed per visit (each visit's own price)", after: 'billed per application (each visit)' },
+        fee: { before: 'none on file', after: '$147.00' },
+        next_visits: ['Each completed visit is charged its own scheduled price, or $147.00 when it has none.'],
+      },
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: billingCall }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'switch to per application at 147', context: 'customers' });
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params).toMatchObject({
+        _ib_billing_pin: '["per_visit",null,"0.00",null,null]',
+        _ib_customer_version: '2026-10-07 10:00:00.000001+00',
+      });
+      const labels = contract.effects.map((e) => e.label);
+      expect(labels).toContain("Billing type: billed per visit (each visit's own price) → billed per application (each visit)");
+      expect(labels).toContain('Per-application fee: none on file → $147.00');
+      expect(labels).toContain('No customer message is sent');
     });
   });
 });

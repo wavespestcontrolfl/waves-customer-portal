@@ -228,7 +228,7 @@ function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
   colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null,
   customerCoveredTerm = false, customerPendingUnresolvedTerm = false,
-  captureCustomerCalls = null, activeHold = false,
+  captureCustomerCalls = null, activeHold = false, addons = [],
 } = {}) {
   // isCustomerPrepayLive's two customer-wide probes (Codex GitHub r7 P1):
   // (a) coveredTermsAsOf(conn, null) — a still-validly-paid term (active/
@@ -339,7 +339,7 @@ function topupScenario({
     }
     if (table === 'scheduled_service_addons') {
       if (op === 'columnInfo') return {};
-      return [];
+      return addons;
     }
     if (table === 'customers') {
       if (op === 'first') {
@@ -938,6 +938,255 @@ describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
     expect(result.skipped).toBeNull();
     expect(inserted.length).toBeGreaterThan(0);
+  });
+});
+
+describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pending lane edit', () => {
+  // The Intelligence Bar card and the customer page ask this before moving a
+  // customer into per_visit / one_time: the SAME seriesExtensionUnbillable the
+  // top-up consults, for the next occurrences with their cadence-filtered
+  // add-ons, under the billing fields the customer would have.
+  const { seriesNextOccurrencesUnbillable, seriesNextOccurrencesPrice } = require('../routes/admin-schedule');
+  const PER_VISIT = { billing_mode: 'per_visit', monthly_rate: 0 };
+
+  test('a root priced only by an add-on that is due on the anchor date alone refuses; the top-up refuses the same series', async () => {
+    const oneTimeAddon = { id: 'a1', estimated_price: '100.00', recurring_pattern: 'one_time', service_key_snapshot: null };
+    const fixture = { parentOverrides: { create_invoice_on_complete: false, estimated_price: '100.00' }, addons: [oneTimeAddon] };
+    const { conn } = topupScenario(fixture);
+    const verdict = await seriesNextOccurrencesUnbillable(conn, 10, { customerOverride: PER_VISIT });
+    expect(verdict).toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    // The parallel root-price check would have passed this root ($100 on the row).
+    const { conn: topConn, inserted } = topupScenario(fixture);
+    const topUp = await topUpRecurringSeriesLocked(topConn, 10, { horizonDays: 30 });
+    expect(topUp.skipped).toBe('unbillable');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a monthly series after July with a seasonal_feb_oct add-on and a $0 base refuses: every seasonal phase is priced, not the first few dates', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
+    try {
+      const seasonal = { id: 'a3', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
+      const fixture = {
+        parentOverrides: { recurring_pattern: 'monthly', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00' },
+        seriesDates: ['2026-07-15'],
+        addons: [seasonal],
+      };
+      // Aug, Sep and Oct carry the add-on's $60; November through January carry nothing.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      // A base price that stands alone keeps every phase billable.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario({ ...fixture, parentOverrides: { ...fixture.parentOverrides, estimated_price: '120.00' } }).conn, 10, { customerOverride: PER_VISIT }))
+        .toBeNull();
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('a daily series whose add-on stops at day 109 refuses: the walk covers the whole horizon, not the first 60 dates', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
+    try {
+      const seasonal = { id: 'a4', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
+      const fixture = {
+        parentOverrides: { recurring_pattern: 'daily', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00' },
+        seriesDates: ['2026-07-15'],
+        addons: [seasonal],
+      };
+      // Every date through Oct 31 (days 1-108) carries the add-on; from Nov 1 none does.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      // A base price that stands alone keeps every phase billable.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario({ ...fixture, parentOverrides: { ...fixture.parentOverrides, estimated_price: '120.00' } }).conn, 10, { customerOverride: PER_VISIT }))
+        .toBeNull();
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('the next occurrence is validated even when it falls beyond the horizon', async () => {
+    const before = process.env.RECURRING_TOPUP_HORIZON_DAYS;
+    process.env.RECURRING_TOPUP_HORIZON_DAYS = '30';
+    try {
+      // Quarterly: the next visit is about 91 days out, past the 30-day horizon.
+      const unpriced = { parentOverrides: { recurring_pattern: 'quarterly', create_invoice_on_complete: false, estimated_price: null } };
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(unpriced).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      const priced = { parentOverrides: { recurring_pattern: 'quarterly', create_invoice_on_complete: false, estimated_price: '150.00' } };
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(priced).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    } finally {
+      if (before === undefined) delete process.env.RECURRING_TOPUP_HORIZON_DAYS; else process.env.RECURRING_TOPUP_HORIZON_DAYS = before;
+    }
+  });
+
+  describe('a rider series seeds on the lawn host date (rideLawnCandidate, the top-up\'s own candidate)', () => {
+    const Preview = require('../services/rider-series-preview');
+    const FG = require('../config/feature-gates');
+    let spies;
+    let visitGroups;
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+      jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
+      process.env.RECURRING_TOPUP_HORIZON_DAYS = '120';
+      visitGroups = FG.gates.visitGroups;
+      FG.gates.visitGroups = true;
+      spies = [jest.spyOn(FG, 'pestRidesLawnAtAcceptLive').mockReturnValue(true)];
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+      delete process.env.RECURRING_TOPUP_HORIZON_DAYS;
+      FG.gates.visitGroups = visitGroups;
+      spies.forEach((sp) => sp.mockRestore());
+    });
+    // Zero base; a seasonal Feb-Oct add-on carries the whole price. Quarterly from Jul 15:
+    // the cadence date (Oct 21) is priced; the horizon (Nov 12) also holds a host date.
+    const seasonal = { id: 'a5', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
+    const fixture = {
+      parentOverrides: { recurring_pattern: 'quarterly', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00', rides_parent_id: 'lawn-1' },
+      colsOverrides: { rides_parent_id: true },
+      seriesDates: ['2026-07-15'],
+      addons: [seasonal],
+    };
+    const plan = (hostDate) => ({
+      reasons: [], insert: [hostDate], planFloor: '2026-07-23',
+      hostRows: [{ id: 'host-1', scheduled_date: hostDate, window_start: '09:00', technician_id: null }],
+    });
+
+    test('a host date the add-on does not price refuses although the cadence date is priced', async () => {
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(plan('2026-11-05')));
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      // Without a ride the same series passes: the cadence date alone is priced.
+      spies[1].mockResolvedValue({ ...plan('2026-11-05'), reasons: [[...Preview.RIDE_BLOCKING_REASONS][0]] });
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    });
+
+    test('a host date the add-on prices (the cadence date itself) passes', async () => {
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(plan('2026-10-21')));
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    });
+
+    test('Codex round 22: every host date the top-up would ride in a run is walked, not only the first', async () => {
+      process.env.RECURRING_TOPUP_HORIZON_DAYS = '400';
+      const twoHosts = {
+        reasons: [], insert: ['2026-10-21', '2027-01-20'], planFloor: '2026-07-23',
+        hostRows: [
+          { id: 'host-1', scheduled_date: '2026-10-21', window_start: '09:00', technician_id: null },
+          { id: 'host-2', scheduled_date: '2027-01-20', window_start: '09:00', technician_id: null },
+        ],
+      };
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(twoHosts));
+      // The first host date is priced by the Feb-Oct add-on; the second (Jan) is not, so the walk refuses.
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+      const verdict = await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10);
+      expect(verdict.hosts.map((h) => [h.date, h.price])).toEqual([['2026-10-21', 60], ['2027-01-20', 0]]);
+      // One planned host only: only that date is a host.
+      spies[1].mockResolvedValue({ ...twoHosts, insert: ['2026-10-21'] });
+      expect((await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10)).hosts.map((h) => h.date)).toEqual(['2026-10-21']);
+    });
+
+    test('a rider mechanism that cannot answer refuses as unverified; a series that rides nothing is untouched', async () => {
+      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockRejectedValue(new Error('preview down')));
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
+        .toMatchObject({ code: 'RECURRING_BILLING_UNVERIFIED' });
+      const flat = { ...fixture, parentOverrides: { ...fixture.parentOverrides, rides_parent_id: null } };
+      expect(await seriesNextOccurrencesUnbillable(topupScenario(flat).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    });
+
+    test('source contract: the verdict asks the top-up\'s own rider candidate, and the top-up\'s ride is built on that same function', () => {
+      const code = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+      const walk = code.slice(code.indexOf('async function seriesWalkWithRide'), code.indexOf('async function seriesVerdictWalk'));
+      expect(walk).toContain('rideLawnCandidate(');
+      expect(walk).toContain('TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN');
+      expect(walk).not.toMatch(/previewRiderPair|hostRows/);
+      const ride = code.slice(code.indexOf('async function rideLawnExtension'), code.indexOf('async function joinOwnStopExtension'));
+      expect(ride).toContain('rideLawnCandidate(ctx)');
+      expect(ride).toContain('placeGroupedExtension(');
+    });
+  });
+
+  describe('Codex round 19: splitRootsByTopupSkip and the explicit $0 override', () => {
+    const { splitRootsByTopupSkip } = require('../routes/admin-schedule');
+    const FG = require('../config/feature-gates');
+
+    test('the top-up\'s own customer and series rules decide: churned customer, annual-prepay series skip; an active series is extended', async () => {
+      expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { pipeline_stage: 'churned' } }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'customer_churned' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({ colsOverrides: { annual_prepay_term_id: {} }, stampedAnnualTermId: true }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'annual_prepay_series' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [10])).toEqual({ extend: [10], skipped: [] });
+      expect(await splitRootsByTopupSkip(topupScenario({}).conn, 5, [])).toEqual({ extend: [], skipped: [] });
+    });
+
+    test('Codex round 22: every skip reason is reported as skipped, with no static permanent / reversible split', async () => {
+      familyOfServiceRow.mockReturnValue('lawn_care');
+      expect(await splitRootsByTopupSkip(topupScenario({ activeHold: true }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'plan_hold' }] });
+      expect(await splitRootsByTopupSkip(topupScenario({ customerOverrides: { active: false } }).conn, 5, [10]))
+        .toEqual({ extend: [], skipped: [{ id: 10, reason: 'customer_inactive' }] });
+    });
+
+    test('Codex round 21: the price verdict tells an unpriced root, a discounted-to-zero line and a priced one apart', async () => {
+      const base = { create_invoice_on_complete: false };
+      const unpriced = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: { ...base, estimated_price: null } }).conn, 10);
+      expect(unpriced).toMatchObject({ price: 0, linePrice: 0, zero: 'unpriced' });
+      const discounted = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: { ...base, estimated_price: '100.00', discount_type: 'fixed_amount', discount_amount: 100 } }).conn, 10);
+      expect(discounted).toMatchObject({ price: 0, linePrice: 100, zero: 'discounted', explicitZero: false });
+      const priced = await seriesNextOccurrencesPrice(topupScenario({ parentOverrides: { ...base, estimated_price: '100.00', discount_type: 'fixed_amount', discount_amount: 25 } }).conn, 10);
+      expect(priced).toMatchObject({ price: 75, linePrice: 100, zero: null });
+    });
+
+    test('Codex round 21: the override zero stays its own kind, and the top-up\'s unbillable verdict is unchanged by the new field', async () => {
+      const before = FG.gates.editApptPriceServiceScope;
+      try {
+        FG.gates.editApptPriceServiceScope = true;
+        const zero = { parentOverrides: { estimated_price: null, create_invoice_on_complete: false, recurring_template_overrides: { estimated_price: 0 } }, colsOverrides: { recurring_template_overrides: {} } };
+        expect(await seriesNextOccurrencesPrice(topupScenario(zero).conn, 10)).toMatchObject({ price: 0, zero: 'override', explicitZero: true });
+        const discounted = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '100.00', discount_type: 'fixed_amount', discount_amount: 100 } });
+        expect(await seriesNextOccurrencesUnbillable(discounted.conn, 10, { customerOverride: PER_VISIT })).not.toBeNull();
+      } finally { FG.gates.editApptPriceServiceScope = before; }
+    });
+
+    test('an explicit $0 override reads as explicitZero only with the scope gate on; an unpriced root never does', async () => {
+      const before = FG.gates.editApptPriceServiceScope;
+      const zero = { parentOverrides: { estimated_price: null, create_invoice_on_complete: false, recurring_template_overrides: { estimated_price: 0 } }, colsOverrides: { recurring_template_overrides: {} } };
+      const unpriced = { parentOverrides: { estimated_price: null, create_invoice_on_complete: false }, colsOverrides: { recurring_template_overrides: {} } };
+      try {
+        FG.gates.editApptPriceServiceScope = true;
+        expect(await seriesNextOccurrencesPrice(topupScenario(zero).conn, 10)).toMatchObject({ price: 0, explicitZero: true, unverified: false });
+        expect(await seriesNextOccurrencesPrice(topupScenario(unpriced).conn, 10)).toMatchObject({ price: 0, explicitZero: false });
+        FG.gates.editApptPriceServiceScope = false;
+        expect(await seriesNextOccurrencesPrice(topupScenario(zero).conn, 10)).toMatchObject({ price: 0, explicitZero: false });
+      } finally { FG.gates.editApptPriceServiceScope = before; }
+    });
+  });
+
+  test('the verdict function stays within the repository complexity limit (decisions, not a one-use helper)', () => {
+    const { Linter } = require('eslint');
+    const fs = require('fs');
+    const code = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+    const messages = new Linter().verify(code, {
+      languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs' },
+      rules: { complexity: ['error', 20] },
+    }, 'admin-schedule.js');
+    expect(messages.filter((m) => /seriesNextOccurrencesUnbillable|seriesVerdictWalk|seriesNextOccurrencesPrice|seriesExtensionDatePrices|seriesExtensionDateVerdicts|storedOccurrenceFloorVerdict/.test(m.message)).map((m) => m.message)).toEqual([]);
+  });
+
+  test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
+    const flat = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' } });
+    expect(await seriesNextOccurrencesUnbillable(flat.conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    const recurring = topupScenario({
+      parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' },
+      addons: [{ id: 'a2', estimated_price: '50.00', recurring_pattern: null, service_key_snapshot: null }],
+    });
+    expect(await seriesNextOccurrencesUnbillable(recurring.conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+  });
+
+  test('the lane the customer would have decides: an unpriced plan is billable on monthly dues, not per visit; no override reads the live customer', async () => {
+    const unpriced = { parentOverrides: { create_invoice_on_complete: false, estimated_price: null } };
+    const monthly = { billing_mode: 'monthly_membership', monthly_rate: 120, waveguard_tier: 'silver' };
+    expect(await seriesNextOccurrencesUnbillable(topupScenario(unpriced).conn, 10, { customerOverride: monthly })).toBeNull();
+    expect(await seriesNextOccurrencesUnbillable(topupScenario(unpriced).conn, 10, { customerOverride: PER_VISIT }))
+      .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(await seriesNextOccurrencesUnbillable(topupScenario({ ...unpriced, customerOverrides: monthly }).conn, 10))
+      .toBeNull();
   });
 });
 
