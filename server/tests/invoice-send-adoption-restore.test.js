@@ -1247,6 +1247,69 @@ describe('the approved invoice text at the text leg', () => {
   });
 });
 
+// Round 13 (PR #6117): the bar sends ONE text. `channels: ['sms']` never starts the email leg, and `adoptsQueuedInvoiceSend: false`
+// refuses a queued pay-link text instead of adopting (cancelling) it.
+describe('a text-only bar send (round 13)', () => {
+  const templates = require('../routes/admin-sms-templates');
+  let invoices;
+  let smsLog;
+  const base = { id: 'inv-1', invoice_number: 'WPC-2026-2001', status: 'draft', customer_id: 'cust-1', payer_id: null, token: 'tok-1', total: 100, credit_applied: 0, send_claim_token: null };
+  const queuedRow = { id: 'sms-q1', status: 'scheduled', scheduled_for: new Date('2099-01-02T13:00:00Z'), metadata: { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1' } };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    invoices = makeInvoicesTable({ ...base });
+    smsLog = makeSmsLogTable([]);
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices.query();
+      if (table === 'sms_log') return smsLog.query();
+      if (table === 'customers') return customerQuery({ id: 'cust-1', first_name: 'Pat', phone: '+19415550100' });
+      if (table === 'notification_prefs') return customerQuery({});
+      if (table === 'activity_log') return passthroughQuery();
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    withInvoiceDepositSettlement.mockImplementation(async (_id, callback) => callback(db, invoices.state()));
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    templates.getTemplate.mockImplementation(async (_key, vars) => `Hi ${vars.first_name}, your invoice is ready: ${vars.pay_url}`);
+    sendInvoiceEmail.mockResolvedValue({ ok: true });
+  });
+
+  test('the text goes, the email leg is never started, and the invoice is finalized as sent', async () => {
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false });
+    expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: false, skipped: true, code: 'email_not_requested' } });
+    expect(sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(invoices.state()).toMatchObject({ status: 'sent', send_claim_token: null });
+  });
+
+  test('a text that fails is handed back, never rescued by an email', async () => {
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(async () => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'PROVIDER_REJECTED', reason: 'number opted out' })));
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false });
+    expect(result).toMatchObject({ ok: false, sms: { ok: false } });
+    expect(sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+  });
+
+  test('without the option (the Invoices page) both legs still run', async () => {
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+    expect(result).toMatchObject({ ok: true, sms: { ok: true }, email: { ok: true } });
+    expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('a queued pay-link text refuses the bar send (queued_pay_link) and is left exactly as it was; the page send adopts it', async () => {
+    smsLog = makeSmsLogTable([{ ...queuedRow }]);
+    await expect(InvoiceService.sendViaSMSAndEmail('inv-1', { channels: ['sms'], refusalOnly: true, adoptsQueuedInvoiceSend: false }))
+      .rejects.toMatchObject({ code: 'queued_pay_link' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(sendInvoiceEmail).not.toHaveBeenCalled();
+    expect(invoices.state()).toMatchObject({ status: 'draft', send_claim_token: null });
+    expect(smsLog.rows ? smsLog.rows()[0].status : 'scheduled').toBe('scheduled');
+    // The page's default keeps adopting its own queued leg.
+    const page = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+    expect(page).toMatchObject({ ok: true });
+  });
+});
+
 // Round 11 (PR #6117): the template CHOICE is a pure function of the invoice, the customer and the facts; the renderer asks for
 // the next choice while a row renders nothing.
 describe('chooseInvoiceSmsTemplate', () => {

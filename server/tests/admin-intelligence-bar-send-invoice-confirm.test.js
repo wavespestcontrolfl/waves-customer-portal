@@ -164,7 +164,9 @@ beforeEach(() => {
   Invoices.getInvoiceDeliveryRecipients.mockResolvedValue({
     customerName: 'Robin Sample', payerBilled: false, primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'robin@example.com' },
   });
-  Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
+  Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true } } });
+  // The invoice text as sendViaSMS renders it (the real renderer needs the template tables).
+  jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue({ body: 'Hi Robin, your invoice is ready: [pay link]', renderedTemplateKey: 'invoice_sent' });
 });
 afterEach(() => { delete process.env.GATE_IB_INVOICE_ACTIONS; delete process.env.GATE_IB_PLATFORM; });
 

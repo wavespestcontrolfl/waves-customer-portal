@@ -464,13 +464,6 @@ function invoiceSmsDigest(rendered, payUrl) {
   return crypto.createHash('sha256').update(`${rendered.renderedTemplateKey || ''}\n${normalized}`).digest('hex').slice(0, 32);
 }
 
-// The same pin for the invoice EMAIL: the template key, the rendered subject and the rendered text, pay link as a token.
-function invoiceEmailDigest(rendered, payUrl) {
-  if (!rendered) return 'none';
-  const swap = (value) => (payUrl ? String(value ?? '').split(String(payUrl)).join(INVOICE_SMS_PAY_LINK_TOKEN) : String(value ?? ''));
-  return crypto.createHash('sha256').update(JSON.stringify([rendered.templateKey || '', swap(rendered.subject), swap(rendered.text)])).digest('hex').slice(0, 32);
-}
-
 // ── attachment upload reservations (Intelligence Bar send fence) ──
 // An upload writes to storage BEFORE it takes the invoice row lock to insert, so a send can claim, deliver and finalize in
 // between. The upload therefore writes a durable reservation (an audit row on the invoice, no new column) before its first
@@ -561,7 +554,6 @@ module.exports = {
   leadSetDigest,
   INVOICE_SMS_PAY_LINK_TOKEN,
   invoiceSmsDigest,
-  invoiceEmailDigest,
   invoiceDeliveryEpoch,
   reserveAttachmentUpload,
   releaseAttachmentUpload,

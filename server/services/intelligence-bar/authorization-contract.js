@@ -114,7 +114,7 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
   'resend_receipt',
-  // The invoice text and/or email.
+  // The invoice text (one text with the pay link; the bar sends no email).
   'send_invoice',
 ]);
 

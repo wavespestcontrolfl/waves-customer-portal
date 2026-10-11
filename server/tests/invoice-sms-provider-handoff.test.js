@@ -179,6 +179,39 @@ describe('invoice SMS provider handoff', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550101' }));
   });
 
+  test('round 13: the phone is read AGAIN inside the final locked provider handoff; a number changed after the early check is not texted', async () => {
+    let phoneNow = '+19415550101';
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+      if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: phoneNow } });
+      if (table === 'activity_log') return query();
+      if (table === 'sms_log') return query({ returning: [] });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }));
+    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+    // The customer edit lands after the early recipient check and before the handoff (it does not take the invoice lock).
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => { phoneNow = '+19415550199'; return withProviderHandoff(dispatch); });
+    invoiceReads = [invoice, invoice, invoice, invoice];
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101' }))
+      .rejects.toMatchObject({ code: 'recipient_changed', deliveryOutcome: 'not_sent' });
+    expect(dispatch).not.toHaveBeenCalled();
+
+    // Unchanged phone: the provider is called. A phone-less approval (null) and an unreadable customer row refuse too.
+    phoneNow = '+19415550101';
+    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+    invoiceReads = [invoice, invoice, invoice, invoice];
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101' })).resolves.toMatchObject({ sent: true });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const precondition = InvoiceService._checkInvoiceDeliveryPreconditions;
+    const base = { sendClaimToken: 'claim-1', sendInvoice: invoice };
+    const unreadable = () => { throw new Error('db down'); };
+    await expect(precondition(unreadable, invoice, { ...base, expectedSmsPhone: '19415550101' })).resolves.toMatchObject({ blocked: true, code: 'recipient_changed' });
+    await expect(precondition(db, invoice, { ...base, expectedSmsPhone: null })).resolves.toMatchObject({ blocked: true, code: 'recipient_changed' });
+    // No approved phone (every other sender): not checked.
+    await expect(precondition(unreadable, invoice, base)).resolves.toEqual({ ok: true });
+  });
+
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
     const invoiceQueries = [];
     db.mockImplementation((table) => {

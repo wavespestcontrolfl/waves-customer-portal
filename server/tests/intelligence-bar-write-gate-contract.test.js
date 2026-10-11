@@ -882,6 +882,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveMessagingHoldChecked').mockResolvedValue(false),
         jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
           .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
+        // The invoice text as sendViaSMS renders it (the real renderer needs the template tables).
+        jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue({ body: 'Hi Pat, your invoice is ready: [pay link]', renderedTemplateKey: 'invoice_sent' }),
         // The effects plan's own reads (invoice-action-effects.js) answer "nothing else happens" on this generic stand-in.
         jest.spyOn(require('../services/invoice-payer-ownership'), 'invoicePayerOwnership').mockResolvedValue(null),
         jest.spyOn(require('../services/invoice-followups'), 'planFollowupSequence').mockResolvedValue({ arms: false, state: 'not_schedulable', cadence: [3, 7, 14, 30] }),

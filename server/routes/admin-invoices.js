@@ -1742,7 +1742,7 @@ async function invoiceSendHandler(req, res, next) {
         holdExempt: 'operator',
         actorTechnicianId: req.technicianId || null,
         // Set only by sendInvoiceFromBar (never an HTTP field): the total and the
-        // recipients the bar's card showed, no account-credit draw (the card never
+        // phone the bar's card showed, no account-credit draw (the card never
         // offered one), no dispute-hold exemption (the bar never overrides one) and
         // refusalOnly: a terminal-visit invoice is never voided and a hold refusal is
         // never requeued for a later send outside the approval.
@@ -1752,6 +1752,9 @@ async function invoiceSendHandler(req, res, next) {
           // claim refuses an edit or partial credit that landed after the card.
           expectedVersion: req.ibApprovedSend.version || null,
           skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true,
+          // The bar sends ONE text and nothing else: no email leg, and a pay-link text already queued for the send window is
+          // never adopted or cancelled (the claim refuses it).
+          channels: ['sms'], adoptsQueuedInvoiceSend: false,
         } : {}),
       });
     } catch (err) {

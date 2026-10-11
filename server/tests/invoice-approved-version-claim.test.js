@@ -297,12 +297,12 @@ describe('claimInvoiceForSend with an approved version', () => {
       await expect(check(null)).resolves.toEqual({ ok: true });
     });
 
-    test('source contract: both legs of the bar\'s send hand the verifier to their provider boundary', () => {
+    test('source contract: the text leg of the bar\'s send hands the verifier to its provider boundary', () => {
       const source = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
       // The text leg: the shared precondition check is given it on both of its routes (the locked handoff and the email authority's pre-send check).
       expect(source.match(/sendClaimToken: invoice\.send_claim_token, sendInvoice, holdExempt, verifyOwner,/g)).toHaveLength(2);
-      // The wrapper passes the version's verifier to the text leg and to the email leg.
-      expect(source.match(/\.\.\.\(expectedVersion\?\.verifyOwner \? \{ verifyOwner: expectedVersion\.verifyOwner \} : \{\}\),/g)).toHaveLength(2);
+      // The wrapper passes the version's verifier to the text leg (the bar sends no email leg).
+      expect(source.match(/\.\.\.\(expectedVersion\?\.verifyOwner \? \{ verifyOwner: expectedVersion\.verifyOwner \} : \{\}\),/g)).toHaveLength(1);
     });
   });
 

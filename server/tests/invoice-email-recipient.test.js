@@ -6,10 +6,6 @@ jest.mock('../services/estimate-deposits', () => ({
     return callback(database, await database('invoices').where({ id: invoiceId }).first());
   }),
 }));
-jest.mock('../services/collections/collection-hold', () => ({
-  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
-  holdExemptionApplies: jest.fn(() => false),
-}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -19,20 +15,19 @@ jest.mock('../services/pdf/invoice-pdf', () => ({
   buildInvoicePDFBuffer: jest.fn(),
   buildReceiptPDFBuffer: jest.fn(),
 }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn(), resolveTemplateForSend: jest.fn(), prepareTemplateSend: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn() }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(),
   invoiceShortCodePrefix: jest.fn(),
 }));
 
-const { _private, sendInvoiceEmail, sendReceiptEmail, renderInvoiceEmailForApproval } = require('../services/invoice-email');
+const { _private, sendInvoiceEmail, sendReceiptEmail } = require('../services/invoice-email');
 const db = require('../models/db');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('../services/pdf/invoice-pdf');
 const sendgrid = require('../services/sendgrid-mail');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { sendTemplate, resolveTemplateForSend, prepareTemplateSend } = require('../services/email-template-library');
-const { invoiceEmailDigest } = require('../services/invoice-helpers');
+const { sendTemplate } = require('../services/email-template-library');
 
 const customer = {
   id: 'cust-1',
@@ -215,107 +210,6 @@ describe('invoice email recipient resolution', () => {
 
     expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@westbay.com' }));
     expect(result.recipient).toEqual(expect.objectContaining({ email: 'ap@westbay.com', role: 'payer' }));
-  });
-
-  test('expectedEmail (the bar\'s approved recipient): a different resolved address is refused before any send; the same one sends', async () => {
-    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
-    sendgrid.isConfigured.mockReturnValue(true);
-    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm1' } });
-    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
-    db.mockImplementation(dbWithPayer(
-      { id: 7, ap_email: 'ap@westbay.com', company_name: 'Homes by West Bay', active: true },
-    ));
-    await expect(sendInvoiceEmail('invoice-1', { expectedEmail: 'old-ap@westbay.com' })).resolves.toEqual({
-      ok: false, code: 'recipient_changed', error: 'The billing email is not the one the approval showed; the email was not sent',
-    });
-    await expect(sendInvoiceEmail('invoice-1', { expectedEmail: null })).resolves.toMatchObject({ ok: false, code: 'recipient_changed' });
-    expect(sendTemplate).not.toHaveBeenCalled();
-    const sent = await sendInvoiceEmail('invoice-1', { expectedEmail: 'ap@westbay.com' });
-    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@westbay.com' }));
-    expect(sent.ok).toBe(true);
-  });
-
-  describe('the bar\'s approved email, checked at the provider handoff (round 12)', () => {
-    const PAY = 'https://portal.wavespestcontrol.com/l/x';
-    // The library's sendTemplate runs the handoff the way the real one does (before the provider call).
-    function runHandoff() {
-      sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
-        const verdict = await withProviderHandoff(async () => {});
-        return verdict.ok === true ? { message: { provider_message_id: 'm1' } } : { sent: false, reason: verdict.reason, code: verdict.code };
-      });
-    }
-    function homeowner({ billingEmail = () => 'billing@example.com' } = {}) {
-      return (table) => {
-        if (table === 'invoices') {
-          return query({ id: 'invoice-1', customer_id: 'cust-1', invoice_number: 'INV-1', token: 'token-1', total: 300, line_items: [], payer_id: null, status: 'draft', notes: 'Quarterly service' });
-        }
-        if (table === 'customers') return query({ ...customer, id: 'cust-1' });
-        if (table === 'notification_prefs') return query({ billing_email: billingEmail() });
-        if (table === 'invoice_attachments') {
-          const rows = { where: () => rows, orderBy: () => rows, select: () => Promise.resolve([]) };
-          return rows;
-        }
-        return query(null);
-      };
-    }
-    let rendered;
-    beforeEach(() => {
-      buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
-      sendgrid.isConfigured.mockReturnValue(true);
-      shortenOrPassthrough.mockResolvedValue(PAY);
-      rendered = { subject: 'Your Waves invoice INV-1', text: `Hi there, pay here: ${PAY}` };
-      resolveTemplateForSend.mockResolvedValue({ template: { key: 'invoice.sent' }, version: { id: 'v1' } });
-      prepareTemplateSend.mockImplementation(() => ({ rendered }));
-      runHandoff();
-    });
-    const approved = () => invoiceEmailDigest({ templateKey: 'invoice.sent', subject: 'Your Waves invoice INV-1', text: 'Hi there, pay here: [pay link]' }, '[pay link]');
-
-    test('the card and the sender share one payload builder (the template gets the card\'s variables)', async () => {
-      db.mockImplementation(homeowner());
-      await sendInvoiceEmail('invoice-1', { plainInvoiceEmail: true, expectedEmail: 'billing@example.com', expectedEmailDigest: approved() });
-      const sentPayload = sendTemplate.mock.calls[0][0].payload;
-      db.mockImplementation(homeowner());
-      resolveTemplateForSend.mockClear();
-      await renderInvoiceEmailForApproval({ id: 'invoice-1', customer_id: 'cust-1', invoice_number: 'INV-1', total: 300, line_items: [], notes: 'Quarterly service' }, { first: sentPayload.first_name, payUrl: PAY });
-      expect(prepareTemplateSend.mock.calls.at(-1)[0].payload).toEqual(sentPayload);
-    });
-
-    test('the same rendered email sends; a template published after the card (subject or text) is refused email_text_changed and nothing goes to the provider', async () => {
-      db.mockImplementation(homeowner());
-      const dispatched = jest.fn();
-      sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
-        const verdict = await withProviderHandoff(dispatched);
-        return verdict.ok === true ? { message: { provider_message_id: 'm1' } } : { sent: false, reason: verdict.reason, code: verdict.code };
-      });
-      const opts = { plainInvoiceEmail: true, expectedEmail: 'billing@example.com', expectedEmailDigest: approved() };
-      await expect(sendInvoiceEmail('invoice-1', opts)).resolves.toMatchObject({ ok: true });
-      expect(dispatched).toHaveBeenCalledTimes(1);
-      for (const published of [{ subject: 'A new subject' }, { text: 'New words.' }]) {
-        dispatched.mockClear();
-        rendered = { ...rendered, ...published };
-        await expect(sendInvoiceEmail('invoice-1', opts)).resolves.toMatchObject({ ok: false, code: 'email_text_changed' });
-        expect(dispatched).not.toHaveBeenCalled();
-      }
-    });
-
-    test('a template that cannot be read at the handoff refuses (no SMTP email in its place)', async () => {
-      db.mockImplementation(homeowner());
-      resolveTemplateForSend.mockRejectedValue(new Error('template disabled'));
-      await expect(sendInvoiceEmail('invoice-1', { plainInvoiceEmail: true, expectedEmailDigest: approved() })).resolves.toMatchObject({ ok: false, code: 'email_text_changed' });
-    });
-
-    test('the billing email changing after the first check (while the PDF and template render) is refused recipient_changed at the handoff', async () => {
-      let billing = 'billing@example.com';
-      db.mockImplementation(homeowner({ billingEmail: () => billing }));
-      buildInvoicePDFBuffer.mockImplementation(async () => { billing = 'someone-else@example.com'; return Buffer.from('pdf'); });
-      const dispatched = jest.fn();
-      sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
-        const verdict = await withProviderHandoff(dispatched);
-        return verdict.ok === true ? { message: { provider_message_id: 'm1' } } : { sent: false, reason: verdict.reason, code: verdict.code };
-      });
-      await expect(sendInvoiceEmail('invoice-1', { plainInvoiceEmail: true, expectedEmail: 'billing@example.com' })).resolves.toMatchObject({ ok: false, code: 'recipient_changed' });
-      expect(dispatched).not.toHaveBeenCalled();
-    });
   });
 
   test('the pay short code of a payer invoice is marked payer_invoice/email; a homeowner invoice mints it unchanged', async () => {

@@ -135,38 +135,6 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(args.payload.invoice_message).toBe('Thanks for having us out!');
   });
 
-  test('round 9: the Intelligence Bar\'s plain invoice email omits BOTH live blocks (other balance; service, address, payment method), whatever the gates say', async () => {
-    const BillingEmailDetails = require('../services/billing-email-details');
-    const live = jest.spyOn(BillingEmailDetails, 'billingEmailDetailsLive').mockReturnValue(true);
-    const service = jest.spyOn(BillingEmailDetails, 'invoiceServiceDetails').mockResolvedValue({ label: 'Pest Control', date: '2099-01-02' });
-    const address = jest.spyOn(BillingEmailDetails, 'invoicePropertyAddress').mockResolvedValue('1 Example Way');
-    const method = jest.spyOn(BillingEmailDetails, 'payMethodOnFileLabel').mockResolvedValue('Visa 4242');
-    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
-    openBalanceSummary.mockResolvedValue({ total: 450, count: 2, invoices: [{}, {}] });
-    mockDb(invoiceRow());
-
-    // The page's email, same gates: both blocks are present.
-    await sendInvoiceEmail('inv-1');
-    let args = EmailTemplates.sendTemplate.mock.calls[0][0];
-    expect(args.payload.invoice_message).toMatch(/previous balance of \$450\.00/);
-    expect(args.payload).toMatchObject({ property_full_address: '1 Example Way', payment_method: 'Visa 4242' });
-
-    // The bar's email: neither block is built or sent.
-    jest.clearAllMocks();
-    EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
-    mockDb(invoiceRow());
-    await sendInvoiceEmail('inv-1', { plainInvoiceEmail: true });
-    args = EmailTemplates.sendTemplate.mock.calls[0][0];
-    expect(args.payload.invoice_message).toBe('Thanks for having us out!');
-    expect(args.payload).not.toHaveProperty('property_full_address');
-    expect(args.payload).not.toHaveProperty('payment_method');
-    expect(openBalanceSummary).not.toHaveBeenCalled();
-    expect(service).not.toHaveBeenCalled();
-    expect(address).not.toHaveBeenCalled();
-    expect(method).not.toHaveBeenCalled();
-    [live, service, address, method].forEach((spy) => spy.mockRestore());
-  });
-
   test('payer-billed invoice never carries the homeowner balance note', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
     openBalanceSummary.mockResolvedValue({ total: 450, count: 2, invoices: [{}, {}] });

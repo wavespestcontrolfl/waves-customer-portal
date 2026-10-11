@@ -3103,7 +3103,7 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // same on its transaction before its caller re-reads it and passes it in).
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
-async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null, verifyOwner = null }) {
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null, verifyOwner = null, expectedSmsPhone = undefined }) {
   // `error` is the field withProviderHandoff's caller (this file) has always
   // read on a blocked outcome (byte-identical to the pre-refactor shape);
   // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
@@ -3149,6 +3149,22 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
       return { sent: false, blocked: true, deliveryOutcome: "not_sent",
         code: "approved_version_changed", error: refusal, reason: refusal,
         validator: "check_invoice_ownership_boundary" };
+    }
+  }
+  // The Intelligence Bar's approved phone, read AGAIN on the locked handle right before the provider call: the customer edit
+  // route changes the phone without taking the invoice lock, so a number removed after the early check must not get the pay
+  // link. A read that fails refuses (fail closed).
+  if (expectedSmsPhone !== undefined) {
+    let freshDigits = null;
+    try {
+      const row = await database("customers").where({ id: current.customer_id }).first("phone");
+      freshDigits = String(row?.phone || "").replace(/\D/g, "");
+    } catch { /* keep the fail-closed null */ }
+    if (!expectedSmsPhone || freshDigits === null || freshDigits !== String(expectedSmsPhone)) {
+      const message = "The customer's phone is not the one the approval showed; the text was not sent";
+      return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+        code: "recipient_changed", error: message, reason: message,
+        validator: "check_invoice_recipient" };
     }
   }
   // Collections DISPUTE hold, re-read at the actual provider boundary on the
@@ -7665,7 +7681,7 @@ const InvoiceService = {
         withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
           invoiceId,
           (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt, verifyOwner, expectedSmsPhone,
           }),
           dispatch,
         ),
@@ -8011,8 +8027,15 @@ const InvoiceService = {
       // showed. The claim refuses (approved_version_changed, nothing sent) when an edit or
       // a partial credit changed the amount due or the lines after the card. Null = unchanged.
       expectedVersion = null,
+      // Intelligence Bar send_invoice: ['sms'] = the text leg only (the email leg is never started, never refused into a
+      // retry). Null = both legs, as every other caller. The page never passes it.
+      channels = null,
+      // false = a queued pay-link text (invoice_send_deferred) is never adopted or cancelled by this send: the claim refuses
+      // it (queued_pay_link). The bar passes false; every other caller keeps the default.
+      adoptsQueuedInvoiceSend = true,
     } = {},
   ) {
+    const smsOnly = Array.isArray(channels) && channels.length === 1 && channels[0] === "sms";
     // The confirming admin rides the version so the claim's closeout pin names them.
     if (expectedVersion && actorTechnicianId && expectedVersion.actorTechnicianId === undefined) {
       expectedVersion = { ...expectedVersion, actorTechnicianId };
@@ -8020,7 +8043,7 @@ const InvoiceService = {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
-      expectedRecipients, refusalOnly, expectedVersion,
+      expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
     });
 
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -8043,7 +8066,7 @@ const InvoiceService = {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
           emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
-          expectedRecipients, refusalOnly, expectedVersion,
+          expectedRecipients, refusalOnly, expectedVersion, channels, adoptsQueuedInvoiceSend,
         }));
       }
     }
@@ -8062,7 +8085,7 @@ const InvoiceService = {
     // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
     try {
-      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt, expectedVersion });
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, holdExempt, expectedVersion });
     } catch (err) {
       if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
@@ -8114,7 +8137,7 @@ const InvoiceService = {
     // credit is drawn down — nothing to reverse.
     let claim;
     try {
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, expectedVersion });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, expectedVersion });
     } catch (err) {
       if (err?.code === "approved_version_changed") return approvedVersionChangedResult(err);
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
@@ -8473,6 +8496,10 @@ const InvoiceService = {
       email.error = "Linked visit is terminal; email delivery not attempted";
       email.code = "INVOICE_VISIT_TERMINAL";
       email.deliveryOutcome = "not_sent";
+    } else if (smsOnly) {
+      // A text-only send (the Intelligence Bar): the email leg is not part of it. Not an error and not a retry.
+      email.skipped = true;
+      email.code = "email_not_requested";
     } else if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
@@ -8491,13 +8518,6 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           holdExempt,
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
-          ...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),
-          // The Intelligence Bar's approved attachment list (digest), checked once more right before the provider call.
-          ...(expectedVersion && expectedVersion.attachments !== undefined ? { expectedAttachments: expectedVersion.attachments } : {}),
-          ...(expectedVersion && expectedVersion.emailDigest !== undefined ? { expectedEmailDigest: expectedVersion.emailDigest } : {}),
-          ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
-          // The bar's card showed the invoice email only: no other-balance note, no account details.
-          ...(expectedVersion ? { plainInvoiceEmail: true } : {}),
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;
@@ -13744,6 +13764,7 @@ InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderH
 InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
 module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
+module.exports.queuedPayLinkText = queuedPayLinkText;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;

@@ -7,7 +7,8 @@
  *
  *   send_invoice — the Invoices page "Send" (POST /admin/invoices/:id/send),
  *                  run through admin-invoices.js sendInvoiceFromBar: the same
- *                  handler, so every refusal and message is the route's own.
+ *                  handler, so every refusal and message is the route's own. The bar sends ONE
+ *                  text with the pay link and nothing else: no email, no PDF, no app push.
  *
  * Always a confirm card (write-gates.js two-step), admin only, never owner-direct, dark behind
  * GATE_IB_INVOICE_ACTIONS.
@@ -37,8 +38,9 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
-const { maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint, invoiceSmsDigest, invoiceEmailDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../invoice-helpers');
+const { maskPhone } = require('./closeout-repair-tools');
+const { explicitBillingChannels } = require('../billing-delivery-channels');
+const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint, invoiceSmsDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../invoice-helpers');
 const { planSendEffects, approvedCloseoutTarget, approvedLeadTargets } = require('./invoice-action-effects');
 
 const CARD_LINES_SHOWN = 4;
@@ -55,10 +57,10 @@ const TARGET_PROPS = {
 const INVOICE_ACTION_TOOLS = [
   {
     name: 'send_invoice',
-    description: `Send ONE existing invoice to the customer, exactly as the Invoices page "Send" button does (text with the pay link and/or the invoice email with the PDF). The first call returns a PREVIEW and sends nothing: the invoice, the customer, the amount due, the lines, the channels and who each reaches (masked), and which message goes out. The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports the text and the email separately.
-Refused with the reason: invoice not found, paid, prepaid, void, refunded, canceled, a bank payment processing, billed to a third-party payer or a payer's monthly statement (or who owes it could not be checked), nothing due, a collections hold on the customer's billing messages, no phone or email on file. Never creates, edits, voids or refunds an invoice. No review request is sent. Admin only.
+    description: `Send ONE existing invoice to the customer BY TEXT: one text with the pay link, as the Invoices page "Send" does for the text leg. No email and no PDF go out from the bar. The first call returns a PREVIEW and sends nothing: the invoice, the customer, the amount due, the lines, and the exact text with who it reaches (masked). The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports whether the text went out.
+Refused with the reason: invoice not found, paid, prepaid, void, refunded, canceled, a bank payment processing, billed to a third-party payer or a payer's monthly statement (or who owes it could not be checked), nothing due, a collections hold on the customer's billing messages, no usable phone (send it from the Invoices page), a customer whose invoices go by app or email only, a pay-link text already scheduled. Never creates, edits, voids or refunds an invoice. No review request is sent. Admin only.
 Takes invoice_id OR invoice_number, exactly one.
-Use for: "send the invoice", "text her the invoice", "resend invoice WPC-2026-0534".`,
+Use for: "text her the invoice", "send the invoice", "resend invoice WPC-2026-0534".`,
     input_schema: { type: 'object', properties: { ...TARGET_PROPS } },
     _sideEffects: true,
   },
@@ -124,22 +126,29 @@ const cardEffects = (effects) => effects.filter((e) => e.line).map(({ key, line,
 
 // ── send_invoice ────────────────────────────────────────────────
 
-// The invoice's own words that reach the customer: the email's personal message (invoices.email_message) and the notes
-// printed on the invoice and PDF (invoices.notes). The card quotes both in full; a longer text is refused, never cut.
+// The invoice's own words the customer can read at the pay link: the notes printed on the invoice (invoices.notes). The card
+// quotes them in full; a longer text is refused, never cut. (The personal message, invoices.email_message, is carried by the
+// email only; the bar sends no email.)
 const CUSTOM_COPY_LIMIT = 600;
 function customerCopy(invoice) {
-  const message = String(invoice.email_message || '').trim();
   const notes = String(invoice.notes || '').trim();
-  if (message.length > CUSTOM_COPY_LIMIT || notes.length > CUSTOM_COPY_LIMIT) {
-    return refusal(`The invoice message is longer than the card can show (${CUSTOM_COPY_LIMIT} characters); send it from the Invoices page.`, 'invoice_copy_too_long', { invoice_id: invoice.id });
+  if (notes.length > CUSTOM_COPY_LIMIT) {
+    return refusal(`The invoice notes are longer than the card can show (${CUSTOM_COPY_LIMIT} characters); send it from the Invoices page.`, 'invoice_copy_too_long', { invoice_id: invoice.id });
   }
-  const lines = [
-    message && `Personal message in the email: "${message}"`,
-    notes && `Notes on the invoice and PDF: "${notes}"`,
-  ].filter(Boolean);
-  return { lines: lines.length ? lines : ['No personal message. No notes.'] };
+  return { lines: [notes ? `Notes on the invoice: "${notes}"` : 'No notes on the invoice.'] };
 }
 
+// The customer's invoice delivery choice, on the handle the claim or the handoff holds: unchanged from the card (pinned digest)
+// and still something a plain text honors. Returns the refusal text, or null; a read that fails refuses.
+async function channelRefusalText(invoice, database, pinnedDigest) {
+  try {
+    const { state, supported } = await billingChannelState(invoice.customer_id, database);
+    if (!supported) return CHANNEL_UNSUPPORTED_TEXT;
+    return digest(state) === pinnedDigest ? null : 'How this customer gets invoices changed after the card was shown, so it was not sent.';
+  } catch {
+    return 'The bar could not re-check how this customer gets invoices, so it was not sent.';
+  }
+}
 
 // Who owes the invoice RIGHT NOW. invoices.payer_id / payer_statement_id are a snapshot from when the invoice was
 // minted: a payer assigned afterwards (the scheduled service, or the customer's default payer) leaves both empty. The
@@ -200,35 +209,9 @@ async function sendRefusal(invoice, dueCents) {
   return null;
 }
 
-// The same recipients the Invoices page shows before Send (GET /:id/recipients): the text goes to the customer's phone, the
-// email to the billing recipient. A leg is OFFERED only when it can send: a phone whose text template is switched off sends no
-// text, so it is not a recipient or a channel. `sms` and `emailRender` are the rendered legs (see smsRender, emailRenderFor).
-function sendLegs(who, invoice, dueCents, sms, emailRender) {
-  const rawPhone = who.primaryContact?.phone || null;
-  const phone = rawPhone && sms.body ? rawPhone : null;
-  const email = who.emailRecipient?.email ? String(who.emailRecipient.email).trim().toLowerCase() : null;
-  // The exact text, from the renderer sendViaSMS sends with; the pay link is minted at send and shown as a token.
-  const text = !rawPhone ? 'No text: no phone on file.'
-    : phone
-      ? `Text to ${maskPhone(rawPhone)}: "${sms.body}" Not sent if the customer opted out of texts.`
-      : `No text: the invoice text template is switched off, so no text goes to ${maskPhone(rawPhone)}.`;
-  // The subject and body the customer gets, rendered from the active invoice.sent template by the sender's own function.
-  const emailLine = email
-    ? `Email to ${maskEmail(email)}: subject "${emailRender.subject}"${emailRender.templateKey === 'invoice.sent' ? ' (template invoice.sent)' : ' (sent without a template)'}, with the invoice PDF and the pay link. The email carries the invoice only (no other-balance or account details).`
-    : 'No email: no billing email on file.';
-  const emailBody = email && emailRender.text ? `Email body, as the customer receives it: "${emailRender.text}"` : null;
-  return { phone, email, text, emailLine, emailBody };
-}
-
 // The text exactly as sendViaSMS renders it (invoice.js renderInvoiceSmsBody, base template row, pay link as a token).
 async function smsRender(invoice, customer) {
   return require('../invoice').renderInvoiceSmsBody(invoice, customer || {}, INVOICE_SMS_PAY_LINK_TOKEN, { noVariants: true, audit: false });
-}
-
-// The email as the sender renders it (invoice-email.js renderInvoiceEmailForApproval), for this invoice's billing recipient.
-function emailRenderFor(invoice, customer, who) {
-  const first = who.emailRecipient?.name || customer?.first_name || 'there';
-  return require('../invoice-email').renderInvoiceEmailForApproval(invoice, { first, payUrl: INVOICE_SMS_PAY_LINK_TOKEN });
 }
 
 // The totals the PDF prints under the lines (pdf/invoice-pdf.js invoiceBreakdownRows), for the card.
@@ -236,32 +219,58 @@ function totalsOf(invoice, customer) {
   return { totals: require('../pdf/invoice-pdf').invoiceBreakdownRows(invoice, customer) };
 }
 
-function emailContentGates() {
-  const gates = require('../../config/feature-gates');
-  return `${gates.isEnabled('balanceVisibility') ? 1 : 0}${gates.billingEmailDetailsLive() ? 1 : 0}`;
+// How the customer chose to get invoices (notification_prefs.invoice_channels; invoice_channel for a customer who never chose).
+// The bar sends a plain text only: an App selection (alone or with Text), or a selection with no Text, is not something it can
+// honor, so it is refused. Read on `database` (the claim passes its locked handle). Returns { state, supported }.
+const CHANNEL_UNSUPPORTED_TEXT = 'This customer gets invoices in the app or by email only, not by text. Send it from the Invoices page.';
+async function billingChannelState(customerId, database = db) {
+  const prefs = await database('notification_prefs').where({ customer_id: customerId }).first('invoice_channels', 'invoice_channel');
+  const explicit = explicitBillingChannels(prefs || {}, 'invoice');
+  const legacy = explicit === null ? String(prefs?.invoice_channel || 'sms').toLowerCase() : null;
+  const supported = explicit === null ? legacy !== 'push' : (explicit.includes('sms') && !explicit.includes('push'));
+  return { state: { explicit, legacy }, supported };
 }
 
-// opts.forSend: the confirmed run also gets the exact recipients (never on the
-// card or in a model-visible result) to hand the send as its approved pins.
-// The text and email as the sender renders them, and the legs that can actually send. A refusal is returned (never thrown):
-// nothing to send to, an email whose template cannot render, or a phone with no renderable text and no email.
-async function deliverableChannels(invoice, customer, who, dueCents) {
-  const rendered = await smsRender(invoice, customer);
-  let emailRender = null;
-  if (who.emailRecipient?.email) {
-    try {
-      emailRender = await emailRenderFor(invoice, customer, who);
-    } catch {
-      return refusal('The invoice email cannot be prepared (its template could not be rendered), so the invoice was not offered for sending. Send it from the Invoices page.', 'invoice_email_unrenderable', { invoice_id: invoice.id });
-    }
+// A pay-link text already queued for the send window (or mid-send) owns this invoice's delivery: the bar never adopts or
+// cancels it, so the card refuses and names the time. The send claim refuses it too (adoptsQueuedInvoiceSend: false).
+function etWhen(value) {
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return 'the send window';
+  const { formatETDate, formatETTime } = require('../../utils/datetime-et');
+  return `${formatETDate(at)} ${formatETTime(at)} ET`;
+}
+function queuedSendRefusal(invoiceId, queued) {
+  return refusal(`A pay-link text is already scheduled${queued.scheduled_for ? ` for ${etWhen(queued.scheduled_for)}` : ''}. Let it send, or cancel it on the invoice page.`, 'invoice_send_queued', { invoice_id: invoiceId });
+}
+
+// The one text the bar can send, or the refusal: the customer's phone with a text template that renders, a delivery choice
+// that includes Text and no App, and no queued pay-link text.
+async function deliverableText(invoice, customer, who) {
+  const at = { invoice_id: invoice.id };
+  const rawPhone = who.primaryContact?.phone || null;
+  const rendered = rawPhone ? await smsRender(invoice, customer) : null;
+  if (!rawPhone || !rendered?.body) {
+    return refusal(rawPhone
+      ? 'The invoice text template is switched off, so there is no text to send. Send it from the invoice page.'
+      : 'No usable phone is on file, so no text can be sent. Send it from the invoice page.', 'invoice_no_channel', at);
   }
-  const legs = sendLegs(who, invoice, dueCents, rendered, emailRender);
-  if (!who.primaryContact?.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
-  // A phone with its text template switched off is not a channel, so it cannot stand in for a missing email.
-  if (!legs.phone && !legs.email) return refusal('Neither a text nor an email can be sent: the invoice text template is switched off and there is no billing email.', 'invoice_no_channel', { invoice_id: invoice.id });
-  return { rendered, emailRender, legs };
+  let channels;
+  try {
+    channels = await billingChannelState(invoice.customer_id);
+  } catch {
+    return refusal('The bar could not check how this customer gets invoices, so it was not offered. Send it from the Invoices page.', 'invoice_channel_unsupported', at);
+  }
+  if (!channels.supported) return refusal(CHANNEL_UNSUPPORTED_TEXT, 'invoice_channel_unsupported', at);
+  const queued = await require('../invoice').queuedPayLinkText(invoice.id, { adoptsQueuedInvoiceSend: false });
+  if (queued) return queuedSendRefusal(invoice.id, queued);
+  return {
+    rendered, channelsState: channels.state, phone: rawPhone,
+    text: `Text to ${maskPhone(rawPhone)}: "${rendered.body}" Not sent if the customer opted out of texts.`,
+  };
 }
 
+// opts.forSend: the confirmed run also gets the exact phone (never on the card or in a model-visible result) to hand the send
+// as its approved pin.
 async function buildSendPlan(input, { forSend = false } = {}) {
   const target = await resolveInvoice(input);
   if (target.error) return target;
@@ -273,16 +282,16 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   if (!who) return refusal('Invoice not found', 'invoice_not_found');
   // The customer row is read once: the text renders for it, and the effects plan uses it.
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
-  const channels = await deliverableChannels(invoice, customer, who, dueCents);
-  if (channels.error) return channels;
-  const { rendered, emailRender, legs } = channels;
+  const legs = await deliverableText(invoice, customer, who);
+  if (legs.error) return legs;
+  const { rendered } = legs;
   const copy = customerCopy(invoice);
   if (copy.error) return copy;
   const totalCents = toCents(invoice.total);
   // Everything the send also does after it delivers: one list, from the handler's own predicates.
   const planned = await planEffectsOrRefuse(() => planSendEffects(invoice, customer, { requestReview: false }), invoice, 'sent');
   if (planned.error) return planned;
-  const recipients = { phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email };
+  const recipients = { phone: String(legs.phone).replace(/\D/g, '') };
   return {
     ...(forSend ? { sendRecipients: recipients } : {}),
     preview: true,
@@ -295,12 +304,10 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     amount_due: money(dueCents),
     total: money(totalCents),
     lines: lineSummary(invoice.line_items),
-    channels: [legs.phone && 'text', legs.email && 'email'].filter(Boolean).join(' and '),
+    channels: 'text',
     text: legs.text,
-    email: legs.emailLine,
-    ...(legs.emailBody ? { email_body: legs.emailBody } : {}),
     ...totalsOf(invoice, customer),
-    // The operator's own words that reach the customer, verbatim (the email and the PDF render them).
+    // The invoice notes the customer can read at the pay link, verbatim.
     custom_copy: copy.lines,
     effects: cardEffects(planned.effects),
     // The delivery effect's sentence, for the confirmation card's summary.
@@ -321,18 +328,15 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       first_delivery: planned.effects.find((e) => e.key === 'delivery').state === 'first',
       // Every post-delivery effect (closeout, lead, reminders, review ...): a change is drift.
       effects: planned.digest,
-      // The attachment list as the email handoff re-checks it (the same files the attachments effect pins).
+      // The attachment list the pay page shows (the same files the attachments effect pins).
       attachments: digestOfFingerprint(planned.effects.find((e) => e.key === 'attachments').state),
       recipients: digest(recipients),
-      // The two gates that add live content to the page's email (other-balance note; service, address and payment-method
-      // details). The bar's email omits both, so a flip changes nothing it sends; it is pinned so the card never goes stale on it.
-      email_content_gates: emailContentGates(),
+      // How the customer chose to get invoices (the bar sends a plain text only): a change after the card refuses, here and
+      // under the send claim.
+      billing_channels: digest(legs.channelsState),
       // The text the card shows (template that renders + body, pay link as a token). The text leg re-checks the body it is
       // about to hand the provider against this, so a template edited after the card is not sent.
       sms_text: invoiceSmsDigest(rendered, INVOICE_SMS_PAY_LINK_TOKEN),
-      // The email the card shows (template key, subject and text, pay link as a token); the email leg renders it again at its
-      // provider handoff and refuses a different one.
-      email_text: emailRender ? invoiceEmailDigest(emailRender, INVOICE_SMS_PAY_LINK_TOKEN) : 'none',
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -350,6 +354,17 @@ function channelResult(leg) {
 
 // Route codes that mean a leg may have been delivered.
 const UNCERTAIN_SEND_CODES = new Set(['INVOICE_DELIVERY_OUTCOME_UNCERTAIN', 'INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN']);
+
+// A pay-link text queued for the send window blocks the send (the claim refuses it, the bar never adopts it). The reply names
+// the scheduled time when the row can still be read.
+const QUEUED_SEND_CODE = 'queued_pay_link';
+async function queuedSendAnswer(plan) {
+  let queued = null;
+  try { queued = await require('../invoice').queuedPayLinkText(plan.invoice_id, { adoptsQueuedInvoiceSend: false }); } catch { /* the time is a nicety */ }
+  const refused = queued ? queuedSendRefusal(plan.invoice_id, queued)
+    : refusal('A pay-link text is already scheduled for this invoice. Let it send, or cancel it on the invoice page.', 'invoice_send_queued', { invoice_id: plan.invoice_id });
+  return { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number, error: `Nothing was sent: ${refused.error}`, code: 'invoice_send_queued', failed: true };
+}
 
 // The re-derived plan when it still matches the card's pin, or the refusal.
 async function verifiedPlan(input, pinned, build, { what, changed }) {
@@ -370,8 +385,12 @@ const IN_PROGRESS_SEND_MESSAGE = 'Another send of this invoice is in progress, s
 const NOOP_SEND_KEYS = ['already_delivered', 'queued_delivery', 'covered_by_credit', 'settled_zero_due'];
 
 // The Send handler's reply, in the tool's words: the first matching rule answers. Each rule is [applies, answer]
-// over c = { base, status, json, text, email, unknown, sent }.
+// over c = { base, status, json, text, unknown, sent }.
 const SEND_OUTCOME_RULES = [
+  // A pay-link text is queued for the send window: the claim refused it (409), or a first delivery reported it queued (200).
+  // Nothing was sent; the answer is built in sendOutcomeFor (it names the time).
+  [(c) => (c.status === 409 && c.json.code === QUEUED_SEND_CODE) || c.json.queued_delivery || c.json.sms?.code === QUEUED_SEND_CODE,
+    (c) => ({ ...c.base, __queued: true })],
   // The route's own pre-delivery refusals (nothing claimed, nothing sent): a fresh card is fine.
   [(c) => c.status === 409 && DEFINITIVE_SEND_CONFLICT_CODES.has(c.json.code),
     (c) => ({ ...c.base, error: `Nothing was sent: ${c.json.error || 'the invoice is busy'}`, code: c.json.code, preview_changed: true })],
@@ -381,41 +400,39 @@ const SEND_OUTCOME_RULES = [
     (c) => ({ ...c.base, outcome_unknown: true, code: (c.status === 409 && c.json.code) || 'delivery_in_progress', error: IN_PROGRESS_SEND_MESSAGE })],
   // The message went out but the app could not record the invoice as sent (the finalization rolled back): never a retry.
   [(c) => c.json.code === 'INVOICE_DELIVERY_RECORD_FAILED',
-    (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code, text: c.text, email: c.email,
+    (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code, text: c.text,
       error: 'The invoice went out, but the app could not record it as sent. Check the invoice by hand and do not send it again.' })],
   // Nothing was sent and the invoice is as it was, but the visit closeout pin could not be retired: the visit will not close
   // by itself (a person closes it). Not a retry-and-forget failure.
   [(c) => c.json.code === 'INVOICE_CLOSEOUT_PIN_RETIRE_FAILED',
-    (c) => ({ ...c.base, failed: true, code: c.json.code, text: c.text, email: c.email,
+    (c) => ({ ...c.base, failed: true, code: c.json.code, text: c.text,
       error: 'The invoice was not sent, but the visit closeout record could not be cleared. The visit will not close by itself: close it by hand.' })],
   [(c) => c.unknown && !c.sent,
-    (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code || 'delivery_uncertain', text: c.text, email: c.email,
+    (c) => ({ ...c.base, outcome_unknown: true, code: c.json.code || 'delivery_uncertain', text: c.text,
       error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' })],
   // Both channels failed (or the route refused before sending). The invoice changed after the card was
   // shown (nothing claimed or sent): a fresh card is right.
   [(c) => c.status !== 200,
     (c) => ({ ...c.base, error: `The invoice was not sent: ${c.json.error || 'send failed'}`, code: c.json.code || 'send_failed', failed: true,
-      ...(['approved_version_changed', 'total_changed'].includes(c.json.code) ? { preview_changed: true } : {}), text: c.text, email: c.email })],
+      ...(['approved_version_changed', 'total_changed', 'recipient_changed', 'sms_text_changed'].includes(c.json.code || c.json.sms?.code) ? { preview_changed: true } : {}), text: c.text })],
   [(c) => NOOP_SEND_KEYS.some((key) => c.json[key]),
-    (c) => ({ ...c.base, success: true, text: c.text, email: c.email,
+    (c) => ({ ...c.base, success: true, text: c.text,
       note: c.json.covered_by_credit ? 'Nothing was sent: account credit now covers this invoice.' : 'Nothing new was sent: the invoice was already delivered or is being delivered.' })],
-  [(c) => c.requested.every((leg) => leg.status === 'sent'),
-    (c) => ({ ...c.base, success: true, text: c.text, email: c.email,
-      note: ['The invoice was sent.', ...[c.text, c.email].map((leg) => leg.warning).filter(Boolean)].join(' ') })],
+  [(c) => c.text.status === 'sent',
+    (c) => ({ ...c.base, success: true, text: c.text,
+      note: ['The invoice text was sent.', c.text.warning].filter(Boolean).join(' ') })],
   [() => true,
-    (c) => ({ ...c.base, partial: true, text: c.text, email: c.email,
-      note: c.unknown ? 'Part of the invoice was sent; delivery of the rest could not be confirmed — check before sending again.' : 'Part of the invoice send did not go out — see text and email.' })],
+    (c) => ({ ...c.base, failed: true, text: c.text, code: c.json.sms?.code || c.json.code || 'send_failed',
+      error: 'The invoice text did not go out.' })],
 ];
 
 function sendOutcome(plan, status, json = {}) {
   const text = channelResult(json.sms);
-  const email = channelResult(json.email);
   const c = {
     base: { invoice_id: plan.invoice_id, invoice_number: plan.invoice_number },
-    status, json, text, email,
-    unknown: UNCERTAIN_SEND_CODES.has(json.code) || [text, email].some((leg) => leg.status === 'unknown'),
-    sent: [text, email].some((leg) => leg.status === 'sent'),
-    requested: [plan.text.startsWith('Text to') && text, plan.email.startsWith('Email to') && email].filter(Boolean),
+    status, json, text,
+    unknown: UNCERTAIN_SEND_CODES.has(json.code) || text.status === 'unknown',
+    sent: text.status === 'sent',
   };
   return SEND_OUTCOME_RULES.find(([applies]) => applies(c))[1](c);
 }
@@ -441,28 +458,29 @@ async function commitSend(input, actionContext) {
       version: {
         updatedAtMs: pinned.invoice_version,
         digest: pinned.version_digest,
-        // The approved attachment list: the email leg checks it once more right before the provider call.
+        // The approved attachment list (checked by the send claim).
         attachments: pinned.attachments,
-        // The text the card showed; the text leg refuses a different body at its provider handoff (omitted when no text goes).
-        ...(plan.sendRecipients.phone ? { smsDigest: pinned.sms_text } : {}),
-        // The email the card showed; the email leg refuses a different template, subject or text at its provider handoff.
-        ...(plan.sendRecipients.email ? { emailDigest: pinned.email_text } : {}),
+        // The text the card showed; the text leg refuses a different body at its provider handoff.
+        smsDigest: pinned.sms_text,
         // The visit the card said would close (or none): handed to the send's closeout, and written on the invoice
         // by the claim so the retry sweep keeps to it.
         closeoutTarget: plan._closeout_target,
         // The leads the card said this send marks won (or none): the conversion after delivery touches those and no others.
         leadTargets: plan._lead_targets,
-        // Run by the send claim on the claimed row, and again at each provider handoff (text and email): who owes the
-        // invoice must still be the customer, and it must still not be an annual-plan invoice (resolved as the pay page does;
-        // a failed lookup refuses).
-        verifyOwner: async (claimed, database) => (await ownerRefusalText(claimed, database)) || annualPlanRefusalText(claimed, database),
+        // Run by the send claim on the claimed row, and again at the text's provider handoff: who owes the invoice must still
+        // be the customer, it must still not be an annual-plan invoice (resolved as the pay page does; a failed lookup
+        // refuses), and the customer's invoice delivery choice must still be the one the card showed (text, never app).
+        verifyOwner: async (claimed, database) => (await ownerRefusalText(claimed, database))
+          || (await annualPlanRefusalText(claimed, database))
+          || channelRefusalText(claimed, database, pinned.billing_channels),
         // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
         verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,
       },
     },
   });
-  const result = sendOutcome(plan, status, json || {});
-  logger.info(`[intelligence-bar:invoice-actions] send ${plan.invoice_id}: ${result.text?.status || 'n/a'} / ${result.email?.status || 'n/a'}`);
+  let result = sendOutcome(plan, status, json || {});
+  if (result.__queued) result = await queuedSendAnswer(plan);
+  logger.info(`[intelligence-bar:invoice-actions] send ${plan.invoice_id}: ${result.text?.status || result.code || 'n/a'}`);
   return result;
 }
 
@@ -483,8 +501,6 @@ function cardLines(toolName, preview) {
       // What the PDF's totals block prints under the lines (the lines above are the PDF's rows).
       ...(preview.totals || []).map((text) => ({ kind: 'billing', text })),
       { kind: 'comms', text: preview.text },
-      { kind: 'comms', text: preview.email },
-      ...(preview.email_body ? [{ kind: 'comms', text: preview.email_body, more: true }] : []),
       ...(preview.custom_copy || []).map((text) => ({ kind: 'comms', text })),
       ...effects,
     ];
