@@ -5087,10 +5087,15 @@ router.post('/:id/unarchive', async (req, res, next) => {
     // Un-archiving makes the estimate open again: take the per-customer estimate lock (a reactivation,
     // like an insert) so the booking's open-estimate check cannot miss it. Lock order, as in the public
     // refresh: the estimate row first, then the per-customer lock (a leaf).
-    const [updated] = await db.transaction(async (trx) => {
-      await trx('estimates').where({ id: req.params.id }).forUpdate().first('id');
-      await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, estimate);
-      return trx('estimates')
+    // The advisory-lock owner comes from the LOCKED row, not the pre-transaction snapshot: a merge or relink that
+    // committed while this request waited for the row lock has moved the estimate to another customer, and
+    // locking the old owner would leave the booking's open-estimate check unfenced. A moved owner refuses.
+    const unarchived = await db.transaction(async (trx) => {
+      const locked = await trx('estimates').where({ id: req.params.id }).forUpdate().first();
+      if (!locked) return { gone: true };
+      if ((locked.customer_id || null) !== (estimate.customer_id || null)) return { ownerChanged: true };
+      await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, locked);
+      return { rows: await trx('estimates')
         .where({ id: req.params.id, status: estimate.status })
         // Observed-state guard, mirroring the archive route (codex pre-push
         // P1 TOCTOU): a concurrent decline/accept that resolved the archived
@@ -5122,8 +5127,13 @@ router.post('/:id/unarchive', async (req, res, next) => {
             decline_reason: null,
           } : {}),
         })
-        .returning('*');
+        .returning('*') };
     });
+    if (unarchived.gone) return res.status(404).json({ error: 'Estimate not found' });
+    if (unarchived.ownerChanged) {
+      return res.status(409).json({ error: 'This estimate moved to a different customer while you were unarchiving it. Refresh and retry.', code: 'estimate_owner_changed' });
+    }
+    const [updated] = unarchived.rows;
     if (!updated) {
       // Zero rows: either a linkage marker (permanent) or a concurrent
       // writer moved the row. Re-read once to say which.

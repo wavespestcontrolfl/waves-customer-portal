@@ -276,6 +276,25 @@ describe('createScheduleBooking runs the POST / handler', () => {
       keySpy.mockRestore(); confirmSpy.mockRestore(); welcomeSpy.mockRestore();
     });
 
+    test('the queued welcome and the tagger both carry the card recipient key (round 9)', async () => {
+      const Contact = require('../services/booking-contact-state');
+      const Welcome = require('../services/new-recurring-welcome-sms');
+      const Tagger = require('../services/appointment-tagger');
+      const { sendRecurringWelcome, tagScheduledService } = require('../routes/admin-schedule')._test;
+      jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+      const welcomeSpy = jest.spyOn(Welcome, 'sendNewRecurringWelcome').mockResolvedValue({ queued: true });
+      const tagSpy = jest.spyOn(Tagger, 'onServiceScheduled').mockResolvedValue(undefined);
+      const c = { customerId: 'cust-1', customer: { id: 'cust-1' }, svc: { id: 'visit-1' }, recurringPattern: 'monthly', createdAppointments: [], req: { approvedContact: 'key-a', approvedWelcome: true } };
+      await sendRecurringWelcome(c);
+      await tagScheduledService(c);
+      expect(welcomeSpy).toHaveBeenCalledWith(expect.objectContaining({ contactKey: 'key-a' }));
+      expect(tagSpy).toHaveBeenCalledWith('visit-1', { approvedWelcome: true, approvedContact: 'key-a' });
+      welcomeSpy.mockClear();
+      await sendRecurringWelcome({ ...c, contactDrifted: undefined, req: {} });
+      expect(welcomeSpy.mock.calls[0][0]).not.toHaveProperty('contactKey');
+      jest.restoreAllMocks();
+    });
+
     test('drift closes the unsent reminder row so the recovery sweep cannot pick it up, and leaves an audit row (round 8)', async () => {
       const Contact = require('../services/booking-contact-state');
       const AppointmentReminders = require('../services/appointment-reminders');
@@ -369,7 +388,7 @@ describe('createScheduleBooking runs the POST / handler', () => {
       await newRecurringWelcomeVerdict({}, 'cust-1');
       expect(db.mock.calls.length).toBeGreaterThan(callsBefore);
       const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
-      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof welcomeVerdict === 'boolean' \? \[\{ approvedWelcome: welcomeVerdict \}\] : \[\]\)\)/);
+      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof welcomeVerdict === 'boolean'\s*\? \[\{ approvedWelcome: welcomeVerdict, \.\.\.\(typeof req\.approvedContact === 'string' \? \{ approvedContact: req\.approvedContact \} : \{\}\) \}\] : \[\]\)\)/);
       // The pinned verdict is withheld (false) when the customer's contact changed after the card.
       expect(src).toContain('const welcomeVerdict = (await bookingContactDrifted(c)) ? false : req.approvedWelcome;');
     });

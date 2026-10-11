@@ -145,6 +145,15 @@ describe('appointment tagger welcome gate', () => {
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
   });
 
+  test('the card recipient key rides to the queued welcome; without a card none is passed (round 9)', async () => {
+    serviceRow = serviceFixture();
+    await AppointmentTagger.onServiceScheduled('svc-anchor', { approvedWelcome: true, approvedContact: 'key-a' });
+    expect(sendNewRecurringWelcome).toHaveBeenCalledWith(expect.objectContaining({ contactKey: 'key-a' }));
+    jest.clearAllMocks();
+    await AppointmentTagger.onServiceScheduled('svc-anchor', { approvedWelcome: true });
+    expect(sendNewRecurringWelcome.mock.calls[0][0]).not.toHaveProperty('contactKey');
+  });
+
   test('a pinned true verdict still honors the label-only tier suppression', async () => {
     serviceRow = serviceFixture();
     mockTierLabelStatus.mockResolvedValueOnce('label');

@@ -519,7 +519,7 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
   test('predicates on observed status/disposition and 409s with a retry message when the row moved', async () => {
     const estimate = { id: 'e1', customer_id: 'cust-1', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
     const readBuilder = makeBuilder({ first: estimate });
-    const writeBuilder = makeBuilder({});
+    const writeBuilder = makeBuilder({ first: estimate });
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
     writeBuilder.forUpdate = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
@@ -550,7 +550,7 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'cust-owner', lookupFailed: false });
     const estimate = { id: 'e2', customer_id: null, customer_phone: '(941) 555-0123', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
     const readBuilder = makeBuilder({ first: estimate });
-    const writeBuilder = makeBuilder({});
+    const writeBuilder = makeBuilder({ first: estimate });
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
     writeBuilder.forUpdate = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
@@ -563,6 +563,40 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'e2', customer_id: null }), trx, { authoritative: true });
     expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-owner']);
     expect(writeBuilder.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.raw.mock.invocationCallOrder[0]);
+    resolver.mockRestore();
+  });
+
+  function unarchiveHarness(snapshot, locked) {
+    const readBuilder = makeBuilder({ first: snapshot });
+    const writeBuilder = makeBuilder({ first: locked });
+    writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
+    writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: snapshot.id }]) }));
+    const trx = jest.fn(() => writeBuilder);
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    db.mockImplementationOnce(() => readBuilder);
+    return { trx, writeBuilder };
+  }
+
+  test('the owner changed between the snapshot and the row lock: refused 409 estimate_owner_changed, nothing locked or written (round 9)', async () => {
+    const snapshot = { id: 'e3', customer_id: 'cust-old', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    const { trx, writeBuilder } = unarchiveHarness(snapshot, { ...snapshot, customer_id: 'cust-new' });
+    const res = makeRes();
+    await unarchiveHandler({ params: { id: 'e3' }, body: {} }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'estimate_owner_changed' }));
+    expect(trx.raw).not.toHaveBeenCalled();
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('the advisory lock is resolved from the LOCKED row, not the pre-transaction snapshot (round 9)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'cust-owner', lookupFailed: false });
+    const snapshot = { id: 'e4', customer_id: null, customer_phone: '(941) 555-0100', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    unarchiveHarness(snapshot, { ...snapshot, customer_phone: '(941) 555-0199' });
+    await unarchiveHandler({ params: { id: 'e4' }, body: {} }, makeRes(), jest.fn());
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'e4', customer_phone: '(941) 555-0199' }), expect.anything(), { authoritative: true });
     resolver.mockRestore();
   });
 });

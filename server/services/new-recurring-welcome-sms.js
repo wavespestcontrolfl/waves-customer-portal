@@ -258,6 +258,7 @@ async function sendNewRecurringWelcome({
   entryPoint = 'new_recurring_welcome',
   adminUserId = null,
   emailOnly = false,
+  contactKey = null,
 } = {}) {
   if (emailOnly && !oneTimeWelcomeEmailEnabled()) return { queued: false, reason: 'gate_off' };
   const sequenceType = emailOnly ? EMAIL_SEQUENCE_TYPE : SEQUENCE_TYPE;
@@ -300,6 +301,8 @@ async function sendNewRecurringWelcome({
         entry_point: entryPoint,
         admin_user_id: adminUserId || null,
         queued_at: new Date().toISOString(),
+        // The recipient key a confirm card pinned (booking-contact-state): delivery re-checks it against the live customer.
+        ...(typeof contactKey === 'string' ? { contact_key: contactKey } : {}),
       });
     }
     // Check-and-insert ATOMIC under a per-customer advisory lock (codex
@@ -445,6 +448,34 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
   }
 }
 
+// A queued welcome that carries a recipient key goes only to the recipients the card showed. Returns a result when the
+// send must not go out now, else null. A changed phone, email or notification setting cancels it (a person sends it by
+// hand after checking the recipient); an unreadable state waits for the next try on the bounded attempt counter.
+async function contactDriftOutcome(row, meta, finish) {
+  if (typeof meta.contact_key !== 'string') return null;
+  const live = await require('./booking-contact-state').currentContactKey(row.customer_id);
+  if (live === meta.contact_key) return null;
+  if (live === null) {
+    await db('sms_sequences').where({ id: row.id }).update({
+      status: 'active', next_send_at: new Date(Date.now() + 15 * 60 * 1000), updated_at: new Date(),
+    });
+    logger.warn(`[new-recurring-welcome] recipients could not be verified for customer ${row.customer_id}; welcome requeued`);
+    return { sent: false, requeued: true };
+  }
+  await finish('cancelled', { skip_reason: 'contact_drift' });
+  logger.warn(`[new-recurring-welcome] customer ${row.customer_id}: phone, email or notification settings changed after the card; welcome not sent`);
+  try {
+    await db('activity_log').insert({
+      customer_id: row.customer_id,
+      action: 'welcome_suppressed_contact_drift',
+      description: `The queued new-recurring welcome was not sent: the customer's phone, email or notification settings changed after the program card was approved. Check the recipient, then send the welcome by hand.`,
+    });
+  } catch (err) {
+    logger.error(`[new-recurring-welcome] contact-drift audit failed for customer ${row.customer_id}: ${err.message}`);
+  }
+  return { sent: false, skipped: true, reason: 'contact_drift' };
+}
+
 async function deliverQueuedWelcome(row) {
   const emailOnly = row.sequence_type === EMAIL_SEQUENCE_TYPE;
   const meta = parseMetadata(row);
@@ -468,6 +499,9 @@ async function deliverQueuedWelcome(row) {
     await finish('cancelled', { skip_reason: 'customer_missing' });
     return { sent: false, skipped: true };
   }
+
+  const drift = await contactDriftOutcome(row, meta, finish);
+  if (drift) return drift;
 
   let service;
   if (scheduledServiceId) {

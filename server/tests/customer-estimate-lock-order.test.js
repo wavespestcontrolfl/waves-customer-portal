@@ -15,7 +15,7 @@ const LOCKS_AFTER = /pg_advisory_xact_lock|lockCustomerComms\(|lockInspectionCre
 // [name, file, how the estimate row is locked before the leaf lock]
 const SITES = [
   ['public-quote refresh', '../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', /\.forUpdate\(\)/],
-  ['admin unarchive', '../routes/admin-estimates', "where({ id: req.params.id }).forUpdate().first('id');", null],
+  ['admin unarchive', '../routes/admin-estimates', "const locked = await trx('estimates').where({ id: req.params.id }).forUpdate().first();", null],
   ['admin proposal revival', '../routes/admin-estimates', 'if (revivingBid) await require', /const locked = await trx\('estimates'\)\.where\(\{ id: estimate\.id \}\)\.forUpdate\(\)/],
   ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, estimate)', /\.forUpdate\(\)/],
 ];
@@ -27,7 +27,7 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(at).toBeGreaterThan(-1);
     if (name === 'admin unarchive') {
       const unarchive = src.indexOf("router.post('/:id/unarchive'");
-      const row = src.indexOf("where({ id: req.params.id }).forUpdate().first('id');", unarchive);
+      const row = src.indexOf("const locked = await trx('estimates').where({ id: req.params.id }).forUpdate().first();", unarchive);
       const leaf = src.indexOf(LOCK, unarchive);
       expect(row).toBeGreaterThan(unarchive);
       expect(leaf).toBeGreaterThan(row);
@@ -48,7 +48,7 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     const src = read('../routes/admin-estimates');
     const unarchive = src.indexOf("router.post('/:id/unarchive'");
     const tx = src.indexOf('db.transaction(async (trx) => {', unarchive);
-    expect(src.slice(tx, tx + 200)).toContain("forUpdate().first('id')");
+    expect(src.slice(tx, tx + 200)).toContain("forUpdate().first()");
   });
 
   test('pure revision sites of an open estimate take no per-customer estimate lock', () => {
@@ -83,6 +83,15 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(src.slice(src.indexOf('const existingDraft'), start)).toMatch(/status: 'draft'[\s\S]*whereNull\('archived_at'\)/);
   });
 
+  test('the unarchive resolves the lock owner from the locked row and refuses when the owner moved (round 9)', () => {
+    const src = read('../routes/admin-estimates');
+    const start = src.indexOf("router.post('/:id/unarchive'");
+    const body = src.slice(start, src.indexOf("router.post('/:id/follow-up'", start));
+    expect(body).toContain('lockCustomerEstimatesForEstimate(trx, locked)');
+    expect(body).not.toContain('lockCustomerEstimatesForEstimate(trx, estimate)');
+    expect(body).toContain("code: 'estimate_owner_changed'");
+  });
+
   test('one-tap init takes the customer row before the estimate lock, as start_program does (round 8)', () => {
     const src = read('../services/one-tap-purchase');
     const row = src.indexOf("await trx('customers').where({ id: customerId }).forKeyShare().first('id');");
@@ -101,7 +110,7 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
 
   test('every reopen site that may hold a null customer_id locks the prospective owner too (round 5)', () => {
     const sites = [
-      ['../routes/admin-estimates', "lockCustomerEstimatesForEstimate(trx, estimate);", 'unarchive'],
+      ['../routes/admin-estimates', "lockCustomerEstimatesForEstimate(trx, locked);", 'unarchive'],
       ['../routes/admin-estimates', 'lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked })', 'revival'],
       ['../services/estimate-extension', 'lockCustomerEstimatesForEstimate(trx, estimate)', 'extend'],
       ['../routes/public-quote', 'lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields })', 'refresh'],

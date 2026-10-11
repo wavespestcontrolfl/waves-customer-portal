@@ -9238,6 +9238,8 @@ async function sendRecurringWelcome(c) {
       recurringPattern,
       entryPoint: 'admin_recurring_appointment_created',
       adminUserId: req.technicianId,
+      // A card-approved booking queues the welcome with the recipient key the card pinned; delivery re-checks it.
+      ...(typeof req.approvedContact === 'string' ? { contactKey: req.approvedContact } : {}),
     });
   } catch (e) {
     logger.error(`[schedule] new recurring welcome SMS failed (non-blocking): ${e.message}`);
@@ -9343,7 +9345,8 @@ try {
   // A pinned verdict reaches the tagger too, so it does not re-run the lookup.
   // A contact change after the card withholds the pinned welcome (the tagger would otherwise queue it for the new recipients).
   const welcomeVerdict = (await bookingContactDrifted(c)) ? false : req.approvedWelcome;
-  await AppointmentTagger.onServiceScheduled(svc.id, ...(typeof welcomeVerdict === 'boolean' ? [{ approvedWelcome: welcomeVerdict }] : []));
+  await AppointmentTagger.onServiceScheduled(svc.id, ...(typeof welcomeVerdict === 'boolean'
+    ? [{ approvedWelcome: welcomeVerdict, ...(typeof req.approvedContact === 'string' ? { approvedContact: req.approvedContact } : {}) }] : []));
 } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 }
 
@@ -28900,7 +28903,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
-  bookingContactDrifted, sendDeferredConfirmations, sendRecurringWelcome,
+  bookingContactDrifted, sendDeferredConfirmations, sendRecurringWelcome, tagScheduledService,
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
   areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
