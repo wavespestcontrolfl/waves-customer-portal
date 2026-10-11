@@ -1754,6 +1754,11 @@ async function returnedOutboundCall(conn, { after, until = null, phone, customer
     .modify((b) => { if (until) b.where("created_at", "<=", until); })
     .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
     .whereRaw("COALESCE(duration_seconds, 0) >= 60")
+    // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
+    // only once SETTLED and not spam: a pass still holding the row's token
+    // may yet write the spam verdict, and a refresh that ran meanwhile would
+    // have recorded a solicitor call as the office keeping its word.
+    .modify((b) => { if (require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) b.whereNull("processing_token").whereRaw("processing_status IS DISTINCT FROM 'spam'"); })
     .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomerWhere(b, "customer_id", customerId); afterCursor(b, "call_log", cursor); })
     .orderBy([{ column: "created_at", order: "asc" }, { column: "id", order: "asc" }])
     .limit(size)
@@ -2265,6 +2270,11 @@ async function cardConnectedCall(conn, commitment, { after, until = null, phone,
     .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
     .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
     .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+    // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a callback proves a kept promise
+    // only once SETTLED and not spam: a pass still holding the row's token
+    // may yet write the spam verdict, and a refresh that ran meanwhile would
+    // have recorded a solicitor call as the office keeping its word.
+    .modify((b) => { if (require('../config/feature-gates').isEnabled('callbackSpamClosesParent')) b.whereNull('processing_token').whereRaw('processing_status IS DISTINCT FROM \'spam\''); })
     .modify((b) => { phoneWhere(b, 'to_phone', phone); if (customerId) b.where('customer_id', customerId); })
     .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
 }

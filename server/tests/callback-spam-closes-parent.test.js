@@ -303,9 +303,15 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     await db('call_log').where({ id: parentId }).update({ review_status: 'dismissed' });
     expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'no_verdict' });
     expect((await readCall(FIXED_PARENT_SID)).review_status).toBe('dismissed');
-    // The parent itself force-reprocessed to spam: its asks stay closed whatever the callback says.
-    await db('call_log').where({ id: parentId }).update({ processing_status: 'spam' });
-    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'parent_spam' });
+    // The parent itself force-reprocessed to spam while this callback's spam verdict stood: its cards stay
+    // closed on its own verdict, but the promise this callback dismissed is judged again and comes back.
+    await db('triage_items').where({ call_log_id: parentId, reason_code: 'missing_service_address' }).update({ status: 'resolved', resolution_rule: 'callback_spam' });
+    await db('call_commitments').where({ id: promiseId }).update({ status: 'dismissed', fulfillment: JSON.stringify({ kind: 'callback_spam', record_type: 'call_log', record_id: childId, strength: 'direct', basis: 'callback_reached_solicitor' }) });
+    await db('call_log').where({ id: parentId }).update({ processing_status: 'spam', metadata: JSON.stringify({ callback_verdict: { spam: true, callback_call_log_id: childId } }) });
+    expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 0, promises: 1, standing: false, parentSpam: true });
+    expect((await db('triage_items').where({ call_log_id: parentId, reason_code: 'missing_service_address' }).first()).status).toBe('resolved');
+    expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('open');
+    expect((await readCall(FIXED_PARENT_SID)).metadata.callback_verdict).toBeUndefined();
   });
 
   test('two spam callbacks: correcting one keeps the parent settled on the other (promise re-pointed); correcting both gives everything back, one card per reason', async () => {

@@ -1196,25 +1196,33 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
     const undone = await db.transaction(async (trx) => {
       const pair = await lockCallbackPair(trx, call, parentId, { status, procGeneration });
       if (!pair.parent) return { applied: false, reason: pair.reason };
-      // The parent's OWN verdict: force-reprocessed to spam since, its asks
-      // are moot on their own and stay closed whatever the callbacks say.
-      if (pair.parent.processing_status === 'spam') return { applied: false, reason: 'parent_spam' };
       const now = new Date();
       const standing = await standingSpamCallbacks(trx, pair.parent, call.id);
       const commitments = require('./call-commitments');
       const hadVerdict = !!callMetadataObject(pair.parent).callback_verdict;
-      if (standing.length) {
-        // Still settled: the stamp moves to a callback that still stands, and
-        // each promise this callback dismissed is judged again with the full
+      // The parent's OWN verdict: force-reprocessed to spam since, its asks
+      // are moot on their own and the cards stay closed whatever the
+      // callbacks say (a later pass that clears the parent files its cards
+      // afresh). The promise is still judged below: nothing may stay
+      // dismissed on a callback that no longer proves anything.
+      const parentSpam = pair.parent.processing_status === 'spam';
+      if (standing.length || parentSpam) {
+        // Still settled: the stamp moves to a callback that still stands (or
+        // goes, when the parent's own verdict is all that stands), and each
+        // promise this callback dismissed is judged again with the full
         // proof (its own evidence boundary and linkage; a sibling promise's
         // callback, or one before a staff renewal, keeps nothing).
-        await trx('call_log').where({ id: parentId }).update({
-          metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
-            [JSON.stringify({ spam: true, callback_call_log_id: standing[0].id, at: now.toISOString() })]),
-          updated_at: now,
-        });
+        if (standing.length) {
+          await trx('call_log').where({ id: parentId }).update({
+            metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
+              [JSON.stringify({ spam: true, callback_call_log_id: standing[0].id, at: now.toISOString() })]),
+            updated_at: now,
+          });
+        } else if (hadVerdict) {
+          await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
+        }
         const judged = await commitments.rejudgeCallbackSpamDismissals(trx, parentId, call.id);
-        return { applied: true, cards: 0, promises: judged.reopened, standing: true };
+        return { applied: true, cards: 0, promises: judged.reopened, standing: standing.length > 0, ...(parentSpam ? { parentSpam: true } : {}) };
       }
       // One canonical card per reason comes back: the newest callback_spam
       // row for each reason, and only where no open / in_progress row for
