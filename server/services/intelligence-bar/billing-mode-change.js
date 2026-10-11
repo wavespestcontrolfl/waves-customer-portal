@@ -338,12 +338,22 @@ function duesMonths() {
   });
 }
 
+// Dues debits still processing, in the two shapes a monthly dues debit takes: a dues
+// PAYMENT (the cron's own already-collected predicate, retry-collectibility.js
+// findCollectedMonthlyPayment, narrowed to processing) and a completion-stamped dues INVOICE
+// paid by ACH (billing-lane.js findLiveStampedDuesInvoice, the same lookup that predicate
+// falls back to, narrowed to processing). The invoice's payment carries an invoice id and
+// an 'Invoice ...' description, so the payment predicate alone does not see it, and
+// openStampedDuesInvoices leaves processing invoices out.
 async function processingDues(dbh, customerId) {
   const { findCollectedMonthlyPayment } = require('../retry-collectibility');
+  const { findLiveStampedDuesInvoice } = require('../billing-lane');
   const out = [];
   for (const period of duesMonths()) {
     const payment = await findCollectedMonthlyPayment(customerId, period, { conn: dbh, statuses: ['processing'], withDuesInvoice: false });
     if (payment) out.push({ ...payment, monthKey: period.monthKey });
+    const invoice = await findLiveStampedDuesInvoice(dbh, customerId, period.monthKey, { openInvoiceCovers: false, processingOnly: true });
+    if (invoice) out.push({ id: `invoice:${invoice.id}`, amount: '', status: invoice.status, monthKey: period.monthKey, invoiceNumber: invoice.invoice_number || null });
   }
   return out;
 }
@@ -438,7 +448,10 @@ const SIDE_FLOW_CHECKS = [
     // pinned, so a debit that appears between the card and Confirm refuses at commit.
     const processing = facts.processing[0];
     if (processing) {
-      return refuse(`The ${monthLabel(processing.monthKey)} dues (${money(processing.amount)}) are still processing by bank debit. If the debit fails, this change would cancel its retry, so wait until it settles. Nothing was proposed.`, 'billing_dues_processing');
+      const what = processing.invoiceNumber || String(processing.id).startsWith('invoice:')
+        ? `dues invoice${processing.invoiceNumber ? ` ${processing.invoiceNumber}` : ''}`
+        : `dues (${money(processing.amount)})`;
+      return refuse(`The ${monthLabel(processing.monthKey)} ${what} ${what.startsWith('dues invoice') ? 'is' : 'are'} still processing by bank debit. If the debit fails, this change would cancel its retry, so wait until it settles. Nothing was proposed.`, 'billing_dues_processing');
     }
     const { armedRetryQuery, isMonthlyObligationRow, hasUnresolvedSiblingStripeOutcome } = require('../retry-collectibility');
     const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');

@@ -5,14 +5,14 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, unverifiedRoots: new Set(), holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, unverifiedRoots: new Set(), holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
     // whereRaw notes the dues stamp, so the open-dues query is told apart from the visits' invoices.
-    q.whereRaw = (sql, args) => { if (String(sql).includes("billed_month' = ?") && Array.isArray(args)) q.billedMonth = args[0]; if (String(sql).includes('membership_dues_month')) q.duesQuery = true; if (String(sql).includes('ambiguous_outcome')) q.ambiguousQuery = true; return q; };
+    q.whereRaw = (sql, args) => { if (String(sql).includes('line_items::jsonb @>') && Array.isArray(args)) q.stampMonth = JSON.parse(args[0])[0].membership_dues_month; if (String(sql).startsWith('status IN') && Array.isArray(args) && args.length === 1 && args[0] === 'processing') q.procOnly = true; if (String(sql).includes("billed_month' = ?") && Array.isArray(args)) q.billedMonth = args[0]; if (String(sql).includes('membership_dues_month')) q.duesQuery = true; if (String(sql).includes('ambiguous_outcome')) q.ambiguousQuery = true; return q; };
     for (const m of ['whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereRaw', 'orderBy', 'join']) q[m] = () => q;
     // limit is honoured, so a card that cut the visits at a page size would show it.
     q.limit = (n) => { q.cap = n; return q; };
@@ -34,6 +34,7 @@ jest.mock('../models/db', () => {
       if (table === 'payment_methods') return mockState.methodDetail;
       if (table === 'scheduled_services') return mockState.roots[0] || null;
       if (table.startsWith('service_completion_attempts')) return mockState.inFlight ? { id: 'att-1' } : null;
+      if (table === 'invoices' && q.procOnly) return mockState.processingInvoice && mockState.processingInvoice.month === q.stampMonth ? mockState.processingInvoice : null;
       if (table === 'stripe_orphan_charges') return mockState.orphan;
       if (table === 'payments') return q.ambiguousQuery ? (mockState.ambiguous && (!mockState.ambiguous.month || mockState.ambiguous.month === q.billedMonth) ? mockState.ambiguous : null) : (q.statuses && q.statuses.includes('processing') ? mockState.processing : mockState.armed);
       return null;
@@ -168,6 +169,7 @@ beforeEach(() => {
   mockState.ambiguous = null;
   mockState.inFlight = false;
   mockState.processing = null;
+  mockState.processingInvoice = null;
   mockState.methodsBusy = false;
   mockState.methodsAdvisoryBusy = false;
   mockState.rootPrices = {};
@@ -1191,6 +1193,35 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.processing = null;
       mockState.customer = { ...MONTHLY };
       expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
+    });
+
+    test('Codex round 18: a stamped dues INVOICE paid by ACH and still processing refuses, naming the invoice and month; the pin carries it', async () => {
+      const month = thisMonth;
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      mockState.processingInvoice = { id: 'inv-9', status: 'processing', invoice_number: 'INV-0009', month };
+      expect(await propose(LEAVE)).toMatchObject({
+        code: 'billing_dues_processing',
+        error: `The ${label} dues invoice INV-0009 is still processing by bank debit. If the debit fails, this change would cancel its retry, so wait until it settles. Nothing was proposed.`,
+      });
+      // Seen through the commit's facts too (the pin): an invoice that starts processing after the card refuses.
+      mockState.processingInvoice = null;
+      const card = await propose(LEAVE);
+      expect(card.error).toBeUndefined();
+      mockState.processingInvoice = { id: 'inv-9', status: 'processing', invoice_number: 'INV-0009', month };
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('the invoice shape is asked through the cron\'s lookup (findLiveStampedDuesInvoice), narrowed to processing; a plain processing payment still refuses', async () => {
+      const lane = require('fs').readFileSync(require.resolve('../services/billing-lane.js'), 'utf8');
+      expect(lane).toContain("processingOnly ? ['processing'] : ['paid', 'prepaid', 'processing']");
+      const card = require('fs').readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
+      expect(card).toContain("findLiveStampedDuesInvoice(dbh, customerId, period.monthKey, { openInvoiceCovers: false, processingOnly: true })");
+      mockState.customer = { ...MONTHLY };
+      mockState.processing = PROCESSING;
+      expect(await propose(LEAVE)).toMatchObject({ code: 'billing_dues_processing', error: expect.stringContaining('dues ($55.00) are still processing') });
     });
 
     test('a customer who is not leaving monthly is not asked about processing dues', async () => {

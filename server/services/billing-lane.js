@@ -1087,11 +1087,12 @@ async function findCollectedDuesPayment(dbConn, customerId, monthKey) {
 // shares — completion, the monthly cron, the retry sweep's classifier — so a
 // month a stamped invoice already bills is never charged a second time.
 // `openInvoiceCovers: false` keeps only invoices that are paid / prepaid /
-// processing.
+// processing; `processingOnly` narrows that to processing (an ACH debit not yet settled).
 async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   excludeScheduledServiceId = null,
   excludeInvoiceId = null,
   openInvoiceCovers = true,
+  processingOnly = false,
 } = {}) {
   // Lazy, like the status vocabulary below: invoice.js requires this module.
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
@@ -1104,7 +1105,7 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   if (openInvoiceCovers) {
     invoiceQuery.whereRaw(`status NOT IN (${placeholders(CANCELLED_SERVICE_RESOLVED_STATUSES)})`, CANCELLED_SERVICE_RESOLVED_STATUSES);
   } else {
-    const paid = ['paid', 'prepaid', 'processing'];
+    const paid = processingOnly ? ['processing'] : ['paid', 'prepaid', 'processing'];
     invoiceQuery.whereRaw(`status IN (${placeholders(paid)})`, paid);
   }
   // A PAYER-billed invoice is a third party's obligation, never the customer's
