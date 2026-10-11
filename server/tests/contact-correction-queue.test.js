@@ -553,6 +553,44 @@ describe('round-19 hardening', () => {
     }
   });
 
+  it('a primary-mark transfer between the match and the lock fails the attach closed', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000c2';
+    const base = { deleted_at: null, first_name: 'Jordan', last_name: 'Riverz', email: null, phone: '+15550001111', address_line1: null, address_line2: null, city: null, state: null, zip: null, updated_at: 1 };
+    const saved = process.env.GATE_SMS_SHARED_PHONE_LINK;
+    try {
+      process.env.GATE_SMS_SHARED_PHONE_LINK = 'true';
+      const knex = makeStubKnex({
+        contact_correction_jobs: [jobRow()],
+        customers: [{ ...base, id: CUSTOMER_ID, sms_primary_for_shared_phone: true }, { ...base, id: OTHER, sms_primary_for_shared_phone: false }],
+      });
+      // The transfer commits while this attach waits for A's lock: A unmarked, B marked.
+      const trxProxy = new Proxy(knex, {
+        apply(target, thisArg, args) {
+          const chain = target(...args);
+          const origForUpdate = chain.forUpdate;
+          chain.forUpdate = () => {
+            knex._data.customers[0].sms_primary_for_shared_phone = false;
+            knex._data.customers[1].sms_primary_for_shared_phone = true;
+            return origForUpdate();
+          };
+          return chain;
+        },
+      });
+      knex.transaction = async (fn) => fn(trxProxy);
+      expect(await queue.attachContactCorrectionContext(1, { senderPhone: '+15550001111', knex })).toBe(false);
+      expect(knex._data.contact_correction_jobs[0].customer_id).toBeFalsy();
+    } finally {
+      if (saved === undefined) delete process.env.GATE_SMS_SHARED_PHONE_LINK; else process.env.GATE_SMS_SHARED_PHONE_LINK = saved;
+    }
+  });
+
+  it('enqueue refuses when the attached customer differs from the route\'s match', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000c2';
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ customer_id: CUSTOMER_ID })] });
+    expect(await queue.enqueueContactCorrectionJob(1, { customerId: OTHER, knex })).toBe(false);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
+  });
+
   it('each processing pass claims under a distinct lock owner', async () => {
     // (round-19) A shared hostname:pid owner let a pass whose lock went
     // stale overwrite the state of the in-process sibling that reclaimed

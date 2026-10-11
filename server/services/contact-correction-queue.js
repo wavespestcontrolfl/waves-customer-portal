@@ -159,6 +159,13 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
     if (!existing.customer_id) {
       const attached = await attachContactCorrectionContext(jobId, { senderPhone: existing.sender_phone, knex });
       if (!attached) return false;
+    } else if (String(existing.customer_id) !== String(customerId)) {
+      // The route resolved the sender to a different account than the locked
+      // attach did (a primary-mark transfer or phone reassignment landed in
+      // between): fail closed — the reservation stays for the stale sweep to
+      // cancel, and no correction is applied to either account (codex #6268 r5).
+      logger.warn(`[contact-correction-queue] job ${jobId}: attached customer differs from the route's match; not enqueuing`);
+      return false;
     }
     // The ATTACHED customer is authoritative (codex #3413 r34): the
     // locked attach matched, snapshotted, and floored ONE customer — the
@@ -210,6 +217,29 @@ async function attachReservationBody(jobId, body, { knex = db } = {}) {
 }
 
 /**
+ * The sender's one account: a single non-deleted phone match, or — when more
+ * than one row shares the number and GATE_SMS_SHARED_PHONE_LINK is on — the
+ * one row staff marked primary (services/shared-phone-link.js, the same rule
+ * as the route's matcher, codex #6268 r3). Null = unlinked, fail closed.
+ */
+async function resolveSenderCustomerId(trx, senderKey) {
+  const matches = await trx('customers')
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+    .limit(2)
+    .select('id');
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    const link = require('./shared-phone-link');
+    if (link.sharedPhoneLinkEnabled()) {
+      const picked = await link.pickMarkedCustomerForPhone(trx, senderKey);
+      if (picked.customer) return picked.customer.id;
+    }
+  }
+  return null;
+}
+
+/**
  * Stamp the SOURCE-TIME context on a reservation as soon as the route
  * matches the sender to a customer (codex #3413 r19): linkage + the
  * match-time CAS baseline. Promotion of a crash-orphaned reservation
@@ -237,30 +267,24 @@ async function attachContactCorrectionContext(jobId, { senderPhone, knex = db } 
     if (!senderKey) return false;
     return await knex.transaction(async (trx) => {
       const contactCorrection = require('./contact-correction');
-      const matches = await trx('customers')
-        .whereNull('deleted_at')
-        .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
-        .limit(2)
-        .select('id');
-      // A shared number attaches only the one account staff marked for it,
-      // under GATE_SMS_SHARED_PHONE_LINK — the same rule as the route's
-      // matcher, so a marked sender's correction is not linked there and
-      // dropped here as stale_no_context (codex #6268 r3).
-      let matchedId = matches.length === 1 ? matches[0].id : null;
-      if (!matchedId && matches.length > 1) {
-        const link = require('./shared-phone-link');
-        if (link.sharedPhoneLinkEnabled()) {
-          const picked = await link.pickMarkedCustomerForPhone(trx, senderKey);
-          matchedId = picked.customer ? picked.customer.id : null;
-        }
-      }
-      if (!matchedId) return false;
+      // One matcher, run TWICE: once to find the row to lock, and again
+      // under that row's lock, so the locked row is still the sender's
+      // resolved account at commit time. A primary-mark transfer A→B or a
+      // phone reassignment between the two reads resolves to B (or to
+      // nothing) on the second pass, and the attach fails closed instead of
+      // pairing B's correction with A's row (codex #6268 r5). The clearing
+      // half of a transfer needs A's row, which this lock holds.
+      const firstId = await resolveSenderCustomerId(trx, senderKey);
+      if (!firstId) return false;
       const row = await trx('customers')
-        .where({ id: matchedId })
+        .where({ id: firstId })
         .whereNull('deleted_at')
         .forUpdate()
         .first();
       if (!row) return false;
+      if (tail10(row.phone) !== senderKey) return false;
+      const lockedId = await resolveSenderCustomerId(trx, senderKey);
+      if (lockedId !== row.id) return false;
       const snapshot = contactCorrection.snapshotContactCasFields(row);
       const floorRow = await trx('contact_correction_jobs')
         .where({ customer_id: row.id, status: 'done' })
