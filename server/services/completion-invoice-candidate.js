@@ -32,17 +32,31 @@ function completionSuppressorInvoiceLookup(conn, where) {
 // STATUSES, below). Void / canceled rows collected nothing and are replaced by
 // a normal mint, so they are not listed. One query for many visits; the same
 // status vocabulary as the single-visit lookups.
-async function completionInvoicesOnVisits(conn, visitIds) {
+async function completionInvoicesOnVisits(conn, visitIds, { lock = false } = {}) {
   if (!visitIds || !visitIds.length) return [];
   const InvoiceService = require('./invoice');
   const dropped = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES
     .filter((status) => !COMPLETION_TERMINAL_INVOICE_STATUSES.includes(status));
-  return conn('invoices')
+  const columns = ['id', 'scheduled_service_id', 'total', 'status', 'created_at'];
+  const rows = await conn('invoices')
     .whereIn('scheduled_service_id', visitIds)
     .whereNotIn('status', dropped)
     .orderBy('created_at', 'desc')
     .orderBy('id', 'desc')
-    .select('id', 'scheduled_service_id', 'total', 'status');
+    .select(columns);
+  if (!lock || !rows.length) return rows;
+  // `lock`: the rows are taken FOR UPDATE NOWAIT in id order and read AGAIN
+  // from the locked rows, so a total, status or visit link changed by an invoice
+  // edit (which locks only the invoice row) is seen as committed, or the call
+  // fails with a lock-not-available error (55P03) instead of waiting: voids,
+  // refunds and the issued-invoice closeout lock invoice -> customer, so a
+  // caller that already holds the customer must never wait on an invoice.
+  const wanted = new Set(visitIds.map(String));
+  const locked = await conn('invoices').whereIn('id', rows.map((r) => r.id)).orderBy('id', 'asc').forUpdate().noWait().select(columns);
+  const time = (r) => new Date(r.created_at).getTime() || 0;
+  return locked
+    .filter((r) => wanted.has(String(r.scheduled_service_id)) && !dropped.includes(r.status))
+    .sort((x, y) => time(y) - time(x) || String(y.id).localeCompare(String(x.id)));
 }
 
 // Terminal status that BLOCKS the completion mint instead of being

@@ -155,9 +155,9 @@ const VISIT_HARD_LIMIT = 2000;
 // (completion-invoice-candidate.js). Each visit gets the newest such invoice's
 // id and total, read with the completion path's own status rules, so the card
 // predicts no new charge for it and the pin changes when an invoice appears.
-async function withVisitInvoices(dbh, visits) {
+async function withVisitInvoices(dbh, visits, { lock = false } = {}) {
   const { completionInvoicesOnVisits } = require('../completion-invoice-candidate');
-  const rows = await completionInvoicesOnVisits(dbh, visits.map((v) => v.id));
+  const rows = await completionInvoicesOnVisits(dbh, visits.map((v) => v.id), { lock });
   const newest = new Map();
   for (const r of rows) if (!newest.has(String(r.scheduled_service_id))) newest.set(String(r.scheduled_service_id), r);
   return visits.map((v) => {
@@ -177,14 +177,16 @@ async function upcomingVisits(dbh, customerId, { lock = false } = {}) {
     .where({ customer_id: customerId })
     .where(function live() { whereVisitRowLive(this, today); })
     .select(VISIT_COLUMNS);
-  const ordered = async () => withVisitInvoices(dbh, await base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1));
+  const ordered = async () => withVisitInvoices(dbh, await base().orderBy('scheduled_date', 'asc').orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1), { lock });
   if (!lock) return ordered();
   // At commit: lock every candidate visit FOR UPDATE, the row lock the
   // Schedule save takes (admin-schedule.js PUT /:id/update-details: customer
   // row first, then the visit row), in id order so two writers locking more
   // than one visit never cross. The projection is read AFTER the locks, with
   // the card's own ordering and cut: a save that committed first is seen, and
-  // one that has not is held off until this transaction ends.
+  // one that has not is held off until this transaction ends. The visits'
+  // invoices are then locked too (withVisitInvoices), last: customers -> claim
+  // -> visits -> invoices, with NOWAIT on the invoices.
   await base().orderBy('id', 'asc').limit(VISIT_HARD_LIMIT + 1).forUpdate();
   return ordered();
 }
@@ -214,13 +216,21 @@ function stillDue(prediction) {
 // card names the method the way completion will pick it. Pinned with the card.
 const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false };
 
+const AUTOPAY_UNVERIFIED = 'Could not verify Auto Pay eligibility. Try again in a moment. Nothing was changed.';
+
+// The saved-method lookup runs in its fail-closed mode (customerOnAutopay
+// failClosed: a broken read throws instead of reading as "no saved method"),
+// so a card never says "invoiced" while completion may still charge the saved
+// card. An unreadable lookup throws an error carrying `autopayUnverified`.
 async function chargeContext(dbh, customerId, row) {
-  let autopayActive = false;
+  let autopayActive;
   try {
     autopayActive = await require('../autopay-eligibility').customerOnAutopay({
       id: customerId, autopay_enabled: row.autopay_enabled, autopay_paused_until: row.autopay_paused_until,
-    }, { db: dbh });
-  } catch { /* unreadable: the card says invoiced */ }
+    }, { db: dbh, failClosed: true });
+  } catch (e) {
+    throw Object.assign(new Error(AUTOPAY_UNVERIFIED), { autopayUnverified: true, cause: e });
+  }
   return { autopayActive: !!autopayActive, gate: !!require('../../config/feature-gates').isEnabled('completionAutopayCharge') };
 }
 
@@ -368,7 +378,7 @@ async function customerPageRefusal(dbh, customerId, row, fields) {
     requestedPerApplicationFee: fields.per_application_fee,
     loadRates: async () => row,
     loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(dbh, customerId),
-    loadUnpricedFutureVisits: () => BillingModeRules.unpricedFutureBillableVisits(dbh, customerId),
+    loadUnpricedFutureVisits: (customerOverride) => BillingModeRules.unpricedFutureBillableVisits(dbh, customerId, { customerOverride }),
   });
   return message ? refuse(`${message}${message.endsWith('.') ? '' : '.'} Nothing was proposed.`, 'billing_mode_rule') : null;
 }
@@ -530,7 +540,13 @@ async function billingEditProposal(customerId, updates, dbh = db) {
   const dues = resolveBillingLane(after).mode === 'monthly_membership' && resolveBillingLane(row).mode === 'monthly_membership'
     ? await require('../monthly-dues-eligibility').monthlyDuesVerdict(dbh, customerId, { overrides: parsed.fields })
     : null;
-  const charge = await chargeContext(dbh, customerId, row);
+  let charge;
+  try {
+    charge = await chargeContext(dbh, customerId, row);
+  } catch (e) {
+    if (e && e.autopayUnverified) return refuse(AUTOPAY_UNVERIFIED, 'billing_autopay_unverified');
+    throw e;
+  }
   return {
     pin: cardPin(row, visits, parsed.fields, charge),
     version: row.version,
@@ -598,8 +614,23 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
   // The customer's billing fields, payer and Auto Pay state, plus every
   // upcoming visit's billing fields the card's projection was built from,
   // read with the visits locked FOR UPDATE (see upcomingVisits).
-  const visits = await upcomingVisits(trx, customerId, { lock: true });
-  if (cardPin(lockedBefore, visits, fields, await chargeContext(trx, customerId, lockedBefore)) !== pin) {
+  let visits;
+  try {
+    visits = await upcomingVisits(trx, customerId, { lock: true });
+  } catch (e) {
+    // NOWAIT on an invoice another transaction holds (an edit, void or refund
+    // in flight): refuse, never wait with the customer row held.
+    if (e && e.code === '55P03') throw changed('An invoice on an upcoming visit is being changed right now — nothing was updated. Try again in a minute.');
+    throw e;
+  }
+  let charge;
+  try {
+    charge = await chargeContext(trx, customerId, lockedBefore);
+  } catch (e) {
+    if (e && e.autopayUnverified) throw changed(AUTOPAY_UNVERIFIED);
+    throw e;
+  }
+  if (cardPin(lockedBefore, visits, fields, charge) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
   const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits);

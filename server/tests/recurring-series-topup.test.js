@@ -228,7 +228,7 @@ function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
   colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null,
   customerCoveredTerm = false, customerPendingUnresolvedTerm = false,
-  captureCustomerCalls = null, activeHold = false,
+  captureCustomerCalls = null, activeHold = false, addons = [],
 } = {}) {
   // isCustomerPrepayLive's two customer-wide probes (Codex GitHub r7 P1):
   // (a) coveredTermsAsOf(conn, null) — a still-validly-paid term (active/
@@ -339,7 +339,7 @@ function topupScenario({
     }
     if (table === 'scheduled_service_addons') {
       if (op === 'columnInfo') return {};
-      return [];
+      return addons;
     }
     if (table === 'customers') {
       if (op === 'first') {
@@ -938,6 +938,48 @@ describe('topUpRecurringSeriesLocked — billable-amount gate', () => {
     const result = await topUpRecurringSeriesLocked(conn, 10, { horizonDays: 30 });
     expect(result.skipped).toBeNull();
     expect(inserted.length).toBeGreaterThan(0);
+  });
+});
+
+describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pending lane edit', () => {
+  // The Intelligence Bar card and the customer page ask this before moving a
+  // customer into per_visit / one_time: the SAME seriesExtensionUnbillable the
+  // top-up consults, for the next occurrences with their cadence-filtered
+  // add-ons, under the billing fields the customer would have.
+  const { seriesNextOccurrencesUnbillable } = require('../routes/admin-schedule');
+  const PER_VISIT = { billing_mode: 'per_visit', monthly_rate: 0 };
+
+  test('a root priced only by an add-on that is due on the anchor date alone refuses; the top-up refuses the same series', async () => {
+    const oneTimeAddon = { id: 'a1', estimated_price: '100.00', recurring_pattern: 'one_time', service_key_snapshot: null };
+    const fixture = { parentOverrides: { create_invoice_on_complete: false, estimated_price: '100.00' }, addons: [oneTimeAddon] };
+    const { conn } = topupScenario(fixture);
+    const verdict = await seriesNextOccurrencesUnbillable(conn, 10, { customerOverride: PER_VISIT });
+    expect(verdict).toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    // The parallel root-price check would have passed this root ($100 on the row).
+    const { conn: topConn, inserted } = topupScenario(fixture);
+    const topUp = await topUpRecurringSeriesLocked(topConn, 10, { horizonDays: 30 });
+    expect(topUp.skipped).toBe('unbillable');
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
+    const flat = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' } });
+    expect(await seriesNextOccurrencesUnbillable(flat.conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+    const recurring = topupScenario({
+      parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' },
+      addons: [{ id: 'a2', estimated_price: '50.00', recurring_pattern: null, service_key_snapshot: null }],
+    });
+    expect(await seriesNextOccurrencesUnbillable(recurring.conn, 10, { customerOverride: PER_VISIT })).toBeNull();
+  });
+
+  test('the lane the customer would have decides: an unpriced plan is billable on monthly dues, not per visit; no override reads the live customer', async () => {
+    const unpriced = { parentOverrides: { create_invoice_on_complete: false, estimated_price: null } };
+    const monthly = { billing_mode: 'monthly_membership', monthly_rate: 120, waveguard_tier: 'silver' };
+    expect(await seriesNextOccurrencesUnbillable(topupScenario(unpriced).conn, 10, { customerOverride: monthly })).toBeNull();
+    expect(await seriesNextOccurrencesUnbillable(topupScenario(unpriced).conn, 10, { customerOverride: PER_VISIT }))
+      .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(await seriesNextOccurrencesUnbillable(topupScenario({ ...unpriced, customerOverrides: monthly }).conn, 10))
+      .toBeNull();
   });
 });
 

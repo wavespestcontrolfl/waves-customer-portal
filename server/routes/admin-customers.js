@@ -3965,7 +3965,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // and its fail-open policy live in services/billing-mode-rules.js, shared
     // with the Intelligence Bar's update_customer.
     const BillingModeRules = require('../services/billing-mode-rules');
-    const unpricedFutureBillableVisits = () => BillingModeRules.unpricedFutureBillableVisits(db, req.params.id);
+    const unpricedFutureBillableVisits = (customerOverride) => BillingModeRules.unpricedFutureBillableVisits(db, req.params.id, { customerOverride });
     if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
       // Lane prerequisites (monthly rate, per-application fee, live annual
       // term, priced upcoming visits) — one copy, services/billing-mode-rules.js,
@@ -3993,7 +3993,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear,
       });
       if (resolvedOnClear.mode !== 'monthly_membership') {
-        const billable = await unpricedFutureBillableVisits();
+        const billable = await unpricedFutureBillableVisits({ billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear });
         if (billable.length > 0) {
           const plural = billable.length !== 1;
           return res.status(400).json({

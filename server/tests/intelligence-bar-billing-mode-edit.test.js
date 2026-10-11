@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], invoiceBusy: false, autopayUnreadable: false, unbillableSeries: new Set(), covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -17,7 +17,9 @@ jest.mock('../models/db', () => {
     // where(fn) runs its callback (the live-visit clause is built that way).
     q.where = (f) => { if (typeof f === 'function') f.call(q, q); return q; };
     q.whereIn = (col) => { if (col === 'id') q.byId = true; return q; };
-    q.forUpdate = () => { q.locked = true; if (table === 'customers') mockState.log.push('customers:row'); return q; };
+    q.forUpdate = () => { q.locked = true; if (table === 'customers') mockState.log.push('customers:row'); if (table === 'invoices') mockState.log.push('invoices:lock'); return q; };
+    // NOWAIT on a locked invoice fails at once (Postgres 55P03), it never waits.
+    q.noWait = () => { q.nowait = true; return q; };
     q.select = (...cols) => { q.cols = cols; return q; };
     q.first = async (...cols) => {
       if (table === 'customers') {
@@ -27,6 +29,7 @@ jest.mock('../models/db', () => {
         return mockState.customer ? { ...mockState.customer, version: mockState.version } : null;
       }
       if (table === 'annual_prepay_terms') return mockState.term;
+      if (table === 'scheduled_services') return mockState.roots[0] || null;
       if (table === 'payments') return mockState.armed;
       return null;
     };
@@ -37,7 +40,10 @@ jest.mock('../models/db', () => {
         if (q.byId) rows = mockState.roots;
         if (q.cols.flat().includes('payer_id')) mockState.log.push(q.locked ? 'visits:lock' : 'visits:read');
       }
-      if (table === 'invoices') rows = mockState.invoices;
+      if (table === 'invoices') {
+        if (q.nowait && mockState.invoiceBusy) return Promise.reject(Object.assign(new Error('could not obtain lock on row'), { code: '55P03' })).then(resolve, reject);
+        rows = mockState.invoices;
+      }
       if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
       if (q.cap != null) rows = rows.slice(0, q.cap);
       return Promise.resolve(rows).then(resolve, reject);
@@ -69,13 +75,18 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/autopay-eligibility', () => ({
   ...jest.requireActual('../services/autopay-eligibility'),
-  customerOnAutopay: jest.fn(async () => mockState.chargeable),
+  customerOnAutopay: jest.fn(async () => { if (mockState.autopayUnreadable) throw new Error('payment_methods read failed'); return mockState.chargeable; }),
 }));
 jest.mock('../utils/customer-billing-lock', () => ({
   withCustomerBillingLock: jest.fn(),
   tryClaimCustomerCollectionInTrx: jest.fn(async () => { mockState.log.push('claim'); return !mockState.claimHeld; }),
 }));
 jest.mock('../services/recurring-series-topup', () => ({ eligibleSeriesParentIds: jest.fn(async () => mockState.seriesIds) }));
+// The top-up's own billable-amount verdict (admin-schedule.js), with its own tests in recurring-series-topup.test.js.
+jest.mock('../routes/admin-schedule', () => ({
+  seriesNextOccurrencesUnbillable: jest.fn(async (conn, id) => (mockState.unbillableSeries.has(String(id))
+    ? { code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' } : null)),
+}));
 jest.mock('../routes/admin-customers', () => ({ _private: { ANNUAL_PREPAY_LOCK_NS: 0x4150 } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockNotifyAdmin = jest.fn(async () => {});
@@ -116,6 +127,9 @@ beforeEach(() => {
   mockState.prepayBusy = false;
   mockState.roots = [];
   mockState.invoices = [];
+  mockState.unbillableSeries = new Set();
+  mockState.invoiceBusy = false;
+  mockState.autopayUnreadable = false;
   mockState.seriesIds = [];
   mockState.covered = new Set();
   mockState.pending = new Set();
@@ -673,6 +687,7 @@ describe('Codex round 5 on #6118', () => {
     mockState.visits = [];
     mockState.seriesIds = ['root-1'];
     mockState.roots = [{ id: 'root-1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2026-09-01' }];
+    mockState.unbillableSeries = new Set(['root-1']);
     for (const billing_mode of ['per_visit', 'one_time']) {
       expect(await propose({ billing_mode })).toMatchObject({
         code: 'billing_mode_rule',
@@ -681,8 +696,8 @@ describe('Codex round 5 on #6118', () => {
     }
     expect(require('../services/recurring-series-topup').eligibleSeriesParentIds)
       .toHaveBeenCalledWith(expect.anything(), { customerId: CUSTOMER_ID });
-    // A priced plan (the root query returns no unpriced root) does not block.
-    mockState.roots = [];
+    // A plan the top-up's verdict finds billable does not block.
+    mockState.unbillableSeries = new Set();
     expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
   });
 
@@ -773,26 +788,20 @@ describe('Codex round 7 on #6118', () => {
   const gates = () => require('../config/feature-gates').gates;
   const root = (extra = {}) => ({ id: 'root-1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2026-09-01', estimated_price: null, prepaid_amount: null, ...extra });
 
-  test('P1: an ongoing plan is judged on its overlaid series template, not the root\'s historical columns', async () => {
-    const was = gates().editApptPriceServiceScope;
-    try {
-      gates().editApptPriceServiceScope = true;
-      mockState.customer = { ...MONTHLY };
-      mockState.seriesIds = ['root-1'];
-      // Unpriced root, priced template: the top-up extends at $90, so per_visit is allowed.
-      mockState.roots = [root({ recurring_template_overrides: { estimated_price: 90 } })];
-      expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
-      // Priced root, template cleared to $0: the next visits are unpriced, so it refuses.
-      mockState.roots = [root({ estimated_price: '100.00', recurring_template_overrides: { estimated_price: 0 } })];
-      expect(await propose({ billing_mode: 'per_visit' })).toMatchObject({ code: 'billing_mode_rule', error: expect.stringMatching(/ongoing recurring plan/) });
-      // A template that makes the plan a callback exempts it.
-      mockState.roots = [root({ recurring_template_overrides: { is_callback: true } })];
-      expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
-      // Gate off: the overlay is a no-op, the root's own columns decide.
-      gates().editApptPriceServiceScope = false;
-      mockState.roots = [root({ recurring_template_overrides: { estimated_price: 90 } })];
-      expect((await propose({ billing_mode: 'per_visit' })).code).toBe('billing_mode_rule');
-    } finally { gates().editApptPriceServiceScope = was; }
+  test('P1: an ongoing plan is judged by the top-up\'s own verdict for its next occurrences, under the lane being set', async () => {
+    const { seriesNextOccurrencesUnbillable } = require('../routes/admin-schedule');
+    mockState.customer = { ...MONTHLY };
+    mockState.seriesIds = ['root-1'];
+    mockState.roots = [root()];
+    // The verdict (cadence-filtered add-ons and discounts per date) says billable: allowed.
+    expect((await propose({ billing_mode: 'per_visit' })).error).toBeUndefined();
+    // It says unbillable (a root priced only by an add-on that drops off the next date): refused.
+    mockState.unbillableSeries = new Set(['root-1']);
+    expect(await propose({ billing_mode: 'one_time' })).toMatchObject({ code: 'billing_mode_rule', error: expect.stringMatching(/ongoing recurring plan/) });
+    // The verdict is asked with the billing fields the customer would have, not the ones it has.
+    expect(seriesNextOccurrencesUnbillable).toHaveBeenLastCalledWith(
+      expect.anything(), 'root-1', { customerOverride: expect.objectContaining({ billing_mode: 'one_time', monthly_rate: 55 }) },
+    );
   });
 
   test('P2: a live visit with an existing invoice is not predicted as a new charge, and the pin carries the invoice', async () => {
@@ -820,6 +829,53 @@ describe('Codex round 7 on #6118', () => {
     expect(customerWrites()).toHaveLength(0);
     // A void invoice does not count (the query leaves it out): the same as no invoice.
     expect((await propose(LEAVE)).pin).toBe(before.pin);
+  });
+
+  test('P2: the commit locks the visits\' invoices last (customers, claim, visits, invoices), re-reads them locked, and a retotal refuses', async () => {
+    mockState.customer = { ...MONTHLY };
+    const visit = { id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null };
+    mockState.visits = [visit];
+    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'sent' }];
+    const card = await propose(LEAVE);
+    const commit = () => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+    mockState.log = [];
+    expect((await commit()).error).toBeUndefined();
+    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'invoices:lock']);
+    // An invoice edit that retotaled it between the card and the commit (read back from the locked row).
+    mockState.updates = [];
+    mockState.customer = { ...MONTHLY };
+    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '150.00', status: 'sent' }];
+    expect(await commit()).toMatchObject({ preview_changed: true });
+    expect(customerWrites()).toHaveLength(0);
+    // A void between the card and the commit changes the pin too.
+    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'void' }];
+    expect(await commit()).toMatchObject({ preview_changed: true });
+    // An invoice held by another transaction is never waited on with the customer row held.
+    mockState.invoices = [{ id: 'inv-9', scheduled_service_id: 'iv1', total: '120.00', status: 'sent' }];
+    mockState.invoiceBusy = true;
+    const busy = await commit();
+    expect(busy).toMatchObject({ preview_changed: true });
+    expect(busy.error).toMatch(/invoice on an upcoming visit is being changed right now/);
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('P2: an unreadable saved-method lookup fails closed in the proposal and at the confirmation; a readable one is unchanged', async () => {
+    const { customerOnAutopay } = require('../services/autopay-eligibility');
+    mockState.customer = { ...MONTHLY };
+    mockState.visits = [{ id: 'iv1', status: 'confirmed', scheduled_date: '2099-05-01', estimated_price: '120.00', prepaid_amount: null, is_callback: false, service_type: 'Pest Control', payer_id: null }];
+    const card = await propose(LEAVE);
+    expect(card.error).toBeUndefined();
+    expect(customerOnAutopay).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ failClosed: true }));
+    mockState.autopayUnreadable = true;
+    expect(await propose(LEAVE)).toEqual({
+      error: 'Could not verify Auto Pay eligibility. Try again in a moment. Nothing was changed.', code: 'billing_autopay_unverified',
+    });
+    const commit = () => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+    const refused = await commit();
+    expect(refused).toMatchObject({ preview_changed: true, error: 'Could not verify Auto Pay eligibility. Try again in a moment. Nothing was changed.' });
+    expect(customerWrites()).toHaveLength(0);
+    mockState.autopayUnreadable = false;
+    expect((await commit()).error).toBeUndefined();
   });
 
   test('P2: the unpriced-visit check has no row cut: a billable visit behind 100+ exempt ones still refuses per_visit', async () => {

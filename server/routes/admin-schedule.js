@@ -5981,10 +5981,14 @@ async function seriesExtensionUnbillable(conn, {
   // The cancel-reseed's in-term placement selects add-ons by the replaced
   // occurrence, not the visit's own day — the check reads the same set.
   addonDate = null,
+  // The billing fields the customer WOULD have (a pending lane edit asking
+  // whether the series stays billable under it); merged over the live row.
+  customerOverride = null,
 }) {
   if (!dates.length) return null;
-  const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
-  if (!gateCustomer) return null;
+  const liveCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
+  if (!liveCustomer) return null;
+  const gateCustomer = customerOverride ? { ...liveCustomer, ...customerOverride } : liveCustomer;
   const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
   // Codex pre-push audit P1 (deferred fast-follow): routed through
   // storedOccurrenceFloorPrice so this guard reads the SAME restacked
@@ -6024,6 +6028,47 @@ async function seriesExtensionUnbillable(conn, {
       : null,
     isCallback: !!parent.is_callback,
     serviceType: extendSeriesServiceType,
+  });
+}
+
+// The billable-amount verdict (seriesExtensionUnbillable, the one the nightly
+// top-up asks per candidate date) for the next `occurrences` visits the top-up
+// would mint on series `parentId`, optionally under billing fields the customer
+// does not have yet (`customerOverride`: a pending lane edit). Inputs are
+// gathered exactly as extendSeriesOnceLocked gathers them: the root with its
+// series template overlaid, the latest live visit's anchor, the cadence walk
+// (nextRecurringDate / seasonalSafeShift / too-close / not-past), the add-ons
+// due on each date, the stored discount scope and the sibling-resolved
+// create-invoice stamp. Dates are the cadence dates only: occupancy clashes
+// move a visit, not its price. Read-only (the legacy cap freeze the extension
+// writes is skipped). Null when the series has nothing to extend or bills.
+async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null, occurrences = 3 } = {}) {
+  const cols = await conn('scheduled_services').columnInfo();
+  let parent = await conn('scheduled_services').where({ id: parentId }).first();
+  if (!parent || !parent.is_recurring || !parent.recurring_pattern) return null;
+  parent = overlayRecurringTemplateOverrides(parent, cols);
+  const latest = await latestLiveSeriesVisit(conn, parentId);
+  if (!latest) return null;
+  const rOpts = {
+    ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
+  const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+  const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+  const blackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
+  const dates = [];
+  for (let attempt = 1; attempt <= 12 && dates.length < occurrences; attempt += 1) {
+    const candidate = seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, blackoutDates);
+    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate) || candidate <= etDateString()) continue;
+    dates.push(candidate);
+  }
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+  const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
+  const seriesCioc = cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined;
+  return seriesExtensionUnbillable(conn, {
+    parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc, customerOverride,
   });
 }
 
@@ -28695,6 +28740,7 @@ module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
 // address resolver, so "same property" can never mean something different
 // in the duplicate guard than it does in the pest-rides-lawn preview.
 module.exports.topUpScopeInput = topUpScopeInput;
+module.exports.seriesNextOccurrencesUnbillable = seriesNextOccurrencesUnbillable;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;

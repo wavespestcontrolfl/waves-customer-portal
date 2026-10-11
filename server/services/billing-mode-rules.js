@@ -29,7 +29,7 @@ const ANNUAL_NEEDS_TERM = 'Annual prepay requires a PAID term covering today —
 // exempt — they complete without an invoice by design in every lane. Errors
 // return [] — fail OPEN (completion logging backstops) rather than
 // hard-locking saves.
-async function unpricedFutureBillableVisits(dbh, customerId) {
+async function unpricedFutureBillableVisits(dbh, customerId, { customerOverride = null } = {}) {
   try {
     const { etDateString } = require('../utils/datetime-et');
     const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
@@ -49,35 +49,34 @@ async function unpricedFutureBillableVisits(dbh, customerId) {
     // No row cut: callbacks and always-free types are removed below, so a
     // limit applied before that would hide billable rows behind exempt ones.
     const billable = rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
-    return [...billable, ...await unpricedOngoingSeries(dbh, customerId, new Set(billable.map((r) => String(r.id))))];
+    return [...billable, ...await unpricedOngoingSeries(dbh, customerId, new Set(billable.map((r) => String(r.id))), customerOverride)];
   } catch { return []; }
 }
 
 // Ongoing recurring plans (the series root with recurring_ongoing = true) the
-// nightly top-up would still extend, whose root carries no price: their next
-// visits would be minted unpriced even when no live occurrence is left today.
-// The selector is the top-up's own (recurring-series-topup.js
-// eligibleSeriesParentIds), narrowed to this customer. Same exemptions as the
-// visits above. Returned with series: true. A failed read here adds nothing
-// (fail open, like the visit read).
-async function unpricedOngoingSeries(dbh, customerId, alreadyListed) {
+// nightly top-up would still extend, whose next visits would be minted with no
+// billable amount under the lane being set: their next visits would complete
+// unbilled even when no live occurrence is left today. The selector is the
+// top-up's own (recurring-series-topup.js eligibleSeriesParentIds), narrowed to
+// this customer; the verdict is the top-up's own too (admin-schedule.js
+// seriesNextOccurrencesUnbillable -> seriesExtensionUnbillable, asked for the
+// next occurrences with their cadence-filtered add-ons and discounts and the
+// billing fields `customerOverride` would give the customer). The floor math is
+// not repeated here. Returned with series: true. A failed read here adds
+// nothing (fail open, like the visit read).
+async function unpricedOngoingSeries(dbh, customerId, alreadyListed, customerOverride) {
   try {
-    const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
     const { eligibleSeriesParentIds } = require('./recurring-series-topup');
+    const { seriesNextOccurrencesUnbillable } = require('../routes/admin-schedule');
     const ids = (await eligibleSeriesParentIds(dbh, { customerId })).filter((id) => !alreadyListed.has(String(id)));
-    if (!ids.length) return [];
-    // The whole root row: the top-up extends from the root with its series
-    // template overlaid (recurring-template-overrides.js, the function
-    // topUpRecurringSeriesLocked uses), so the service, callback and price
-    // fields are judged on the overlaid row, not the root's historical columns.
-    const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
-    const roots = await dbh('scheduled_services').whereIn('id', ids).select('*');
-    const positive = (v) => Number(v) > 0;
-    return roots
-      .map((r) => overlayRecurringTemplateOverrides(r, { recurring_template_overrides: 'recurring_template_overrides' in r }))
-      .filter((r) => !positive(r.estimated_price) && !positive(r.prepaid_amount))
-      .filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type))
-      .map((r) => ({ id: r.id, service_type: r.service_type, is_callback: r.is_callback, scheduled_date: r.scheduled_date, series: true }));
+    const out = [];
+    for (const id of ids) {
+      const verdict = await seriesNextOccurrencesUnbillable(dbh, id, { customerOverride });
+      if (!verdict || verdict.code !== 'RECURRING_WITHOUT_BILLABLE_AMOUNT') continue;
+      const root = await dbh('scheduled_services').where({ id }).first('id', 'service_type', 'is_callback', 'scheduled_date');
+      if (root) out.push({ ...root, series: true });
+    }
+    return out;
   } catch { return []; }
 }
 
@@ -131,7 +130,7 @@ function unpricedVisitsRefusal(mode, billable) {
  *                               the route never passes it), else undefined
  *   loadRates()               — the stored { monthly_rate, per_application_fee }
  *   loadLiveAnnualTerm()      — liveAnnualPrepayTerm for this customer
- *   loadUnpricedFutureVisits() — unpricedFutureBillableVisits for this customer
+ *   loadUnpricedFutureVisits(customerOverride) — unpricedFutureBillableVisits for this customer
  */
 async function billingModeRefusal(mode, facts) {
   // Lazy, like the route's own require before the extraction.
@@ -148,7 +147,8 @@ async function billingModeRefusal(mode, facts) {
   if (mode === 'per_application' && !(parseFloat(effectiveFee) > 0)) return PER_APPLICATION_NEEDS_FEE;
   if (mode === 'annual_prepay' && !(await facts.loadLiveAnnualTerm())) return ANNUAL_NEEDS_TERM;
   if (mode === 'per_visit' || mode === 'one_time') {
-    const billable = await facts.loadUnpricedFutureVisits();
+    // The billing fields the customer would have, for the ongoing-plan verdict.
+    const billable = await facts.loadUnpricedFutureVisits({ billing_mode: mode, monthly_rate: effectiveRate, per_application_fee: effectiveFee });
     if (billable.length > 0) return unpricedVisitsRefusal(mode, billable);
   }
   return null;
