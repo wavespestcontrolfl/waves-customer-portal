@@ -161,13 +161,32 @@ function parseData(value) {
 // Each priced one-time line the estimate sells. A manual accept books and
 // invoices none of them (skipAutoSchedule + skipSetupInvoice), so each one
 // says the work is scheduled and billed by hand.
+//
+// The WaveGuard membership fee is the one component the engine counts in
+// oneTime.total but keeps OUT of oneTime.items (v1-legacy-mapper), so it is
+// listed as its own line from the fee field; a line sum that still falls
+// short of the aggregate is refused by unitemizedOneTimeRefusal below.
+const MEMBERSHIP_FEE_PATHS = [
+  ['oneTime', 'membershipFee'], ['result', 'oneTime', 'membershipFee'], ['results', 'oneTime', 'membershipFee'], ['engineResult', 'oneTime', 'membershipFee'],
+];
+const readPath = (data, path) => path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), data);
+function membershipFeeLine(data) {
+  for (const path of MEMBERSHIP_FEE_PATHS) {
+    const n = Number(readPath(data, path));
+    if (Number.isFinite(n) && n > 0) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(n), consequence: 'schedule_and_invoice_by_hand' };
+  }
+  return null;
+}
 function oneTimeLineEffects(estimate, converter) {
   if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return [];
-  const items = converter.estimateOneTimeItemsFromData(parseData(estimate.estimate_data), { collapseMirrored: true });
-  return items
+  const data = parseData(estimate.estimate_data);
+  const items = converter.estimateOneTimeItemsFromData(data, { collapseMirrored: true });
+  const lines = items
     .map((item) => ({ name: String(item.name || item.label || item.service || 'One-time service').trim(), amount: positiveAmount(item) }))
     .filter((line) => line.amount != null)
     .map((line) => ({ kind: 'one_time_line', ...line, consequence: 'schedule_and_invoice_by_hand' }));
+  const fee = membershipFeeLine(data);
+  return fee ? [...lines, fee] : lines;
 }
 
 // The one-time total the estimate carries as a plain number: the row's
@@ -179,7 +198,7 @@ const ONE_TIME_AGGREGATE_PATHS = [
 ];
 function oneTimeAggregateTotal(estimate) {
   const data = parseData(estimate.estimate_data);
-  const candidates = [estimate.onetime_total, ...ONE_TIME_AGGREGATE_PATHS.map((path) => path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), data))];
+  const candidates = [estimate.onetime_total, ...ONE_TIME_AGGREGATE_PATHS.map((path) => readPath(data, path))];
   for (const value of candidates) {
     if (value == null || value === '') continue;
     const n = Number(value);
@@ -192,16 +211,23 @@ function oneTimeAggregateTotal(estimate) {
 // total that no line itemizes: the card could show only an amount, not the
 // work staff must schedule and invoice by hand after the accept. Returns the
 // refusal, or null when every one-time dollar is on a listed line.
+//
+// Partial itemization refuses too: when the listed lines (items plus the
+// membership fee) add up to less than the aggregate, the card header would
+// say one amount and the lines another, and staff would invoice only the
+// lines. A line sum ABOVE the aggregate is fine: the engine pools a manual
+// discount into the total without pushing it into the lines.
+const UNITEMIZED_TOLERANCE = 0.01;
 function unitemizedOneTimeRefusal(estimate, lines) {
-  if (lines.some((line) => line.kind === 'one_time_line')) return null;
   const total = oneTimeAggregateTotal(estimate);
   if (total == null) return null;
-  return {
-    message: `This estimate carries a ${money(total)} one-time charge with no itemized service, so the bar cannot say what to schedule and invoice after the accept. Accept it from the estimate page.`,
-    statusCode: 409,
-    code: 'one_time_unitemized',
-    total,
-  };
+  const listed = round2(lines.filter((line) => line.kind === 'one_time_line').reduce((sum, line) => sum + Number(line.amount || 0), 0));
+  const missing = round2(total - listed);
+  if (missing <= UNITEMIZED_TOLERANCE) return null;
+  const message = listed > 0
+    ? `This estimate carries a ${money(total)} one-time charge, but its listed services add up to ${money(listed)}: ${money(missing)} is not itemized, so the bar cannot say what to schedule and invoice after the accept. Accept it from the estimate page.`
+    : `This estimate carries a ${money(total)} one-time charge with no itemized service, so the bar cannot say what to schedule and invoice after the accept. Accept it from the estimate page.`;
+  return { message, statusCode: 409, code: 'one_time_unitemized', total, listed, missing };
 }
 
 // ── The side-effect gate: one context for everything outside the transaction ──
@@ -408,6 +434,38 @@ const BELL_LABELS = {
 const customerIdOf = ({ acceptedEstimate, proposalCustomer }) => acceptedEstimate.customer_id || proposalCustomer?.id || null;
 const idText = (v) => (v == null ? null : String(v));
 
+// What the operator reads when a step the card promised did not run. The
+// accept is committed and the idempotent path never re-runs the plan, so the
+// result must say which effect still needs a hand.
+const STEP_LABELS = {
+  group_followup_transfer: 'The follow-up messages were not moved to the other estimate in the group',
+  property_link: 'The property was not linked to the accepted services',
+  multi_home: 'The other homes on this account were not marked',
+  lead_won: 'The linked lead was not marked won',
+  membership_email: 'The membership email was not sent',
+  welcome_sms: 'The welcome text was not sent',
+  termite_agreement: 'The termite agreement was not created',
+  admin_bell: 'The office notification was not posted',
+};
+const SKIPPED_STEP_SUFFIX = ': what it acts on changed after the accept. Complete it by hand.';
+
+async function warnLeadsNotWon(step, ctx) {
+  const ids = step.target.lead_ids;
+  let rows;
+  try {
+    rows = await ctx.database('leads').whereIn('id', ids).select('id', 'status', 'deleted_at');
+  } catch (err) {
+    logger.warn(`[estimate-manual-acceptance] lead_won verify unreadable for estimate ${ctx.acceptedEstimate.id}: ${err.message}`);
+    ctx.warnings?.push(`The linked lead could not be verified as won${SKIPPED_STEP_SUFFIX}`);
+    return;
+  }
+  const won = new Set(rows.filter((r) => r.status === 'won' && !r.deleted_at).map((r) => String(r.id)));
+  const notWon = ids.filter((id) => !won.has(String(id)));
+  if (!notWon.length) return;
+  logger.warn(`[estimate-manual-acceptance] lead_won skipped ${notWon.length} lead(s) for estimate ${ctx.acceptedEstimate.id}: not won after conversion`, { notWon });
+  ctx.warnings?.push(`${STEP_LABELS.lead_won}${SKIPPED_STEP_SUFFIX}`);
+}
+
 const POST_COMMIT_STEPS = {
   group_followup_transfer: {
     // The sibling that takes over the group's follow-up messages.
@@ -482,7 +540,13 @@ const POST_COMMIT_STEPS = {
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] linked lead conversion failed for estimate ${acceptedEstimate.id}: ${err.message}`);
         ctx.warnings.push('Linked lead was not marked won automatically.');
+        return;
       }
+      // The helper skips a lead that closed or was deleted between the
+      // target check and its own read, without throwing. The card promised
+      // these leads, so the rows are read back and any one not won is a
+      // warning the operator finishes by hand.
+      if (step.target?.lead_ids?.length) await warnLeadsNotWon(step, ctx);
     },
   },
   membership_email: {
@@ -557,20 +621,6 @@ const POST_COMMIT_STEPS = {
 
 const sameTarget = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
-// What the operator reads when a step the card promised did not run. The
-// accept is committed and the idempotent path never re-runs the plan, so the
-// result must say which effect still needs a hand.
-const STEP_LABELS = {
-  group_followup_transfer: 'The follow-up messages were not moved to the other estimate in the group',
-  property_link: 'The property was not linked to the accepted services',
-  multi_home: 'The other homes on this account were not marked',
-  lead_won: 'The linked lead was not marked won',
-  membership_email: 'The membership email was not sent',
-  welcome_sms: 'The welcome text was not sent',
-  termite_agreement: 'The termite agreement was not created',
-  admin_bell: 'The office notification was not posted',
-};
-const SKIPPED_STEP_SUFFIX = ': what it acts on changed after the accept. Complete it by hand.';
 function skippedStepWarning(ctx, step) {
   if (!Array.isArray(ctx.warnings)) return;
   ctx.warnings.push(`${STEP_LABELS[step.step] || `The ${step.step} step did not run`}${SKIPPED_STEP_SUFFIX}`);

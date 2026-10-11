@@ -437,6 +437,38 @@ describe('round 9, finding 1: a one-time total with no itemized line refuses', (
   });
 });
 
+describe('round 10, finding 1: a partly itemized one-time total refuses; the membership fee is its own line', () => {
+  const withFee = (items, extra = {}) => makeWorld({
+    estimateOverrides: {
+      monthly_total: '49.00', onetime_total: '449.00',
+      estimate_data: JSON.stringify({
+        recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+        result: { oneTime: { total: 449, membershipFee: 99, items } },
+        ...extra,
+      }),
+    },
+  });
+  test('a $99 membership fee outside the items is listed as its own line, so $350 + $99 covers the $449 total', async () => {
+    const world = withFee([{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }]);
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'schedule_and_invoice_by_hand' },
+    ]);
+  });
+  test('lines that add up to less than the total refuse, naming the missing amount', async () => {
+    const world = withFee([{ service: 'german_roach', name: 'German Roach Cleanout', price: 300 }]);
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unitemized', message: expect.stringContaining('$50.00 is not itemized') });
+  });
+  test('lines above the total (a pooled manual discount) do not refuse', () => {
+    const lines = [{ kind: 'one_time_line', amount: 350 }, { kind: 'one_time_line', amount: 99 }];
+    expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '400.00', estimate_data: '{}' }, lines)).toBeNull();
+    expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '449.00', estimate_data: '{}' }, lines)).toBeNull();
+    expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '449.02', estimate_data: '{}' }, lines)).toMatchObject({ missing: 0.02 });
+  });
+});
+
 describe('finding 5 (round 6): the one-time amount is what the customer pays', () => {
   test('a $100 line discounted to $90 is listed at $90; a line discounted to $0 is not listed', async () => {
     const world = makeWorld({
@@ -862,6 +894,18 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     changing.world = world;
     const { result } = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: changing, world });
     expect(result.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/^The membership email was not sent: what it acts on changed after the accept\. Complete it by hand\.$/)]));
+  });
+  test('round 10, finding 2: an approved lead the helper skipped (closed after the target check) is a warning, a won one is not', async () => {
+    const leads = resolvingLeads(['lead-aaaaaa']);
+    const world = makeWorld({ extraTables: { leads: [{ id: 'lead-aaaaaa', status: 'won', deleted_at: null }] } });
+    const { result } = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: leads, world });
+    expect(result.warnings.filter((w) => /linked lead/i.test(w))).toEqual([]);
+
+    const skipping = resolvingLeads(['lead-aaaaaa']);
+    const closed = makeWorld({ extraTables: { leads: [{ id: 'lead-aaaaaa', status: 'lost', deleted_at: null }] } });
+    const second = await dryThenReal({ dryLeads: resolvingLeads(['lead-aaaaaa']), realLeads: skipping, world: closed });
+    expect(skipping.markLinkedLeadEstimateAccepted).toHaveBeenCalled();
+    expect(second.result.warnings).toContain('The linked lead was not marked won: what it acts on changed after the accept. Complete it by hand.');
   });
   test('round 9, finding 2: every post-commit step has an operator label for its skip', () => {
     expect(Object.keys(Effects.STEP_LABELS).sort()).toEqual(Object.keys(Effects.POST_COMMIT_STEPS).sort());
