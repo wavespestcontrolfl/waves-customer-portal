@@ -212,13 +212,17 @@ function pooledDiscountLine(estimate, lines) {
 const ONE_TIME_AGGREGATE_PATHS = [
   ['onetime_total'], ['oneTime', 'total'], ['results', 'oneTime', 'total'], ['result', 'oneTime', 'total'], ['engineResult', 'oneTime', 'total'],
 ];
+//
+// An explicit zero is authoritative: the mapper lets a positive item be
+// discounted to an aggregate of exactly $0, and the customer accepted $0.
+// The first field that holds a number decides; null only when none does.
 function oneTimeAggregateTotal(estimate) {
   const data = parseData(estimate.estimate_data);
   const candidates = [estimate.onetime_total, ...ONE_TIME_AGGREGATE_PATHS.map((path) => readPath(data, path))];
   for (const value of candidates) {
     if (value == null || value === '') continue;
     const n = Number(value);
-    if (Number.isFinite(n) && n > 0) return round2(n);
+    if (Number.isFinite(n)) return n > 0 ? round2(n) : 0;
   }
   return null;
 }

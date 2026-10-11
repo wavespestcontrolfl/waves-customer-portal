@@ -385,7 +385,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
   test('is listed from the estimate\'s one-time items, with name and amount', async () => {
     const world = makeWorld({
       estimateOverrides: {
-        monthly_total: '49.00',
+        monthly_total: '49.00', onetime_total: '350.00',
         estimate_data: JSON.stringify({
           recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
           result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }, { service: 'free', name: 'Free Look', price: 0 }] } },
@@ -432,8 +432,24 @@ describe('round 9, finding 1: a one-time total with no itemized line refuses', (
   test('the aggregate is read from the row, the engine result and the legacy top-level shape', () => {
     expect(Effects.oneTimeAggregateTotal({ onetime_total: '12.50', estimate_data: '{}' })).toBe(12.5);
     expect(Effects.oneTimeAggregateTotal({ onetime_total: null, estimate_data: JSON.stringify({ oneTime: { total: '99' } }) })).toBe(99);
-    expect(Effects.oneTimeAggregateTotal({ onetime_total: '0', estimate_data: JSON.stringify({ results: { oneTime: { total: 0 } } }) })).toBeNull();
+    expect(Effects.oneTimeAggregateTotal({ onetime_total: '0', estimate_data: JSON.stringify({ results: { oneTime: { total: 0 } } }) })).toBe(0);
+    expect(Effects.oneTimeAggregateTotal({ onetime_total: null, estimate_data: '{}' })).toBeNull();
     expect(Effects.unitemizedOneTimeRefusal({ onetime_total: '0', estimate_data: '{}' }, [])).toBeNull();
+  });
+  test('round 13: an explicit $0 aggregate is authoritative: a $100 item discounted to $0 lists a -$100 discount line', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        monthly_total: '49.00', onetime_total: '0.00',
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { total: 0, items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 100 }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((l) => [l.name, l.amount])).toEqual([
+      ['German Roach Cleanout', 100], ['Discount applied to the one-time total', -100],
+    ]);
   });
 });
 
@@ -497,6 +513,7 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
   test('a $100 line discounted to $90 is listed at $90; a line discounted to $0 is not listed', async () => {
     const world = makeWorld({
       estimateOverrides: {
+        onetime_total: '290.00',
         estimate_data: JSON.stringify({
           recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
           result: { oneTime: { items: [
@@ -517,6 +534,7 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
   test('the operator-approved net (manualFinalOneTime) wins over the discounted and list prices: $250 beats $300', async () => {
     const world = makeWorld({
       estimateOverrides: {
+        onetime_total: '250.00',
         estimate_data: JSON.stringify({
           recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
           result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 300, priceAfterDiscount: 280, manualFinalOneTime: 250 }] } },
