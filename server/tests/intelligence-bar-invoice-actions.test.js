@@ -110,7 +110,8 @@ function makeDb() {
         const day = q.raws.find((r) => /AT TIME ZONE/.test(r.sql))?.bindings?.[0];
         const total = state.stripe_orphan_charges
           .filter((o) => o.resolved === false && o.created_day === day
-            && state.ib_pending_actions.some((a) => a.tool_name === 'charge_invoice' && a.status === 'confirmed' && String(a.params?.invoice_id) === String(o.invoice_id)))
+            && state.ib_pending_actions.some((a) => a.tool_name === 'charge_invoice' && a.status === 'confirmed' && String(a.params?.invoice_id) === String(o.invoice_id)
+              && String(o.source || '').endsWith(`:ib:${a.id}`)))
           .reduce((sum, o) => sum + Number(o.amount), 0);
         return { total: String(total) };
       }
@@ -386,7 +387,7 @@ describe('send_invoice commit', () => {
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
         expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' },
-        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), verifyEffects: expect.any(Function) },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), verifyEffects: expect.any(Function) },
       },
     });
     // The exact recipients ride only to the send, never into the result.
@@ -720,7 +721,7 @@ describe('charge_invoice commit', () => {
     expect(Invoices.chargeInvoiceFromBar).toHaveBeenCalledWith({
       invoiceId: INV, body: { paymentMethodId: CARD, expectedTotal: 132.87 }, actor: { technicianId: 'staff-1' }, chargeGuard: expect.any(Function),
       version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/) },
-      closeoutTarget: 'none',
+      closeoutTarget: 'none', ibActionId: 'op-1',
     });
     expect(result).toMatchObject({ success: true, charged: true, payment_id: 'pay-1', amount: '$132.87', card: 'Visa •••• 4242' });
     expect(executionOutcome(result)).toBe('completed');
@@ -880,19 +881,19 @@ describe('round 3: real-schema SQL, orphans, closeout on the charge card, lines'
     // Every other table.column the new queries name is declared by a migration of that table.
     for (const [table, columns] of Object.entries({
       stripe_invoice_charge_attempts: ['invoice_id', 'status', 'resolved_at'],
-      stripe_orphan_charges: ['invoice_id', 'amount', 'resolved', 'created_at'],
+      stripe_orphan_charges: ['invoice_id', 'amount', 'resolved', 'created_at', 'source'],
       payments: ['payment_date', 'status', 'amount', 'metadata'],
     })) for (const column of columns) expect(declared(table, column)).toBe(true);
   });
   const paidSql = (day) => tools.paidTodayQuery(knex, day).toSQL().sql;
 
   test('an unresolved orphan charge from today for an invoice the bar charged counts at its amount; resolved, other-day and non-bar ones do not', async () => {
-    state.ib_pending_actions = [{ tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: { outcome_unknown: true }, params: { invoice_id: INV2 } }];
+    state.ib_pending_actions = [{ id: 'op-9', tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: { outcome_unknown: true }, params: { invoice_id: INV2 } }];
     state.stripe_orphan_charges = [
-      { invoice_id: INV2, amount: '400.00', resolved: false, created_day: TODAY },
-      { invoice_id: INV2, amount: '90.00', resolved: true, created_day: TODAY },
-      { invoice_id: INV2, amount: '80.00', resolved: false, created_day: '2000-01-01' },
-      { invoice_id: 'inv-page', amount: '70.00', resolved: false, created_day: TODAY },
+      { invoice_id: INV2, amount: '400.00', resolved: false, created_day: TODAY, source: 'invoice_card_on_file:ib:op-9' },
+      { invoice_id: INV2, amount: '90.00', resolved: true, created_day: TODAY, source: 'invoice_card_on_file:ib:op-9' },
+      { invoice_id: INV2, amount: '80.00', resolved: false, created_day: '2000-01-01', source: 'invoice_card_on_file:ib:op-9' },
+      { invoice_id: 'inv-page', amount: '70.00', resolved: false, created_day: TODAY, source: 'invoice_card_on_file' },
     ];
     await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(40000);
     // 1,100 committed + 400 orphan: only $0.00 left for a charge of $0.01 more than the limit allows.
@@ -1076,3 +1077,83 @@ describe('round 5', () => {
     expect(webhook).toMatch(/approvedTarget: paymentIntent\.metadata\?\.approved_closeout_target \|\| null/);
   });
 });
+
+describe('round 6', () => {
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  // Item 2: the card shows the operator's own words, quoted; both are pinned.
+  test('send: the card quotes the personal message and the notes verbatim, or says there are none', async () => {
+    let card = await preview('send_invoice', { invoice_id: INV });
+    expect(cardLines('send_invoice', card).map((l) => l.text)).toContain('No personal message. No notes.');
+    state.invoices[0].email_message = 'Thanks for choosing us, Robin!';
+    state.invoices[0].notes = 'Treated the lanai "twice".';
+    card = await preview('send_invoice', { invoice_id: INV });
+    const lines = cardLines('send_invoice', card).map((l) => l.text);
+    expect(lines).toContain('Personal message in the email: "Thanks for choosing us, Robin!"');
+    expect(lines).toContain('Notes on the invoice and PDF: "Treated the lanai "twice"."');
+    expect(lines).not.toContain('No personal message. No notes.');
+  });
+
+  test('send: both fields are in the approved version digest, and an edit after the card refuses the confirmed send', async () => {
+    const { approvedInvoiceVersionDigest } = require('../services/invoice-helpers');
+    const base = approvedInvoiceVersionDigest(state.invoices[0]);
+    expect(approvedInvoiceVersionDigest({ ...state.invoices[0], email_message: 'hi' })).not.toBe(base);
+    expect(approvedInvoiceVersionDigest({ ...state.invoices[0], notes: 'hi' })).not.toBe(base);
+    state.invoices[0].notes = 'First draft';
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    state.invoices[0].notes = 'Second draft';
+    await expect(run()).resolves.toMatchObject({ preview_changed: true });
+    expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('send: a message or notes longer than 600 characters refuses the card instead of cutting it', async () => {
+    state.invoices[0].email_message = 'x'.repeat(601);
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_copy_too_long', error: expect.stringMatching(/send it from the Invoices page/) });
+    state.invoices[0].email_message = 'x'.repeat(600);
+    state.invoices[0].notes = 'y'.repeat(601);
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'invoice_copy_too_long' });
+    state.invoices[0].notes = 'y'.repeat(600);
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ preview: true });
+  });
+
+  // Item 3: orphans are counted by the action that made them.
+  test('cap: an orphan from a page charge on an invoice that has an old bar approval does not count; a bar orphan does', async () => {
+    state.ib_pending_actions = [{ id: 'op-old', tool_name: 'charge_invoice', status: 'confirmed', consumed_day: '2000-01-01', result: {}, params: { invoice_id: INV2 } }];
+    state.stripe_orphan_charges = [{ invoice_id: INV2, amount: '300.00', resolved: false, created_day: TODAY, source: 'invoice_card_on_file' }];
+    await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(0);
+    // The webhook's orphan for the same invoice, with no bar mark, does not count either.
+    state.stripe_orphan_charges.push({ invoice_id: INV2, amount: '200.00', resolved: false, created_day: TODAY, source: 'invoice_payment_webhook' });
+    await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(0);
+    // A bar orphan made by another action on that invoice does not match op-old; the one made by op-old does.
+    state.stripe_orphan_charges.push({ invoice_id: INV2, amount: '150.00', resolved: false, created_day: TODAY, source: 'invoice_card_on_file:ib:op-other' });
+    await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(0);
+    state.stripe_orphan_charges.push({ invoice_id: INV2, amount: '120.00', resolved: false, created_day: TODAY, source: 'invoice_card_on_file:ib:op-old' });
+    await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(12000);
+  });
+
+  test('cap: the orphan join names the bar mark in real SQL, and the mark is stamped on the PaymentIntent and on both orphan writers', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const sql = tools.dailyTotalsQuery(knex, { excludeInvoiceId: INV, day: '2099-01-01' }).toSQL().sql;
+    expect(sql).toContain("o.source LIKE '%:ib:' || pa.id::text");
+    knex.destroy();
+    const { orphanSourceFor } = require('../services/orphan-source');
+    expect(orphanSourceFor('invoice_card_on_file', null)).toBe('invoice_card_on_file');
+    const id = '12345678-1234-4234-8234-123456789abc';
+    expect(orphanSourceFor('invoice_payment_webhook', id)).toBe(`invoice_payment_webhook:ib:${id}`);
+    expect(orphanSourceFor('invoice_payment_webhook', id).length).toBeLessThanOrEqual(64);
+    expect(read('../services/stripe.js')).toMatch(/ib_action_id: String\(ibActionId\)\.slice\(0, 36\)/);
+    expect(read('../services/stripe.js')).toMatch(/orphanSourceFor\('invoice_card_on_file', initiatedVia === 'intelligence_bar' \? ibActionId : null\)/);
+    expect(read('../routes/stripe-webhook.js')).toMatch(/orphanSourceFor\('invoice_payment_webhook', paymentIntent\.metadata\?\.initiated_via === 'intelligence_bar' \? paymentIntent\.metadata\.ib_action_id : null\)/);
+    expect(read('../routes/admin-invoices.js')).toMatch(/ibActionId: req\.ibActionId \|\| null/);
+  });
+
+  // Item 1: the attachment fence has two halves.
+  test('send: the approved attachment digest rides to the email leg, which refuses a different list right before the provider call (source contract)', () => {
+    expect(read('../services/invoice.js')).toMatch(/expectedVersion && expectedVersion\.attachments !== undefined \? \{ expectedAttachments: expectedVersion\.attachments \}/);
+    const email = read('../services/invoice-email.js');
+    expect(email).toMatch(/options\.expectedAttachments !== undefined && attachmentsFingerprintDigest\(attachmentRows\) !== options\.expectedAttachments/);
+    expect(email.indexOf('attachmentsFingerprintDigest(attachmentRows) !== options.expectedAttachments')).toBeLessThan(email.indexOf('sendgrid.isConfigured()'));
+  });
+});
+

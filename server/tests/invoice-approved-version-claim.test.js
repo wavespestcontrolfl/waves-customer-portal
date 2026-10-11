@@ -80,10 +80,12 @@ function makeDb(initial, { mutateAfterFirstRead = null } = {}) {
 const approved = (row) => ({ updatedAtMs: new Date(row.updated_at).getTime(), digest: approvedInvoiceVersionDigest(row) });
 
 describe('approvedInvoiceVersionDigest', () => {
-  test('moves with the amount due, the credit and the lines, not with unrelated columns', () => {
+  test('moves with the amount due, the credit, the lines and the customer-facing words (email message, notes), not with unrelated columns', () => {
     const row = baseRow();
     const digest = approvedInvoiceVersionDigest(row);
-    expect(approvedInvoiceVersionDigest({ ...row, notes: 'x', updated_at: new Date() })).toBe(digest);
+    expect(approvedInvoiceVersionDigest({ ...row, service_type: 'Other', updated_at: new Date() })).toBe(digest);
+    expect(approvedInvoiceVersionDigest({ ...row, notes: 'x' })).not.toBe(digest);
+    expect(approvedInvoiceVersionDigest({ ...row, email_message: 'x' })).not.toBe(digest);
     expect(approvedInvoiceVersionDigest({ ...row, credit_applied: '10.00' })).not.toBe(digest);
     expect(approvedInvoiceVersionDigest({ ...row, line_items: JSON.stringify([{ description: 'Quarterly Pest Control', amount: 129 }]) })).not.toBe(digest);
     // The same lines as an already parsed array (jsonb) read the same.

@@ -64,7 +64,8 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString } = require('../../utils/datetime-et');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest } = require('../invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint } = require('../invoice-helpers');
+const { BAR_ORPHAN_SOURCE_MARK } = require('../orphan-source');
 const { isCardMethodType } = require('../stripe-pricing');
 const { planSendEffects, planChargeEffects, annualPrepayRefusal, approvedCloseoutTarget } = require('./invoice-action-effects');
 
@@ -189,6 +190,22 @@ const cardEffects = (effects) => effects.filter((e) => e.line).map(({ key, line,
 
 // ── send_invoice ────────────────────────────────────────────────
 
+// The invoice's own words that reach the customer: the email's personal message (invoices.email_message) and the notes
+// printed on the invoice and PDF (invoices.notes). The card quotes both in full; a longer text is refused, never cut.
+const CUSTOM_COPY_LIMIT = 600;
+function customerCopy(invoice) {
+  const message = String(invoice.email_message || '').trim();
+  const notes = String(invoice.notes || '').trim();
+  if (message.length > CUSTOM_COPY_LIMIT || notes.length > CUSTOM_COPY_LIMIT) {
+    return refusal(`The invoice message is longer than the card can show (${CUSTOM_COPY_LIMIT} characters); send it from the Invoices page.`, 'invoice_copy_too_long', { invoice_id: invoice.id });
+  }
+  const lines = [
+    message && `Personal message in the email: "${message}"`,
+    notes && `Notes on the invoice and PDF: "${notes}"`,
+  ].filter(Boolean);
+  return { lines: lines.length ? lines : ['No personal message. No notes.'] };
+}
+
 const TEXT_MESSAGE = 'the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link';
 
 // The send refusals the bar checks before reading recipients (the route's own
@@ -246,6 +263,8 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   if (!who) return refusal('Invoice not found', 'invoice_not_found');
   const legs = sendLegs(who, invoice, dueCents);
   if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
+  const copy = customerCopy(invoice);
+  if (copy.error) return copy;
   const totalCents = toCents(invoice.total);
   // Everything the send also does after it delivers: one list, from the handler's own predicates.
   const customer = await db('customers').where({ id: invoice.customer_id }).first();
@@ -267,6 +286,8 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     channels: [legs.phone && 'text', legs.email && 'email'].filter(Boolean).join(' and '),
     text: legs.text,
     email: legs.emailLine,
+    // The operator's own words that reach the customer, verbatim (the email and the PDF render them).
+    custom_copy: copy.lines,
     effects: cardEffects(planned.effects),
     // The delivery effect's sentence, for the confirmation card's summary.
     send_note: planned.effects.find((e) => e.key === 'delivery').line,
@@ -282,6 +303,8 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       first_delivery: planned.effects.find((e) => e.key === 'delivery').state === 'first',
       // Every post-delivery effect (closeout, lead, reminders, review ...): a change is drift.
       effects: planned.digest,
+      // The attachment list as the email handoff re-checks it (the same files the attachments effect pins).
+      attachments: digestOfFingerprint(planned.effects.find((e) => e.key === 'attachments').state),
       payer_id: invoice.payer_id || null,
       recipients: digest(recipients),
     },
@@ -382,6 +405,8 @@ async function commitSend(input, actionContext) {
       version: {
         updatedAtMs: pinned.invoice_version,
         digest: pinned.version_digest,
+        // The approved attachment list: the email leg checks it once more right before the provider call.
+        attachments: pinned.attachments,
         // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
         verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,
       },
@@ -450,7 +475,10 @@ function orphanChargesTodayQuery(database, day) {
     .whereExists(function barApproval() {
       this.select(database.raw('1')).from('ib_pending_actions as pa')
         .where({ 'pa.tool_name': 'charge_invoice', 'pa.status': 'confirmed' })
-        .whereRaw("pa.params->>'invoice_id' = o.invoice_id::text");
+        // The orphan's source carries the confirmed action that made the charge (orphanSourceFor): a page charge,
+        // or a bar charge from another action, on the same invoice does not match.
+        .whereRaw("pa.params->>'invoice_id' = o.invoice_id::text")
+        .whereRaw(`o.source LIKE '%${BAR_ORPHAN_SOURCE_MARK}' || pa.id::text`);
     })
     .sum({ total: 'o.amount' });
 }
@@ -743,6 +771,8 @@ async function runCharge(input, pinned, actionContext) {
     // charge's own invoice lock, before any Stripe call.
     version: { updatedAtMs: pinned.invoice_version, digest: pinned.version_digest },
     closeoutTarget: plan._closeout_target,
+    // The confirmed action id: PaymentIntent metadata and the orphan row's source, so the daily cap counts its own orphans.
+    ibActionId: actionContext?.operationId || null,
   });
   const result = chargeOutcome(plan, status, json || {});
   logger.info(`[intelligence-bar:invoice-actions] charge ${plan.invoice_id}: ${result.payment_status || result.code || 'done'}`);
@@ -765,6 +795,7 @@ function cardLines(toolName, preview) {
       ...(preview.lines.length > CARD_LINES_SHOWN ? [{ kind: 'billing', text: `All ${preview.lines.length} invoice lines are listed; lines ${CARD_LINES_SHOWN + 1} on are under "Show more"` }] : []),
       { kind: 'comms', text: preview.text },
       { kind: 'comms', text: preview.email },
+      ...(preview.custom_copy || []).map((text) => ({ kind: 'comms', text })),
       ...effects,
     ];
   }

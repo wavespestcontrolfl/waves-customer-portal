@@ -17,6 +17,7 @@ const {
   STALE_CLAIM_WINDOW_MS,
 } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
+const { orphanSourceFor } = require('../services/orphan-source');
 // Admin bell rows go through NotificationService (not raw inserts) so the
 // GATE_ADMIN_BELL_POLICY chokepoint covers them.
 const NotificationService = require('../services/notification-service');
@@ -630,7 +631,8 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason,
         customer_id: paymentIntent.metadata?.waves_customer_id || paymentIntent.metadata?.customer_id || null,
         invoice_id: paymentIntent.metadata?.waves_invoice_id || paymentIntent.metadata?.invoice_id || null,
         amount,
-        source: 'invoice_payment_webhook',
+        // A bar charge's PaymentIntent names its confirmed action, so the bar's daily cap counts this row.
+        source: orphanSourceFor('invoice_payment_webhook', paymentIntent.metadata?.initiated_via === 'intelligence_bar' ? paymentIntent.metadata.ib_action_id : null),
         original_db_error: reason.slice(0, 1000),
       })
       .onConflict('stripe_payment_intent_id')

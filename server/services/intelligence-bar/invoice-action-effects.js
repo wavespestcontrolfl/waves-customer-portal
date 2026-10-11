@@ -108,12 +108,10 @@ async function closeoutEffect(invoice, trigger, lead) {
 // to them). Pinned by id, name, size and edit time, read with the caller's handle so the send claim reads
 // them under the claim.
 async function attachmentsEffect(invoice, database) {
-  const rows = await database('invoice_attachments').where({ invoice_id: invoice.id })
-    .orderBy('created_at', 'asc').orderBy('id', 'asc').select('id', 'file_name', 'file_size_bytes', 'updated_at');
+  const Helpers = require('../invoice-helpers');
+  const rows = await Helpers.loadInvoiceAttachmentRows(database, invoice.id);
   const names = rows.map((row) => String(row.file_name || 'file').replace(/\s+/g, ' ').trim());
-  const state = rows.length
-    ? rows.map((row) => [row.id, row.file_name, row.file_size_bytes, row.updated_at ? new Date(row.updated_at).getTime() : null].join('|')).join(';')
-    : 'none';
+  const state = Helpers.attachmentsFingerprint(rows);
   return effect('attachments', rows.length > 0, state, rows.length ? `Attachments the customer can open from the online invoice: ${names.join(', ')}` : 'No attachments.');
 }
 

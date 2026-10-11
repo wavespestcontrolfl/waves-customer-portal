@@ -197,13 +197,16 @@ describe('chargeInvoiceFromBar', () => {
     const pageCall = StripeService.chargeInvoiceWithSavedCard.mock.calls[0];
     const chargeGuard = jest.fn();
     const bar = await router.chargeInvoiceFromBar({
-      invoiceId: 'inv-1', body: { paymentMethodId: 'pm-1', expectedTotal: 132.87 }, actor: { technicianId: 'staff-1' }, chargeGuard, closeoutTarget: 'visit-1',
+      invoiceId: 'inv-1', body: { paymentMethodId: 'pm-1', expectedTotal: 132.87 }, actor: { technicianId: 'staff-1' }, chargeGuard, closeoutTarget: 'visit-1', ibActionId: null,
     });
     const barCall = StripeService.chargeInvoiceWithSavedCard.mock.calls[1];
     expect(page).toEqual({ status: 200, json: { success: true, paymentId: 'pay-1', status: 'paid', amount: 132.87 } });
     expect(bar).toEqual(page);
     expect(barCall.slice(0, 2)).toEqual(['inv-1', 'pm-1']);
-    const { assertUnderChargeLock, initiatedVia, expectedVersion, approvedCloseoutTarget, ...barOptions } = barCall[2];
+    const { assertUnderChargeLock, initiatedVia, expectedVersion, approvedCloseoutTarget, ibActionId, ...barOptions } = barCall[2];
+    // The confirmed bar action id rides to the charge (PaymentIntent metadata, orphan mark); the page sets none.
+    expect(ibActionId).toBeNull();
+    expect(pageCall[2].ibActionId).toBeUndefined();
     expect(expectedVersion).toBeNull();
     // The visit the card approved for the paid-invoice closeout rides to the charge; the page sets none.
     expect(approvedCloseoutTarget).toBe('visit-1');

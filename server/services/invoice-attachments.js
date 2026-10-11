@@ -27,6 +27,19 @@ const s3 = new S3Client({
     : undefined,
 });
 
+// A live send claim (invoices.status 'sending') owns the invoice's attachments: the email counts and points to them at
+// the provider handoff, and the Intelligence Bar's send approved a fixed list. Checked on the row locked FOR UPDATE, so it
+// serializes with the claim's own UPDATE. Any live send claim (page, queue worker or bar) trips it: the claim marker does not
+// say which sender holds it.
+const INVOICE_SENDING_MESSAGE = 'This invoice is being sent right now; try again in a minute';
+function assertNotBeingSent(lockedInvoice) {
+  if (lockedInvoice && lockedInvoice.status === 'sending') {
+    const err = attachmentError(INVOICE_SENDING_MESSAGE, 409);
+    err.code = 'invoice_sending';
+    throw err;
+  }
+}
+
 function attachmentError(message, statusCode = 400) {
   const err = new Error(message);
   err.status = statusCode;
@@ -192,8 +205,9 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
       // (Codex #3109 r25): a merge-undo can repoint the invoice while this
       // upload waits on the FOR UPDATE — inserting the stale pre-lock
       // owner would split the attachment from the invoice it belongs to.
-      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first('id', 'customer_id');
+      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first('id', 'customer_id', 'status');
       if (!lockedInvoice) throw attachmentError('Invoice not found', 404);
+      assertNotBeingSent(lockedInvoice);
 
       const lockedExisting = await attachmentUsage(invoice.id, trx);
       assertAttachmentBudget(lockedExisting, uploadedObjects.map((object) => object.file));
@@ -240,25 +254,32 @@ function isMissingS3ObjectError(err) {
   return statusCode === 404 || ['NoSuchKey', 'NotFound'].includes(err?.name || err?.Code || err?.code);
 }
 
-async function remove(invoiceId, attachmentId) {
-  const attachment = await getForInvoice(invoiceId, attachmentId);
-  if (!attachment) {
-    throw attachmentError('Attachment not found', 404);
-  }
-
-  if (config.s3?.bucket && attachment.s3_key) {
-    try {
-      await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: attachment.s3_key }));
-    } catch (err) {
-      if (!isMissingS3ObjectError(err)) {
-        logger.warn(`[invoice-attachments] failed to delete object ${attachment.id}: ${err.message}`);
-        throw attachmentError('Could not delete attachment from storage. Please retry.', 502);
-      }
+async function deleteStoredObject(attachment) {
+  if (!(config.s3?.bucket && attachment.s3_key)) return;
+  try {
+    await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: attachment.s3_key }));
+  } catch (err) {
+    if (!isMissingS3ObjectError(err)) {
+      logger.warn(`[invoice-attachments] failed to delete object ${attachment.id}: ${err.message}`);
+      throw attachmentError('Could not delete attachment from storage. Please retry.', 502);
     }
   }
+}
 
-  await db('invoice_attachments').where({ id: attachmentId, invoice_id: invoiceId }).del();
-  return attachment;
+async function remove(invoiceId, attachmentId) {
+  // The invoice row is locked first (the send claim's UPDATE waits on it, and this waits on a claim), so the
+  // sending check, the storage delete and the row delete are one decision. A storage failure rolls it all back.
+  return db.transaction(async (trx) => {
+    const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'status');
+    assertNotBeingSent(lockedInvoice);
+    const attachment = await trx('invoice_attachments').where({ id: attachmentId, invoice_id: invoiceId }).first();
+    if (!attachment) {
+      throw attachmentError('Attachment not found', 404);
+    }
+    await deleteStoredObject(attachment);
+    await trx('invoice_attachments').where({ id: attachmentId, invoice_id: invoiceId }).del();
+    return attachment;
+  });
 }
 
 module.exports = {

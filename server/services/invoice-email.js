@@ -11,7 +11,7 @@
 const { isDeepStrictEqual } = require('node:util');
 const logger = require('./logger');
 const db = require('../models/db');
-const { invoiceAmountDue, SEND_FINALIZABLE_STATUSES } = require('./invoice-helpers');
+const { invoiceAmountDue, SEND_FINALIZABLE_STATUSES, loadInvoiceAttachmentRows, attachmentsFingerprintDigest } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
 const { wrapEmail, ctaButton, currency, formatDate, plainText, colors, stripeFooterLine } = require('./email-template');
@@ -296,12 +296,18 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     logger.error(`[invoice-email] PDF build failed for ${invoice.invoice_number}: ${err.message}`);
     return { ok: false, error: 'PDF generation failed' };
   }
-  const attachmentCountRow = await db('invoice_attachments')
-    .where({ invoice_id: invoice.id })
-    .count('* as count')
-    .first()
-    .catch(() => ({ count: 0 }));
-  const extraAttachmentCount = Number(attachmentCountRow?.count || 0);
+  // The files the email points to, read once for both the note below and the Intelligence Bar's last check. That send
+  // approved a fixed list (options.expectedAttachments = its digest): a different list at this provider handoff is not sent.
+  let attachmentRows = [];
+  try {
+    attachmentRows = await loadInvoiceAttachmentRows(db, invoice.id);
+  } catch (err) {
+    if (options.expectedAttachments !== undefined) return { ok: false, blocked: true, error: 'The invoice attachments could not be checked; the email was not sent', code: 'approved_version_changed' };
+  }
+  if (options.expectedAttachments !== undefined && attachmentsFingerprintDigest(attachmentRows) !== options.expectedAttachments) {
+    return { ok: false, blocked: true, error: 'The invoice attachments are not the ones the approval showed; the email was not sent', code: 'approved_version_changed' };
+  }
+  const extraAttachmentCount = attachmentRows.length;
 
   const first = recipient.name || customer.first_name || 'there';
   // Phrase the service as "your <type> service" so a concrete type reads

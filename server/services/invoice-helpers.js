@@ -429,9 +429,25 @@ function approvedInvoiceVersionDigest(invoice) {
     credit_cents: Math.round((Number(invoice && invoice.credit_applied) || 0) * 100),
     due_cents: Math.round(invoiceAmountDue(invoice) * 100),
     lines: lines === undefined ? null : lines,
+    // The operator's own words that reach the customer: the email's personal message and the notes on the invoice / PDF.
+    email_message: (invoice && invoice.email_message) || null,
+    notes: (invoice && invoice.notes) || null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 32);
 }
+
+// The invoice's attached files, as the send reads them (the delivery email points to them): oldest first.
+async function loadInvoiceAttachmentRows(database, invoiceId) {
+  return database('invoice_attachments').where({ invoice_id: invoiceId })
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').select('id', 'file_name', 'file_size_bytes', 'updated_at');
+}
+// One string for a set of attachments: id, name, size and edit time of each ('none' for no files).
+function attachmentsFingerprint(rows) {
+  if (!rows || !rows.length) return 'none';
+  return rows.map((row) => [row.id, row.file_name, row.file_size_bytes, row.updated_at ? new Date(row.updated_at).getTime() : null].join('|')).join(';');
+}
+const digestOfFingerprint = (fingerprint) => crypto.createHash('sha256').update(String(fingerprint)).digest('hex').slice(0, 32);
+const attachmentsFingerprintDigest = (rows) => digestOfFingerprint(attachmentsFingerprint(rows));
 
 // Whether an invoice row is still the version an approval showed: the same edit time
 // (to the millisecond) and the same amount-due / lines digest. Used by the bar's charge under
@@ -476,6 +492,10 @@ module.exports = {
   hasCollectibleAmountDue,
   invoiceAmountDue,
   approvedInvoiceVersionDigest,
+  loadInvoiceAttachmentRows,
+  attachmentsFingerprint,
+  attachmentsFingerprintDigest,
+  digestOfFingerprint,
   invoiceMatchesApprovedVersion,
   invoiceDepositCreditCents,
   invoicePrincipalCents,

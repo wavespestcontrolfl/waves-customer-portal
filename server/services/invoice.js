@@ -8397,6 +8397,8 @@ const InvoiceService = {
           holdExempt,
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
           ...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),
+          // The Intelligence Bar's approved attachment list (digest), checked once more right before the provider call.
+          ...(expectedVersion && expectedVersion.attachments !== undefined ? { expectedAttachments: expectedVersion.attachments } : {}),
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;
