@@ -204,7 +204,7 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
       });
     return updated > 0;
   } catch (err) {
-    logger.warn(`[contact-correction-queue] enqueue failed for job ${jobId}: ${err.message}`);
+    logger.warn(`[contact-correction-queue] enqueue failed for job ${jobId} (${err.code || err.name || 'unknown'})`);
     return false;
   }
 }
@@ -228,7 +228,7 @@ async function attachReservationBody(jobId, body, { knex = db } = {}) {
       .update({ body: body || null, updated_at: knex.fn.now() });
     return updated > 0;
   } catch (err) {
-    logger.warn(`[contact-correction-queue] body attach failed for job ${jobId}: ${err.message}`);
+    logger.warn(`[contact-correction-queue] body attach failed for job ${jobId} (${err.code || err.name || 'unknown'})`);
     return false;
   }
 }
@@ -318,7 +318,9 @@ async function attachContactCorrectionContext(jobId, { senderPhone, knex = db } 
       return updated > 0;
     });
   } catch (err) {
-    logger.warn(`[contact-correction-queue] context attach failed for job ${jobId}: ${err.message}`);
+    // Code only (codex #6268 r14): Knex formats bindings into a failed
+    // query's message, which would put the sender's number in the log.
+    logger.warn(`[contact-correction-queue] context attach failed for job ${jobId} (${err.code || err.name || 'unknown'})`);
     return false;
   }
 }

@@ -124,6 +124,12 @@ async function findOrCreateThreadWith(conn, {
   contactEmail,
   contactExternalId,
   contactLabel,
+  // GATE_SMS_SHARED_PHONE_LINK (codex #6268 r14): a text linked through the
+  // shared-phone primary mark must NOT pull the number's earlier unknown
+  // conversation (and every message in it, some of which may belong to the
+  // other account on that phone) into this customer. Only the current
+  // message joins the customer's thread; the unknown thread stays as it is.
+  preserveUnknownThread = false,
 }) {
   if (!channel) throw new Error('findOrCreateThread: channel is required');
 
@@ -140,7 +146,7 @@ async function findOrCreateThreadWith(conn, {
       .where({ customer_id: customerId, channel, our_endpoint_id: ourEndpointId || null })
       .first();
     if (existing) {
-      if (contactPhone) {
+      if (contactPhone && !preserveUnknownThread) {
         await promoteUnknownPhoneThreadWith(conn, {
           customerId,
           channel,
@@ -151,7 +157,7 @@ async function findOrCreateThreadWith(conn, {
       }
       return existing;
     }
-    if (contactPhone) {
+    if (contactPhone && !preserveUnknownThread) {
       const promoted = await promoteUnknownPhoneThreadWith(conn, {
         customerId,
         channel,
@@ -538,6 +544,7 @@ async function recordTouchpoint(opts) {
       contactEmail: opts.contactEmail,
       contactExternalId: opts.contactExternalId,
       contactLabel: opts.contactLabel,
+      preserveUnknownThread: opts.preserveUnknownThread === true,
     });
     const message = await appendMessage({
       ...opts,

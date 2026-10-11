@@ -2089,6 +2089,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     }
     let emailSync = null;
     let rowLaneStamp = null;
+    let rowMarkCleared = false;
     let rowRailsRepairedOnly = false;
     try {
       await db.transaction(async (trx) => {
@@ -2155,10 +2156,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
         await trx('customers').where('id', customerId).update(
           rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
         );
-        if (clean.phone !== undefined && lockedBefore.sms_primary_for_shared_phone === true
-          && String(lockedBefore.phone || '').replace(/\D/g, '').slice(-10) !== String(clean.phone || '').replace(/\D/g, '').slice(-10)) {
-          perRowSharedPhoneMarksCleared += 1;
-        }
+        // Flag only; counted after the transaction commits (codex #6268 r14).
+        rowMarkCleared = clean.phone !== undefined && lockedBefore.sms_primary_for_shared_phone === true
+          && String(lockedBefore.phone || '').replace(/\D/g, '').slice(-10) !== String(clean.phone || '').replace(/\D/g, '').slice(-10);
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
             !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -2232,6 +2232,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       }).catch(() => null);
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
+    if (rowMarkCleared) perRowSharedPhoneMarksCleared += 1;
     // Reaching here means the per-row transaction committed — a blocked
     // churnGuardForRow throws churnBlocked above and lands in `errors`
     // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,

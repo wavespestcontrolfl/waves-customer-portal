@@ -94,6 +94,21 @@ describe('findSingleCustomerByPhone with a shared phone', () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shared-phone: primary mark'));
   });
 
+  test('gate on, marked: the linked row carries a NON-enumerable sharedPhoneLinked tag (never written or serialized)', async () => {
+    process.env[GATE] = 'true';
+    mockState.rows = [row('a'), row('b', { sms_primary_for_shared_phone: true })];
+    const picked = await findSingleCustomerByPhone(PHONE);
+    expect(picked.sharedPhoneLinked).toBe(true);
+    expect(Object.keys(picked)).not.toContain('sharedPhoneLinked');
+    expect({ ...picked }).not.toHaveProperty('sharedPhoneLinked');
+    expect(JSON.parse(JSON.stringify(picked))).not.toHaveProperty('sharedPhoneLinked');
+  });
+
+  test('a single match (no mark path) carries no tag', async () => {
+    mockState.rows = [row('a')];
+    expect((await findSingleCustomerByPhone(PHONE)).sharedPhoneLinked).toBeUndefined();
+  });
+
   test('gate on, none marked: stays unlinked, no guess from texts or updated_at', async () => {
     process.env[GATE] = 'true';
     mockState.rows = [

@@ -190,6 +190,10 @@ async function pickSharedPhoneCustomer(key, phone) {
     return null;
   }
   logger.info(`[sms] shared-phone: primary mark; sender phone ${maskPhone(phone)} linked to ${picked.customer.id}`);
+  // Non-enumerable: never spread into a write or a JSON body. The inbox
+  // persist reads it to leave the number's earlier unknown thread alone
+  // (codex #6268 r14).
+  Object.defineProperty(picked.customer, 'sharedPhoneLinked', { value: true, enumerable: false });
   return picked.customer;
 }
 
@@ -445,6 +449,10 @@ router.post('/sms', async (req, res) => {
     // wait for a durable message so redelivery can safely resume processing.
     const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
+      // A mark-linked shared-phone sender joins the customer's thread with
+      // THIS message only; the number's earlier unknown thread is kept
+      // (codex #6268 r14, GATE_SMS_SHARED_PHONE_LINK).
+      preserveUnknownThread: customer?.sharedPhoneLinked === true,
       channel: 'sms',
       ourEndpointId: To,
       contactPhone: From,
