@@ -3564,9 +3564,6 @@ async function reviseAdminEstimate({
         }
       }
     }
-    // A revision rewrites the estimate's services: take the per-customer estimate lock (a leaf) after
-    // the row lock above, so the booking's open-estimate check sees the revised services.
-    await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, lockedPrior.customer_id);
     const [row] = await trx('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')

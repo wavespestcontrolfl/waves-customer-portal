@@ -18,6 +18,10 @@ const EXTRACTED = [
   'overlappingPrepayTerm', 'planSeriesDates', 'planChildDates', 'planBoosterDates', 'unbillableSeriesRefusal',
   'lockBookingScope', 'insertParentRow', 'insertSeriesRows', 'insertSeriesVisit', 'runInTransactionHooks',
   'runPostInsertHooks', 'bookingResponse', 'runStampGroups', 'stampParentInsertColumns',
+  'bookingContext', 'runBookingStages', 'commitBooking', 'bookingErrorResponse', 'estimateLinkFlags', 'billingStampFacts',
+  'requestStage', 'customerStage', 'propertyStage', 'callBookingStage', 'linkedEstimateStage', 'annualPrepayStage',
+  'visitDurationStage', 'visitWindowStage', 'technicianStage', 'visitNotesStage', 'callbackStage', 'pricingStage',
+  'priceStampStage', 'seriesFactsStage', 'seriesPlanStage',
 ];
 
 describe('admin booking create structure', () => {
@@ -35,8 +39,8 @@ describe('admin booking create structure', () => {
     }
   }, 180000);
 
-  test('the create handler stays under 100', () => {
-    expect(complexity.scheduleCreateHandler).toBeLessThan(100);
+  test('the create handler stays under the lint limit (20)', () => {
+    expect(complexity.scheduleCreateHandler || 1).toBeLessThanOrEqual(20);
   });
 
   test.each(EXTRACTED)('%s stays under 20', (name) => {
@@ -46,16 +50,28 @@ describe('admin booking create structure', () => {
   });
 
   test('the booking transaction callback only orchestrates the three transaction operations, in order', () => {
-    const start = src.indexOf('await db.transaction(async (trx) => {', src.indexOf('async function scheduleCreateHandler('));
-    const end = src.indexOf('\n    });', start);
-    const body = src.slice(start, end);
-    const calls = [...body.matchAll(/await (\w+)\(trx/g)].map((m) => m[1]);
+    const start = src.indexOf('await db.transaction(async (trx) => {', src.indexOf('async function commitBooking('));
+    const end = src.indexOf('\n  });', start);
+    const calls = [...src.slice(start, end).matchAll(/await (\w+)\(trx/g)].map((m) => m[1]);
     expect(calls).toEqual(['lockBookingScope', 'insertSeriesRows', 'runInTransactionHooks']);
   });
 
-  test('post-commit side effects run from the hook table, not inline in the handler', () => {
+  test('the handler runs the stage table, commits, answers, and leaves side effects to the hook table', () => {
     const handler = src.slice(src.indexOf('async function scheduleCreateHandler('), src.indexOf("router.post('/bulk-action'"));
-    expect(handler).toContain('runPostInsertHooks(bookingCtx)');
-    expect(handler).not.toMatch(/sendCardOnFileLink\(/);
+    const body = handler.slice(0, handler.indexOf('\n}\n'));
+    expect(body).toContain('runBookingStages(c)');
+    expect(body).toContain('commitBooking(c)');
+    expect(body).toContain('setImmediate(() => runPostInsertHooks(c))');
+    expect(body).not.toMatch(/sendCardOnFileLink\(|db\(|req\.body/);
+  });
+
+  test('the stage table lists every preflight stage, in the order the request meets them', () => {
+    const table = src.slice(src.indexOf('const BOOKING_STAGES = ['), src.indexOf('];', src.indexOf('const BOOKING_STAGES = [')));
+    const names = table.replace(/^[^\n]*\n/, '').split(',').map((n) => n.trim()).filter(Boolean);
+    expect(names).toEqual([
+      'requestStage', 'customerStage', 'propertyStage', 'callBookingStage', 'linkedEstimateStage', 'annualPrepayStage',
+      'visitDurationStage', 'visitWindowStage', 'technicianStage', 'visitNotesStage', 'callbackStage', 'pricingStage',
+      'priceStampStage', 'seriesFactsStage', 'seriesPlanStage',
+    ]);
   });
 });

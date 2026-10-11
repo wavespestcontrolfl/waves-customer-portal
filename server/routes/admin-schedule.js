@@ -9295,12 +9295,19 @@ async function pushLegacyTechNote(c) {
   } catch (e) { logger.error(`[schedule] tech notification failed (non-blocking): ${e.message}`); }
 }
 
+// The new-customer welcome verdict for this booking: the one a confirm card pinned (req.approvedWelcome,
+// set only by createScheduleBooking's start_program caller), else the live lookup the Schedule screen uses.
+async function newRecurringWelcomeVerdict(req, customerId) {
+  return typeof req.approvedWelcome === 'boolean' ? req.approvedWelcome : isNewRecurringSignupCandidate(customerId);
+}
+
 // Trigger appointment type automations
 async function tagScheduledService(c) {
-  const { svc } = c;
+  const { svc, req } = c;
 try {
   const AppointmentTagger = require('../services/appointment-tagger');
-  await AppointmentTagger.onServiceScheduled(svc.id);
+  // A pinned verdict reaches the tagger too, so it does not re-run the lookup.
+  await AppointmentTagger.onServiceScheduled(svc.id, ...(typeof req.approvedWelcome === 'boolean' ? [{ approvedWelcome: req.approvedWelcome }] : []));
 } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 }
 
@@ -10038,399 +10045,460 @@ async function unbillableSeriesRefusal(c) {
 }
 
 router.post('/', requireAdmin, scheduleCreateHandler);
+// The request fields every stage reads, copied onto the booking context.
+const BOOKING_BODY_FIELDS = [
+  'customerId', 'technicianId', 'scheduledDate', 'serviceType', 'timeWindow', 'notes', 'isRecurring',
+  'recurringPattern', 'recurringCount', 'recurringOngoing', 'recurringNth', 'recurringWeekday',
+  'recurringIntervalDays', 'skipWeekends', 'weekendShift', 'boosterMonths', 'discountId', 'discountType',
+  'discountAmount', 'createInvoice', 'sendConfirmation', 'serviceId', 'serviceAddons', 'assignmentMode',
+  'primaryLineDiscount', 'primaryLinePrice', 'estimatedPrice', 'estimatedDuration', 'urgency', 'internalNotes',
+  'customerNotes', 'isCallback', 'parentServiceId', 'sendConfirmationSms', 'sendTechNotification',
+  'sourceEstimateId', 'sendCardOnFileLink', 'propertyId',
+];
+
+// ---- the booking request, one stage at a time -----------------------------------
+// Each stage reads the booking context `c`, writes what it learned back to it, and returns a refusal
+// ({ refusal: { status, body } }) to stop the request, or nothing to go on. BOOKING_STAGES runs them in order.
+
+function requestStage(c) {
+  const refusal = bookingRequestRefusal(c.req);
+  if (refusal) return refusal;
+  c.separateProgram = c.req.body.duplicateSeriesOverride;
+  Object.assign(c, bookingWindowFromBody(c.req.body));
+  return null;
+}
+
+async function customerStage(c) {
+  c.customer = await db('customers').where({ id: c.customerId }).first();
+  if (!c.customer) return refuse(404, { error: 'Customer not found' });
+  return null;
+}
+
+async function propertyStage(c) {
+  Object.assign(c, await resolveBookingProperty(c));
+  return duplicateSeriesPreflightRefusal(c);
+}
+
+async function callBookingStage(c) {
+  // Phone-agent double-booking guard. A fast preflight on the anchor date;
+  // the locked re-check inside the booking transaction (right after the
+  // customer lock) is the race-safe backstop and covers every date a
+  // series books. The
+  // override is "Book another anyway" for exactly the visits it listed.
+  c.linkedEstimateId = c.sourceEstimateId || c.req.body.source_estimate_id || null;
+  c.callBookingGuard = {
+    override: c.req.body.allowCallBookingDuplicate,
+    reviewedIds: c.req.body.callBookingReviewedIds,
+    customerId: c.customerId,
+    lines: requestedServiceLines(c.serviceType, c.serviceId, c.serviceAddons),
+    dates: [c.scheduledDate],
+    bookingProperty: c.bookingProperty,
+    linkedEstimateId: c.linkedEstimateId,
+  };
+  await assertNoCallBookingConflict(c.callBookingGuard);
+}
+
+async function linkedEstimateStage(c) {
+  // Optional: accept the linked open quote as annual prepay on book (creates
+  // the pending prepay invoice + renewal term in the same step as the
+  // booking). Only 'prepay_annual' is honored; anything else falls through
+  // to the standard verbal-yes accept. Ineligible combinations downgrade to
+  // a standard accept with a booking warning — never a half-applied prepay.
+  c.bookingBillingTerm = c.req.body.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
+  c.linkedEstimate = null;
+  if (c.linkedEstimateId) {
+    const linked = await linkedEstimatePreflight(c);
+    if (linked.refusal) return linked;
+    c.linkedEstimate = linked.linkedEstimate;
+  }
+  // Retired-for-sale catalog rows book only for a customer already on that plan (retiredServiceRefusal).
+  const retired = await retiredServiceRefusal(c);
+  if (retired) return retired;
+  Object.assign(c, estimateLinkFlags(c));
+  return null;
+}
+
+// How the linked estimate rides this booking: accepted on book, attached, linked now or later.
+function estimateLinkFlags(c) {
+  const { linkedEstimate, linkedEstimateId } = c;
+  // Booking from a phone "yes": a sent/viewed quote the customer accepted
+  // verbally gets its win recorded AFTER the appointment commits (below), so
+  // a booking failure never leaves an orphaned acceptance. Until that runs we
+  // only link an already-accepted estimate — an open quote is linked once its
+  // acceptance lands, keeping source_estimate_id pointed only at recorded wins.
+  const acceptEstimateOnBook = !!(linkedEstimate && linkedEstimate.status !== 'accepted');
+  // An UNOWNED quote (customer_id NULL) must be attached to this customer
+  // post-commit before it can carry source_estimate_id — otherwise a lost
+  // attach race would leave the appointment linked to a quote that now belongs
+  // to someone else. Defer linking for it too (covers the already-accepted
+  // unowned case, which acceptEstimateOnBook does not).
+  const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
+  const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
+  // While the estimate link is deferred, the rows carry no
+  // source_estimate_id yet, so the sole-property anchor cannot see that an
+  // estimate owns their address (GH codex #3837 r2 P1): a quote for a NEW
+  // address would anchor the whole series to the customer's old property,
+  // and the post-commit linkage only stamps rows still NULL. Leave the
+  // parent AND its spawned children unanchored — the linkage stamps them.
+  const propertyOwnedByEstimateLinkage = !!linkedEstimateId && !insertLinkId;
+  return { acceptEstimateOnBook, estimateNeedsAttach, insertLinkId, propertyOwnedByEstimateLinkage };
+}
+
+async function annualPrepayStage(c) {
+  // Annual prepay on book: applies, or downgrades to a standard accept with a warning (resolveAnnualPrepay).
+  Object.assign(c, await resolveAnnualPrepay(c));
+  Object.assign(c, billingStampFacts(c));
+  return null;
+}
+
+// The invoice flag and the member-series coverage this booking stamps on its rows.
+function billingStampFacts(c) {
+  const { bookingBillingTermEffective, createInvoice, customer, isRecurring } = c;
+  // An annual-prepay booking MUST bill per application until the prepay
+  // invoice is paid — the per-visit coverage stamp is what suppresses
+  // billing after payment, and the seeder's own coverage rows are
+  // deliberately create_invoice_on_complete=true. The modal always sends
+  // createInvoice for these; forcing it here means a crafted/omitted flag
+  // can't book a prepay series whose pending-window completions bill
+  // nothing (codex P2).
+  const createInvoiceEffective = bookingBillingTermEffective === 'prepay_annual' ? true : !!createInvoice;
+
+  // Billing lane (explicit customers.billing_mode; legacy inference for
+  // NULL): a monthly-membership customer's RECURRING series is covered by
+  // dues, so its rows must not carry per-visit price stamps or the
+  // create-invoice default — those stamps are exactly how members got
+  // double-billed (completion honors an explicit price on one-off visits
+  // only). A one-off (non-recurring) booking for a member keeps its price
+  // and bills normally. A prepay_annual BOOKING is excluded outright
+  // (checked on the booking term, not the resolved lane): the customer's
+  // CURRENT lane may still read monthly_membership while the annual
+  // acceptance is in flight, and the pending-prepay path depends on the
+  // forced create_invoice_on_complete + price stamps to bill completions
+  // that land before the annual invoice is paid (Codex r1 P1).
+  // A payer-billed customer's visits invoice the AP payer at completion —
+  // dues coverage never applies (membershipDuesCoverVisit is payer-
+  // guarded) — so stripping the price would underbill the payer's invoice
+  // down to the monthly_rate fallback or nothing (Codex r8 P1). The
+  // booking-time signal is the customer's DEFAULT payer: per-job payers
+  // only attach post-booking via the payer PATCH, and an office attaching
+  // one to an already-stripped member row must (re)price the row there —
+  // the schedule card's payer prediction surfaces the missing amount.
+  const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
+    && !customer?.payer_id
+    && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
+  const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
+  return { createInvoiceEffective, memberSeriesCovered, createInvoiceStamp };
+}
+
+async function visitDurationStage(c) {
+  const { bookingProperty, customer, estimatedDuration, serviceId } = c;
+  const zone = bookingProperty
+    ? getZone(bookingProperty.service_address_city, bookingProperty.service_address_zip)
+    : getZone(customer?.city, customer?.zip);
+  // Owner directive (2026-07-03): every service call defaults to 60 minutes;
+  // the service-record default or an explicit tech-entered duration wins below.
+  let duration = 60;
+
+  // Look up service from services table for duration/pricing
+  let serviceRecord = null;
+  if (serviceId) {
+    try {
+      serviceRecord = await db('services').where({ id: serviceId }).first();
+      if (serviceRecord?.default_duration_minutes) duration = serviceRecord.default_duration_minutes;
+    } catch (e) { logger.warn(`[schedule] services table lookup failed: ${e.message}`); }
+  }
+
+  // Explicit override from the client (multi-service groups send the
+  // summed line-item duration so estimated_duration_minutes matches the
+  // actual time window). Wins over the heuristic + service-record default.
+  const parsedExplicitDuration = Number.parseInt(estimatedDuration, 10);
+  if (Number.isInteger(parsedExplicitDuration) && parsedExplicitDuration > 0) {
+    duration = parsedExplicitDuration;
+  }
+  Object.assign(c, { zone, duration, serviceRecord });
+}
+
+function visitWindowStage(c) {
+  const { duration } = c;
+  let { windowStart, windowEnd } = c;
+  // Shared admin window rules (scheduling/window-rules.js): on-the-hour,
+  // >= 08:00, end > start, end <= day end; the end is derived from the
+  // duration when not supplied. Previously any string was persisted
+  // ("8am" stored with a NaN-derived end, 06:30 booked before opening).
+  let computedEnd = windowEnd || null;
+  if (windowStart) {
+    const normalizedWindow = assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes: duration });
+    windowStart = normalizedWindow.window_start;
+    windowEnd = normalizedWindow.window_end;
+    computedEnd = normalizedWindow.window_end;
+  }
+  Object.assign(c, { windowStart, windowEnd, computedEnd });
+  return null;
+}
+
+async function technicianStage(c) {
+  const { assignmentMode, customerId, scheduledDate, serviceType, technicianId, zone } = c;
+  // Auto-assign tech if requested
+  let resolvedTechId = technicianId || null;
+  if (assignmentMode === 'auto') {
+    try {
+      const TechMatcher = require('../services/tech-matcher');
+      const match = await TechMatcher.findBestTech({ customerId, date: scheduledDate, serviceType, zone });
+      if (match?.technicianId) resolvedTechId = match.technicianId;
+    } catch (e) { logger.warn(`[schedule] Auto-assign failed, leaving unassigned: ${e.message}`); }
+  } else if (assignmentMode === 'unassigned') {
+    resolvedTechId = null;
+  }
+  c.resolvedTechId = resolvedTechId;
+}
+
+function visitNotesStage(c) {
+  const { customerNotes, isRecurring, notes, recurringNth, recurringPattern, recurringWeekday, scheduledDate } = c;
+  // Merge notes
+  const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
+  // seasonal_feb_oct derives its anchor from the date like every other
+  // month-based cadence; monthly_nth_weekday stays raw passthrough because
+  // there the operator supplies nth/weekday explicitly.
+  const monthAnchorOpts = (isRecurring
+    && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
+    ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
+    : { nth: recurringNth, weekday: recurringWeekday };
+  Object.assign(c, { combinedNotes, monthAnchorOpts });
+}
+
+async function callbackStage(c) {
+  const { customer, customerId, isCallback, isRecurring, req, scheduledDate, serviceRecord, serviceType } = c;
+  // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
+  // definition — the new-appointment modal never sends `isCallback`, so
+  // derive it server-side from the catalog row. Persisted `is_callback`
+  // drives callback reporting + completion invoice suppression downstream.
+  // Computed BEFORE pricing: the membership-booking evidence below must
+  // exclude callbacks, mirroring the tier sync.
+  const resolvedIsCallback = isCallback
+    || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
+
+  // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
+  // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+  // the suggestion the client named — never taken from the client. Only the
+  // primary row below is stamped; null = nothing saved (gate off, not a
+  // pest/lawn re-service, or empty words).
+  const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
+    && resolvedIsCallback
+    && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
+    && req.body.customerRequest && typeof req.body.customerRequest === 'object')
+    ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
+    : null;
+
+  // A recurring booking that creates WaveGuard plan coverage IS the
+  // membership sale — let the "any member" discount floor see that, since
+  // the customer row's tier is only stamped after the series commits.
+  const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+    isRecurring: !!isRecurring,
+    isCallback: resolvedIsCallback,
+    serviceType,
+    serviceRecord,
+    customer,
+    scheduledDate,
+  });
+  Object.assign(c, { resolvedIsCallback, officeCustomerRequest, recurringMembershipBooking });
+}
+
+async function pricingStage(c) {
+  const { customer, discountAmount, discountId, discountType, estimatedPrice, primaryLineDiscount, primaryLinePrice, recurringMembershipBooking, req, serviceAddons, serviceId, serviceRecord, serviceType } = c;
+  c.pricing = await buildAppointmentPricing({
+    serviceRecord,
+    serviceType,
+    serviceId,
+    estimatedPrice,
+    primaryLinePrice,
+    primaryLineDiscount,
+    serviceAddons,
+    discountId,
+    discountType,
+    discountAmount,
+    customer,
+    recurringMembershipBooking,
+  });
+
+  // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
+  // non-stackable stack_group (the WaveGuard tiers, promo, relationship)
+  // — one on a line, one on the appointment-level slot spanning onto
+  // that same line, or two different lines each carrying one — must
+  // never both actually persist. Before this, enforcement was entirely
+  // client-side (existingSelectionConflict in CreateAppointmentModal.jsx),
+  // with no server backstop: a client bypass, or the gate simply being
+  // off (which already skips that client check), let two conflicting
+  // tiers both save. Checked here, before ANY write (the transaction
+  // below has not opened yet) — a conflict throws a plain operational
+  // 400, not the transaction's own rollback path, since nothing has
+  // been written for it to roll back.
+  //
+  // GitHub round 5 P1 follow-up (Codex, blocked push 5): a failed
+  // stack_group lookup must FAIL CLOSED (a retryable error), never
+  // silently proceed as if the conflict check found nothing — the
+  // exact silent-disable this whole check exists to prevent, just
+  // moved one layer down.
+  let stackGroupRows;
+  try {
+    stackGroupRows = await discountStackGroupRowsForPricing(c.pricing);
+  } catch (e) {
+    throw Object.assign(
+      httpError(503, 'Could not confirm the discount rules for this booking — try again'),
+      { code: 'DISCOUNT_STACK_GROUP_LOOKUP_FAILED' },
+    );
+  }
+  assertNoDiscountStackGroupConflict(stackGroupRows);
+  // Codex pre-push audit P0 (round 6, blocked push 8): the group's own
+  // per-visit price, bound to the SAME previewed number the client
+  // displayed and posted expected_discount_stacking alongside — see
+  // assertPriceMatchesPricing's own comment for why this is needed even
+  // with the regime unchanged.
+  assertPriceMatchesPricing({ expectedPrice: req.body?.expected_price, finalPrice: c.pricing.finalPrice });
+  return null;
+}
+
+function priceStampStage(c) {
+  const { customer, estimatedPrice, pricing, primaryLinePrice, resolvedIsCallback, serviceAddons } = c;
+  // Re-service callbacks default to $0 for WaveGuard customers, but an operator
+  // can still enter an explicit charge (e.g. a re-service that also handled a
+  // billable extra). `buildAppointmentPricing` has already parsed that operator
+  // amount into `pricing.finalPrice`, so only zero it out when NO explicit
+  // price was provided — otherwise the charge is silently lost. This flag is
+  // reused for the recurring child + booster rows so callback suppression and
+  // callback reporting propagate to every generated visit, not just the first.
+  const positiveMoneyInput = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0; };
+  // Add-on lines are operator-entered charges too — `buildAppointmentPricing`
+  // already folded them into `pricing.finalPrice`. Treat a priced add-on as an
+  // explicit price so a re-service that addressed a billable extra isn't zeroed
+  // back to $0 (which would also zero the generated child/booster visits).
+  const addonHasExplicitPrice = Array.isArray(serviceAddons)
+    && serviceAddons.some((a) => positiveMoneyInput(a?.basePrice ?? a?.grossPrice ?? a?.price));
+  const explicitPriceProvided = positiveMoneyInput(primaryLinePrice)
+    || positiveMoneyInput(estimatedPrice)
+    || addonHasExplicitPrice;
+  const zeroCallbackPrice = resolvedIsCallback && customerEligibleForFreeCallback(customer) && !explicitPriceProvided;
+
+  let finalPrice = pricing.finalPrice;
+  if (zeroCallbackPrice) finalPrice = 0;
+  const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
+  const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
+  Object.assign(c, { zeroCallbackPrice, finalPrice, appointmentDiscountType, appointmentDiscountAmount });
+}
+
+async function seriesFactsStage(c) {
+  const { customerId, isRecurring, pricing, req } = c;
+  const cols = await db('scheduled_services').columnInfo();
+  const addonCols = pricing.addonLines.length > 0
+    ? await db('scheduled_service_addons').columnInfo()
+    : {};
+  let shouldSendNewRecurringWelcome = isRecurring ? await newRecurringWelcomeVerdict(req, customerId) : false;
+  Object.assign(c, { cols, addonCols, shouldSendNewRecurringWelcome });
+}
+
+async function seriesPlanStage(c) {
+  Object.assign(c, await planSeriesDates(c));
+  c.lockedLinkedEstimate = c.linkedEstimate;
+  return unbillableSeriesRefusal(c);
+}
+
+// A priced ADD-ON riding a covered member visit keeps a price stamp so
+// the one-per-series review alert fires and Charge Now surfaces the
+// billable amount — but the stamp is the ADD-ON-ONLY total (pre-
+// discount), never the base+add-on subtotal: the base is covered by
+// dues, and stamping the full price would surface/mint a $100 plan
+// visit + $20 add-on as $120 instead of the billable $20 (Codex r2+r3).
+// Base-only rows stay stamp-free.
+//
+// GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M): `a.price` is
+// the line's OWN net (gross minus its own line discount only) —
+// stackVisitDiscounts deliberately keeps each line's ALLOCATED SHARE
+// of an appointment-level credit as a separate field
+// (appointmentCreditDollars, threaded through buildAppointmentPricing
+// / restackLiveVisitFinancials's addonDollars — see their own
+// comments), never folded into net. Reading `.price` alone here
+// dropped that allocated share from the covered-member's stamped
+// add-on total: a $100 add-on at 20% off with a $15 allocated fixed
+// appointment credit stamped $83 (net alone) instead of the real $68
+// (net minus its $15 share) — inflating the amount surfaced for an
+// add-on that already got part of the credit applied to it.
+const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => {
+  const price = Number(a?.price);
+  if (!(price > 0)) return sum;
+  const share = Number(a?.appointmentCreditDollars) || 0;
+  return sum + Math.max(0, price - share);
+}, 0);
+// The stages, in the order the request meets them. Order matters: each reads what the ones before it wrote.
+const BOOKING_STAGES = [
+  requestStage, customerStage, propertyStage, callBookingStage, linkedEstimateStage, annualPrepayStage,
+  visitDurationStage, visitWindowStage, technicianStage, visitNotesStage, callbackStage, pricingStage,
+  priceStampStage, seriesFactsStage, seriesPlanStage,
+];
+
+async function runBookingStages(c) {
+  for (const stage of BOOKING_STAGES) {
+    const refusal = await stage(c);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+// The context every stage and operation reads and writes: the request's fields, and the state the operations
+// write back (the parent row, the linked estimate as the transaction read it under its lock, the WaveGuard sync
+// result, and the rodent-bait setup stamped inside the transaction; an accept-on-book success retires it, a
+// failed attach/accept leaves it so the first completion still collects, codex #3591 r62 P1).
+function bookingContext(req) {
+  const c = {
+    req, addonOnlyTotal, bookingWarnings: [], createdAppointments: [], svc: undefined, waveguardPlanSync: null, directRodentSetupStamp: 0,
+    estimateAutoAccepted: false, annualPrepayResult: null, estimateAttachRaceLost: false,
+  };
+  for (const field of BOOKING_BODY_FIELDS) c[field] = req.body[field];
+  return c;
+}
+
+// The booking transaction, then the post-commit steps that need its rows.
+async function commitBooking(c) {
+  await db.transaction(async (trx) => {
+    await lockBookingScope(trx, c);
+    await insertSeriesRows(trx, c);
+    await runInTransactionHooks(trx, c);
+  });
+  await attachUnownedEstimate(c);
+  await acceptLinkedEstimateOnBook(c);
+  await linkAttachedEstimateRows(c);
+  await registerCreatedReminders(c);
+  await redeemFirstInspectionCredit(c);
+}
+
+function bookingErrorResponse(err, res, next) {
+  // The in-transaction duplicate-series backstop rolled the create back —
+  // present the SAME 409 the preflight would have returned.
+  if (Array.isArray(err.duplicateRecurringSeries)) {
+    return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
+  }
+  // The phone-agent double-booking guard (preflight or locked re-check).
+  if (err.callBookingConflict) return res.status(409).json(err.callBookingConflict);
+  if (err.isOperational && err.status) {
+    return res.status(err.status).json({ error: err.message, code: err.code, ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+  }
+  return next(err);
+}
+
 async function scheduleCreateHandler(req, res, next) {
   try {
-    const {
-      customerId, technicianId, scheduledDate,
-      serviceType, timeWindow, notes, isRecurring, recurringPattern, recurringCount, recurringOngoing,
-      recurringNth, recurringWeekday, recurringIntervalDays,
-      skipWeekends, weekendShift,
-      boosterMonths,
-      discountId, discountType, discountAmount,
-      createInvoice,
-      sendConfirmation, serviceId, serviceAddons, assignmentMode, primaryLineDiscount,
-      primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
-      parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
-      sendCardOnFileLink,
-      // The operator's explicit service address for a multi-property customer
-      // (customer_properties.id). Absent → the sole-property anchor below.
-      propertyId,
-    } = req.body;
-
-    // The request's own refusals, in order: separate-program review, the window pair, required fields, the
-    // discount-stacking regime (bookingRequestRefusal).
-    const requestRefusal = bookingRequestRefusal(req);
-    if (requestRefusal) return res.status(requestRefusal.refusal.status).json(requestRefusal.refusal.body);
-    const separateProgram = req.body.duplicateSeriesOverride;
-    let { windowStart, windowEnd } = bookingWindowFromBody(req.body);
-
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
-
-    const { bookingProperty, bookingSeriesScope } = await resolveBookingProperty({ req, customerId, propertyId });
-    const duplicateSeries = await duplicateSeriesPreflightRefusal({
-      req, customerId, serviceId, serviceType, bookingSeriesScope, separateProgram, isRecurring,
-    });
-    if (duplicateSeries) return sendRefusal(res, duplicateSeries);
-
-    const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
-    // Phone-agent double-booking guard. A fast preflight on the anchor date;
-    // the locked re-check inside the booking transaction (right after the
-    // customer lock) is the race-safe backstop and covers every date a
-    // series books. The
-    // override is "Book another anyway" for exactly the visits it listed.
-    const callBookingGuard = {
-      override: req.body.allowCallBookingDuplicate,
-      reviewedIds: req.body.callBookingReviewedIds,
-      customerId,
-      lines: requestedServiceLines(serviceType, serviceId, serviceAddons),
-      dates: [scheduledDate],
-      bookingProperty,
-      linkedEstimateId,
-    };
-    await assertNoCallBookingConflict(callBookingGuard);
-    // Optional: accept the linked open quote as annual prepay on book (creates
-    // the pending prepay invoice + renewal term in the same step as the
-    // booking). Only 'prepay_annual' is honored; anything else falls through
-    // to the standard verbal-yes accept. Ineligible combinations downgrade to
-    // a standard accept with a booking warning — never a half-applied prepay.
-    const bookingBillingTerm = req.body.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
-    let linkedEstimate = null;
-    const bookingWarnings = [];
-    if (linkedEstimateId) {
-      const linked = await linkedEstimatePreflight({
-        req, customerId, customer, bookingProperty, bookingBillingTerm, scheduledDate, serviceId, serviceAddons, linkedEstimateId,
-      });
-      if (linked.refusal) return sendRefusal(res, linked);
-      ({ linkedEstimate } = linked);
-    }
-    // Retired-for-sale catalog rows book only for a customer already on that plan (retiredServiceRefusal).
-    const retiredRefusal = await retiredServiceRefusal({
-      customerId, serviceId, serviceAddons, serviceType, isRecurring, recurringPattern, recurringIntervalDays, linkedEstimate,
-    });
-    if (retiredRefusal) return sendRefusal(res, retiredRefusal);
-    // Booking from a phone "yes": a sent/viewed quote the customer accepted
-    // verbally gets its win recorded AFTER the appointment commits (below), so
-    // a booking failure never leaves an orphaned acceptance. Until that runs we
-    // only link an already-accepted estimate — an open quote is linked once its
-    // acceptance lands, keeping source_estimate_id pointed only at recorded wins.
-    const acceptEstimateOnBook = !!(linkedEstimate && linkedEstimate.status !== 'accepted');
-    // An UNOWNED quote (customer_id NULL) must be attached to this customer
-    // post-commit before it can carry source_estimate_id — otherwise a lost
-    // attach race would leave the appointment linked to a quote that now belongs
-    // to someone else. Defer linking for it too (covers the already-accepted
-    // unowned case, which acceptEstimateOnBook does not).
-    const estimateNeedsAttach = !!(linkedEstimate && !linkedEstimate.customer_id);
-    const insertLinkId = (acceptEstimateOnBook || estimateNeedsAttach) ? null : linkedEstimateId;
-    // While the estimate link is deferred, the rows carry no
-    // source_estimate_id yet, so the sole-property anchor cannot see that an
-    // estimate owns their address (GH codex #3837 r2 P1): a quote for a NEW
-    // address would anchor the whole series to the customer's old property,
-    // and the post-commit linkage only stamps rows still NULL. Leave the
-    // parent AND its spawned children unanchored — the linkage stamps them.
-    const propertyOwnedByEstimateLinkage = !!linkedEstimateId && !insertLinkId;
-
-    // Annual prepay on book: applies, or downgrades to a standard accept with a warning (resolveAnnualPrepay).
-    const { bookingBillingTermEffective, annualPrepayCoverage } = await resolveAnnualPrepay({
-      acceptEstimateOnBook, boosterMonths, bookingBillingTerm, bookingWarnings, customerId, isRecurring, linkedEstimate,
-      recurringIntervalDays, recurringPattern, req, scheduledDate, serviceAddons, serviceType,
-    });
-
-    // An annual-prepay booking MUST bill per application until the prepay
-    // invoice is paid — the per-visit coverage stamp is what suppresses
-    // billing after payment, and the seeder's own coverage rows are
-    // deliberately create_invoice_on_complete=true. The modal always sends
-    // createInvoice for these; forcing it here means a crafted/omitted flag
-    // can't book a prepay series whose pending-window completions bill
-    // nothing (codex P2).
-    const createInvoiceEffective = bookingBillingTermEffective === 'prepay_annual' ? true : !!createInvoice;
-
-    // Billing lane (explicit customers.billing_mode; legacy inference for
-    // NULL): a monthly-membership customer's RECURRING series is covered by
-    // dues, so its rows must not carry per-visit price stamps or the
-    // create-invoice default — those stamps are exactly how members got
-    // double-billed (completion honors an explicit price on one-off visits
-    // only). A one-off (non-recurring) booking for a member keeps its price
-    // and bills normally. A prepay_annual BOOKING is excluded outright
-    // (checked on the booking term, not the resolved lane): the customer's
-    // CURRENT lane may still read monthly_membership while the annual
-    // acceptance is in flight, and the pending-prepay path depends on the
-    // forced create_invoice_on_complete + price stamps to bill completions
-    // that land before the annual invoice is paid (Codex r1 P1).
-    // A payer-billed customer's visits invoice the AP payer at completion —
-    // dues coverage never applies (membershipDuesCoverVisit is payer-
-    // guarded) — so stripping the price would underbill the payer's invoice
-    // down to the monthly_rate fallback or nothing (Codex r8 P1). The
-    // booking-time signal is the customer's DEFAULT payer: per-job payers
-    // only attach post-booking via the payer PATCH, and an office attaching
-    // one to an already-stripped member row must (re)price the row there —
-    // the schedule card's payer prediction surfaces the missing amount.
-    const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
-      && !customer?.payer_id
-      && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
-    const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
-    // A priced ADD-ON riding a covered member visit keeps a price stamp so
-    // the one-per-series review alert fires and Charge Now surfaces the
-    // billable amount — but the stamp is the ADD-ON-ONLY total (pre-
-    // discount), never the base+add-on subtotal: the base is covered by
-    // dues, and stamping the full price would surface/mint a $100 plan
-    // visit + $20 add-on as $120 instead of the billable $20 (Codex r2+r3).
-    // Base-only rows stay stamp-free.
-    //
-    // GitHub Codex round 3 on #4642 (PRRT_kwDOR3YQi86kmS5M): `a.price` is
-    // the line's OWN net (gross minus its own line discount only) —
-    // stackVisitDiscounts deliberately keeps each line's ALLOCATED SHARE
-    // of an appointment-level credit as a separate field
-    // (appointmentCreditDollars, threaded through buildAppointmentPricing
-    // / restackLiveVisitFinancials's addonDollars — see their own
-    // comments), never folded into net. Reading `.price` alone here
-    // dropped that allocated share from the covered-member's stamped
-    // add-on total: a $100 add-on at 20% off with a $15 allocated fixed
-    // appointment credit stamped $83 (net alone) instead of the real $68
-    // (net minus its $15 share) — inflating the amount surfaced for an
-    // add-on that already got part of the credit applied to it.
-    const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => {
-      const price = Number(a?.price);
-      if (!(price > 0)) return sum;
-      const share = Number(a?.appointmentCreditDollars) || 0;
-      return sum + Math.max(0, price - share);
-    }, 0);
-
-    const zone = bookingProperty
-      ? getZone(bookingProperty.service_address_city, bookingProperty.service_address_zip)
-      : getZone(customer?.city, customer?.zip);
-    // Owner directive (2026-07-03): every service call defaults to 60 minutes;
-    // the service-record default or an explicit tech-entered duration wins below.
-    let duration = 60;
-
-    // Look up service from services table for duration/pricing
-    let serviceRecord = null;
-    if (serviceId) {
-      try {
-        serviceRecord = await db('services').where({ id: serviceId }).first();
-        if (serviceRecord?.default_duration_minutes) duration = serviceRecord.default_duration_minutes;
-      } catch (e) { logger.warn(`[schedule] services table lookup failed: ${e.message}`); }
-    }
-
-    // Explicit override from the client (multi-service groups send the
-    // summed line-item duration so estimated_duration_minutes matches the
-    // actual time window). Wins over the heuristic + service-record default.
-    const parsedExplicitDuration = Number.parseInt(estimatedDuration, 10);
-    if (Number.isInteger(parsedExplicitDuration) && parsedExplicitDuration > 0) {
-      duration = parsedExplicitDuration;
-    }
-
-    // Shared admin window rules (scheduling/window-rules.js): on-the-hour,
-    // >= 08:00, end > start, end <= day end; the end is derived from the
-    // duration when not supplied. Previously any string was persisted
-    // ("8am" stored with a NaN-derived end, 06:30 booked before opening).
-    let computedEnd = windowEnd || null;
-    if (windowStart) {
-      const normalizedWindow = assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes: duration });
-      windowStart = normalizedWindow.window_start;
-      windowEnd = normalizedWindow.window_end;
-      computedEnd = normalizedWindow.window_end;
-    }
-
-    // Auto-assign tech if requested
-    let resolvedTechId = technicianId || null;
-    if (assignmentMode === 'auto') {
-      try {
-        const TechMatcher = require('../services/tech-matcher');
-        const match = await TechMatcher.findBestTech({ customerId, date: scheduledDate, serviceType, zone });
-        if (match?.technicianId) resolvedTechId = match.technicianId;
-      } catch (e) { logger.warn(`[schedule] Auto-assign failed, leaving unassigned: ${e.message}`); }
-    } else if (assignmentMode === 'unassigned') {
-      resolvedTechId = null;
-    }
-
-    // Merge notes
-    const combinedNotes = [notes, customerNotes].filter(Boolean).join('\n') || null;
-    // seasonal_feb_oct derives its anchor from the date like every other
-    // month-based cadence; monthly_nth_weekday stays raw passthrough because
-    // there the operator supplies nth/weekday explicitly.
-    const monthAnchorOpts = (isRecurring
-      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
-      ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
-      : { nth: recurringNth, weekday: recurringWeekday };
-
-    // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
-    // definition — the new-appointment modal never sends `isCallback`, so
-    // derive it server-side from the catalog row. Persisted `is_callback`
-    // drives callback reporting + completion invoice suppression downstream.
-    // Computed BEFORE pricing: the membership-booking evidence below must
-    // exclude callbacks, mirroring the tier sync.
-    const resolvedIsCallback = isCallback
-      || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
-
-    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
-    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
-    // the suggestion the client named — never taken from the client. Only the
-    // primary row below is stamped; null = nothing saved (gate off, not a
-    // pest/lawn re-service, or empty words).
-    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
-      && resolvedIsCallback
-      && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
-      && req.body.customerRequest && typeof req.body.customerRequest === 'object')
-      ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
-      : null;
-
-    // A recurring booking that creates WaveGuard plan coverage IS the
-    // membership sale — let the "any member" discount floor see that, since
-    // the customer row's tier is only stamped after the series commits.
-    const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
-      isRecurring: !!isRecurring,
-      isCallback: resolvedIsCallback,
-      serviceType,
-      serviceRecord,
-      customer,
-      scheduledDate,
-    });
-
-    const pricing = await buildAppointmentPricing({
-      serviceRecord,
-      serviceType,
-      serviceId,
-      estimatedPrice,
-      primaryLinePrice,
-      primaryLineDiscount,
-      serviceAddons,
-      discountId,
-      discountType,
-      discountAmount,
-      customer,
-      recurringMembershipBooking,
-    });
-
-    // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
-    // non-stackable stack_group (the WaveGuard tiers, promo, relationship)
-    // — one on a line, one on the appointment-level slot spanning onto
-    // that same line, or two different lines each carrying one — must
-    // never both actually persist. Before this, enforcement was entirely
-    // client-side (existingSelectionConflict in CreateAppointmentModal.jsx),
-    // with no server backstop: a client bypass, or the gate simply being
-    // off (which already skips that client check), let two conflicting
-    // tiers both save. Checked here, before ANY write (the transaction
-    // below has not opened yet) — a conflict throws a plain operational
-    // 400, not the transaction's own rollback path, since nothing has
-    // been written for it to roll back.
-    //
-    // GitHub round 5 P1 follow-up (Codex, blocked push 5): a failed
-    // stack_group lookup must FAIL CLOSED (a retryable error), never
-    // silently proceed as if the conflict check found nothing — the
-    // exact silent-disable this whole check exists to prevent, just
-    // moved one layer down.
-    let stackGroupRows;
-    try {
-      stackGroupRows = await discountStackGroupRowsForPricing(pricing);
-    } catch (e) {
-      throw Object.assign(
-        httpError(503, 'Could not confirm the discount rules for this booking — try again'),
-        { code: 'DISCOUNT_STACK_GROUP_LOOKUP_FAILED' },
-      );
-    }
-    assertNoDiscountStackGroupConflict(stackGroupRows);
-    // Codex pre-push audit P0 (round 6, blocked push 8): the group's own
-    // per-visit price, bound to the SAME previewed number the client
-    // displayed and posted expected_discount_stacking alongside — see
-    // assertPriceMatchesPricing's own comment for why this is needed even
-    // with the regime unchanged.
-    assertPriceMatchesPricing({ expectedPrice: req.body?.expected_price, finalPrice: pricing.finalPrice });
-
-    // Re-service callbacks default to $0 for WaveGuard customers, but an operator
-    // can still enter an explicit charge (e.g. a re-service that also handled a
-    // billable extra). `buildAppointmentPricing` has already parsed that operator
-    // amount into `pricing.finalPrice`, so only zero it out when NO explicit
-    // price was provided — otherwise the charge is silently lost. This flag is
-    // reused for the recurring child + booster rows so callback suppression and
-    // callback reporting propagate to every generated visit, not just the first.
-    const positiveMoneyInput = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0; };
-    // Add-on lines are operator-entered charges too — `buildAppointmentPricing`
-    // already folded them into `pricing.finalPrice`. Treat a priced add-on as an
-    // explicit price so a re-service that addressed a billable extra isn't zeroed
-    // back to $0 (which would also zero the generated child/booster visits).
-    const addonHasExplicitPrice = Array.isArray(serviceAddons)
-      && serviceAddons.some((a) => positiveMoneyInput(a?.basePrice ?? a?.grossPrice ?? a?.price));
-    const explicitPriceProvided = positiveMoneyInput(primaryLinePrice)
-      || positiveMoneyInput(estimatedPrice)
-      || addonHasExplicitPrice;
-    const zeroCallbackPrice = resolvedIsCallback && customerEligibleForFreeCallback(customer) && !explicitPriceProvided;
-
-    let finalPrice = pricing.finalPrice;
-    if (zeroCallbackPrice) finalPrice = 0;
-    const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
-    const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
-    const createdAppointments = [];
-
-    const cols = await db('scheduled_services').columnInfo();
-    const addonCols = pricing.addonLines.length > 0
-      ? await db('scheduled_service_addons').columnInfo()
-      : {};
-    let shouldSendNewRecurringWelcome = isRecurring
-      ? await isNewRecurringSignupCandidate(customerId)
-      : false;
-
-    const { plannedChildDates, plannedBoosterDates, plannedCount, skipWeekendsEffective, seriesBlackoutDates } = await planSeriesDates({
-      bookingWarnings, boosterMonths, customerId, isRecurring, monthAnchorOpts, recurringCount, recurringIntervalDays,
-      recurringOngoing, recurringPattern, scheduledDate, skipWeekends, weekendShift,
-    });
-
-    const unbillable = await unbillableSeriesRefusal({
-      addonOnlyTotal, createInvoiceStamp, customer, isRecurring, memberSeriesCovered, plannedBoosterDates,
-      plannedChildDates, pricing, resolvedIsCallback, scheduledDate, seriesBlackoutDates, serviceId, serviceType,
-      skipWeekendsEffective, zeroCallbackPrice,
-    });
-    if (unbillable) return sendRefusal(res, unbillable);
-
-    // The booking context every operation after the preflights reads (and writes its results to); see lockBookingScope
-    // and the operations after it.
-    const bookingCtx = {
-      scheduledDate, plannedChildDates, plannedBoosterDates, customerId, req, callBookingGuard, customer,
-      linkedEstimateId, bookingProperty, bookingBillingTerm, pricing, isRecurring, separateProgram, serviceId, serviceType,
-      bookingSeriesScope, resolvedTechId, windowStart, computedEnd, cols, propertyOwnedByEstimateLinkage, timeWindow, zone,
-      duration, combinedNotes, recurringPattern, propertyId, memberSeriesCovered, addonOnlyTotal, finalPrice, urgency,
-      internalNotes, resolvedIsCallback, officeCustomerRequest, parentServiceId, insertLinkId, recurringOngoing, monthAnchorOpts,
-      recurringIntervalDays, skipWeekends, skipWeekendsEffective, weekendShift, boosterMonths, appointmentDiscountType,
-      appointmentDiscountAmount, createInvoiceStamp, bookingWarnings, addonCols, createdAppointments, sendConfirmationSms,
-      seriesBlackoutDates, zeroCallbackPrice, createInvoiceEffective, plannedCount, acceptEstimateOnBook, linkedEstimate,
-      bookingBillingTermEffective, annualPrepayCoverage, estimateNeedsAttach, windowEnd, sendTechNotification, sendCardOnFileLink,
-      // State the operations write back: the parent row, the linked estimate as the transaction read it under its
-      // lock (the preflight copy until then), the WaveGuard sync result, and the rodent-bait setup stamped inside
-      // the transaction (an accept-on-book success retires it; a failed attach/accept leaves it so the first
-      // completion still collects, codex #3591 r62 P1).
-      svc: undefined, lockedLinkedEstimate: linkedEstimate, waveguardPlanSync: null, directRodentSetupStamp: 0,
-      estimateAutoAccepted: false, annualPrepayResult: null, estimateAttachRaceLost: false, shouldSendNewRecurringWelcome,
-    };
-    await db.transaction(async (trx) => {
-      await lockBookingScope(trx, bookingCtx);
-      await insertSeriesRows(trx, bookingCtx);
-      await runInTransactionHooks(trx, bookingCtx);
-    });
-    await attachUnownedEstimate(bookingCtx);
-    await acceptLinkedEstimateOnBook(bookingCtx);
-    await linkAttachedEstimateRows(bookingCtx);
-    await registerCreatedReminders(bookingCtx);
-    await redeemFirstInspectionCredit(bookingCtx);
-
+    const c = bookingContext(req);
+    const refusal = await runBookingStages(c);
+    if (refusal) return sendRefusal(res, refusal);
+    await commitBooking(c);
     // The appointment(s), any prepayment, and all reminder rows are committed at this point: respond
-    // immediately so the admin UI isn't held on "Saving…" while the best-effort side effects run (the
+    // immediately so the admin UI isn't held on "Saving..." while the best-effort side effects run (the
     // confirmation SMS + Twilio landline lookup, welcome SMS, tech notification, tagging, prepay-terms
     // refresh and dispatch broadcast cost ~15-20s and affect neither the response, financial state nor
     // reminder-row durability).
-    res.status(201).json(bookingResponse(bookingCtx));
-    setImmediate(() => runPostInsertHooks(bookingCtx));
+    res.status(201).json(bookingResponse(c));
+    setImmediate(() => runPostInsertHooks(c));
+    return undefined;
   } catch (err) {
-    // The in-transaction duplicate-series backstop rolled the create back —
-    // present the SAME 409 the preflight would have returned.
-    if (Array.isArray(err.duplicateRecurringSeries)) {
-      return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
-    }
-    // The phone-agent double-booking guard (preflight or locked re-check).
-    if (err.callBookingConflict) return res.status(409).json(err.callBookingConflict);
-    if (err.isOperational && err.status) {
-      return res.status(err.status).json({ error: err.message, code: err.code, ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
-    }
-    next(err);
+    return bookingErrorResponse(err, res, next);
   }
 }
 
@@ -10450,11 +10518,13 @@ async function scheduleCreateHandler(req, res, next) {
 // showed; any other anchor refuses under the lock. approvedBilling: the
 // billing columns (payer, lane, fee, tier, rate) the card was built on.
 // approvedVisitDates: the series dates the card showed (DATES_CHANGED on any
-// difference); approvedNoOpenEstimateFamily: re-check open estimates for that
-// service family inside the transaction (ESTIMATE_OPENED).
+// difference); approvedNoOpenEstimate: re-check that the customer has no open
+// estimate inside the transaction (ESTIMATE_OPENED). approvedWelcome: the
+// new-customer welcome verdict the card pinned; the handler and the appointment tagger use it
+// instead of looking again (page bookings pass nothing and look as before).
 async function createScheduleBooking({
   body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling,
-  approvedVisitDates, approvedNoOpenEstimateFamily,
+  approvedVisitDates, approvedNoOpenEstimate, approvedWelcome,
 }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
@@ -10464,7 +10534,8 @@ async function createScheduleBooking({
     ...(approvedServiceAnchor ? { approvedServiceAnchor } : {}),
     ...(approvedBilling ? { approvedBilling } : {}),
     ...(Array.isArray(approvedVisitDates) ? { approvedVisitDates } : {}),
-    ...(approvedNoOpenEstimateFamily ? { approvedNoOpenEstimateFamily } : {}),
+    ...(approvedNoOpenEstimate === true ? { approvedNoOpenEstimate: true } : {}),
+    ...(typeof approvedWelcome === 'boolean' ? { approvedWelcome } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
   };
   return new Promise((resolve, reject) => {
@@ -29064,6 +29135,7 @@ module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionCo
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;
+module.exports.newRecurringWelcomeVerdict = newRecurringWelcomeVerdict;
 // Same handler as PUT /:id/update-details — see updateVisitDetails above.
 module.exports.updateVisitDetails = updateVisitDetails;
 module.exports.assertApprovedRepriceState = assertApprovedRepriceState;

@@ -30,6 +30,12 @@
  */
 
 const BILLING_FINGERPRINT_COLS = ['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate'];
+// Every customers column the booking's WaveGuard plan sync reads (syncCustomerWaveGuardPlanFromScheduledServices:
+// isMembershipCustomerRow, isAutoDerivedTierLabelRow, buildCustomerWaveGuardAlignmentUpdates, and the
+// customer_not_found check) beyond the billing columns above. The card's alignment preview is built from these, so
+// a change under the lock must refuse. Only this rail compares them: page bookings keep BILLING_FINGERPRINT_COLS.
+const PLAN_SYNC_FINGERPRINT_COLS = ['waveguard_tier_source', 'active', 'pipeline_stage', 'member_since', 'deleted_at'];
+const CARD_BILLING_COLS = [...BILLING_FINGERPRINT_COLS, ...PLAN_SYNC_FINGERPRINT_COLS];
 const ADDRESS_COLS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
 function httpError(status, message) {
@@ -40,7 +46,7 @@ function httpError(status, message) {
   return err;
 }
 
-const billingString = (row) => BILLING_FINGERPRINT_COLS.map((c) => String(row?.[c] ?? '')).join('|');
+const billingString = (row) => CARD_BILLING_COLS.map((c) => String(row?.[c] ?? '')).join('|');
 
 const RAILS = [
   {
@@ -51,19 +57,20 @@ const RAILS = [
     message: 'The customer\'s billing changed since the card was shown. Nothing was booked.',
     applies: (ctx) => !!ctx.req.approvedBilling,
     lock: (trx, ctx) => trx('customers').where({ id: ctx.customerId }).forUpdate().first('id'),
-    read: async (trx, ctx) => billingString(await trx('customers').where({ id: ctx.customerId }).first(...BILLING_FINGERPRINT_COLS)),
+    read: async (trx, ctx) => billingString(await trx('customers').where({ id: ctx.customerId }).first(...CARD_BILLING_COLS)),
     approved: (ctx) => billingString(ctx.req.approvedBilling),
   },
   {
-    // The card's open-estimate check. Every estimate insert and reactivation
+    // The card's open-estimate check: the SAME any-open condition the card's own check uses
+    // (openEstimateForCustomer; no service-family reading). Every estimate insert and reopening
     // for a customer takes this lock first (utils/customer-estimate-lock.js),
     // so this read waits for an in-flight creator and sees its row.
     code: 'ESTIMATE_OPENED',
-    message: 'This customer now has an open estimate for this service. Mark the estimate accepted on the estimate page. Nothing was booked.',
-    applies: (ctx) => !!ctx.req.approvedNoOpenEstimateFamily,
+    message: 'This customer now has an open estimate. Accept or close it first; the bar does not start a program beside an open estimate. Nothing was booked.',
+    applies: (ctx) => ctx.req.approvedNoOpenEstimate === true,
     lock: (trx, ctx) => require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, ctx.customerId),
     read: async (trx, ctx) => Boolean(await require('../intelligence-bar/start-program')
-      .openEstimateForFamily(ctx.customerId, ctx.req.approvedNoOpenEstimateFamily, trx)),
+      .openEstimateForCustomer(ctx.customerId, trx)),
     approved: () => false,
   },
   {
@@ -172,4 +179,4 @@ async function runApprovedBookingRails(trx, ctx, rails = RAILS) {
   }
 }
 
-module.exports = { RAILS, runApprovedBookingRails, BILLING_FINGERPRINT_COLS };
+module.exports = { RAILS, runApprovedBookingRails, BILLING_FINGERPRINT_COLS, PLAN_SYNC_FINGERPRINT_COLS, CARD_BILLING_COLS };

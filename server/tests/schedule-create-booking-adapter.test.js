@@ -215,7 +215,7 @@ describe('createScheduleBooking runs the POST / handler', () => {
     });
   });
 
-  describe('approvedVisitDates / approvedNoOpenEstimateFamily / propertyId (Intelligence Bar start_program)', () => {
+  describe('approvedVisitDates / approvedNoOpenEstimate / approvedWelcome / propertyId (Intelligence Bar start_program)', () => {
     const recurringBody = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };
 
     test('the dates the handler plans book; any other dates refuse with DATES_CHANGED before any insert', async () => {
@@ -233,14 +233,14 @@ describe('createScheduleBooking runs the POST / handler', () => {
 
     test('an open estimate found inside the transaction refuses with ESTIMATE_OPENED; none books', async () => {
       const StartProgram = require('../services/intelligence-bar/start-program');
-      const spy = jest.spyOn(StartProgram, 'openEstimateForFamily').mockResolvedValueOnce({ id: 'est-1', status: 'sent' });
-      const refused = await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimateFamily: 'lawn_care' });
+      const spy = jest.spyOn(StartProgram, 'openEstimateForCustomer').mockResolvedValueOnce({ id: 'est-1', status: 'sent' });
+      const refused = await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimate: true });
       expect(refused.status).toBe(409);
       expect(refused.json.code).toBe('ESTIMATE_OPENED');
-      expect(spy).toHaveBeenCalledWith('cust-1', 'lawn_care', expect.anything());
+      expect(spy).toHaveBeenCalledWith('cust-1', expect.anything());
       expect(inserts).toEqual([]);
       spy.mockResolvedValueOnce(null);
-      expect((await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimateFamily: 'lawn_care' })).status).toBe(201);
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimate: true })).status).toBe(201);
       spy.mockRestore();
     });
 
@@ -248,11 +248,11 @@ describe('createScheduleBooking runs the POST / handler', () => {
       const StartProgram = require('../services/intelligence-bar/start-program');
       const EstimateLock = require('../utils/customer-estimate-lock');
       const lockSpy = jest.spyOn(EstimateLock, 'lockCustomerEstimates').mockResolvedValue(undefined);
-      const readSpy = jest.spyOn(StartProgram, 'openEstimateForFamily').mockResolvedValue(null);
+      const readSpy = jest.spyOn(StartProgram, 'openEstimateForCustomer').mockResolvedValue(null);
       const Seeder = require('../services/recurring-appointment-seeder');
       const seriesGuard = jest.spyOn(Seeder, 'checkActiveSeriesLocked').mockResolvedValue({ matches: [], guardError: null });
       const recurringBody = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };
-      expect((await createScheduleBooking({ body: recurringBody, actor, approvedNoOpenEstimateFamily: 'lawn_care' })).status).toBe(201);
+      expect((await createScheduleBooking({ body: recurringBody, actor, approvedNoOpenEstimate: true })).status).toBe(201);
       expect(lockSpy).toHaveBeenCalledWith(expect.anything(), 'cust-1');
       expect(lockSpy.mock.invocationCallOrder[0]).toBeLessThan(readSpy.mock.invocationCallOrder[0]);
       // The estimate lock is a leaf: taken after the series lock (and so after the customer row lock).
@@ -263,6 +263,19 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(lockSpy).not.toHaveBeenCalled();
       lockSpy.mockRestore();
       readSpy.mockRestore();
+    });
+
+    test('approvedWelcome: the pinned welcome verdict is used as given, with no lookup; the tagger gets it too', async () => {
+      const { newRecurringWelcomeVerdict } = require('../routes/admin-schedule');
+      const callsBefore = db.mock.calls.length;
+      expect(await newRecurringWelcomeVerdict({ approvedWelcome: false }, 'cust-1')).toBe(false);
+      expect(await newRecurringWelcomeVerdict({ approvedWelcome: true }, 'cust-1')).toBe(true);
+      expect(db.mock.calls.length).toBe(callsBefore);
+      // Page bookings pass nothing: the live lookup runs as before.
+      await newRecurringWelcomeVerdict({}, 'cust-1');
+      expect(db.mock.calls.length).toBeGreaterThan(callsBefore);
+      const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+      expect(src).toMatch(/onServiceScheduled\(svc\.id, \.\.\.\(typeof req\.approvedWelcome === 'boolean' \? \[\{ approvedWelcome: req\.approvedWelcome \}\] : \[\]\)\)/);
     });
 
     test('an explicit propertyId stamps that property on the visit with GATE_EDIT_APPT_ADDRESS off (a programmatic booking is exempt)', async () => {

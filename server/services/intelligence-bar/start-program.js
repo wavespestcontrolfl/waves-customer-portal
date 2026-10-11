@@ -136,54 +136,54 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
   };
 }
 
-// Open estimates that are the customer's, and the ones that will land on the customer: an estimate
-// written with no customer_id (the email-inquiry draft) is the customer's when the accept's own
-// phone match (resolveProspectiveAcceptCustomer, the resolver every accept and tier read uses)
-// resolves it to this customer. A lookup that fails counts as a match: it fails closed.
+// Open estimates that are the customer's, and the ones that will land on the customer. The guard asks
+// one question (does this customer have ANY open estimate?) and never classifies the estimate's service
+// family. Three ways an open estimate belongs to the customer:
+//   - it is linked by customer_id;
+//   - it has no customer_id and the accept resolver (resolveProspectiveAcceptCustomer: the estimate group's
+//     owner first, then the phone match) resolves it to this customer;
+//   - it is a member of an estimate group that one of this customer's estimates belongs to (the accept lands
+//     a grouped member on the group's owner, with or without a phone on the member).
+// A lookup that fails counts as a match: it fails closed.
 async function openEstimateRowsForCustomer(customerId, conn) {
   // The estimate lifecycle's open set (sending included); an archived row keeps
   // its status but is no longer an offer.
   const { OPEN_ESTIMATE_STATUSES } = require('../estimate-conversion-agent');
-  const columns = ['id', 'status', 'estimate_data', 'service_interest'];
+  const columns = ['id', 'status', 'created_at'];
   const linked = await conn('estimates').where({ customer_id: customerId })
     .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select(...columns);
+  if (linked.length) return linked;
   const customer = await conn('customers').where({ id: customerId }).first('phone');
   const digits = String(customer?.phone || '').replace(/\D/g, '').slice(-10);
-  if (digits.length < 10) return linked;
+  const ownGroups = conn('estimates').where({ customer_id: customerId }).whereNotNull('estimate_group_id').select('estimate_group_id');
   const unlinked = await conn('estimates').whereNull('customer_id')
     .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at')
-    .whereRaw("regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+    .where(function contactOrGroup() {
+      this.whereIn('estimate_group_id', ownGroups);
+      if (digits.length >= 10) this.orWhereRaw("regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`]);
+    })
     .select(...columns, 'customer_phone', 'customer_phone_typed', 'estimate_group_id');
   const { resolveProspectiveAcceptCustomer } = require('../recurring-card-on-file');
   const matched = [];
   for (const est of unlinked) {
     const { customerId: ownerId, lookupFailed } = await resolveProspectiveAcceptCustomer(est, conn, { authoritative: true });
-    if (lookupFailed || String(ownerId || '') === String(customerId)) matched.push({ ...est, unlinked: true });
+    if (lookupFailed || String(ownerId || '') === String(customerId)) matched.push(est);
   }
-  return [...linked, ...matched];
+  return matched;
 }
 
-// Is there an open estimate for this service family? Accepting estimates from
-// the bar is a pending owner decision (Q5), so an open quote for the service
-// refuses instead of booking around it. An unreadable estimate fails closed.
-async function openEstimateForFamily(customerId, family, conn = db) {
+// The customer's open estimate, or null. Accepting estimates from the bar is a pending owner decision
+// (Q5), so any open estimate refuses instead of the bar starting a program beside it. Over-refusal is the
+// intended safe side: no service-family reading, so nothing here can misclassify an estimate.
+async function openEstimateForCustomer(customerId, conn = db) {
   const rows = await openEstimateRowsForCustomer(customerId, conn);
-  if (!rows.length) return null;
-  const { acceptedRecurringBillingLines } = require('../plan-rate-ledger');
-  const { serviceFamilyKeyForAdoption } = require('../../routes/estimate-public');
-  for (const est of rows) {
-    let data = est.estimate_data;
-    if (typeof data === 'string') {
-      try { data = JSON.parse(data); } catch { return est; }
-    }
-    const lines = acceptedRecurringBillingLines(data || {});
-    if (lines.some((line) => serviceFamilyKeyForAdoption(line) === family)) return est;
-    // A draft with no priced recurring lines yet (a lead or booking draft) still names
-    // its service: fall back to service_interest, classified by the same family
-    // classifier the adoption code uses, so such an open estimate refuses too.
-    if (!lines.length && est.service_interest && serviceFamilyKeyForAdoption({ service: est.service_interest }) === family) return est;
-  }
-  return null;
+  return rows[0] || null;
+}
+
+function openEstimateRefusal(estimate) {
+  const { etDateString } = require('../../utils/datetime-et');
+  const created = estimate.created_at ? etDateString(new Date(estimate.created_at)) : 'date unknown';
+  return `This customer has an open estimate (${estimate.status}, ${created} ET). Accept or close it first; the bar does not start a program beside an open estimate.`;
 }
 
 async function resolveTechnician(input) {
@@ -308,6 +308,22 @@ async function resolveProgramService(serviceText, cadence) {
   return catalogCadenceRefusal(catalogRow, cadence) || { catalogRow, family };
 }
 
+// Retired-for-sale catalog rows (quarterly T&S) book only for a customer already on that plan. The booking
+// handler refuses the same case at commit (RETIRED_SERVICE_NOT_SELLABLE); asking here, with the booking's own
+// service id, name and cadence, means the card refuses before anyone approves it.
+async function retiredServiceRefusal(customerId, catalogRow, cadence) {
+  let notHeld;
+  try {
+    notHeld = await require('../service-library').retiredServicesNotHeldBy({
+      customerId, serviceIds: [catalogRow.id], serviceTypes: [catalogRow.name], recurrence: { pattern: cadence, intervalDays: null },
+    });
+  } catch {
+    return refusal('Could not check whether this service is still sold. Try again in a moment. Nothing was proposed.');
+  }
+  if (!notHeld.length) return {};
+  return refusal(`${notHeld.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan. Nothing was proposed.`, 'program_service_retired');
+}
+
 // The catalog row's own cadence, resolved the way the Schedule screen's
 // server pre-fill does (admin-customers cadenceFromEstimateLine: seasonal
 // mosquito -> seasonal_feb_oct, 9 visits -> every 6 weeks, ...). A cadence this
@@ -352,16 +368,11 @@ async function programConflict({ customerId, catalogRow, family, components, cur
   }
   let openEstimate;
   try {
-    openEstimate = await openEstimateForFamily(customerId, family);
+    openEstimate = await openEstimateForCustomer(customerId);
   } catch {
     return refusal('Could not read this customer\'s open estimates. Try again in a moment. Nothing was proposed.');
   }
-  if (openEstimate?.unlinked) {
-    return refusal(`An unlinked open estimate matches this customer for ${RateChange.lineLabel(family).toLowerCase()} (${openEstimate.status}). Link it to the customer or close it first. Nothing was proposed.`, 'program_open_estimate');
-  }
-  if (openEstimate) {
-    return refusal(`This customer has an open estimate for ${RateChange.lineLabel(family).toLowerCase()} (${openEstimate.status}). Mark the estimate accepted on the estimate page. Nothing was proposed.`, 'program_open_estimate');
-  }
+  if (openEstimate) return refusal(openEstimateRefusal(openEstimate), 'program_open_estimate');
   return null;
 }
 
@@ -511,7 +522,14 @@ async function plannedVisitDates(customerId, firstDate, cadence) {
 // welcome would still go out.
 async function welcomeVerdict(args) {
   const { isNewRecurringSignupCandidate, WELCOME_DELAY_MINUTES } = require('../new-recurring-welcome-sms');
-  const welcomeCandidate = await isNewRecurringSignupCandidate(args.customerId);
+  // The lookup is fail-soft by default (false on an error). The card PINS this verdict, so a lookup that
+  // fails refuses: "could not look" must not read as "not a new customer".
+  let welcomeCandidate;
+  try {
+    welcomeCandidate = await isNewRecurringSignupCandidate(args.customerId, { throwOnError: true });
+  } catch {
+    return refusal('Could not verify welcome-message eligibility. Try again in a moment. Nothing was proposed.', 'program_welcome_unverified');
+  }
   if (!args.sendTexts && welcomeCandidate) {
     return refusal('This customer has never had a recurring service, so booking the program queues the new-customer welcome text. The Schedule screen has no switch for that text, and neither does this tool. Propose again with send_texts on. Nothing was proposed.', 'program_welcome_cannot_skip');
   }
@@ -544,6 +562,7 @@ const PLAN_STEPS = [
   ['args', (o, input) => parseProgramInput(input)],
   ['loaded', (o) => loadProgramCustomer(o.args.customerId)],
   ['service', (o) => resolveProgramService(o.args.serviceText, o.args.cadence)],
+  ['retired', (o) => retiredServiceRefusal(o.args.customerId, o.service.catalogRow, o.args.cadence)],
   ['ledger', async (o) => {
     const PlanRateLedger = require('../plan-rate-ledger');
     const { customer } = o.loaded;
@@ -886,10 +905,12 @@ async function bookSeries(plan, actionContext) {
       approvedServiceAnchor: { propertyId: plan.propertyId, address: plan.serviceAddress },
       approvedVisitDates: plan.visitDates,
       // Re-run the open-estimate check inside the booking transaction.
-      approvedNoOpenEstimateFamily: plan.family,
+      approvedNoOpenEstimate: true,
+      // The welcome verdict the card pinned: the handler and the appointment tagger use it, no second lookup.
+      approvedWelcome: plan.welcomeCandidate === true,
       // The billing state the card was built on (dues-covered visits); the
       // handler re-checks it under the customer lock before any insert.
-      approvedBilling: Object.fromEntries(['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate']
+      approvedBilling: Object.fromEntries(require('../scheduling/approved-booking-rails').CARD_BILLING_COLS
         .map((c) => [c, plan.customer[c] ?? null])),
     });
   } catch (err) {
@@ -1032,7 +1053,7 @@ Ongoing programs only (no visit count). Refuses: a customer who is not on a mont
 
 module.exports = {
   START_PROGRAM_TOOL,
-  openEstimateForFamily,
+  openEstimateForCustomer,
   startProgram,
   serviceAnchorAddress,
   startProgramLive,

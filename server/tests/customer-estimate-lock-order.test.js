@@ -1,7 +1,10 @@
 /**
- * One lock order for every reactivation / revision of an open estimate: the estimate ROW lock first,
- * then the per-customer estimate lock (utils/customer-estimate-lock.js, a leaf), and no other lock
- * after it. The booking takes the same lock after its customer / comms / series locks.
+ * The per-customer estimate lock (utils/customer-estimate-lock.js, a leaf) is taken only by writers that
+ * CREATE or REOPEN an estimate for a customer, because start_program's guard asks one question: does this
+ * customer have ANY open estimate? Reopening sites take the estimate ROW lock first, then the leaf lock,
+ * and no other lock after it. A pure revision of an already-open estimate (reprice, service opt-in/out,
+ * the lead-webhook triage rewrite, the existing intake shell rewrite) cannot change the answer and takes
+ * no leaf lock.
  */
 const fs = require('fs');
 
@@ -15,9 +18,6 @@ const SITES = [
   ['admin unarchive', '../routes/admin-estimates', "where({ id: req.params.id }).forUpdate().first('id');", null],
   ['admin proposal revival', '../routes/admin-estimates', 'if (revivingBid) await require', /const locked = await trx\('estimates'\)\.where\(\{ id: estimate\.id \}\)\.forUpdate\(\)/],
   ['extendEstimate', '../services/estimate-extension', 'lockCustomerEstimates(trx, estimate.customer_id)', /\.forUpdate\(\)/],
-  ['reviseAdminEstimate', '../services/admin-estimate-persistence', 'lockCustomerEstimates(trx, lockedPrior.customer_id)', /const lockedPrior = await trx\('estimates'\)/],
-  ['customer service opt-in / opt-out', '../routes/estimate-public', 'lockCustomerEstimates(trx, estimate.customer_id)', /lockEstimateOwnerForUpdate\(trx, estimate\)/],
-  ['agent reprice', '../services/intelligence-bar/estimate-tools', 'lockCustomerEstimates(trx, estimate.customer_id)', /where\(\{ id: estimateId \}\)\.forUpdate\(\)/],
 ];
 
 describe('customer estimate lock order (row lock first, then the leaf lock)', () => {
@@ -51,13 +51,40 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(src.slice(tx, tx + 200)).toContain("forUpdate().first('id')");
   });
 
-  test('the lead-webhook triage rewrite takes the per-customer lock inside its own transaction', () => {
+  test('pure revision sites of an open estimate take no per-customer estimate lock', () => {
+    const revisionSites = [
+      ['../services/admin-estimate-persistence', 'async function reviseAdminEstimate('],
+      ['../services/intelligence-bar/estimate-tools', 'async function reviseOwnedAgentDraft('],
+      ['../routes/estimate-public', 'async function applyServiceMixChange('],
+    ];
+    for (const [rel, fnStart] of revisionSites) {
+      const src = read(rel);
+      const start = src.indexOf(fnStart);
+      expect(start).toBeGreaterThan(-1);
+      const next = src.indexOf('\nasync function ', start + 10);
+      const body = src.slice(start, next > 0 ? next : undefined);
+      expect(body).not.toContain('lockCustomerEstimates');
+    }
+  });
+
+  test('the lead-webhook triage rewrite is not wrapped in a lock; only the draft insert is', () => {
     const src = read('../routes/lead-webhook');
-    const at = src.indexOf('lockCustomerEstimates(trx, customer.id);');
-    expect(at).toBeGreaterThan(-1);
-    const after = src.slice(at, at + 600);
-    expect(after).toMatch(/trx\('estimates'\)/);
-    expect(after).not.toMatch(LOCKS_AFTER);
+    expect(src.split('lockCustomerEstimates(').length - 1).toBe(1);
+  });
+
+  test('the intake shell rewrite only edits a live draft: it never reopens a closed estimate', () => {
+    const src = read('../services/lead-intake');
+    const start = src.indexOf('if (existingDraft) {');
+    const end = src.indexOf('const token = crypto.randomBytes', start);
+    const branch = src.slice(start, end);
+    expect(branch).toContain(".whereNull('archived_at').update(updates)");
+    expect(branch).not.toMatch(/status:|archived_at:\s*null|lockCustomerEstimates/);
+    // The shell it finds is a still-draft, unarchived row.
+    expect(src.slice(src.indexOf('const existingDraft'), start)).toMatch(/status: 'draft'[\s\S]*whereNull\('archived_at'\)/);
+  });
+
+  test('the lock module exports only lockCustomerEstimates', () => {
+    expect(Object.keys(require('../utils/customer-estimate-lock'))).toEqual(['lockCustomerEstimates']);
   });
 
   test('an unlinked estimate insert locks the customer the accept would resolve, before the insert', () => {

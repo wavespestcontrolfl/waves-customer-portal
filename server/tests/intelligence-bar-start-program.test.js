@@ -75,6 +75,7 @@ function fakeDb() {
         return (...args) => {
           calls.push({ table, method: String(prop), args });
           if (prop === 'whereNull' && args[0] === 'customer_id') state.unlinked = true;
+          if (prop === 'where' && typeof args[0] === 'function') args[0].call(b, b);
           return b;
         };
       },
@@ -338,46 +339,41 @@ describe('refusals', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('an open estimate for the service', async () => {
-    tables.estimates = [{ id: 'est-1', status: 'sent', estimate_data: {} }];
-    jest.spyOn(PlanRateLedger, 'acceptedRecurringBillingLines').mockReturnValue([{ service: 'lawn_care', name: 'Lawn Care' }]);
+  test('ANY open estimate refuses, whatever its service (no family reading)', async () => {
+    tables.estimates = [{ id: 'est-1', status: 'sent', created_at: '2026-10-01T15:00:00Z', estimate_data: {}, service_interest: 'Pest Control' }];
+    const lines = jest.spyOn(PlanRateLedger, 'acceptedRecurringBillingLines').mockReturnValue([{ service: 'pest_control', name: 'Pest Control' }]);
     const result = await run(BASE_INPUT);
     expect(result.code).toBe('program_open_estimate');
-    expect(result.error).toContain('Mark the estimate accepted on the estimate page');
+    expect(result.error).toBe('This customer has an open estimate (sent, 2026-10-01 ET). Accept or close it first; the bar does not start a program beside an open estimate.');
+    // The guard never classifies the estimate's lines or service_interest.
+    expect(lines).not.toHaveBeenCalled();
     const estimateCalls = calls.filter((c) => c.table === 'estimates');
     expect(estimateCalls).toContainEqual({ table: 'estimates', method: 'whereNull', args: ['archived_at'] });
     const statuses = estimateCalls.find((c) => c.method === 'whereIn').args[1];
     expect(statuses).toEqual(expect.arrayContaining(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']));
+    expect(estimateCalls.find((c) => c.method === 'select').args).not.toContain('service_interest');
   });
 
-  test('an open draft with no priced lines but a matching service_interest also refuses (fallback family)', async () => {
-    tables.estimates = [{ id: 'est-2', status: 'draft', estimate_data: {}, service_interest: 'Lawn Care' }];
-    jest.spyOn(PlanRateLedger, 'acceptedRecurringBillingLines').mockReturnValue([]);
-    const result = await run(BASE_INPUT);
-    expect(result.code).toBe('program_open_estimate');
-    expect(calls.filter((c) => c.table === 'estimates' && c.method === 'select')[0].args).toContain('service_interest');
-    // A draft for a different service, or priced lines for another family, does not refuse.
-    tables.estimates = [{ id: 'est-3', status: 'draft', estimate_data: {}, service_interest: 'Pest Control' }];
+  test('with no open estimate the program is proposed', async () => {
+    tables.estimates = [];
     expect((await run(BASE_INPUT)).code).toBeUndefined();
   });
 
-  test('an open estimate with no customer_id that the accept would land on this customer also refuses (round 3)', async () => {
+  test('an open estimate with no customer_id that the accept would land on this customer also refuses', async () => {
     const RecurringCof = require('../services/recurring-card-on-file');
     tables.customers = [memberCustomer({ phone: '+19415550123' })];
     tables.estimates = [{
-      id: 'est-unlinked', customer_id: null, status: 'draft', estimate_data: {}, service_interest: 'Lawn Care',
+      id: 'est-unlinked', customer_id: null, status: 'draft', created_at: '2026-10-02T15:00:00Z', estimate_data: {}, service_interest: 'Pest Control',
       customer_phone: '(941) 555-0123',
     }];
-    jest.spyOn(PlanRateLedger, 'acceptedRecurringBillingLines').mockReturnValue([]);
     const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer')
       .mockResolvedValue({ customerId: CUSTOMER_ID, lookupFailed: false });
     const result = await run(BASE_INPUT);
     expect(result.code).toBe('program_open_estimate');
-    expect(result.error).toContain('An unlinked open estimate matches this customer');
-    expect(result.error).toContain('Link it to the customer or close it first');
+    expect(result.error).toContain('This customer has an open estimate (draft, 2026-10-02 ET). Accept or close it first');
     expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-unlinked' }), expect.anything(), { authoritative: true });
-    // The phone digits pick the candidates; the accept's own resolver decides whose estimate it is.
-    expect(calls.some((c) => c.table === 'estimates' && c.method === 'whereRaw' && /regexp_replace/.test(c.args[0]))).toBe(true);
+    // The phone digits pick candidates; the accept's own resolver decides whose estimate it is.
+    expect(calls.some((c) => c.table === 'estimates' && c.method === 'orWhereRaw' && /regexp_replace/.test(c.args[0]))).toBe(true);
     // An unlinked estimate that resolves to someone else, or to nobody, does not refuse.
     resolver.mockResolvedValue({ customerId: '00000000-0000-4000-8000-00000000c0a2', lookupFailed: false });
     expect((await run(BASE_INPUT)).code).toBeUndefined();
@@ -386,6 +382,52 @@ describe('refusals', () => {
     // A lookup that fails reads as a match: fail closed.
     resolver.mockResolvedValue({ customerId: null, lookupFailed: true });
     expect((await run(BASE_INPUT)).code).toBe('program_open_estimate');
+  });
+
+  test('a member of an estimate group that one of the customer\'s estimates belongs to is found with no phone at all (round 4)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    tables.customers = [memberCustomer({ phone: null })];
+    tables.estimates = [{ id: 'est-member', customer_id: null, status: 'sent', created_at: '2026-10-03T15:00:00Z', estimate_group_id: 'group-1', customer_phone: null }];
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer')
+      .mockResolvedValue({ customerId: CUSTOMER_ID, lookupFailed: false });
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_open_estimate');
+    expect(calls.some((c) => c.table === 'estimates' && c.method === 'whereIn' && c.args[0] === 'estimate_group_id')).toBe(true);
+    // No phone: no phone clause, only the group clause.
+    expect(calls.some((c) => c.method === 'orWhereRaw')).toBe(false);
+    // The group's owner decides: a sibling owned by another customer does not refuse.
+    resolver.mockResolvedValue({ customerId: '00000000-0000-4000-8000-00000000c0a2', lookupFailed: false });
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+  });
+
+  test('a retired-for-sale service is refused at the card, before any approval (round 4)', async () => {
+    const Library = require('../services/service-library');
+    const retired = jest.spyOn(Library, 'retiredServicesNotHeldBy').mockResolvedValue([{ service_key: 'tree_shrub_quarterly', name: 'Tree & Shrub Care (quarterly)' }]);
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_service_retired');
+    expect(result.error).toContain('Tree & Shrub Care (quarterly) is retired for new sales and this customer is not on that plan');
+    expect(retired).toHaveBeenCalledWith({
+      customerId: CUSTOMER_ID, serviceIds: ['svc-lawn'], serviceTypes: ['Lawn Care'], recurrence: { pattern: 'monthly', intervalDays: null },
+    });
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+    // A customer who holds it (nothing returned) books as before.
+    retired.mockResolvedValue([]);
+    expect((await run(BASE_INPUT)).code).toBeUndefined();
+  });
+
+  test('welcome eligibility that cannot be verified refuses instead of pinning "not a new customer" (round 4)', async () => {
+    Welcome.isNewRecurringSignupCandidate.mockRejectedValue(new Error('db down'));
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_welcome_unverified');
+    expect(result.error).toBe('Could not verify welcome-message eligibility. Try again in a moment. Nothing was proposed.');
+    expect(Welcome.isNewRecurringSignupCandidate).toHaveBeenCalledWith(CUSTOMER_ID, { throwOnError: true });
+  });
+
+  test('isNewRecurringSignupCandidate stays fail-soft for page callers and throws only on request', async () => {
+    Welcome.isNewRecurringSignupCandidate.mockRestore();
+    db.mockImplementation(() => { throw new Error('boom'); });
+    expect(await Welcome.isNewRecurringSignupCandidate(CUSTOMER_ID)).toBe(false);
+    await expect(Welcome.isNewRecurringSignupCandidate(CUSTOMER_ID, { throwOnError: true })).rejects.toThrow('boom');
   });
 
   test('a technician marked out on a LATER series date is refused at the card, naming that date', async () => {
@@ -511,11 +553,15 @@ describe('commit', () => {
     expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([]);
     expect(createScheduleBooking.mock.calls[0][0].skipLeadConversion).toBe(true);
     expect(createScheduleBooking.mock.calls[0][0].approvedVisitDates).toEqual(['2099-03-03', '2099-04-07', '2099-05-05', '2099-06-02']);
-    expect(createScheduleBooking.mock.calls[0][0].approvedNoOpenEstimateFamily).toBe('lawn_care');
+    expect(createScheduleBooking.mock.calls[0][0].approvedNoOpenEstimate).toBe(true);
+    // The welcome verdict the card pinned (this customer is not a first-ever signup) rides into the booking.
+    expect(createScheduleBooking.mock.calls[0][0].approvedWelcome).toBe(false);
     expect(body.propertyId).toBe('prop-1');
     expect(createScheduleBooking.mock.calls[0][0].approvedServiceAnchor).toEqual({ propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' });
     expect(createScheduleBooking.mock.calls[0][0].approvedBilling).toEqual({
       payer_id: null, billing_mode: 'monthly_membership', per_application_fee: null, waveguard_tier: 'Bronze', monthly_rate: '41.33',
+      // Every other customers column the booking's plan sync reads (round 4).
+      waveguard_tier_source: 'manual', active: true, pipeline_stage: 'active_customer', member_since: '2024-01-01', deleted_at: null,
     });
     // The handler queues its texts after it replies: queued, never "sent".
     expect(result.message).toContain('Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).');

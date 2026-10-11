@@ -3115,8 +3115,6 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
         reason: 'Agent Estimate pricing was revised; re-author the proposal before delivery.',
       };
     }
-    // The reprice rewrites the draft's services: per-customer estimate lock (a leaf) before the write.
-    await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, estimate.customer_id);
     const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
       .update({
         estimate_data: JSON.stringify(mergedData),

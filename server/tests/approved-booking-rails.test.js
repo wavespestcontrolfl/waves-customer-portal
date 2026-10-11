@@ -41,7 +41,7 @@ beforeEach(() => {
   log = [];
   billingRow = { ...BILLING };
   jest.spyOn(EstimateLock, 'lockCustomerEstimates').mockImplementation(async () => { log.push('lock:estimates-advisory'); });
-  jest.spyOn(StartProgram, 'openEstimateForFamily').mockImplementation(async () => { log.push('read:open-estimate'); return null; });
+  jest.spyOn(StartProgram, 'openEstimateForCustomer').mockImplementation(async () => { log.push('read:open-estimate'); return null; });
   jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockImplementation(async () => { log.push('read:credit'); return 0; });
   jest.spyOn(Tools, 'bookingOverlapFacts').mockImplementation(async (_c, rows, date) => rows.map((r) => ({ fact: `${r.id}|${date}` })));
   jest.spyOn(StartProgram, 'serviceAnchorAddress').mockReturnValue('1 Example St, Sarasota, FL 34201');
@@ -69,9 +69,34 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     billingRow = { ...BILLING };
     expect(await codeOf(run({ approvedBilling: BILLING }))).toBeNull();
   });
-  test('ESTIMATE_OPENED', async () => {
-    StartProgram.openEstimateForFamily.mockResolvedValue({ id: 'est-1' });
-    expect(await codeOf(run({ approvedNoOpenEstimateFamily: 'lawn_care' }))).toBe('ESTIMATE_OPENED');
+  test('ESTIMATE_OPENED (any open estimate, no service-family reading)', async () => {
+    StartProgram.openEstimateForCustomer.mockResolvedValue({ id: 'est-1' });
+    expect(await codeOf(run({ approvedNoOpenEstimate: true }))).toBe('ESTIMATE_OPENED');
+    // The rail asks the same question the card's own check asks: the customer id and the transaction, nothing else.
+    expect(StartProgram.openEstimateForCustomer).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+  });
+  test.each([
+    ['waveguard_tier_source', 'auto'], ['active', false], ['pipeline_stage', 'lead'], ['member_since', '2020-01-01'], ['deleted_at', '2026-10-01'],
+  ])('BILLING_CHANGED when the plan-sync input %s moves under the lock (round 4)', async (col, value) => {
+    const pinned = { ...BILLING, waveguard_tier_source: 'manual', active: true, pipeline_stage: 'active_customer', member_since: null, deleted_at: null };
+    billingRow = { ...pinned, [col]: value };
+    expect(await codeOf(run({ approvedBilling: pinned }))).toBe('BILLING_CHANGED');
+    billingRow = { ...pinned };
+    expect(await codeOf(run({ approvedBilling: pinned }))).toBeNull();
+  });
+  test('the card pins every customers column the plan sync reads', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { CARD_BILLING_COLS } = require('../services/scheduling/approved-booking-rails');
+    const src = fs.readFileSync(path.join(__dirname, '../services/self-booking-plan-sync.js'), 'utf8');
+    const fnBody = (name) => { const at = src.indexOf(`function ${name}(`); return src.slice(at, src.indexOf('\n}\n', at)); };
+    const read = new Set();
+    for (const name of ['buildCustomerWaveGuardAlignmentUpdates', 'isAutoDerivedTierLabelRow']) {
+      for (const m of fnBody(name).matchAll(/\b(?:customer|row)\??\.([a-z_]+)/g)) read.add(m[1]);
+    }
+    read.delete('earliest_service_date'); // derived from the schedule rows, not a customers column
+    read.add('deleted_at'); // the sync's customer_not_found / live-customer check
+    for (const col of read) expect(CARD_BILLING_COLS).toContain(col);
   });
   test('INSPECTION_CREDIT_CHANGED', async () => {
     InspectionCredit.projectRedeemableOfferAmount.mockResolvedValue({ amount: 25 });
@@ -105,7 +130,7 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
 
 test('every lock is taken before any read, and the estimate lock is the last lock', async () => {
   await run({
-    approvedBilling: BILLING, approvedNoOpenEstimateFamily: 'lawn_care', creditFreeCard: true,
+    approvedBilling: BILLING, approvedNoOpenEstimate: true, creditFreeCard: true,
     approvedVisitDates: ['2099-03-03', '2099-04-07'],
     approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' }, approvedOverlapFacts: [],
   });

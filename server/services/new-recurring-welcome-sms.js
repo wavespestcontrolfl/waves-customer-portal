@@ -47,7 +47,7 @@ const TEMPLATE_EMAIL_KEY = 'welcome.new_recurring';
 // whole new batch — without it the new series would always disqualify
 // itself. Pre-insert callers (estimate converter, admin schedule route)
 // omit it.
-async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = null } = {}) {
+async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = null, throwOnError = false } = {}) {
   if (!customerId) return false;
 
   try {
@@ -82,6 +82,9 @@ async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = nu
     return !priorRecurringSeries && !priorServicedVisit && !priorCompletedService;
   } catch (err) {
     logger.warn(`[new-recurring-welcome] prior service lookup failed for customer ${customerId}: ${err.message}`);
+    // throwOnError: a caller that must PIN the verdict (the Intelligence Bar's start_program card) cannot
+    // treat "could not look" as "not a new customer".
+    if (throwOnError) throw err;
     return false;
   }
 }

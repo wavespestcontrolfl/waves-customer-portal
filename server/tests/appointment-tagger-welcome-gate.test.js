@@ -131,6 +131,27 @@ describe('appointment tagger welcome gate', () => {
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
   });
 
+  test('approvedWelcome (a confirm card pinned the verdict) replaces the lookup: true welcomes, false does not', async () => {
+    serviceRow = serviceFixture();
+    isNewRecurringSignupCandidate.mockResolvedValue(false);
+    await AppointmentTagger.onServiceScheduled('svc-anchor', { approvedWelcome: true });
+    expect(isNewRecurringSignupCandidate).not.toHaveBeenCalled();
+    expect(sendNewRecurringWelcome).toHaveBeenCalledTimes(1);
+
+    jest.clearAllMocks();
+    isNewRecurringSignupCandidate.mockResolvedValue(true);
+    await AppointmentTagger.onServiceScheduled('svc-anchor', { approvedWelcome: false });
+    expect(isNewRecurringSignupCandidate).not.toHaveBeenCalled();
+    expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+  });
+
+  test('a pinned true verdict still honors the label-only tier suppression', async () => {
+    serviceRow = serviceFixture();
+    mockTierLabelStatus.mockResolvedValueOnce('label');
+    await AppointmentTagger.onServiceScheduled('svc-anchor', { approvedWelcome: true });
+    expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+  });
+
   test('one-time booking never consults the gate or sends the welcome', async () => {
     serviceRow = serviceFixture({ is_recurring: false, recurring_pattern: null });
     isNewRecurringSignupCandidate.mockResolvedValue(true);
