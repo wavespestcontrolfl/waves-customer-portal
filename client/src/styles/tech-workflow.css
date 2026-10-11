@@ -186,7 +186,10 @@
 .tech-wrapup-stepper { display: flex; align-items: center; gap: 8px; }
 .tech-wrapup-stepper-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 14px; }
 .tech-wrapup-stepper-value { color: var(--tech-text); font-size: 16px; }
-.tech-wrapup-stepper .ui-action.tech-visit-action { min-width: 56px; }
+/* One width for every step button, so the two rows' buttons line up ("−5" is narrower than "−15"). */
+.tech-wrapup-stepper .ui-action.tech-visit-action { width: 60px; min-width: 60px; padding-left: 0; padding-right: 0; }
+/* The pay-link row's hint sits under its label, not after it on the same line. */
+.tech-wrapup-hint { display: block; }
 .tech-wrapup-timing { display: grid; gap: 8px; margin-top: 8px; }
 .tech-wrapup-next { margin: 0; font-size: 16px; font-weight: 500; }
 /* The Time on-site clock outside the lawn sheet (the Tree & Shrub Wrap-up); the lawn sheet's own, more specific rule wins there. */
