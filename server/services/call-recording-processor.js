@@ -4095,8 +4095,8 @@ const parseCardPayload = (p) => (typeof p === 'string' ? (() => { try { return J
 // Calls whose spelling is never compared with the linked customer: a third-party caller (family
 // member, agent, tenant, buyer ...), or an applicant / vendor an inbound number prelinked to a
 // customer. An unlinked call still compares against the extracted caller name.
-function nameSpellingCallExcluded({ customerId, extraction, v2Result }) {
-  return !!customerId && (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property) || thirdPartyCallNatureFromV2(v2Result));
+function nameSpellingCallExcluded({ customerId, relationship, v2Result }) {
+  return !!customerId && (isExplicitlyNonOwner(relationship) || thirdPartyCallNatureFromV2(v2Result));
 }
 
 // An OPEN card is stale when the live stored name now equals the spelling the card itself recorded,
@@ -4135,7 +4135,7 @@ async function retireNameSpellingCardForThirdParty(conn, { callLogId, customerId
 // per-call triage lock, then the claim fence (a Customer 360 edit locks the row and then the
 // customer's call locks; the reverse order here would deadlock with it). The customer name is read
 // live under that lock, so the card never carries a name the record no longer has.
-async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, procToken }) {
+async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, relationship = null, procToken }) {
   const live = customerId ? await trx('customers').where({ id: customerId }).forUpdate().first('first_name', 'last_name') : null;
   await lockTriageCall(trx, callLogId);
   if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
@@ -4143,7 +4143,7 @@ async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, di
     .where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).forUpdate().first('id', 'payload');
   // A spouse / partner is authorized on the account but is not the account holder: unless the caller's
   // own name is the record's, their spelling is not compared with it and an earlier card is retired.
-  if (spouseCallerIsNotAccountHolder({ relationship: extraction?.caller?.relationship_to_property, extracted, live })) {
+  if (spouseCallerIsNotAccountHolder({ relationship, extracted, live })) {
     if (openCard) await retireStaleNameSpellingCard(trx, callLogId, openCard, 'Superseded — the caller is not the account holder.');
     return false;
   }
@@ -4172,6 +4172,15 @@ async function writeNameSpellingCard(trx, { callLogId, customerId, extracted, di
   return true;
 }
 
+// The caller relationship from a VALID V2 result only; any other status classifies nobody.
+const validV2CallerRelationship = (v2Result) => (v2Result?.status === 'valid' ? v2Result.extraction?.caller?.relationship_to_property : null);
+
+// Work exists when this pass has a caller-turn spelling or the call has an open card to prune.
+async function nameSpellingPassHasWork(conn, callLogId, dictation) {
+  if ((dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)) return true;
+  return !!(await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).first('id'));
+}
+
 // The name_spelling_differs card (advisory, card-only): the caller spelled their own name
 // and the spelling differs (letters, any case) from the name being saved for the caller
 // (the linked customer's name when linked, else the extracted name). ONE open card per call.
@@ -4188,15 +4197,17 @@ async function fileNameSpellingCard(conn, {
   try {
     if (isOutbound) return false;
     const extraction = v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } };
-    if (nameSpellingCallExcluded({ customerId, extraction, v2Result })) {
+    // Who the caller is comes only from a VALID V2 result: a partial extraction from a failed
+    // normalization or schema check classifies nobody (no exclusion, no spouse veto, no retire).
+    const relationship = validV2CallerRelationship(v2Result);
+    if (nameSpellingCallExcluded({ customerId, relationship, v2Result })) {
       return await retireNameSpellingCardForThirdParty(conn, { callLogId, customerId, procToken });
     }
     // No usable caller spelling in this pass and no open card: nothing to do. With an open card the
     // writer still prunes it against the live stored name (an entry the office already fixed drops);
     // inconclusive evidence itself never adds, replaces or retires an entry that still differs.
-    if (!(dictation?.names || []).some((n) => n.whose === 'caller' && n.turn)
-      && !(await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', status: 'open' }).first('id'))) return false;
-    return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, procToken }));
+    if (!(await nameSpellingPassHasWork(conn, callLogId, dictation))) return false;
+    return await conn.transaction((trx) => writeNameSpellingCard(trx, { callLogId, customerId, extracted, dictation, extraction, relationship, procToken }));
   } catch (err) {
     logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);
     return false;

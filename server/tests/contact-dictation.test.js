@@ -413,6 +413,25 @@ describe('spelled names — card-only', () => {
     });
   });
 
+  describe('quiet reprocess follows the live stored name', () => {
+    const quiet = { names: [] };
+    const card = { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', quote: 'q', confidence: 0.9 };
+    const decide = (live, payload = card) => nameSpellingCardDecision({ dictation: quiet, live, openCardPayload: payload });
+    test('a stored name edited to another still-wrong value refreshes the card; unchanged writes nothing', () => {
+      const edited = decide({ first_name: 'Quentrell', last_name: 'Sorov' });
+      expect(edited.retire).toBe(false);
+      expect(edited.differences).toEqual([expect.objectContaining({ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sorov' })]);
+      expect(decide({ first_name: 'Quentrell', last_name: 'SIROV' }).differences).toEqual([]);
+    });
+    test('a blanked field drops its entry: retire when it was the only one, refresh when others remain', () => {
+      expect(decide({ first_name: 'Quentrell', last_name: null })).toMatchObject({ retire: true, differences: [] });
+      const two = { field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell', also: [card] };
+      const out = decide({ first_name: 'Quentrell', last_name: '' }, two);
+      expect(out.retire).toBe(false);
+      expect(out.differences).toEqual([expect.objectContaining({ field: 'first_name', spelled_value: 'Kwentrell' })]);
+    });
+  });
+
   describe('settled-card dedupe key', () => {
     test('a cosmetic change of the stored value does not re-file a settled discrepancy', () => {
       const settled = [{ customer_ids: [], field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' }];

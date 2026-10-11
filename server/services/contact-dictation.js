@@ -443,15 +443,19 @@ function nameSpellingCardDecision({ dictation = null, live = null, extracted = {
   // an entry whose live value now matches is dropped; one still different is kept (its stored value
   // refreshed). Evidence from this pass replaces the card's entry for the same field.
   const matches = (d) => !!(d && saved[d.field] && d.spelled_value && nameKey(saved[d.field]) === nameKey(d.spelled_value));
-  const unresolved = recorded.filter((d) => d && NAME_FIELDS.includes(d.field) && d.spelled_value && saved[d.field] && !matches(d))
+  // An entry whose field is now blank is dropped: a blank name belongs to the missing-name cards.
+  const stillWrong = recorded.filter((d) => d && NAME_FIELDS.includes(d.field) && d.spelled_value && saved[d.field] && !matches(d));
+  const unresolved = stillWrong
     .map((d) => ({ field: d.field, spelled_value: d.spelled_value, saved_value: saved[d.field], quote: d.quote ?? null, confidence: d.confidence ?? null }));
   if (differences.length) {
     return { saved, differences: [...differences, ...unresolved.filter((d) => !differences.some((n) => n.field === d.field))], retire: false };
   }
-  // No new evidence: every entry matching retires the card; fewer unresolved entries than recorded is a
-  // refresh with only those; nothing changed writes nothing.
-  const retire = recorded.length > 0 && !unresolved.length && recorded.every(matches);
-  return { saved, differences: unresolved.length && unresolved.length < recorded.length ? unresolved : [], retire };
+  // No new evidence: no entry still wrong retires the card; fewer entries than recorded, or a changed
+  // stored value on one that is still wrong, is a refresh with only the unresolved entries; nothing
+  // changed writes nothing.
+  const changed = unresolved.length < recorded.length
+    || stillWrong.some((d) => nameKey(d.saved_value) !== nameKey(saved[d.field]));
+  return { saved, differences: unresolved.length && changed ? unresolved : [], retire: recorded.length > 0 && !unresolved.length };
 }
 
 /**

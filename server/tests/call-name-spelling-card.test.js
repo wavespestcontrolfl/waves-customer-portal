@@ -175,20 +175,20 @@ describe('fileNameSpellingCard', () => {
   test.each(['family_member', 'real_estate_agent', 'lender', 'tenant', 'property_manager', 'employee', 'home_buyer', 'other'])(
     'a third-party caller (%s) is never compared with the linked account holder', async (relationship) => {
       const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
-      const v2Result = { extraction: { caller: { relationship_to_property: relationship }, meta: { call_summary: 'x' } } };
+      const v2Result = { status: 'valid', extraction: { caller: { relationship_to_property: relationship }, meta: { call_summary: 'x' } } };
       expect(await file(conn, { customerId: 'cust-1', v2Result })).toBe(false);
       expect(conn.writes).toEqual([]);
     },
   );
 
   test('a third party on an UNLINKED call still gets a card against the extracted caller name; owner-equivalent callers compare with the customer', async () => {
-    const v2Third = { extraction: { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } } };
+    const v2Third = { status: 'valid', extraction: { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } } };
     const unlinked = makeConn();
     expect(await file(unlinked, { v2Result: v2Third })).toBe(true);
     expect(JSON.parse(unlinked.writes[0].row.payload).compared_against.source).toBe('extracted');
     for (const rel of ['owner', 'spouse_partner', 'unknown', undefined]) {
       const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
-      const v2Result = { extraction: { caller: { relationship_to_property: rel }, meta: { call_summary: 'x' } } };
+      const v2Result = { status: 'valid', extraction: { caller: { relationship_to_property: rel }, meta: { call_summary: 'x' } } };
       expect(await file(conn, { customerId: 'cust-1', v2Result })).toBe(true);
     }
   });
@@ -278,7 +278,7 @@ describe('fileNameSpellingCard', () => {
     expect(callOrder).toEqual(['customer-row', 'call-lock']);
     expect(reclassified.writes).toEqual([]);
     // Relationship-based exclusion retires too; no open card means no transaction at all.
-    const tenant = { extraction: { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } } };
+    const tenant = { status: 'valid', extraction: { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } } };
     const second = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' }, openCard });
     await file(second, { customerId: 'cust-1', v2Result: tenant });
     expect(second.retired).toHaveLength(1);
@@ -294,7 +294,7 @@ describe('fileNameSpellingCard', () => {
   });
 
   test('a spouse spelling their OWN different name is not compared with the account holder; a spouse whose name is the account name is', async () => {
-    const spouse = { extraction: { caller: { relationship_to_property: 'spouse_partner' }, meta: { call_summary: 'x' } } };
+    const spouse = { status: 'valid', extraction: { caller: { relationship_to_property: 'spouse_partner' }, meta: { call_summary: 'x' } } };
     const record = { first_name: 'Quentrell', last_name: 'Sirov' };
     const other = makeConn({ customer: record });
     expect(await file(other, { customerId: 'cust-1', v2Result: spouse, extracted: { first_name: 'Marta', last_name: 'Sirov' } })).toBe(false);
@@ -333,6 +333,24 @@ describe('fileNameSpellingCard', () => {
     expect(await file(both, { customerId: 'cust-1', dictation: quiet })).toBe(false);
     expect(both.retired).toHaveLength(1);
   });
+
+  test.each(['normalization_failed', 'schema_failed'])(
+    'a %s V2 result classifies nobody: a spouse / vendor / tenant in it neither suppresses a card nor retires one', async (status) => {
+      const record = { first_name: 'Quentrell', last_name: 'Sirov' };
+      const openCard = { id: 'card-1', payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } };
+      for (const extraction of [
+        { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } },
+        { call_nature: 'vendor_or_partner', caller: { relationship_to_property: 'unknown' }, meta: { call_summary: 'x' } },
+      ]) {
+        const conn = makeConn({ customer: record, openCard });
+        expect(await file(conn, { customerId: 'cust-1', v2Result: { status, extraction } })).toBe(true);
+        expect(conn.retired).toEqual([]);
+      }
+      // A partial extraction naming a different spouse does not veto the comparison either.
+      const spouse = { status, extraction: { caller: { relationship_to_property: 'spouse_partner' }, meta: { call_summary: 'x' } } };
+      expect(await file(makeConn({ customer: record }), { customerId: 'cust-1', v2Result: spouse, extracted: { first_name: 'Marta', last_name: 'Sirov' } })).toBe(true);
+    },
+  );
 
   test('a reprocess with a conflicting pair and an unchanged stored name leaves the open card open', async () => {
     const openCard = { id: 'card-1', payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } };
