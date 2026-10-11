@@ -1287,10 +1287,14 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
   // the parent is an inbound VOICEMAIL, and the callback went to its number
   // or its customer. A callback from the Call Log action on an answered call
   // proves nothing about that call's asks.
-  // Share-locked like the children: inside the apply transaction a pass that
-  // would claim the parent (its token write) waits for the card write to
-  // commit, so a card never closes on a parent snapshot a pass is replacing.
-  const parents = new Map((await conn('call_log').whereIn('id', [...new Set(children.map((c) => String(c.parent_id)))]).forShare()
+  // The parent is read UNLOCKED, the sweep's contract (no call_log row lock
+  // after the triage rows: operator recording adoption locks call_log first,
+  // then the same triage rows, and a FOR SHARE here deadlocked against it;
+  // codex #6271 r36). The apply phase fences the card write instead: the
+  // callback_spam UPDATE re-checks the parent's settled-voicemail state in
+  // the statement itself (settledParentSql), so a claim or adoption that
+  // committed since this read makes the write skip the card.
+  const parents = new Map((await conn('call_log').whereIn('id', [...new Set(children.map((c) => String(c.parent_id)))])
     .select('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'recording_sid', 'created_at', 'duration_seconds')).map((p) => [String(p.id), p]));
   const voicemail = (p) => p.call_outcome === 'voicemail' || p.answered_by === 'voicemail' || p.processing_status === 'voicemail';
   // The callback must postdate the voicemail's end (the processor's lockCallbackPair boundary).
@@ -2717,6 +2721,18 @@ async function sweep({ now = new Date(), only = null } = {}) {
       const updatedRows = await trx('triage_items')
         .whereIn('id', group.map((d) => d.item.id))
         .where({ status: 'open' })
+        // callback_spam: the parent must still be a settled voicemail AT THE
+        // WRITE (no pass holding it, no replacement recording waiting): the
+        // evidence read above took no lock on it (see loadCallbackSpamEvidence).
+        .modify((q) => {
+          if (rule !== 'callback_spam') return;
+          const { settledParentSql } = require('./call-commitments');
+          q.whereExists(function parentStillSettledVoicemail() {
+            this.select(trx.raw('1')).from('call_log as p').whereRaw('p.id = triage_items.call_log_id')
+              .whereRaw(settledParentSql('p'))
+              .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')");
+          });
+        })
         .update({
           status,
           resolution_note: RULE_NOTES[rule],
