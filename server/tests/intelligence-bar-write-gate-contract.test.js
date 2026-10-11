@@ -625,7 +625,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }, {
       customers: [{
         id: '00000000-0000-0000-0000-00000000e001', first_name: 'Dana', last_name: 'Example', version: 'v1',
-        monthly_rate: '41.33', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', payer_id: null, deleted_at: null,
+        monthly_rate: '41.33', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', payer_id: null, deleted_at: null, active: true, pipeline_stage: 'active_customer',
       }],
       services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', billing_type: 'recurring', is_active: true, default_duration_minutes: 60 }],
       technicians: [{ id: '00000000-0000-0000-0000-00000000e0aa', name: 'Sam Tech', employment_status: 'active', field_dispatchable: true, active: true }],
