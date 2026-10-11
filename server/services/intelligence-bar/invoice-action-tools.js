@@ -41,7 +41,7 @@ const { UUID_RE } = require('./task-context');
 const { maskPhone } = require('./closeout-repair-tools');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus, approvedInvoiceVersionDigest, digestOfFingerprint, invoiceSmsDigest, INVOICE_SMS_PAY_LINK_TOKEN } = require('../invoice-helpers');
-const { planSendEffects, approvedCloseoutTarget, approvedLeadTargets } = require('./invoice-action-effects');
+const { planSendEffects, approvedCloseoutTarget, approvedLeadTargets, approvedFollowupCadence } = require('./invoice-action-effects');
 
 const CARD_LINES_SHOWN = 4;
 
@@ -186,10 +186,34 @@ async function annualPlanRefusalText(invoice, database = db) {
 
 // The send refusals the bar checks before reading recipients (the route's own
 // text where the route has one), or null.
+// The page's Schedule send stores the time on the invoice itself (status 'scheduled' + scheduled_send_at), not as a queued text.
+// Claiming it would silently cancel that delivery, so the bar refuses and names the time. A parked row (no time) is not queued.
+const scheduledSendMessage = (invoice) => `A send is already scheduled for ${etWhen(invoice.scheduled_send_at)}; let it send, or cancel it on the invoice page.`;
+function scheduledSendRefusal(invoice) {
+  if (invoice.status !== 'scheduled' || !invoice.scheduled_send_at) return null;
+  return refusal(scheduledSendMessage(invoice), 'invoice_send_queued', { invoice_id: invoice.id });
+}
+// The same answer under the send claim, as { code, message } (the claim hands the row back with that code). The claim passes the
+// row's prior status and scheduled_send_at.
+function scheduledSendClaimRefusal(claimed) {
+  return claimed.status === 'scheduled' && claimed.scheduled_send_at
+    ? { code: 'invoice_send_queued', message: scheduledSendMessage(claimed) } : null;
+}
+
+// The totals rows depend on the customer too (a tax row only for a commercial property). The digest of the rows the card shows is
+// pinned, and the claim recomputes it from the live customer row.
+const totalsDigest = (invoice, customer) => digest(totalsOf(invoice, customer).totals);
+async function totalsRefusalText(claimed, database, pinnedDigest) {
+  const customer = await database('customers').where({ id: claimed.customer_id }).first();
+  return totalsDigest(claimed, customer) === pinnedDigest ? null : 'The totals the card showed changed (the customer record changed), so nothing was sent.';
+}
+
 async function sendRefusal(invoice, dueCents) {
   const notCollectible = collectibleRefusal(invoice);
   if (notCollectible) return notCollectible;
   const at = { invoice_id: invoice.id };
+  const scheduled = scheduledSendRefusal(invoice);
+  if (scheduled) return scheduled;
   if (invoice.payer_statement_id) return refusal('Invoice is billed on the payer’s monthly statement; not sent individually.', 'payer_statement', at);
   const ownerText = await ownerRefusalText(invoice);
   if (ownerText) return refusal(ownerText, 'payer_owned', at);
@@ -319,6 +343,7 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     // _version already pins the closeout's state, and the confirmed run hands the send this re-derived target.
     _closeout_target: approvedCloseoutTarget(planned.effects),
     _lead_targets: approvedLeadTargets(planned.effects),
+    _followup_cadence: approvedFollowupCadence(planned.effects),
     _version: {
       invoice_id: invoice.id,
       status: invoice.status,
@@ -328,6 +353,10 @@ async function buildSendPlan(input, { forSend = false } = {}) {
       // Amount due, credit and lines: the claim refuses a row that no longer matches.
       version_digest: approvedInvoiceVersionDigest(invoice),
       sent: msOf(invoice.sent_at),
+      // A send the page scheduled (null: none, or the card would have refused).
+      scheduled_send_at: msOf(invoice.scheduled_send_at),
+      // The totals rows the card shows (they depend on the customer's property type).
+      totals: totalsDigest(invoice, customer),
       first_delivery: planned.effects.find((e) => e.key === 'delivery').state === 'first',
       // Every post-delivery effect (closeout, lead, reminders, review ...): a change is drift.
       effects: planned.digest,
@@ -474,12 +503,16 @@ async function commitSend(input, actionContext) {
         closeoutTarget: plan._closeout_target,
         // The leads the card said this send marks won (or none): the conversion after delivery touches those and no others.
         leadTargets: plan._lead_targets,
+        // The reminder cadence the card listed: the reminders are armed from it even if the ladder gate flips after the claim.
+        followupCadence: plan._followup_cadence,
         // Run by the send claim on the claimed row, and again at the text's provider handoff: who owes the invoice must still
         // be the customer, it must still not be an annual-plan invoice (resolved as the pay page does; a failed lookup
         // refuses), and the customer's invoice delivery choice must still be the one the card showed (text, never app).
         verifyOwner: async (claimed, database) => (await ownerRefusalText(claimed, database))
           || (await annualPlanRefusalText(claimed, database))
-          || channelRefusalText(claimed, database, pinned.billing_channels),
+          || (await channelRefusalText(claimed, database, pinned.billing_channels))
+          || (await totalsRefusalText(claimed, database, pinned.totals))
+          || scheduledSendClaimRefusal(claimed),
         // Run by the send claim on the claimed row: the post-delivery effects the card listed must be unchanged.
         verifyEffects: async (claimed, database) => (await planSendEffects(claimed, await database('customers').where({ id: claimed.customer_id }).first(), { database, requestReview: false })).digest === pinned.effects,
       },

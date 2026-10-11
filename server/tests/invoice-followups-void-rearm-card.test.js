@@ -155,6 +155,32 @@ describe('the send card and the scheduler agree on a void-stopped sequence', () 
     expect(second.seqUpdate.mock.calls[0][0]).toMatchObject({ status: 'completed' });
   });
 
+  test('round 16: a ladder gate flip between the claim and the schedule: the cadence the card showed is the one written', async () => {
+    const oldInvoice = { ...sentInvoice, created_at: '2099-01-01T10:00:00Z', sent_at: '2099-01-02T10:00:00Z', sms_sent_at: null };
+    const seq = voidStoppedSeq({ anchor_at: null, step_index: 1 });
+    const saved = process.env.GATE_DUNNING_LADDER_90;
+    try {
+      // The card is built with the 90-day ladder on: step 1 is day 10.
+      process.env.GATE_DUNNING_LADDER_90 = 'true';
+      setupDb({ seq, invoice: oldInvoice });
+      const planned = await planFollowupSequence(oldInvoice, db);
+      expect(planned.cadence).toEqual([3, 10, 17, 30, 60, 90]);
+      // The gate flips off before scheduleForInvoice runs: without the carried cadence step 1 would be day 7.
+      delete process.env.GATE_DUNNING_LADDER_90;
+      const legacy = setupDb({ seq, invoice: oldInvoice });
+      await scheduleForInvoice('inv-1');
+      const dayOf = (update) => Math.round((new Date(update.next_touch_at) - new Date('2099-01-02T10:00:00Z')) / 86400000);
+      expect(dayOf(legacy.seqUpdate.mock.calls[0][0])).toBeGreaterThanOrEqual(6);
+      expect(dayOf(legacy.seqUpdate.mock.calls[0][0])).toBeLessThanOrEqual(8);
+      const carried = setupDb({ seq, invoice: oldInvoice });
+      await scheduleForInvoice('inv-1', { approvedCadence: planned.cadence });
+      expect(new Date(carried.seqUpdate.mock.calls[0][0].next_touch_at).getTime()).toBe(new Date(planned.nextTouchAt).getTime());
+      expect(dayOf(carried.seqUpdate.mock.calls[0][0])).toBeGreaterThanOrEqual(9);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_DUNNING_LADDER_90; else process.env.GATE_DUNNING_LADDER_90 = saved;
+    }
+  });
+
   test('round 14: voidStopRearmAnchor is the one anchor: a shifted anchor_at, else sent_at, else sms_sent_at, else created_at; both callers use it', () => {
     const invoice = { sent_at: 'S', sms_sent_at: 'M', created_at: 'C' };
     expect(voidStopRearmAnchor({ anchor_at: 'A' }, invoice)).toBe('A');

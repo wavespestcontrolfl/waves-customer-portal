@@ -1166,6 +1166,18 @@ describe('the bar send records its delivery in the finalizing transaction', () =
     expect(closeout.recordApprovedCloseoutTarget.mock.calls[0][2].claimToken).toBe(closeout.recordApprovedCloseoutDelivery.mock.calls[0][1]);
   });
 
+  test('round 16: the reminder cadence the card showed is handed to the scheduler; a page send hands it nothing', async () => {
+    const { scheduleForInvoice } = require('../services/invoice-followups');
+    const withCadence = bar();
+    withCadence.expectedVersion.followupCadence = [3, 10, 17, 30, 60, 90];
+    await InvoiceService.sendViaSMSAndEmail('inv-1', withCadence);
+    expect(scheduleForInvoice).toHaveBeenCalledWith('inv-1', { approvedCadence: [3, 10, 17, 30, 60, 90] });
+    scheduleForInvoice.mockClear();
+    invoices = makeInvoicesTable({ ...base });
+    await InvoiceService.sendViaSMSAndEmail('inv-1');
+    expect(scheduleForInvoice).toHaveBeenCalledWith('inv-1');
+  });
+
   test('a marker that cannot be written rolls the finalization back: the claim is held, nothing downstream runs, and the send reports it by hand', async () => {
     closeout.recordApprovedCloseoutDelivery.mockRejectedValueOnce(new Error('audit insert failed'));
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', bar());

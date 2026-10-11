@@ -140,13 +140,13 @@ function voidStopRearmAnchor(existing, invoice) {
   return existing.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
 }
 
-async function voidStopRearmDecision(existing, { planActive, holdForAutopay, anchor }) {
+async function voidStopRearmDecision(existing, { planActive, holdForAutopay, anchor, steps }) {
   const stamp = String(existing.stopped_reason || '');
   if (await planActive()) return { kind: 'payment_plan' };
   if (stamp === 'invoice_voided:prev=paused' || stamp === 'invoice_terminal_status:void'
     || existing.paused_reason || existing.paused_by_admin_id || existing.paused_until) return { kind: 'paused' };
   if (await holdForAutopay()) return { kind: 'autopay_hold', nextTouchAt: null };
-  const nextTouchAt = computeNextTouchAt(anchor, existing.step_index);
+  const nextTouchAt = computeNextTouchAt(anchor, existing.step_index, steps);
   return { kind: nextTouchAt ? 'active' : 'completed', nextTouchAt };
 }
 
@@ -448,8 +448,9 @@ function legacyTouchFor(row, now = new Date()) {
   return isStaleTouch(legacyAt, now) ? null : legacyAt;
 }
 
-function computeNextTouchAt(anchorDate, stepIndex) {
-  const step = followupSteps()[stepIndex];
+// `steps` (default: the live ladder) lets a caller that carries an APPROVED cadence compute from it instead of today's gate.
+function computeNextTouchAt(anchorDate, stepIndex, steps = followupSteps()) {
+  const step = steps[stepIndex];
   if (!step) return null;
   return anchorTo10amNY(new Date(anchorDate), step.daysAfterSend, config.sendWindow.hour);
 }
@@ -481,7 +482,7 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
 // The re-arm decision for a void-stopped sequence, from one function for the scheduler and the Intelligence Bar's preview
 // (voidStopRearmDecision, from voidStopRearmAnchor). `database` is the caller's handle (the scheduler's locked transaction, or
 // the planner's read handle); `knownCustomer` saves a customer read when the caller already has the row.
-async function rearmDecisionFor(database, invoice, existing, knownCustomer = null) {
+async function rearmDecisionFor(database, invoice, existing, { knownCustomer = null, steps } = {}) {
   return voidStopRearmDecision(existing, {
     planActive: () => activePaymentPlan(database, invoice.id),
     holdForAutopay: async () => {
@@ -494,6 +495,7 @@ async function rearmDecisionFor(database, invoice, existing, knownCustomer = nul
       }
     },
     anchor: voidStopRearmAnchor(existing, invoice),
+    steps,
   });
 }
 
@@ -521,7 +523,7 @@ function rearmPatch(decision, now) {
 // exhausted cadence restores terminal 'completed' so the legacy late-payment checker owns the invoice again. The void stop over
 // a PAUSED row carries the ':prev=paused' suffix so a metadata-less legacy pause survives the round-trip, and
 // 'invoice_terminal_status:void' is the same system stop stamped by the 20260601000012 backfill migration (Codex #3493 r12 P0).
-async function reconcileExistingSequence(trx, invoice, existing) {
+async function reconcileExistingSequence(trx, invoice, existing, steps) {
   if (!isSystemVoidStop(existing)) return existing;
   const voidStopStamp = String(existing.stopped_reason || '');
   // Every check is rearmDecisionFor's (shared with the Intelligence Bar's planner); this only writes the decision. Never
@@ -530,7 +532,7 @@ async function reconcileExistingSequence(trx, invoice, existing) {
   // live enrollment must agree; a read error keeps the hold, r16). The cadence anchors on when the invoice went out, NOT the
   // due date (r4); a shifted anchor_at wins. The write stays conditional on the exact system stop, so a racing admin
   // pause/stop wins.
-  const decision = await rearmDecisionFor(trx, invoice, existing);
+  const decision = await rearmDecisionFor(trx, invoice, existing, { steps });
   if (decision.kind === 'payment_plan') return existing;
   const [written] = await trx('invoice_followup_sequences')
     .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
@@ -565,7 +567,7 @@ async function adoptionBlockedByAchFailures(trx, invoice) {
 }
 
 // What a NEW sequence row would be, or null when none should be armed: { stepIndex, nextTouchAt, onAutopay }.
-async function newSequencePlanFor(trx, invoice, { adoption }) {
+async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
   // Never arm dunning under an active payment plan (codex r7 P1). Plan
   // creation stops sequences inside its own invoice-locked transaction —
   // this check runs under the SAME lock, so whichever writer commits first
@@ -589,7 +591,7 @@ async function newSequencePlanFor(trx, invoice, { adoption }) {
   // passed, already re-dated past this run, in this same insert (Codex
   // #5202 r1 P2: a separate deferral write could fail after the stale
   // skip and leave the first reminder to be passed over next run).
-  const landing = adoption ? adoptionLanding(anchorAt, new Date()) : { stepIndex: 0, nextAt: computeNextTouchAt(anchorAt, 0) };
+  const landing = adoption ? adoptionLanding(anchorAt, new Date()) : { stepIndex: 0, nextAt: computeNextTouchAt(anchorAt, 0, steps) };
   if (!landing) {
     logger.info(`[invoice-followups] adoption left invoice ${invoice.id} for a person: every ladder step has passed`);
     return null;
@@ -609,11 +611,19 @@ async function insertSequence(trx, invoice, plan) {
   return row;
 }
 
+// The ladder a CARRIED cadence (an array of days after the send) stands for: the Intelligence Bar pins the cadence its card showed
+// and hands it through the send, so a GATE_DUNNING_LADDER_90 flip between the claim and this call cannot change the schedule it
+// approved. Null/empty = today's live ladder (every other caller).
+function stepsForCadence(approvedCadence) {
+  return Array.isArray(approvedCadence) && approvedCadence.length ? approvedCadence.map((daysAfterSend) => ({ daysAfterSend })) : followupSteps();
+}
+
 /**
  * Create (or re-hydrate) a sequence row for a newly-issued invoice.
  * Call this from the invoice-send flow.
  */
-async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
+async function scheduleForInvoice(invoiceId, { adoption = false, approvedCadence = null } = {}) {
+  const steps = stepsForCadence(approvedCadence);
   // Cheap unlocked pre-checks: a missing / non-schedulable / payer-billed
   // invoice never arms a sequence, and none of those verdicts can be flipped
   // by an ownership change (a merge moves customer_id, not status or payer).
@@ -663,8 +673,8 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
     const existing = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
     // Orphan adoption only arms an invoice that has NO row: one that gained
     // a row since the sweep selected it belongs to whoever armed it.
-    if (existing) return adoption ? null : reconcileExistingSequence(trx, invoice, existing);
-    const plan = await newSequencePlanFor(trx, invoice, { adoption });
+    if (existing) return adoption ? null : reconcileExistingSequence(trx, invoice, existing, steps);
+    const plan = await newSequencePlanFor(trx, invoice, { adoption, steps });
     return plan ? insertSequence(trx, invoice, plan) : null;
   });
 }
@@ -682,7 +692,7 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
   if (existing) {
     if (!isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
     // The same decision scheduleForInvoice makes for a void-stopped sequence (rearmDecisionFor, from voidStopRearmAnchor).
-    const decision = await rearmDecisionFor(database, invoice, existing, knownCustomer);
+    const decision = await rearmDecisionFor(database, invoice, existing, { knownCustomer });
     const REARM_STATE = { payment_plan: 'payment_plan', paused: 'paused', autopay_hold: 'autopay_hold', active: 'rearm', completed: 'completed' };
     return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence, nextTouchAt: decision.nextTouchAt || null };
   }

@@ -80,7 +80,12 @@ function closeoutLine(closeout, lead) {
     ? `${lead} also finishes a closeout already started for the linked visit (${visit}): completes its remaining steps; no completion text, report, review request or charge`
     : `${lead} also completes the linked visit (${visit}) and creates its service record; no completion text, report, review request or charge`;
 }
-const closeoutState = (closeout) => (closeout ? `${closeout.visitId}:${closeout.resuming === true ? 'resuming' : 'new'}` : 'none');
+// The visit id first (approvedCloseoutTarget reads it), then every fact closeoutLine shows (service type, date) and the visit row's
+// edit time, as a hash: a visit edited after the card changes the pin, so the confirm refuses instead of closing a different visit.
+const closeoutFactsDigest = (closeout) => crypto.createHash('sha256')
+  .update(JSON.stringify([closeout.serviceType || null, closeout.date ? String(closeout.date) : null, closeout.updatedAt ? new Date(closeout.updatedAt).getTime() : null]))
+  .digest('hex').slice(0, 16);
+const closeoutState = (closeout) => (closeout ? `${closeout.visitId}:${closeout.resuming === true ? 'resuming' : 'new'}:${closeoutFactsDigest(closeout)}` : 'none');
 
 // GATE_INVOICE_ISSUED_CLOSES_VISIT: the closeout's own read-only probe, with the handler's trigger.
 // `database` is the planner's own handle: inside the send claim it is the claim's transaction, and a probe on the root pool
@@ -162,6 +167,14 @@ function approvedLeadTargets(effects) {
   return lead && lead.applies ? require('../invoice-helpers').leadSetDigest(String(lead.state).split(',')) : 'none';
 }
 
+// The reminder cadence (days after the send) the approved plan showed: handed to the send so the reminders are armed from the
+// approved ladder even if GATE_DUNNING_LADDER_90 flips after the claim. null when the plan has none.
+function approvedFollowupCadence(effects) {
+  const followups = (effects || []).find((e) => e.key === 'followups');
+  const cadence = followups && followups.facts && followups.facts.cadence;
+  return Array.isArray(cadence) && cadence.length ? cadence.map(Number) : null;
+}
+
 function finish(effects) {
   return { effects, digest: effectsDigest(effects) };
 }
@@ -170,6 +183,7 @@ module.exports = {
   planSendEffects,
   approvedCloseoutTarget,
   approvedLeadTargets,
+  approvedFollowupCadence,
   effectsDigest,
   closeoutLine,
   SEND_CALL_COVERAGE,

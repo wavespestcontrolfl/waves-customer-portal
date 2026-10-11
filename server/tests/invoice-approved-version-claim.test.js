@@ -352,6 +352,14 @@ describe('the approved-version claim checks, one decision each', () => {
     await expect(checks.approvedOwnerRefusal(base({ verifyOwner: async () => { throw new Error('x'); } }))).resolves.toMatchObject({ message: expect.stringContaining('could not verify who owes') });
   });
 
+  test('owner (round 16): a verifier may answer with its own { code, message }; it sees the row\'s PRIOR status and scheduled_send_at', async () => {
+    const scheduledAt = new Date('2099-03-04T15:00:00Z');
+    const verifyOwner = jest.fn(async () => ({ code: 'invoice_send_queued', message: 'A send is already scheduled' }));
+    const refusal = await checks.approvedOwnerRefusal(base({ verifyOwner }, { current: { ...row, status: 'scheduled', scheduled_send_at: scheduledAt } }));
+    expect(refusal).toMatchObject({ code: 'invoice_send_queued', message: 'A send is already scheduled' });
+    expect(verifyOwner).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduled_send_at: scheduledAt }), db);
+  });
+
   test('attachments: null when the card did not pin them or no upload is in flight; an upload in flight (or an unreadable answer) refuses', async () => {
     await expect(checks.approvedAttachmentRefusal(base({}))).resolves.toBeNull();
     const spy = jest.spyOn(helpers, 'attachmentUploadInFlight');

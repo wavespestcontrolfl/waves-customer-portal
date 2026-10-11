@@ -3121,7 +3121,7 @@ const INVOICE_DELIVERY_CHECKS = [
     if (!verifyOwner) return null;
     let refusal = "The bar could not verify who owes this invoice, so it was not sent.";
     try { refusal = await verifyOwner({ ...current }, database); } catch { /* keep the fail-closed text */ }
-    return refusal ? deliveryNotSent("approved_version_changed", refusal, "check_invoice_ownership_boundary") : null;
+    return refusal ? deliveryNotSent("approved_version_changed", typeof refusal === "object" ? refusal.message : refusal, "check_invoice_ownership_boundary") : null;
   } },
   // The Intelligence Bar's approved phone, read AGAIN on the locked handle right before the provider call: the customer edit
   // route changes the phone without taking the invoice lock, so a number removed after the early check must not get the pay
@@ -4594,9 +4594,12 @@ async function approvedEffectsRefusal({ invoice, current, expectedVersion, datab
 // cannot be had refuses (fail closed).
 async function approvedOwnerRefusal({ invoice, current, expectedVersion, database }) {
   if (!expectedVersion.verifyOwner) return null;
-  let text = "The bar could not verify who owes this invoice, so it was not sent.";
-  try { text = await expectedVersion.verifyOwner({ ...invoice, status: current.status }, database); } catch { /* keep the fail-closed text */ }
-  return text ? approvedClaimRefusal(text) : null;
+  let verdict = "The bar could not verify who owes this invoice, so it was not sent.";
+  // The prior status AND the prior scheduled_send_at (the claim's flip clears it): a send the page scheduled is visible to the verifier.
+  try { verdict = await expectedVersion.verifyOwner({ ...invoice, status: current.status, scheduled_send_at: current.scheduled_send_at }, database); } catch { /* keep the fail-closed text */ }
+  if (!verdict) return null;
+  // A verifier may answer with its own refusal code ({ code, message }); a plain string is an approved-version refusal.
+  return typeof verdict === "object" ? Object.assign(new Error(verdict.message), { code: verdict.code }) : approvedClaimRefusal(verdict);
 }
 
 // The card listed the invoice's attachments. An upload that reserved the invoice before this claim and has not inserted yet
@@ -7316,6 +7319,9 @@ const InvoiceService = {
     // Intelligence Bar send_invoice only: a leg that did not send is reported on the result and NEVER queued as a later
     // replay (a replay would deliver outside the approval: its recipient, its total).
     noReplay = false,
+    // Intelligence Bar send_invoice only: the reminder cadence its card showed (days after the send). The reminders are armed from
+    // it, so a GATE_DUNNING_LADDER_90 flip after the claim cannot change what was approved. Null = today's ladder.
+    approvedCadence = null,
   } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
@@ -7376,7 +7382,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, expectedSmsDigest, verifyOwner, noReplay,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone, expectedSmsDigest, verifyOwner, noReplay, approvedCadence,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -7831,7 +7837,7 @@ const InvoiceService = {
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
-        await require("./invoice-followups").scheduleForInvoice(invoiceId);
+        await require("./invoice-followups").scheduleForInvoice(invoiceId, ...(approvedCadence ? [{ approvedCadence }] : []));
       } catch (e) {
         logger.error(
           `[invoice-followups] scheduleForInvoice failed: ${e.message}`,
@@ -7917,7 +7923,7 @@ const InvoiceService = {
         // recovered send still gets its collection follow-ups, audit line,
         // and lead conversion instead of silently losing them.
         try {
-          await require("./invoice-followups").scheduleForInvoice(invoiceId);
+          await require("./invoice-followups").scheduleForInvoice(invoiceId, ...(approvedCadence ? [{ approvedCadence }] : []));
         } catch (e) {
           logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
         }
@@ -8275,6 +8281,7 @@ const InvoiceService = {
           ...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),
           ...(expectedVersion && expectedVersion.smsDigest !== undefined ? { expectedSmsDigest: expectedVersion.smsDigest } : {}),
           ...(expectedVersion?.verifyOwner ? { verifyOwner: expectedVersion.verifyOwner } : {}),
+          ...(expectedVersion?.followupCadence ? { approvedCadence: expectedVersion.followupCadence } : {}),
           // The bar never leaves a replay behind (no later text or email outside its approval).
           ...(refusalOnly ? { noReplay: true } : {}),
         });
@@ -8758,7 +8765,7 @@ const InvoiceService = {
         // re-arm is conditional).
         if (ownedDeliveryFinalized) {
           try {
-            await require("./invoice-followups").scheduleForInvoice(invoiceId);
+            await require("./invoice-followups").scheduleForInvoice(invoiceId, ...(expectedVersion?.followupCadence ? [{ approvedCadence: expectedVersion.followupCadence }] : []));
           } catch (e) {
             logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
           }

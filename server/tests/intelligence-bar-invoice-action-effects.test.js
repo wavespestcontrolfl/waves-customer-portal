@@ -121,6 +121,28 @@ describe('planSendEffects', () => {
     await expect(effects.planSendEffects(invoice({ status: 'sent', sent_at: new Date('2099-01-01T00:00:00Z') }), customer, {})).resolves.toHaveProperty('digest');
   });
 
+  test('round 16: every fact the closeout line shows (service type, date) and the visit\'s edit time is in the pin; the visit id still leads the state', async () => {
+    const visit = { visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', updatedAt: '2099-01-01T10:00:00Z', resuming: false };
+    issuedCloseoutTarget.mockResolvedValue(visit);
+    const base = await effects.planSendEffects(invoice(), customer, {});
+    expect((await effects.planSendEffects(invoice(), customer, {})).digest).toBe(base.digest);
+    expect(effects.approvedCloseoutTarget(base.effects)).toBe('visit-1');
+    for (const edit of [{ serviceType: 'Termite' }, { date: '2099-01-09' }, { updatedAt: '2099-01-01T11:00:00Z' }, { resuming: true }]) {
+      issuedCloseoutTarget.mockResolvedValue({ ...visit, ...edit });
+      const changed = await effects.planSendEffects(invoice(), customer, {});
+      expect([edit, changed.digest === base.digest]).toEqual([edit, false]);
+      expect(effects.approvedCloseoutTarget(changed.effects)).toBe('visit-1');
+    }
+  });
+
+  test('round 16: approvedFollowupCadence is the card\'s cadence (days after the send), or null', async () => {
+    Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 10, 17, 30, 60, 90] });
+    const plan = await effects.planSendEffects(invoice(), customer, {});
+    expect(effects.approvedFollowupCadence(plan.effects)).toEqual([3, 10, 17, 30, 60, 90]);
+    expect(effects.approvedFollowupCadence([])).toBeNull();
+    expect(effects.approvedFollowupCadence(null)).toBeNull();
+  });
+
   // Round 5 item 1 (the plan half).
   test('the send plan lists the invoice attachments by name and pins their id, name, size and edit time', async () => {
     let plan = await effects.planSendEffects(invoice(), customer, {});

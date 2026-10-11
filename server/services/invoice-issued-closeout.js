@@ -856,7 +856,7 @@ async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, toda
     visit = resolved.visit;
     resuming = true;
   }
-  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), resuming } : null;
+  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), updatedAt: visit.updated_at || null, resuming } : null;
 }
 
 async function loadCloseoutInvoice(run) {

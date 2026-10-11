@@ -296,7 +296,7 @@ describe('send_invoice commit', () => {
       invoiceId: INV, body: { requestReview: false, firstDelivery: true }, actor: { technicianId: 'staff-1' },
       approvedSend: {
         expectedTotal: 129, recipients: { phone: '9415550100' },
-        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), smsDigest: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
+        version: { updatedAtMs: new Date('2099-01-01T12:00:00Z').getTime(), digest: expect.stringMatching(/^[0-9a-f]{32}$/), attachments: expect.stringMatching(/^[0-9a-f]{32}$/), smsDigest: expect.stringMatching(/^[0-9a-f]{32}$/), closeoutTarget: 'none', leadTargets: 'none', followupCadence: [3, 7, 14, 30], verifyOwner: expect.any(Function), verifyEffects: expect.any(Function) },
       },
     });
     // The exact phone rides only to the send, never into the result; the result has no email leg.
@@ -406,14 +406,14 @@ describe('send_invoice commit', () => {
       Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 200, json: { ok: true, sms: { ok: true } } });
       await run();
       const { verifyOwner } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
-      await expect(verifyOwner({ id: INV, customer_id: 'cust-1' }, db)).resolves.toBeNull();
+      await expect(verifyOwner({ ...state.invoices[0], status: 'draft' }, db)).resolves.toBeNull();
       withPrefs({ invoice_channels: ['sms', 'email'] });
-      await expect(verifyOwner({ id: INV, customer_id: 'cust-1' }, db)).resolves.toMatch(/changed after the card/);
+      await expect(verifyOwner({ ...state.invoices[0], status: 'draft' }, db)).resolves.toMatch(/changed after the card/);
       withPrefs({ invoice_channels: ['push', 'sms'] });
-      await expect(verifyOwner({ id: INV, customer_id: 'cust-1' }, db)).resolves.toMatch(/app or by email only/);
+      await expect(verifyOwner({ ...state.invoices[0], status: 'draft' }, db)).resolves.toMatch(/app or by email only/);
       withPrefs({ invoice_channels: ['sms'] });
       db.mockImplementationOnce(() => { throw new Error('db down'); });
-      await expect(verifyOwner({ id: INV, customer_id: 'cust-1' }, db)).resolves.toMatch(/could not re-check/);
+      await expect(verifyOwner({ ...state.invoices[0], status: 'draft' }, db)).resolves.toMatch(/could not re-check/);
       expect(card._version.billing_channels).toMatch(/^[0-9a-f]{32}$/);
     });
 
@@ -492,6 +492,76 @@ describe('send_invoice commit', () => {
       state.invoices[0] = invoiceRow({ subtotal: '120.00', tax_amount: '9.00', tax_rate: '0.075', total: '129.00' });
       const card = await preview('send_invoice', { invoice_id: INV });
       expect(card.totals).toEqual(['Subtotal: $120.00', 'Total: $129.00']);
+    });
+  });
+
+  describe('round 16: more facts pinned, a scheduled send refused, the approved reminder cadence carried', () => {
+    const verifyOwnerOf = async () => {
+      const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      await run();
+      return Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+    };
+
+    test('a visit edited after the card (its service type, date or edit time) refuses the confirm as preview_changed', async () => {
+      const visit = { visitId: 'visit-1', serviceType: 'Pest', date: '2099-01-02', updatedAt: '2099-01-01T10:00:00Z', resuming: false };
+      issuedCloseoutTarget.mockResolvedValue(visit);
+      for (const edit of [{ serviceType: 'Termite' }, { date: '2099-01-09' }, { updatedAt: '2099-01-01T11:00:00Z' }]) {
+        Invoices.sendInvoiceFromBar.mockClear();
+        issuedCloseoutTarget.mockResolvedValue(visit);
+        const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+        issuedCloseoutTarget.mockResolvedValue({ ...visit, ...edit });
+        await expect(run()).resolves.toMatchObject({ preview_changed: true });
+        expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+      }
+    });
+
+    test('a customer property type changed after the card changes the totals rows: the confirm refuses, and the claim\'s check refuses too', async () => {
+      state.invoices[0] = invoiceRow({ subtotal: '120.00', tax_amount: '9.00', tax_rate: '0.075', total: '129.00' });
+      const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      expect(card.totals).toEqual(['Subtotal: $120.00', 'Total: $129.00']);
+      expect(card._version.totals).toMatch(/^[0-9a-f]{32}$/);
+      state.customers[0] = { ...state.customers[0], property_type: 'commercial' };
+      await expect(run()).resolves.toMatchObject({ preview_changed: true });
+      expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+      // Under the claim: a card built for a residential customer, the type changes between the re-derivation and the claim.
+      state.customers[0] = { ...state.customers[0], property_type: 'residential' };
+      const second = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      await second.run();
+      const { verifyOwner } = Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version;
+      const claimed = { ...state.invoices[0], status: 'draft' };
+      await expect(verifyOwner(claimed, db)).resolves.toBeNull();
+      state.customers[0] = { ...state.customers[0], property_type: 'commercial' };
+      await expect(verifyOwner(claimed, db)).resolves.toMatch(/totals the card showed changed/);
+    });
+
+    test('an invoice the page scheduled (status scheduled + a send time) refuses the card as invoice_send_queued and names the time; a parked row does not', async () => {
+      state.invoices[0] = invoiceRow({ status: 'scheduled', scheduled_send_at: new Date('2099-03-04T15:00:00Z') });
+      const refused = await preview('send_invoice', { invoice_id: INV });
+      expect(refused).toMatchObject({ code: 'invoice_send_queued', error: expect.stringMatching(/A send is already scheduled for March 4 10:00 AM ET; let it send, or cancel it on the invoice page\./) });
+      state.invoices[0] = invoiceRow({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: 'parked' });
+      await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ preview: true });
+    });
+
+    test('a send scheduled after the card: the confirm refuses at re-derivation, and the claim\'s check answers invoice_send_queued with the prior status and time', async () => {
+      const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      state.invoices[0] = invoiceRow({ status: 'scheduled', scheduled_send_at: new Date('2099-03-04T15:00:00Z') });
+      await expect(run()).resolves.toMatchObject({ code: 'invoice_send_queued' });
+      expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+      state.invoices[0] = invoiceRow();
+      const version = await verifyOwnerOf();
+      // The claim hands the verifier the row with its PRIOR status and scheduled_send_at.
+      const scheduled = { ...state.invoices[0], status: 'scheduled', scheduled_send_at: new Date('2099-03-04T15:00:00Z') };
+      await expect(version.verifyOwner(scheduled, db)).resolves.toMatchObject({ code: 'invoice_send_queued', message: expect.stringMatching(/already scheduled for/) });
+      // At the provider handoff the row is 'sending': no refusal from this check.
+      await expect(version.verifyOwner({ ...state.invoices[0], status: 'sending', scheduled_send_at: null }, db)).resolves.toBeNull();
+    });
+
+    test('the card\'s reminder cadence rides to the send (so a ladder gate flip after the claim cannot change it); _version pins the scheduled time', async () => {
+      Followups.planFollowupSequence.mockResolvedValue({ arms: true, state: 'active', cadence: [3, 10, 17, 30, 60, 90] });
+      const { card, run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+      expect(card._version).toHaveProperty('scheduled_send_at', null);
+      await run();
+      expect(Invoices.sendInvoiceFromBar.mock.calls[0][0].approvedSend.version.followupCadence).toEqual([3, 10, 17, 30, 60, 90]);
     });
   });
 
