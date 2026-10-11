@@ -5,6 +5,8 @@
 const {
   dropUnneededCallCards,
   callMakesNoServiceAsk,
+  callEndedWithNothingToDo,
+  noActionCallCards,
   spelledEmailSettled,
 } = require('../services/call-triage-flags');
 
@@ -127,6 +129,68 @@ describe('dropUnneededCallCards', () => {
   test('tolerates a missing extraction', () => {
     expect(dropUnneededCallCards(['missing_service_address'], null).flags).toEqual([]);
     expect(dropUnneededCallCards(null, null)).toEqual({ flags: [], dropped: [] });
+  });
+});
+
+// 2026-10-10 call audit: a caller who heard the fee and said no, and a caller
+// outside the service area, each left blocking cards with nothing to do.
+describe('noActionCallCards: a call that ended with nothing to do', () => {
+  const done = (over = {}) => ({
+    recommended_disposition: 'no_action_needed',
+    meta: { is_voicemail: false },
+    scheduling: { status: 'none' },
+    service_request: { quote_requested: true, quote_promised: false },
+    property: { service_address: { city: 'Sampleton' } },
+    ...over,
+  });
+
+  test('no time agreed and no street stated: no booking-hold card and no address card', () => {
+    expect(noActionCallCards(done()).sort()).toEqual([
+      'address_unverifiable', 'address_unverified', 'ambiguous_scheduling', 'low_confidence_address', 'missing_service_address', 'not_confirmed',
+    ]);
+  });
+
+  test('a caller who asked for a visit and then declined (status requested) files no not_confirmed card', () => {
+    expect(noActionCallCards(done({ scheduling: { status: 'requested' } }))).toContain('not_confirmed');
+  });
+
+  test('a stated street keeps every address card (from the extraction or the merged record)', () => {
+    const heard = done({ property: { service_address: { street_line_1: '1234 Sample Palm Dr' } } });
+    expect(noActionCallCards(heard)).toEqual(['not_confirmed', 'ambiguous_scheduling']);
+    expect(noActionCallCards(done(), { canonicalStreet: '1234 Sample Palm Dr' })).toEqual(['not_confirmed', 'ambiguous_scheduling']);
+  });
+
+  test('any other verdict keeps every card', () => {
+    for (const rec of ['callback_task_created', 'lead_response_flow_triggered', 'estimate_send', 'existing_customer_routed', 'booked', undefined, null]) {
+      expect(noActionCallCards(done({ recommended_disposition: rec }))).toEqual([]);
+    }
+    expect(noActionCallCards(null)).toEqual([]);
+  });
+
+  test('an open thread keeps every card: a time confirmed, offered, accepted or still unclear, a promised callback, follow-up or quote, a voicemail', () => {
+    const open = [
+      { scheduling: { status: 'confirmed' } },
+      { scheduling: { status: 'offered' } },
+      { scheduling: { status: 'ambiguous' } },
+      { scheduling: { status: 'reschedule_requested' } },
+      { scheduling: { status: 'canceled' } },
+      { scheduling: { status: 'none', confirmed_start_at: '2026-10-12T11:00:00-04:00' } },
+      { scheduling: { status: 'requested', agent_committed_booking: true } },
+      { scheduling: { status: 'requested', caller_accepted_slot: true } },
+      { scheduling: { status: 'none', follow_up_mentioned: true } },
+      { scheduling: { status: 'none', callback_window_start: '2026-10-09T15:23' } },
+      { scheduling: { status: 'none', callback_window_end: '2026-10-09T16:23' } },
+      { service_request: { quote_promised: true } },
+      { meta: { is_voicemail: true } },
+    ];
+    for (const over of open) {
+      expect(callEndedWithNothingToDo(done(over))).toBe(false);
+      expect(noActionCallCards(done(over))).toEqual([]);
+    }
+  });
+
+  test('a missing scheduling block reads as no time asked', () => {
+    expect(callEndedWithNothingToDo({ recommended_disposition: 'no_action_needed' })).toBe(true);
   });
 });
 

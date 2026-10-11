@@ -876,6 +876,43 @@ function dropUnneededCallCards(flags, extraction, options) {
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
 }
 
+// 5. A call that ended with nothing to do (2026-10-10 call audit: 8 cards in
+//    48 hours on callers who heard the price and said no, wanted a product
+//    Waves does not carry, or were outside the service area and were told
+//    so). The model's own verdict is recommended_disposition
+//    no_action_needed, and the call left no open thread: no time agreed,
+//    offered or accepted, no promised callback or follow-up, no promised
+//    quote, not a voicemail. Such a call holds on "not_confirmed" or on its
+//    address, and the card that files is nobody's work. Returned as card
+//    codes, not as a flag filter, because not_confirmed is the routing
+//    reason and never one of the call's flags. The routing verdict and the
+//    flags are untouched. A stated street keeps the address cards, for the
+//    same reason as rule 3 (Step 3's backfill can copy it onto a record).
+const NO_ACTION_SCHEDULING_STATUSES = new Set(['none', 'requested']);
+const NO_ACTION_HOLD_CARDS = ['not_confirmed', 'ambiguous_scheduling'];
+const NO_ACTION_ADDRESS_CARDS = ['missing_service_address', 'address_unverifiable', 'address_unverified', 'low_confidence_address'];
+
+function callEndedWithNothingToDo(extraction) {
+  if (!extraction || extraction.recommended_disposition !== 'no_action_needed') return false;
+  if (extraction.meta?.is_voicemail === true) return false;
+  const scheduling = extraction.scheduling || {};
+  if (!NO_ACTION_SCHEDULING_STATUSES.has(String(scheduling.status || 'none'))) return false;
+  const openThread = scheduling.confirmed_start_at
+    || scheduling.agent_committed_booking === true
+    || scheduling.caller_accepted_slot === true
+    || scheduling.follow_up_mentioned === true
+    || scheduling.callback_window_start
+    || scheduling.callback_window_end;
+  if (openThread) return false;
+  return extraction.service_request?.quote_promised !== true;
+}
+
+function noActionCallCards(extraction, { canonicalStreet } = {}) {
+  if (!callEndedWithNothingToDo(extraction)) return [];
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
+  return statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
+}
+
 function hasCanonicalWriteBlock(flags) {
   return (flags || []).some((f) => CANONICAL_WRITE_BLOCKING_FLAGS.has(f));
 }
@@ -3357,6 +3394,8 @@ module.exports = {
   deriveEmailReview,
   spelledEmailSettled,
   dropUnneededCallCards,
+  callEndedWithNothingToDo,
+  noActionCallCards,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
