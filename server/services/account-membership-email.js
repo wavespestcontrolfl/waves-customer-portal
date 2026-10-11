@@ -157,11 +157,28 @@ async function sendTemplate({
   metadata = {},
   contactOverride = null,
   billingAuthorityInput = null,
+  // The recipient an operator approved (estimate-accept-effects.recipientKey).
+  // Compared against the contact THIS read loads, never against a contact
+  // handed in from an earlier read: an address that changed in between is no
+  // email, so the plan and rate never go to a former address.
+  expectedRecipientKey = null,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
   const contact = contactOverride || getPrimaryContact(recipientCustomer);
+  if (expectedRecipientKey && require('./estimate-accept-effects').recipientKey(contact.email) !== expectedRecipientKey) {
+    logger.warn(`[account-membership-email] ${templateKey} not sent for customer ${recipientCustomer.id}: the address changed since it was approved`);
+    await logLifecycleEmailAttempt({
+      customerId: recipientCustomer.id,
+      templateKey,
+      eventType,
+      status: 'skipped',
+      failureReason: 'recipient_changed',
+      metadata,
+    });
+    return { ok: false, skipped: true, reason: 'recipient_changed' };
+  }
   if (!isEmailLike(contact.email)) {
     await logLifecycleEmailAttempt({
       customerId: recipientCustomer.id,
@@ -769,13 +786,11 @@ async function sendMembershipStarted({
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
-  // The contact that matched the approved key. sendTemplate reads the
-  // customer again; it is handed this contact so the provider receives the
-  // address that was checked, not one that changed in between.
-  let approvedContact = null;
+  // An early check on this read; sendTemplate reads the customer again and
+  // checks the same key against THAT contact, so an address that changes in
+  // between is no email (never an override of the fresh read).
   if (recipientKey) {
-    approvedContact = getPrimaryContact(customer);
-    if (require('./estimate-accept-effects').recipientKey(approvedContact.email) !== recipientKey) {
+    if (require('./estimate-accept-effects').recipientKey(getPrimaryContact(customer).email) !== recipientKey) {
       logger.warn(`[account-membership-email] membership.started not sent for customer ${customer.id}: the address changed since it was approved`);
       await logLifecycleEmailAttempt({
         customerId: customer.id,
@@ -811,7 +826,7 @@ async function sendMembershipStarted({
     idempotencyKey: idempotencyKey || `membership.started:${customerId}:${sourceId || stableEventKey(effectiveDate)}`,
     categories: ['membership_started'],
     metadata: { source_id: sourceId, billing_lane: lane },
-    ...(approvedContact ? { contactOverride: approvedContact } : {}),
+    ...(recipientKey ? { expectedRecipientKey: recipientKey } : {}),
   });
 }
 
