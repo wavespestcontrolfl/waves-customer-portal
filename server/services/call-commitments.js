@@ -2061,25 +2061,47 @@ const CALLBACK_SPAM = "callback_spam";
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
+  // Both link arms imply an index: relatedCommitmentId its own, relatedCallId
+  // the admin-callback + spam partial index (20261010270000). The promise's
+  // call must be a VOICEMAIL (the processor's and the sweep's eligibility): a
+  // spam callback linked to an answered call says nothing about that call's
+  // promise.
   const row = await conn("call_log")
     .where("direction", "like", "outbound%")
     .where({ source: "admin-callback", processing_status: "spam" })
     .whereNull("processing_token")
     .where("created_at", ">", after)
     .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ?))", [commitment.id, commitment.call_log_id])
+    .whereExists(function parentIsVoicemail() {
+      this.select(conn.raw("1")).from("call_log as parent").where("parent.id", commitment.call_log_id)
+        .whereRaw("(parent.call_outcome = 'voicemail' OR parent.answered_by = 'voicemail' OR parent.processing_status = 'voicemail')");
+    })
     .modify((b) => phoneWhere(b, "to_phone", phone))
     .orderBy("created_at", "asc")
     .first("id", "created_at");
   return row ? { kind: CALLBACK_SPAM, record_type: "call_log", record_id: row.id, matched_at: row.created_at, strength: "direct", basis: "callback_reached_solicitor" } : null;
 }
-// The correction: that callback reprocessed into a real conversation. The
-// dismissal it produced (and only it — a human verdict stands) is owed again.
-async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
+// The rows a callback's spam verdict dismissed: the same scope the dismissal
+// could reach (refreshableVerdictSql lets this evidence close a callback card
+// staff confirmed or edited, so the correction reaches those too); a card
+// staff dismissed themselves stands.
+function callbackSpamDismissalsQ(conn, callLogId, callbackCallId) {
   return conn("call_commitments")
     .where({ call_log_id: callLogId, party: "waves", kind: "callback", status: "dismissed" })
-    .whereNull("human_state")
-    .whereRaw("fulfillment->>'kind' = ? AND fulfillment->>'record_id' = ?", [CALLBACK_SPAM, String(callbackCallId)])
+    .where((q) => q.whereNull("human_state").orWhereIn("human_state", ["confirmed", "edited"]))
+    .whereRaw("fulfillment->>'kind' = ? AND fulfillment->>'record_id' = ?", [CALLBACK_SPAM, String(callbackCallId)]);
+}
+// The correction: that callback reprocessed into anything but spam, and no
+// other spam callback stands. The dismissal it produced is owed again.
+async function reopenCallbackSpamDismissals(conn, callLogId, callbackCallId) {
+  return callbackSpamDismissalsQ(conn, callLogId, callbackCallId)
     .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+}
+// The correction while ANOTHER spam callback still stands: the promise stays
+// dismissed, on that callback's evidence, so correcting it later reopens.
+async function repointCallbackSpamDismissals(conn, callLogId, fromCallbackCallId, toCallbackCallId) {
+  return callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId)
+    .update({ fulfillment: conn.raw("jsonb_set(fulfillment, '{record_id}', to_jsonb(?::text), true)", [String(toCallbackCallId)]), updated_at: new Date() });
 }
 async function customerLeftProof(conn, commitment, call) {
   const after = await evidenceBoundary(conn, commitment, call);
@@ -3854,6 +3876,7 @@ module.exports = {
   obligationRenewedAt,
   callbackReachedSolicitor,
   reopenCallbackSpamDismissals,
+  repointCallbackSpamDismissals,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,
   buildCallOutcomes,

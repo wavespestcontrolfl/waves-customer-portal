@@ -260,9 +260,13 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
   test('a callback corrected to a real conversation gives the parent back its cards and its promise', async () => {
     const parentId = await insertCall(FIXED_PARENT_SID, { from_phone: '+15555550188' });
     await db('triage_items').insert([card(parentId, 'missing_service_address'), card(parentId, 'on_file_house_number_conflict', 'resolved')]);
-    await db('call_commitments').insert([promise(parentId, 'cb-fixed')]);
-    const childId = await insertChild(FIXED_CHILD_SID, parentId, { to_phone: '+15555550188' });
+    // Staff launched the callback from the card, which confirms the promise; the
+    // callback row then carries relatedCommitmentId. The spam verdict may dismiss
+    // such a confirmed card, so the correction must reach it too.
+    const [{ id: promiseId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-fixed'), human_state: 'confirmed' }]).returning('id');
+    const childId = await insertChild(FIXED_CHILD_SID, parentId, { to_phone: '+15555550188', metadata: JSON.stringify({ source: 'admin-callback', relatedCallId: parentId, relatedCommitmentId: promiseId }) });
     expect(await close(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 1, promises: 1, reviewSynced: true });
+    expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('dismissed');
 
     // The correction only counts once the child's row reads processed with no live token, on this pass's generation.
     expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: false, reason: 'verdict_superseded' });
@@ -276,7 +280,7 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
       ['on_file_house_number_conflict', 'resolved', null], // someone else's close stays
     ]);
     const p = await db('call_commitments').where({ call_log_id: parentId }).first();
-    expect([p.status, p.fulfillment, p.fulfilled_at]).toEqual(['open', null, null]);
+    expect([p.status, p.fulfillment, p.fulfilled_at, p.human_state]).toEqual(['open', null, null, 'confirmed']);
     const parent = await readCall(FIXED_PARENT_SID);
     expect(parent.review_status).toBe('open');
     expect(parent.metadata.callback_verdict).toBeUndefined();
@@ -284,31 +288,41 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     expect(await reopen(FIXED_CHILD_SID)).toEqual({ applied: true, cards: 0, promises: 0, standing: false });
   });
 
-  test('two spam callbacks: correcting one keeps the parent settled on the other; correcting both gives everything back', async () => {
+  test('two spam callbacks: correcting one keeps the parent settled on the other (promise re-pointed); correcting both gives everything back, one card per reason', async () => {
     const parentId = await insertCall(TWICE_PARENT_SID, { from_phone: '+15555550122' });
-    await db('triage_items').insert([card(parentId, 'missing_service_address')]);
+    await db('triage_items').insert([card(parentId, 'missing_service_address'), card(parentId, 'missing_last_name')]);
     await db('call_commitments').insert([promise(parentId, 'cb-twice')]);
     const childA = await insertChild(TWICE_CHILD_A_SID, parentId, { to_phone: '+15555550122', created_at: new Date(Date.now() - 10 * 60 * 1000) });
     const childB = await insertChild(TWICE_CHILD_B_SID, parentId, { to_phone: '+15555550122' });
-    expect(await close(TWICE_CHILD_A_SID)).toMatchObject({ applied: true, cards: 1, promises: 1 });
+    expect(await close(TWICE_CHILD_A_SID)).toMatchObject({ applied: true, cards: 2, promises: 1 });
     expect(await close(TWICE_CHILD_B_SID)).toMatchObject({ applied: true, cards: 0, promises: 0 });
     expect((await readCall(TWICE_PARENT_SID)).metadata.callback_verdict.callback_call_log_id).toBe(childB);
     // The promise was dismissed on the earliest spam callback (A).
-    expect((await db('call_commitments').where({ call_log_id: parentId }).first()).fulfillment.record_id).toBe(childA);
+    const promiseRow = () => db('call_commitments').where({ call_log_id: parentId }).first();
+    expect((await promiseRow()).fulfillment.record_id).toBe(childA);
 
-    // B corrected: A still stands, so the card stays closed and the stamp names A; B dismissed nothing, so nothing reopens.
-    await db('call_log').where({ id: childB }).update({ processing_status: 'processed' });
-    expect(await reopen(TWICE_CHILD_B_SID)).toEqual({ applied: true, cards: 0, promises: 0, standing: true });
-    expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('resolved');
-    expect((await readCall(TWICE_PARENT_SID)).metadata.callback_verdict.callback_call_log_id).toBe(childA);
-    expect((await db('call_commitments').where({ call_log_id: parentId }).first()).status).toBe('dismissed');
+    // A corrected while B stands: cards stay closed, the stamp and the promise's dismissal move to B.
+    await db('call_log').where({ id: childA }).update({ processing_status: 'processed' });
+    expect(await reopen(TWICE_CHILD_A_SID)).toEqual({ applied: true, cards: 0, promises: 0, standing: true });
+    expect((await db('triage_items').where({ call_log_id: parentId, status: 'resolved' })).length).toBe(2);
+    expect((await readCall(TWICE_PARENT_SID)).metadata.callback_verdict.callback_call_log_id).toBe(childB);
+    expect([(await promiseRow()).status, (await promiseRow()).fulfillment.record_id]).toEqual(['dismissed', childB]);
 
-    // A corrected too (as a voicemail verdict this time): nothing stands, everything comes back.
-    await db('call_log').where({ id: childA }).update({ processing_status: 'voicemail' });
-    expect(await processor.reopenParentOnCallbackCorrected(await readCall(TWICE_CHILD_A_SID), { callSid: TWICE_CHILD_A_SID, procGeneration: 3, status: 'voicemail' }))
+    // A reprocess of the voicemail filed the address ask again meanwhile (one live row per reason).
+    await db('triage_items').insert([card(parentId, 'missing_service_address')]);
+
+    // B corrected too (as a voicemail verdict this time): nothing stands. The surname card
+    // comes back; the address reason already has a live row, so its history stays resolved.
+    await db('call_log').where({ id: childB }).update({ processing_status: 'voicemail' });
+    expect(await processor.reopenParentOnCallbackCorrected(await readCall(TWICE_CHILD_B_SID), { callSid: TWICE_CHILD_B_SID, procGeneration: 3, status: 'voicemail' }))
       .toEqual({ applied: true, cards: 1, promises: 1, standing: false });
-    expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
-    expect((await db('call_commitments').where({ call_log_id: parentId }).first()).status).toBe('open');
+    const cards = await db('triage_items').where({ call_log_id: parentId }).orderBy(['reason_code', 'status']);
+    expect(cards.map((c) => [c.reason_code, c.status, c.resolution_rule])).toEqual([
+      ['missing_last_name', 'open', null],
+      ['missing_service_address', 'open', null],
+      ['missing_service_address', 'resolved', 'callback_spam'],
+    ]);
+    expect((await promiseRow()).status).toBe('open');
     const parent = await readCall(TWICE_PARENT_SID);
     expect(parent.metadata.callback_verdict).toBeUndefined();
     expect(parent.review_status).toBe('open');

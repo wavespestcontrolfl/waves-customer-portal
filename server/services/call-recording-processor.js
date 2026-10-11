@@ -1181,22 +1181,37 @@ async function reopenParentOnCallbackCorrected(call, { callSid = null, procGener
       if (!pair.parent) return { applied: false, reason: pair.reason };
       const now = new Date();
       const standing = await standingSpamCallbacks(trx, pair.parent, call.id);
-      let cards = 0;
+      const commitments = require('./call-commitments');
       if (standing.length) {
+        // Still settled: the stamp and the promise's dismissal move to the
+        // callback that still stands, so correcting THAT one later reopens.
         await trx('call_log').where({ id: parentId }).update({
           metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
             [JSON.stringify({ spam: true, callback_call_log_id: standing[0].id, at: now.toISOString() })]),
           updated_at: now,
         });
-      } else {
-        cards = await trx('triage_items')
-          .where({ call_log_id: parentId, status: 'resolved', resolution_rule: CALLBACK_SPAM_RULE })
-          .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now });
-        await syncCallReviewStatus(trx, parentId, 'resolved');
-        await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
+        await commitments.repointCallbackSpamDismissals(trx, parentId, call.id, standing[0].id);
+        return { applied: true, cards: 0, promises: 0, standing: true };
       }
-      const promises = await require('./call-commitments').reopenCallbackSpamDismissals(trx, parentId, call.id);
-      return { applied: true, cards, promises, standing: standing.length > 0 };
+      // One canonical card per reason comes back: the newest callback_spam
+      // row for each reason, and only where no open / in_progress row for
+      // that reason exists (a reprocess after the settlement may have filed
+      // one; triage_items_open_unique_idx allows one live row per reason).
+      // Older history rows stay resolved.
+      const cards = await trx('triage_items')
+        .whereIn('id', trx('triage_items').distinctOn('reason_code').select('id')
+          .where({ call_log_id: parentId, status: 'resolved', resolution_rule: CALLBACK_SPAM_RULE })
+          .orderBy([{ column: 'reason_code' }, { column: 'resolved_at', order: 'desc', nulls: 'last' }, { column: 'id', order: 'desc' }]))
+        .whereNotExists(function liveRowForReason() {
+          this.select(trx.raw('1')).from('triage_items as live')
+            .whereRaw('live.call_log_id = triage_items.call_log_id AND live.reason_code = triage_items.reason_code')
+            .whereIn('live.status', ['open', 'in_progress']);
+        })
+        .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now });
+      await syncCallReviewStatus(trx, parentId, 'resolved');
+      await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
+      const promises = await commitments.reopenCallbackSpamDismissals(trx, parentId, call.id);
+      return { applied: true, cards, promises, standing: false };
     });
     if (undone.applied) logger.info(`[call-proc] callback ${maskSid(callSid)} is not spam after all (${status}): parent voicemail ${undone.standing ? 'stays settled on another spam callback' : 'reopened'} (${undone.cards} card(s), ${undone.promises} promise(s))`);
     return undone;
