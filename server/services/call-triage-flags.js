@@ -846,7 +846,18 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
+// A pre-construction pre-treat (a new slab) has no unit to ask about,
+// commercial jobs included (owner 2026-10-07): the advisory "which unit?"
+// card is skipped. The caller decides preConstructionPretreat (every view of
+// the call's service resolves to the allowlist, no condo/apartment wording);
+// any address hold on the booking is unchanged. A named predicate keeps this
+// decision out of dropUnneededCallCards' complexity.
+function pretreatDroppedCards(preConstructionPretreat) {
+  return preConstructionPretreat ? ['missing_unit_number'] : [];
+}
+
+function dropUnneededCallCards(flags, extraction, options) {
+  const { canonicalStreet, preConstructionPretreat } = options || {};
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
@@ -878,8 +889,63 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
         || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {})))) {
     dropped.add('caller_not_authorized');
   }
+  pretreatDroppedCards(preConstructionPretreat).forEach((f) => dropped.add(f));
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
+}
+
+// 5. A call that ended with nothing to do (2026-10-10 call audit: 8 cards in
+//    48 hours on callers who heard the price and said no, wanted a product
+//    Waves does not carry, or were outside the service area and were told
+//    so). The model's own verdict is recommended_disposition
+//    no_action_needed, and the call left no open thread: no time agreed,
+//    offered or accepted, no promised callback or follow-up, no promised
+//    quote, not a voicemail. Scheduling status 'requested' means only that
+//    the caller wanted a visit, not that the caller dropped it, so on its own
+//    it keeps every card: it qualifies only with the call's own evidence
+//    that the request ended (the caller declined the stated price and
+//    accepted no other, or the urgency reads no_appointment_needed). Such a call holds on "not_confirmed" or on its
+//    address, and the card that files is nobody's work. Returned as card
+//    codes, not as a flag filter, because not_confirmed is the routing
+//    reason and never one of the call's flags. The routing verdict and the
+//    flags are untouched. A stated street keeps the address cards, for the
+//    same reason as rule 3 (Step 3's backfill can copy it onto a record).
+// The caller said no to the price staff stated, and said yes to no other.
+function callerDeclinedThePrice(serviceRequest) {
+  const sr = serviceRequest || {};
+  const all = [sr.price, ...(Array.isArray(sr.prices) ? sr.prices : [])].filter(Boolean);
+  if (all.some((p) => p.caller_response === 'accepted' || p.accepted === true)) return false;
+  return sr.price?.caller_response === 'declined';
+}
+
+function requestedVisitWasDropped(extraction) {
+  const sr = extraction?.service_request || {};
+  return sr.urgency === 'no_appointment_needed' || callerDeclinedThePrice(sr);
+}
+
+const NO_ACTION_HOLD_CARDS = ['not_confirmed', 'ambiguous_scheduling'];
+const NO_ACTION_ADDRESS_CARDS = ['missing_service_address', 'address_unverifiable', 'address_unverified', 'low_confidence_address'];
+
+function callEndedWithNothingToDo(extraction) {
+  if (!extraction || extraction.recommended_disposition !== 'no_action_needed') return false;
+  if (extraction.meta?.is_voicemail === true) return false;
+  const scheduling = extraction.scheduling || {};
+  const status = String(scheduling.status || 'none');
+  if (status === 'requested' ? !requestedVisitWasDropped(extraction) : status !== 'none') return false;
+  const openThread = scheduling.confirmed_start_at
+    || scheduling.agent_committed_booking === true
+    || scheduling.caller_accepted_slot === true
+    || scheduling.follow_up_mentioned === true
+    || scheduling.callback_window_start
+    || scheduling.callback_window_end;
+  if (openThread) return false;
+  return extraction.service_request?.quote_promised !== true;
+}
+
+function noActionCallCards(extraction, { canonicalStreet } = {}) {
+  if (!callEndedWithNothingToDo(extraction)) return [];
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
+  return statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
 }
 
 function hasCanonicalWriteBlock(flags) {
@@ -3354,6 +3420,8 @@ module.exports = {
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,
+  UNIT_LEVEL_WORDING_RE,
+  EXISTING_SERVICE_INTENTS,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,
@@ -3361,6 +3429,8 @@ module.exports = {
   deriveEmailReview,
   spelledEmailSettled,
   dropUnneededCallCards,
+  callEndedWithNothingToDo,
+  noActionCallCards,
   CALLBACK_SPAM_MOOT_CODES,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,

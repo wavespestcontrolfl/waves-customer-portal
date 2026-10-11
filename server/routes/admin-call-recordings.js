@@ -812,6 +812,8 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         // fields are replaced — never a processed row whose audio does not
         // match its intelligence.
         processing_status: null,
+        // The verdict time described the previous recording too (Codex #6269 r2).
+        processed_at: null,
         // …and the retry budget: extraction_attempts counted failures on the
         // OLD audio; one transient error on the adopted recording would
         // otherwise hit the sweep's cap (Codex #3736 r11 P1).
