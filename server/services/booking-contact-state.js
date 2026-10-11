@@ -89,4 +89,9 @@ function contactCardLines(state, { sendTexts, welcome }) {
   return lines;
 }
 
-module.exports = { bookingContactState, contactKey, currentContactKey, contactCardLines, maskPhone, maskEmail };
+// The durable pin a card-approved booking writes (activity_log, inside the booking transaction) for each visit it
+// creates: { scheduled_service_id, contact_key }. The confirmation sender re-checks it against the live customer, so a
+// send that happens later (the recovery sweep included) cannot reach recipients the card did not show.
+const CONTACT_PIN_ACTION = 'booking_contact_pin';
+
+module.exports = { CONTACT_PIN_ACTION, bookingContactState, contactKey, currentContactKey, contactCardLines, maskPhone, maskEmail };

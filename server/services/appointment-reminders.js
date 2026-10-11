@@ -2442,6 +2442,43 @@ async function alertRegistrationFailure({ scheduledServiceId, customerId, source
 // sweep's own filter.
 const STRANDED_CONFIRMATION_FILTER = { cancelled: false, confirmation_sent: false, windows_preclosed: false };
 
+// A visit booked from a confirm card carries the recipient key the card pinned (activity_log, written in the booking
+// transaction). Every confirmation send, the recovery sweep included, checks it against the live customer: a changed
+// phone, email or notification setting closes the row unsent and audits it, and a person sends it by hand. A visit with
+// no pin (every other booking path) is not touched. An unreadable recipient state sends nothing now; the row stays
+// unsent and the next run checks again. A failed close or audit write changes nothing: the next run reaches the same
+// mismatch and skips again, so the send never goes to the new recipients.
+async function contactPinBlocksConfirmation(record, scheduledServiceId) {
+  const { CONTACT_PIN_ACTION, currentContactKey } = require('./booking-contact-state');
+  const pin = await db('activity_log')
+    .where({ action: CONTACT_PIN_ACTION })
+    .whereRaw("metadata->>'scheduled_service_id' = ?", [String(scheduledServiceId)])
+    .first('metadata');
+  if (!pin) return false;
+  const meta = typeof pin.metadata === 'string' ? JSON.parse(pin.metadata) : (pin.metadata || {});
+  if (typeof meta.contact_key !== 'string') return false;
+  const live = await currentContactKey(record.customer_id);
+  if (live === meta.contact_key) return false;
+  if (live === null) {
+    logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} held: the recipients could not be verified`);
+    return true;
+  }
+  logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} not sent: phone, email or notification settings changed after the card`);
+  try {
+    // Audit first: a close that then fails is retried (and re-audited) by the next run, never lost.
+    await db('activity_log').insert({
+      customer_id: record.customer_id,
+      action: 'confirmation_suppressed_contact_drift',
+      description: `Visit ${scheduledServiceId}: the customer's phone, email or notification settings changed after the program card was approved, so the booking confirmation was not sent. Check the recipient, then send the confirmation by hand.`,
+    });
+    await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId, confirmation_sent: false })
+      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+  } catch (err) {
+    logger.error(`[appt-remind] could not close or audit the held confirmation for ${scheduledServiceId}: ${err.message}`);
+  }
+  return true;
+}
+
 const AppointmentReminders = {
 
   // Exposed for route-level registration wrappers (spawned-visit path in
@@ -2996,6 +3033,7 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] sendConfirmation: skipping cancelled appointment ${scheduledServiceId}`);
         return false;
       }
+      if (await contactPinBlocksConfirmation(record, scheduledServiceId)) return false;
       return await deliverConfirmation(record, {
         scheduledServiceId,
         customerId: record.customer_id,

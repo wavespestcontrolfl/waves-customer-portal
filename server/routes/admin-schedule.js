@@ -8730,11 +8730,27 @@ async function syncSeriesWaveGuardPlan(trx, c) {
 
 // Writes that ride the booking transaction after the rows exist, in order. A rodent-bait series owes
 // its setup at creation unless an estimate acceptance bills it (the two rodent rules are exclusive).
+// A card-approved booking (req.approvedContact, verified under the customer lock by the CONTACT_CHANGED rail) pins
+// that recipient key to every visit it creates, in this transaction: the deferred confirmation, and the recovery
+// sweep behind it, then re-check it before they send (appointment-reminders sendConfirmation). A failed insert fails
+// the booking, so no sweep-eligible visit exists without its pin.
+async function pinBookingContact(trx, c) {
+  const { CONTACT_PIN_ACTION } = require('../services/booking-contact-state');
+  const rows = c.createdAppointments.map((a) => ({
+    customer_id: c.customerId,
+    action: CONTACT_PIN_ACTION,
+    description: `Visit ${a.id} was booked from a confirm card; its confirmation goes only to the recipients the card showed.`,
+    metadata: JSON.stringify({ scheduled_service_id: a.id, contact_key: c.req.approvedContact }),
+  }));
+  if (rows.length) await trx('activity_log').insert(rows);
+}
+
 const IN_TRANSACTION_HOOKS = [
   { when: (c) => c.req.body.prepaid && c.isRecurring, run: stampPrepaidSeries },
   { when: (c) => c.isRecurring && (!c.linkedEstimateId || c.acceptEstimateOnBook), run: stampDirectRodentSetup },
   { when: (c) => c.isRecurring && c.linkedEstimateId && !c.acceptEstimateOnBook, run: stampAcceptedEstimateRodentSetup },
   { when: (c) => c.isRecurring, run: syncSeriesWaveGuardPlan },
+  { when: (c) => typeof c.req.approvedContact === 'string', run: pinBookingContact },
 ];
 
 async function runInTransactionHooks(trx, c) {

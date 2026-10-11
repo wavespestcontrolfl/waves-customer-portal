@@ -84,11 +84,15 @@ function fakeDb() {
     return b;
   }
   const trx = (table) => builder(table);
-  trx.raw = jest.fn(async () => ({}));
+  trx.raw = jest.fn((sql, bindings) => Object.assign(Promise.resolve({}), { sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   trx.isTransaction = true;
   db.mockImplementation(builder);
   db.transaction.mockImplementation(async (cb) => cb(trx));
 }
+
+// The phase marker rows (audit_log) are bookkeeping: tests about what the card changes look past them.
+const nonMarkerWrites = () => writes.filter((w) => w.table !== 'audit_log');
 
 function memberCustomer(overrides = {}) {
   return {
@@ -212,7 +216,7 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     ]);
     expect(preview.notifies_customer).toBe(true);
     expect(typeof preview._version).toBe('string');
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
     expect(createScheduleBooking).not.toHaveBeenCalled();
   });
 
@@ -367,7 +371,7 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 
   test('a catalog row edited after the card (updated_at moved) refuses with preview_changed', async () => {
@@ -700,6 +704,20 @@ describe('refusals', () => {
     expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_already_billed' });
   });
 
+  test.each(['business', 'commercial', 'Business'])('a %s property type on a monthly-membership account refuses, with no commercial tier sentinel (round 10)', async (propertyType) => {
+    tables.customers = [memberCustomer({ property_type: propertyType, waveguard_tier: 'Bronze' })];
+    const result = await run(BASE_INPUT);
+    expect(result).toMatchObject({ code: 'program_commercial_account' });
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the commercial test is the canonical predicate in self-booking-plan-sync, not a copy (round 10)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/intelligence-bar/start-program'), 'utf8');
+    expect(src).toContain("require('../self-booking-plan-sync').isCommercialAccount(customer)");
+    expect(src).not.toMatch(/\['commercial', 'business'\]/);
+    expect(typeof require('../services/self-booking-plan-sync').isCommercialAccount).toBe('function');
+  });
+
   test('no saved property: refused (the booking would create one)', async () => {
     tables.customer_properties = [];
     const result = await run(BASE_INPUT);
@@ -775,7 +793,7 @@ describe('commit', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 
   test('pin drift: a different technician or time refuses too', async () => {
@@ -797,7 +815,7 @@ describe('commit', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ nothing_changed: true, code: 'DUPLICATE_SERIES' });
     expect(result.error).toContain('Nothing was booked');
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
     expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
   });
 
@@ -873,6 +891,162 @@ describe('commit', () => {
     });
   });
 
+  describe('phase marker and resume (round 10)', () => {
+    const markerInserts = () => writes.filter((w) => w.table === 'audit_log' && w.op === 'insert');
+    const markerRow = (insert, phase = 'booked_pending_bill') => ({
+      id: insert.data.id, resource_id: CUSTOMER_ID, created_at: '2026-10-11T10:00:00Z',
+      metadata: JSON.stringify({ ...JSON.parse(insert.data.metadata), phase }),
+    });
+    // A first run whose bill step fails after the visits are booked: leaves the marker open.
+    async function interruptedFirstRun() {
+      const version = await approvedVersion();
+      bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      PlanRateLedger.setLineForScalarWrite.mockRejectedValueOnce(Object.assign(new Error('connection lost'), { code: 'ECONNRESET' }));
+      const first = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(first.partial).toBe(true);
+      return markerInserts()[0];
+    }
+
+    test('the marker is written before the booking is attempted', async () => {
+      const version = await approvedVersion();
+      let insertsAtBooking = null;
+      createScheduleBooking.mockImplementation(async () => {
+        insertsAtBooking = markerInserts().length;
+        tables.customers = [memberCustomer({ waveguard_tier: 'Silver' })];
+        return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+      });
+      await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(insertsAtBooking).toBe(1);
+      const data = JSON.parse(markerInserts()[0].data.metadata);
+      expect(data.phase).toBe('booking');
+      expect(data.target).toMatchObject({ customerId: CUSTOMER_ID, tier: 'Silver', bill: { totalAfter: 102.66 } });
+      expect(markerInserts()[0].data).toMatchObject({ action: 'start_program.pending_bill', resource_type: 'customer', resource_id: CUSTOMER_ID });
+    });
+
+    test('the marker moves to booked_pending_bill after the booking, and to billed inside the bill transaction', async () => {
+      const version = await approvedVersion();
+      bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      const updates = writes.filter((w) => w.table === 'audit_log' && w.op === 'update');
+      expect(updates).toHaveLength(2);
+      expect(updates[0].data.metadata.bindings[0]).toContain('booked_pending_bill');
+      // The billed move is the second marker write and comes after the customer row and the ledger lines.
+      expect(updates[1].data.metadata.bindings[0]).toContain('"phase":"billed"');
+      const order = writes.map((w) => `${w.table}:${w.op}`);
+      expect(order.lastIndexOf('customers:update')).toBeLessThan(order.lastIndexOf('audit_log:update'));
+      expect(PlanRateLedger.setLineForScalarWrite).toHaveBeenCalled();
+    });
+
+    test('a refused booking abandons the marker; an unexpected booking error leaves it open', async () => {
+      const version = await approvedVersion();
+      createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Slot overlap', code: 'OVERLAP_CHANGED' } });
+      await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      let updates = writes.filter((w) => w.table === 'audit_log' && w.op === 'update');
+      expect(updates).toHaveLength(1);
+      expect(updates[0].data.metadata.bindings[0]).toContain('abandoned');
+      writes = [];
+      createScheduleBooking.mockRejectedValue(new Error('socket hang up'));
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result.outcome_unknown).toBe(true);
+      expect(writes.filter((w) => w.table === 'audit_log' && w.op === 'update')).toEqual([]);
+    });
+
+    test('a marker that cannot be written books nothing', async () => {
+      const version = await approvedVersion();
+      jest.spyOn(require('../services/intelligence-bar/start-program-marker'), 'writeMarker').mockRejectedValue(new Error('disk full'));
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result).toMatchObject({ code: 'program_marker_failed' });
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+    });
+
+    test('an interrupted bill step resumes on the next card instead of refusing because the series exists', async () => {
+      const insert = await interruptedFirstRun();
+      // The next ask: the series exists (the planner would refuse), the marker is open.
+      createScheduleBooking.mockReset();
+      writes = [];
+      tables.audit_log = [markerRow(insert)];
+      const preview = await run(BASE_INPUT);
+      expect(preview).toMatchObject({ preview: true, resume: true, notifies_customer: false });
+      expect(preview.tier).toEqual({ before: 'Bronze', after: 'Silver' });
+      expect(preview.bill).toEqual({ total_before: 41.33, total_after: 102.66 });
+      expect(typeof preview._version).toBe('string');
+      // Confirmed with the resume card's version: the stored bill step runs, nothing is booked.
+      const done = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+      expect(done).toMatchObject({ success: true, resumed: true, tier: { after: 'Silver' }, monthly_bill: { before: 41.33, after: 102.66 } });
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+      expect(writes.find((w) => w.table === 'customers' && w.op === 'update').data).toMatchObject({ waveguard_tier: 'Silver', monthly_rate: 102.66 });
+      expect(writes.filter((w) => w.table === 'audit_log' && w.op === 'update')).toHaveLength(1);
+      expect(PlanRateLedger.setLineForScalarWrite).toHaveBeenLastCalledWith(expect.anything(), CUSTOMER_ID,
+        { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 102.66 }, { source: 'ib_update' });
+    });
+
+    test('resume refuses a stale card version, and an earlier landed commit is reported done without a second write', async () => {
+      const insert = await interruptedFirstRun();
+      writes = [];
+      tables.audit_log = [markerRow(insert)];
+      const stale = await run({ ...BASE_INPUT, _verified_program_version: 'old-card' }, { confirmed: true });
+      expect(stale.preview_changed).toBe(true);
+      expect(nonMarkerWrites()).toEqual([]);
+      // The earlier commit actually landed (ack lost): row and lines are at the target.
+      const preview = await run(BASE_INPUT);
+      tables.customers = [memberCustomer({ waveguard_tier: 'Silver', waveguard_tier_source: 'manual', monthly_rate: 102.66 })];
+      PlanRateLedger.loadComponents.mockResolvedValue([{ family_key: 'pest_control', monthly_rate: '41.33' }, { family_key: 'lawn_care', monthly_rate: '61.33' }]);
+      const done = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+      expect(done).toMatchObject({ success: true, resumed: true });
+      expect(done.message).toContain('already landed');
+      expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+    });
+
+    test('a completed marker does not resume: the next card is the normal one', async () => {
+      const insert = await interruptedFirstRun();
+      tables.audit_log = [markerRow(insert, 'billed')];
+      const preview = await run(BASE_INPUT);
+      expect(preview.resume).toBeUndefined();
+    });
+
+    test('a booking marker with no series behind it is abandoned and the normal card follows', async () => {
+      const insert = await interruptedFirstRun();
+      writes = [];
+      tables.audit_log = [markerRow(insert, 'booking')];
+      tables.scheduled_services = [];
+      const preview = await run(BASE_INPUT);
+      expect(preview.resume).toBeUndefined();
+      expect(writes.find((w) => w.table === 'audit_log' && w.op === 'update').data.metadata.bindings[0]).toContain('no_series');
+    });
+
+    test('the stale-marker sweep raises one bell for a marker open past 10 minutes, then stamps it', async () => {
+      const Marker = require('../services/intelligence-bar/start-program-marker');
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
+      const insert = await interruptedFirstRun();
+      writes = [];
+      tables.audit_log = [markerRow(insert)];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(alert).toHaveBeenCalledWith('billing', expect.objectContaining({ severity: 'needs-you', subject: { type: 'customer', id: CUSTOMER_ID } }),
+        expect.objectContaining({ dedupeKey: `start-program-pending-bill:${insert.data.id}`, bell: true }));
+      expect(writes.find((w) => w.table === 'audit_log' && w.op === 'update').data.metadata.bindings[0]).toContain('alerted_at');
+      const cutoff = calls.find((c) => c.table === 'audit_log' && c.method === 'where' && c.args[0] === 'created_at');
+      expect(cutoff.args[1]).toBe('<');
+      expect(Date.now() - cutoff.args[2].getTime()).toBeGreaterThanOrEqual(Marker.STALE_MINUTES * 60 * 1000 - 1000);
+    });
+
+    test('the scheduler runs the stale-marker sweep every 10 minutes under an exclusive lock', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+      const at = src.indexOf("runExclusive('start-program-pending-bill'");
+      expect(at).toBeGreaterThan(-1);
+      expect(src.slice(src.lastIndexOf('cron.schedule(', at), at)).toContain("'*/10 * * * *'");
+      expect(src.slice(at, at + 300)).toContain('start-program-marker');
+    });
+
+    test('the alert copy obeys the admin notification rules', () => {
+      const { composeAdminAlert } = require('../services/admin-alert-compose');
+      expect(() => composeAdminAlert({
+        area: 'Billing', action: 'Program booked, bill not set', why: 'A program start booked the visits, but the tier and monthly bill did not finish.',
+        severity: 'needs-you', link: `/admin/customers?customerId=${CUSTOMER_ID}`, subject: { type: 'customer', id: CUSTOMER_ID }, doneWhen: 'bill_step_finished', who: 'person',
+      })).not.toThrow();
+    });
+  });
+
   test('fewer visits than the card promised: tier and bill are not applied, the shortfall is named', async () => {
     const version = await approvedVersion();
     createScheduleBooking.mockResolvedValue({ status: 201, json: {
@@ -936,7 +1110,7 @@ describe('commit', () => {
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'This customer now has an open inspection credit the card did not show. Nothing was booked.', code: 'INSPECTION_CREDIT_CHANGED' } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ code: 'INSPECTION_CREDIT_CHANGED', preview_changed: true, nothing_changed: true });
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
     expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
   });
 
@@ -967,7 +1141,7 @@ describe('commit', () => {
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Changed. Nothing was booked.', code } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ code, preview_changed: true, nothing_changed: true });
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 
   test('a tier another writer set after the booking is not overwritten: partial receipt names it', async () => {
@@ -988,7 +1162,7 @@ describe('commit', () => {
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: "The customer's billing changed since the card was shown. Nothing was booked.", code: 'BILLING_CHANGED' } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ code: 'BILLING_CHANGED', preview_changed: true, nothing_changed: true });
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 
   test('the handler resolves a different service address under its lock: refused, preview_changed', async () => {
@@ -996,7 +1170,7 @@ describe('commit', () => {
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'The service address changed since the card was shown. Nothing was booked.', code: 'ADDRESS_CHANGED' } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ code: 'ADDRESS_CHANGED', preview_changed: true, nothing_changed: true });
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 
   test('the handler finds a new overlap under its lock: refused, nothing booked, preview_changed', async () => {
@@ -1004,7 +1178,7 @@ describe('commit', () => {
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Another visit now overlaps the first visit. Nothing was booked.', code: 'OVERLAP_CHANGED' } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ code: 'OVERLAP_CHANGED', preview_changed: true, nothing_changed: true });
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 
   test('the service address is pinned: a changed address refuses with preview_changed', async () => {
@@ -1061,7 +1235,7 @@ describe('commit', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(executionOutcome(result)).toBe('outcome_unknown');
     expect(result.error).toContain('NOT changed');
-    expect(writes).toEqual([]);
+    expect(nonMarkerWrites()).toEqual([]);
   });
 });
 

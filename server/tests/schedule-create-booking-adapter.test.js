@@ -243,6 +243,30 @@ describe('createScheduleBooking runs the POST / handler', () => {
       spy.mockRestore();
     });
 
+    test('the booking transaction writes the recipient pin for each created visit; a page booking writes none (round 10)', async () => {
+      const Contact = require('../services/booking-contact-state');
+      const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+      const pins = [];
+      const baseTransaction = db.transaction.getMockImplementation();
+      db.transaction = jest.fn(async (cb) => baseTransaction(async (trx) => {
+        const wrapped = jest.fn((table) => {
+          const c = trx(table);
+          if (table === 'activity_log') c.insert = jest.fn(async (rows) => { pins.push(...[].concat(rows)); return [1]; });
+          return c;
+        });
+        Object.assign(wrapped, trx);
+        return cb(wrapped);
+      }));
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedContact: 'key-a' })).status).toBe(201);
+      expect(pins).toHaveLength(1);
+      expect(pins[0]).toMatchObject({ customer_id: 'cust-1', action: 'booking_contact_pin' });
+      expect(JSON.parse(pins[0].metadata)).toEqual({ scheduled_service_id: 'new-1', contact_key: 'key-a' });
+      pins.length = 0;
+      expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
+      expect(pins).toEqual([]);
+      spy.mockRestore();
+    });
+
     test('the deferred confirmation and welcome go to the pinned recipients only: drift after the commit skips both and warns', async () => {
       const Contact = require('../services/booking-contact-state');
       const AppointmentReminders = require('../services/appointment-reminders');

@@ -53,6 +53,7 @@ const CADENCES = {
 // The Schedule screen books an ongoing series as its first 4 visits.
 const ONGOING_PRESEED = 4;
 const LEDGER_SOURCE = 'ib_update';
+const Marker = require('./start-program-marker');
 
 function startProgramLive() {
   return require('../../config/feature-gates').ibStartProgramLive();
@@ -256,6 +257,11 @@ async function loadProgramCustomer(customerId) {
   const customer = await db('customers').where({ id: customerId })
     .first('*', db.raw('updated_at::text AS version'));
   if (!customer || customer.deleted_at) return refusal('No live customer matches that id. Nothing was proposed.');
+  // The canonical commercial rule (the tier sentinel or a commercial/business property type), never a copy: commercial is
+  // never a WaveGuard membership, and this card sets a WaveGuard tier.
+  if (require('../self-booking-plan-sync').isCommercialAccount(customer)) {
+    return refusal('This is a commercial or business account. WaveGuard tiers and this program card are for residential customers. Book the visits from the Schedule screen. Nothing was proposed.', 'program_commercial_account');
+  }
   if (customer.payer_id || resolveBillingLane(customer).mode !== 'monthly_membership' || !(Number(customer.monthly_rate) > 0)) {
     return refusal('This tool starts a program only for a customer who already pays a monthly plan bill (monthly membership, no Bill-To payer). Start this customer\'s first plan from an accepted estimate or the Schedule screen. Nothing was proposed.', 'program_needs_monthly_plan');
   }
@@ -910,20 +916,22 @@ async function applyTierAndBill(plan) {
         familyKey: step.family, previousScalar: step.previousScalar, newScalar: step.newScalar,
       }, { source: LEDGER_SOURCE });
     }
+    // The phase marker moves to 'billed' in this same transaction: it can never say billed without the bill.
+    if (plan.markerId) await Marker.setPhase(plan.markerId, 'billed', {}, trx);
   });
 }
 
 // After a failed or ambiguous tier-and-bill step (an acknowledgement lost after COMMIT looks like a failure),
 // read what the step writes: the customer's monthly rate and tier, and the ledger lines. Returns 'done' when
-// every write landed, 'not_done' when the bill and ledger are still exactly what the card started from, and
-// 'unknown' when the read fails or the state is neither (a concurrent edit, or a partial state). The step is
-// one transaction, so a mix is never its own doing.
+// every write landed, 'not_done' when the bill and ledger are still exactly what the card started from,
+// 'unknown' when the read worked but the state is neither (a concurrent edit, or a partial state), and
+// 'unreadable' when the read failed. The step is one transaction, so a mix is never its own doing.
 async function reconcileTierAndBill(plan) {
   try {
     const PlanRateLedger = require('../plan-rate-ledger');
     const RateChange = require('./rate-change');
     const row = await db('customers').where('id', plan.customerId).first('waveguard_tier', 'waveguard_tier_source', 'monthly_rate');
-    if (!row) return 'unknown';
+    if (!row) return 'unreadable';
     const components = await PlanRateLedger.loadComponents(db, plan.customerId);
     if (RateChange.ledgerPin(components, row.monthly_rate) === plan.ledgerPin) return 'not_done';
     const byFamily = new Map(components.map((c) => [c.family_key, round(c.monthly_rate)]));
@@ -932,7 +940,7 @@ async function reconcileTierAndBill(plan) {
       && row.waveguard_tier === plan.tier && row.waveguard_tier_source === 'manual';
     return landed ? 'done' : 'unknown';
   } catch {
-    return 'unknown';
+    return 'unreadable';
   }
 }
 
@@ -941,7 +949,7 @@ function tierAndBillUnknown(plan, booked, err) {
   return {
     outcome_unknown: true,
     series_booked: booked,
-    error: `The visits are booked (${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}). The tier and monthly bill step ended without a clear answer (${err.code || err.message}), and a follow-up read could not say whether it landed. Check this customer's WaveGuard tier and monthly bill on the customer profile before trying again. Do not run this card again: the visits are already booked.`,
+    error: `The visits are booked (${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}). The tier and monthly bill step ended without a clear answer (${err.code || err.message}), and a follow-up read could not say whether it landed. Check this customer's WaveGuard tier and monthly bill on the customer profile before trying again. Do not book the visits again: the next program start for this customer first checks this step and offers to finish it.`,
   };
 }
 
@@ -1067,10 +1075,24 @@ async function commitProgram(input, actionContext) {
   // Defensive: the planner already refuses unless exactly the promised visits were planned.
   if (plan.visitDates.length !== ONGOING_PRESEED) return { ...unplannableDates(), preview_changed: true };
 
+  // The phase marker goes down BEFORE the booking: a crash between the booking commit and the bill commit leaves
+  // it open, and the next program start for this customer finishes the bill step from it (see start-program-marker.js).
+  try {
+    plan.markerId = await Marker.writeMarker({ customerId: plan.customerId, actorId: actionContext.technicianId || actionContext.actorId, target: markerTarget(plan) });
+  } catch (err) {
+    logger.error(`[intelligence-bar] start_program could not write its phase marker for customer ${plan.customerId}: ${err.message}`);
+    return { error: 'The start of this program could not be recorded, so nothing was booked. Try again in a moment.', code: 'program_marker_failed', nothing_changed: true };
+  }
+
   // Step 1: the series, through the Schedule screen's own handler.
   const booking = await bookSeries(plan, actionContext);
-  if (booking.result) return booking.result;
+  if (booking.result) {
+    // A refusal changed nothing; an unexpected error may have booked, so that marker stays for the schedule check.
+    if (booking.result.outcome_unknown !== true) await Marker.settle(plan.markerId, 'abandoned', { reason: 'booking_refused' });
+    return booking.result;
+  }
   const created = booking.json || {};
+  await Marker.settle(plan.markerId, 'booked_pending_bill', { series_id: created.id || null });
   const booked = {
     series_id: created.id,
     visits_booked: created.recurringCreated,
@@ -1085,6 +1107,7 @@ async function commitProgram(input, actionContext) {
   const planned = ONGOING_PRESEED;
   const createdCount = Number(created.recurringCreated) || 0;
   if (createdCount < planned) {
+    await Marker.settle(plan.markerId, 'abandoned', { reason: 'fewer_visits' });
     const state = await customerStateAfterBooking(plan.customerId);
     return partialReceipt(plan, booked, state,
       `the Schedule screen booked ${createdCount} of the ${planned} visits on the card${warnings.length ? ` (${warnings.join(' ')})` : ''}. Add the missing visits on the Schedule screen (check days off and blackout dates), then set the tier and bill with update_customer`);
@@ -1098,11 +1121,17 @@ async function commitProgram(input, actionContext) {
     // An acknowledgement lost after COMMIT lands here too: read what the step writes before reporting.
     // A drift refusal is thrown by this step before its first write: it never needs a reconcile read.
     const landed = err.drift ? 'not_done' : await reconcileTierAndBill(plan);
-    if (landed === 'done') return programStartedReceipt(plan, created, booked, warnings);
-    if (landed === 'unknown') return tierAndBillUnknown(plan, booked, err);
+    if (landed === 'done') {
+      await Marker.settle(plan.markerId, 'billed', { via: 'reconcile' });
+      return programStartedReceipt(plan, created, booked, warnings);
+    }
+    if (landed !== 'not_done') return tierAndBillUnknown(plan, booked, err);
+    // A drift refusal is for the operator to settle by hand; any other failure leaves the marker open so the next program
+    // start for this customer finishes the bill step.
+    if (err.drift) await Marker.settle(plan.markerId, 'abandoned', { reason: 'bill_drift' });
     const state = await customerStateAfterBooking(plan.customerId);
     return partialReceipt(plan, booked, state,
-      `${err.drift ? err.message : `the update failed (${err.code || err.message})`} Set them with update_customer, or cancel the series on the Schedule screen`);
+      `${err.drift ? err.message : `the update failed (${err.code || err.message}). Ask for a program start for this customer again, and it offers to finish the tier and bill.`} Set them with update_customer, or cancel the series on the Schedule screen`);
   }
   return programStartedReceipt(plan, created, booked, warnings);
 }
@@ -1120,10 +1149,122 @@ function programStartedReceipt(plan, created, booked, warnings) {
   };
 }
 
+// What the bill step needs, frozen in the marker: enough to rebuild the plan fields applyTierAndBill and the
+// reconcile read, without the customer, the technician or the dates.
+function markerTarget(plan) {
+  return {
+    version: plan.version,
+    customerId: plan.customerId,
+    customerName: customerName(plan.customer),
+    catalogName: plan.catalogRow.name,
+    firstDate: plan.firstDate,
+    tier: plan.tier,
+    tierBefore: plan.tierBefore ?? null,
+    ledgerPin: plan.ledgerPin,
+    customer: {
+      billing_mode: plan.customer.billing_mode ?? null, payer_id: plan.customer.payer_id ?? null,
+      waveguard_tier: plan.customer.waveguard_tier ?? null, waveguard_tier_source: plan.customer.waveguard_tier_source ?? null,
+    },
+    planSyncUpdates: plan.planSyncUpdates ?? null,
+    bill: { totalBefore: plan.bill.totalBefore, totalAfter: plan.bill.totalAfter, steps: plan.bill.steps, lines: plan.bill.lines },
+  };
+}
+
+function planFromMarker(marker) {
+  const t = marker.target;
+  return {
+    customerId: t.customerId, tier: t.tier, tierBefore: t.tierBefore, ledgerPin: t.ledgerPin, customer: t.customer,
+    planSyncUpdates: t.planSyncUpdates || undefined, bill: t.bill, catalogRow: { name: t.catalogName }, firstDate: t.firstDate,
+    markerId: marker.id,
+  };
+}
+
+// The version the resume card carries: bound to the marker and the bill target it will apply.
+const resumeVersion = (marker) => require('crypto').createHash('sha256').update(JSON.stringify(['resume', marker.id, marker.target.version, marker.target.bill.totalAfter, marker.target.tier])).digest('hex');
+
+function resumePreview(marker) {
+  const t = marker.target;
+  return {
+    preview: true,
+    resume: true,
+    customer_id: t.customerId,
+    customer_name: t.customerName,
+    service: t.catalogName,
+    tier: { before: t.tierBefore, after: t.tier },
+    bill: { total_before: t.bill.totalBefore, total_after: t.bill.totalAfter },
+    send_texts: false,
+    notifies_customer: false,
+    notifies_technician: false,
+    card_lines: [
+      { kind: 'operational', text: `Finish an earlier program start: the ${t.catalogName} visits are already booked. Nothing new is booked and nobody is texted` },
+      { kind: 'billing', text: `Monthly bill ${money(t.bill.totalBefore)} -> ${money(t.bill.totalAfter)} a month (the bill the first card showed)` },
+      { kind: 'customer', text: `WaveGuard tier: ${t.tierBefore || 'none'} -> ${t.tier}` },
+    ],
+    _version: resumeVersion(marker),
+    note: 'PREVIEW ONLY: nothing was changed. The earlier program start booked its visits but did not finish the tier and monthly bill.',
+  };
+}
+
+function resumeReceipt(plan, how) {
+  return {
+    success: true,
+    resumed: true,
+    tier: { before: plan.tierBefore, after: plan.tier },
+    monthly_bill: { before: plan.bill.totalBefore, after: plan.bill.totalAfter },
+    message: `Finished the earlier program start${how === 'already' ? ' (it had already landed)' : ''}: tier ${plan.tier}; monthly bill ${money(plan.bill.totalBefore)} -> ${money(plan.bill.totalAfter)}.`,
+  };
+}
+
+// The confirmed resume: reconcile first (an ambiguous earlier commit may have landed), then run the stored bill step.
+async function commitResume(input, marker) {
+  if (input._verified_program_version !== resumeVersion(marker)) {
+    return { error: 'An earlier program start for this customer booked its visits but did not finish the tier and monthly bill. Ask again for a fresh card to finish it.', preview_changed: true };
+  }
+  const plan = planFromMarker(marker);
+  const unknown = (why) => ({ outcome_unknown: true, error: `${why} Check this customer's WaveGuard tier and monthly bill on the customer profile. The visits are already booked.` });
+  const landed = await reconcileTierAndBill(plan);
+  if (landed === 'done') {
+    await Marker.settle(marker.id, 'billed', { via: 'resume_reconcile' });
+    return resumeReceipt(plan, 'already');
+  }
+  if (landed === 'unreadable') return unknown('The customer could not be read.');
+  if (landed === 'unknown') {
+    // Someone changed the bill or tier since: the stored target no longer applies, so the marker is released.
+    await Marker.settle(marker.id, 'abandoned', { reason: 'changed_by_hand' });
+    return unknown('The tier or monthly bill is not what the first card started from or ended at, so nothing was changed.');
+  }
+  try {
+    await applyTierAndBill(plan);
+  } catch (err) {
+    logger.error(`[intelligence-bar] start_program resume failed for customer ${plan.customerId}: ${err.message}`);
+    const after = err.drift ? 'not_done' : await reconcileTierAndBill(plan);
+    if (after === 'done') {
+      await Marker.settle(marker.id, 'billed', { via: 'resume_catch_reconcile' });
+      return resumeReceipt(plan, 'already');
+    }
+    if (after !== 'not_done') return unknown('The update ended without a clear answer.');
+    if (err.drift) {
+      await Marker.settle(marker.id, 'abandoned', { reason: 'bill_drift' });
+      return { error: `${err.message} Nothing was changed. Set the tier and bill with update_customer; the visits stay booked.`, code: 'program_resume_drift' };
+    }
+    return { error: `The tier and bill update failed (${err.code || err.message}). Nothing was changed. Ask again to retry it.`, code: 'program_resume_failed' };
+  }
+  logger.info(`[intelligence-bar] start_program resumed: customer ${plan.customerId}, tier ${plan.tier}, bill ${money(plan.bill.totalAfter)}`);
+  return resumeReceipt(plan);
+}
+
 async function startProgram(input, actionContext = {}) {
   if (!startProgramLive()) {
     return { error: 'Starting a program from the Intelligence Bar is not enabled (GATE_IB_START_PROGRAM). Use the Schedule screen and the customer profile.', code: 'gate_off' };
   }
+  // An earlier start for this customer booked its visits but never finished the bill: finish that first.
+  let resumable = null;
+  try {
+    resumable = await Marker.findResumable(input.customer_id);
+  } catch (err) {
+    logger.warn(`[intelligence-bar] start_program marker lookup failed for customer ${input.customer_id}: ${err.message}`);
+  }
+  if (resumable) return actionContext.confirmed === true ? commitResume(input, resumable) : resumePreview(resumable);
   // ONLY the server-derived context confirms (same rule as merge_customers).
   if (actionContext.confirmed !== true) {
     const built = await buildProgramPlan(input, actionContext);
@@ -1177,5 +1318,5 @@ module.exports = {
   startProgram,
   serviceAnchorAddress,
   startProgramLive,
-  _test: { planBill, scheduleBody, cardLines, buildProgramPlan, applyTierAndBill },
+  _test: { planBill, scheduleBody, cardLines, buildProgramPlan, applyTierAndBill, markerTarget, resumeVersion },
 };
