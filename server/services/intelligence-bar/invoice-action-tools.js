@@ -243,17 +243,9 @@ function emailContentGates() {
 
 // opts.forSend: the confirmed run also gets the exact recipients (never on the
 // card or in a model-visible result) to hand the send as its approved pins.
-async function buildSendPlan(input, { forSend = false } = {}) {
-  const target = await resolveInvoice(input);
-  if (target.error) return target;
-  const { invoice } = target;
-  const dueCents = toCents(invoiceAmountDue(invoice));
-  const refused = await sendRefusal(invoice, dueCents);
-  if (refused) return refused;
-  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
-  if (!who) return refusal('Invoice not found', 'invoice_not_found');
-  // The customer row is read once: the text renders for it, and the effects plan uses it.
-  const customer = await db('customers').where({ id: invoice.customer_id }).first();
+// The text and email as the sender renders them, and the legs that can actually send. A refusal is returned (never thrown):
+// nothing to send to, an email whose template cannot render, or a phone with no renderable text and no email.
+async function deliverableChannels(invoice, customer, who, dueCents) {
   const rendered = await smsRender(invoice, customer);
   let emailRender = null;
   if (who.emailRecipient?.email) {
@@ -267,6 +259,23 @@ async function buildSendPlan(input, { forSend = false } = {}) {
   if (!who.primaryContact?.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
   // A phone with its text template switched off is not a channel, so it cannot stand in for a missing email.
   if (!legs.phone && !legs.email) return refusal('Neither a text nor an email can be sent: the invoice text template is switched off and there is no billing email.', 'invoice_no_channel', { invoice_id: invoice.id });
+  return { rendered, emailRender, legs };
+}
+
+async function buildSendPlan(input, { forSend = false } = {}) {
+  const target = await resolveInvoice(input);
+  if (target.error) return target;
+  const { invoice } = target;
+  const dueCents = toCents(invoiceAmountDue(invoice));
+  const refused = await sendRefusal(invoice, dueCents);
+  if (refused) return refused;
+  const who = await require('../../routes/admin-invoices').getInvoiceDeliveryRecipients(invoice.id);
+  if (!who) return refusal('Invoice not found', 'invoice_not_found');
+  // The customer row is read once: the text renders for it, and the effects plan uses it.
+  const customer = await db('customers').where({ id: invoice.customer_id }).first();
+  const channels = await deliverableChannels(invoice, customer, who, dueCents);
+  if (channels.error) return channels;
+  const { rendered, emailRender, legs } = channels;
   const copy = customerCopy(invoice);
   if (copy.error) return copy;
   const totalCents = toCents(invoice.total);
