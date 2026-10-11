@@ -5,7 +5,7 @@
 // grouped stop (prepare mode) shows no Wrap-up and keeps the fixed flags. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import FastCompleteLawnSheet from './FastCompleteLawnSheet';
 
 vi.mock('./TechTreatmentZoneModal', () => ({ default: () => null }));
@@ -38,9 +38,12 @@ const REVIEW = { status: 'complete', findings: [{ finding_id: 'f-1', name: 'Doll
 const PREVIEW = { schedulerEnabled: true, at: '2026-10-12T14:00:00.000Z', bucket: 'b1', reviewSequencesEnabled: true, cadenceTickMinutesOfHour: [14, 44] };
 
 let requests;
-function makeRequest({ wrapUp = true, previews = [PREVIEW], seeds = { exteriorMinutes: 30, interiorMinutes: 120 }, nextVisit = null } = {}) {
+// `holdRereads`: the first preview read answers, every later one waits until request.release().
+function makeRequest({ wrapUp = true, previews = [PREVIEW], seeds = { exteriorMinutes: 30, interiorMinutes: 120 }, nextVisit = null, holdRereads = false } = {}) {
   const queue = [...previews];
-  return vi.fn(async (path, options = {}) => {
+  const held = [];
+  let previewReads = 0;
+  const request = vi.fn(async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, options, body });
     if (path.split('?')[0].endsWith('/lawn-fast/context')) return context(wrapUp);
@@ -54,10 +57,16 @@ function makeRequest({ wrapUp = true, previews = [PREVIEW], seeds = { exteriorMi
     if (path.endsWith('/lawn-assessment/confirm')) return { success: true, confirmed: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
     if (path.includes('/reentry-defaults')) return seeds;
     if (path.startsWith('/admin/schedule/next-visit')) return { nextVisit };
-    if (path.startsWith('/admin/reviews/send-time-preview')) return queue.length > 1 ? queue.shift() : queue[0];
+    if (path.startsWith('/admin/reviews/send-time-preview')) {
+      previewReads += 1;
+      if (holdRereads && previewReads > 1) return new Promise((resolve) => { held.push(() => resolve(PREVIEW)); });
+      return queue.length > 1 ? queue.shift() : queue[0];
+    }
     if (path.endsWith('/complete')) return { success: true, invoiceId: null };
     return {};
   });
+  request.release = () => held.forEach((resolve) => resolve());
+  return request;
 }
 
 class FixtureFileReader {
@@ -174,6 +183,49 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(onPrepared.mock.calls[0][1]).toMatchObject(FOUR_FLAGS);
     for (const key of WRAP_UP_KEYS) expect(onPrepared.mock.calls[0][1]).not.toHaveProperty(key);
     expect(reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
+    expect(completeCalls()).toHaveLength(0);
+  });
+});
+
+describe('while the review send time is being re-checked', () => {
+  const previewReads = () => reads(/send-time-preview/).length;
+
+  async function startHeldComplete(props = {}) {
+    const request = makeRequest({ holdRereads: true });
+    await openSheet({ request, props });
+    await confirmAssessment();
+    await waitFor(() => expect(previewReads()).toBeGreaterThan(0));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Back' }).disabled).toBe(true));
+    return request;
+  }
+
+  test('the form, Complete, Back and Details are inert, a second tap does nothing, and nothing is posted', async () => {
+    const onClose = vi.fn();
+    const onViewDetails = vi.fn();
+    const request = await startHeldComplete({ onClose, onViewDetails });
+    expect(screen.getByRole('checkbox', { name: 'Send completion text' }).matches(':disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Details' }).disabled).toBe(true);
+    expect(completeButton().disabled).toBe(true);
+    const before = previewReads();
+    fireEvent.click(completeButton());
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(previewReads()).toBe(before);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onViewDetails).not.toHaveBeenCalled();
+    expect(completeCalls()).toHaveLength(0);
+    // The answer lands: the sheet unlocks and posts once.
+    await act(async () => { request.release(); });
+    await waitFor(() => expect(completeCalls().length).toBe(1));
+  });
+
+  test('an answer that lands after the sheet is gone posts nothing', async () => {
+    const request = await startHeldComplete();
+    cleanup();
+    await act(async () => { request.release(); });
+    await act(async () => { await Promise.resolve(); });
     expect(completeCalls()).toHaveLength(0);
   });
 });

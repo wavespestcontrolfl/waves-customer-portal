@@ -4,7 +4,7 @@
 // and untouched it posts the same four flags; each change rides the /complete body.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import FastCompleteTreeShrubSheet from './FastCompleteTreeShrubSheet';
 
 vi.mock('../../lib/completion-photo', () => ({
@@ -37,20 +37,28 @@ const context = (wrapUp) => ({
 });
 const PREVIEW = { schedulerEnabled: true, at: '2026-10-12T14:00:00.000Z', bucket: 'b1', reviewSequencesEnabled: true, cadenceTickMinutesOfHour: [14, 44] };
 
-function makeRequest({ wrapUp = true, previews = [PREVIEW], seeds = { exteriorMinutes: 30, interiorMinutes: 0 }, nextVisit = null } = {}) {
+// `holdRereads`: the first preview read answers, every later one waits until request.release().
+function makeRequest({ wrapUp = true, previews = [PREVIEW], seeds = { exteriorMinutes: 30, interiorMinutes: 0 }, nextVisit = null, holdRereads = false } = {}) {
   const calls = [];
   const queue = [...previews];
+  const held = [];
+  let previewReads = 0;
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith('/tree-shrub/fast-context')) return context(wrapUp);
     if (path.includes('/reentry-defaults')) return seeds;
     if (path.startsWith('/admin/schedule/next-visit')) return { nextVisit };
-    if (path.startsWith('/admin/reviews/send-time-preview')) return queue.length > 1 ? queue.shift() : queue[0];
+    if (path.startsWith('/admin/reviews/send-time-preview')) {
+      previewReads += 1;
+      if (holdRereads && previewReads > 1) return new Promise((resolve) => { held.push(() => resolve(PREVIEW)); });
+      return queue.length > 1 ? queue.shift() : queue[0];
+    }
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.endsWith('/complete')) return { success: true };
     return {};
   });
   request.calls = calls;
+  request.release = () => held.forEach((resolve) => resolve());
   return request;
 }
 
@@ -122,5 +130,49 @@ describe('gate on', () => {
     expect(opened(request).some((path) => path.endsWith('/complete'))).toBe(false);
     const body = await complete(request);
     expect(body).toMatchObject(FOUR_FLAGS);
+  });
+});
+
+describe('while the review send time is being re-checked', () => {
+  async function startHeldComplete(props = {}) {
+    const request = makeRequest({ holdRereads: true });
+    await openSheet(request, props);
+    await waitFor(() => expect(opened(request).some((path) => path.startsWith('/admin/reviews/send-time-preview'))).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete tree & shrub' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true));
+    return request;
+  }
+
+  test('the form, Complete and Close are inert, a second tap does nothing, and nothing is posted', async () => {
+    const onClose = vi.fn();
+    const request = await startHeldComplete({ onClose });
+    expect(screen.getByRole('checkbox', { name: 'Send completion text' }).matches(':disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: /^Chelated Iron Plus/ }).closest('fieldset').disabled).toBe(true);
+    const reads = () => opened(request).filter((path) => path.startsWith('/admin/reviews/send-time-preview')).length;
+    const before = reads();
+    const complete = document.querySelector('.tech-visit-footer .tech-visit-complete');
+    expect(complete.disabled).toBe(true);
+    fireEvent.click(complete);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(reads()).toBe(before);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(opened(request).some((path) => path.endsWith('/complete'))).toBe(false);
+    // The answer lands: the sheet unlocks and posts once.
+    await act(async () => { request.release(); });
+    await waitFor(() => expect(opened(request).some((path) => path.endsWith('/complete'))).toBe(true));
+    expect(opened(request).filter((path) => path.endsWith('/complete'))).toHaveLength(1);
+  });
+
+  test('an answer that lands after the sheet is gone posts nothing', async () => {
+    const request = makeRequest({ holdRereads: true });
+    await openSheet(request);
+    await waitFor(() => expect(opened(request).some((path) => path.startsWith('/admin/reviews/send-time-preview'))).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete tree & shrub' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true));
+    cleanup();
+    await act(async () => { request.release(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(opened(request).some((path) => path.endsWith('/complete'))).toBe(false);
   });
 });

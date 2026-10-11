@@ -19,216 +19,119 @@ import {
   MAX_REVIEW_DELAY_MS,
   completionReviewHint,
   completionReviewSuppressionReason,
-  completionTimeOnSiteBody,
   completionWillReview,
-  customReviewTimeProblem,
   formatReentryStepperMinutes,
-  reviewDelayMinutesOf,
-  reviewPreviewSubmitVerdict,
-  reviewScheduledForOf,
-  reviewSendPreviewPath,
 } from '../../lib/completion-review-timing';
-import { completionInvoicePrediction } from '../../lib/completion-invoice-prediction';
-import { etDateString } from '../../lib/timezone';
+import {
+  REENTRY_MAX,
+  adjustedTimeProblem,
+  customTimeProblem,
+  previewRecheckWanted,
+  reviewTimeMissingProblem,
+  wrapUpBilling,
+  wrapUpFields,
+} from '../../lib/fast-complete-wrap-up';
+import { etDateString, formatETDateOnly } from '../../lib/timezone';
+import { useNextVisit, useReentrySteppers, useReviewPreview } from '../../hooks/useWrapUpReads';
 import { Button, Checkbox, Input, Select } from '../ui';
 import '../../styles/tech-workflow.css';
 
-// The steppers' step and ceiling, the full form's.
+// The steppers' step, the full form's.
 const REENTRY_STEPS = { exterior: 5, interior: 15 };
-const REENTRY_MAX = 1440;
-const PREVIEW_POLL_MS = 60 * 1000;
-const ADJUSTED_RANGE_MESSAGE = 'Adjusted time on site must be 1–720 minutes.';
+const NEXT_VISIT_DATE = { weekday: 'short', month: 'short', day: 'numeric' };
+const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: true, reviewTiming: REVIEW_TIMING_DEFAULT, reviewCustomAt: '', adjusted: '' };
 
-const nextVisitDate = (date) => (date
-  ? new Date(`${date}T00:00:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-  : 'N/A');
-
-const stepReentry = (delta) => (current) => Math.min(REENTRY_MAX, Math.max(0, (current ?? 0) + delta));
-
-// `enabled` false (the gate is off, or a part of a grouped stop): nothing is read and nothing is
-// sent; `fields()` is the four flags the sheets always posted. `applicationsRecorded`: the sheet
+// `gate` is the context's `wrapUp` (GATE_FAST_COMPLETE_WRAP_UP). Off, or a part of a grouped stop
+// (`submission.preparing`, or a `sharedNote`), the section is not `enabled`: nothing is read, drawn or
+// sent, and `fields(fallback)` is the fallback the sheet always posted. `applicationsRecorded`: the sheet
 // records a product (the full form's spray evidence), which brings the re-entry steppers back on
 // a no-spray visit. `customerConcern`: the full form's fourth customer choice, which suppresses
-// the review ask (the sheets offer three choices, so they pass false).
-export function useWrapUp({ enabled, service, request, base, applicationsRecorded = false, customerConcern = false }) {
-  const serviceId = service?.id;
-  const customerId = service?.customerId || service?.routedCustomerId || null;
-  const serviceType = service?.serviceType || '';
+// the review ask (the sheets offer three choices, so they pass false). `onChecking(busy)`: the
+// sheet that owns Close and the lock hears when the submit-time check starts and ends.
+export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, onChecking }) {
+  const enabled = gate === true && !submission?.preparing && sharedNote == null;
   const requestRef = useRef(request);
   requestRef.current = request;
   const isAdmin = enabled && getAdminUser()?.role === 'admin';
-
-  const [sendSms, setSendSms] = useState(true);
-  const [includePayLink, setIncludePayLink] = useState(true);
-  const [requestReview, setRequestReview] = useState(true);
-  const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
-  const [reviewCustomAt, setReviewCustomAt] = useState('');
-  const [adjusted, setAdjusted] = useState('');
-  const [reentrySeeds, setReentrySeeds] = useState(null);
-  const [reentryExt, setReentryExt] = useState(null);
-  const [reentryInt, setReentryInt] = useState(null);
-  const [nextVisit, setNextVisit] = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [choice, setChoice] = useState(INITIAL_CHOICE);
   const [notice, setNotice] = useState('');
-  const previewRef = useRef(null);
-  previewRef.current = preview;
-  const failureNoticedRef = useRef(false);
-  const recheckingRef = useRef(false);
-  const reentrySeedsRef = useRef(null);
+  const [checking, setChecking] = useState(false);
+  const aliveRef = useRef(true);
+  const checkingRef = useRef(false);
+  const onCheckingRef = useRef(onChecking);
+  onCheckingRef.current = onChecking;
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; onCheckingRef.current?.(false); };
+  }, []);
 
-  const { willInvoice, reviewAwaitsPayment } = completionInvoicePrediction({ service: service || {}, visitPrice: service?.estimatedPrice });
-  const payerBanner = service?.billedToPayer
-    ? `Billed to ${service.billedToPayer.name || 'a third-party payer'} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
-    : null;
+  const billing = wrapUpBilling(service);
   const suppression = completionReviewSuppressionReason({ customerConcernInteraction: customerConcern });
-  const willReview = completionWillReview({ requestReview, reviewSuppressionReason: suppression });
-  const hint = completionReviewHint({ willReview, effectiveSendSms: sendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment }).text;
+  const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
+  const stepper = useReentrySteppers({ enabled, serviceId: service?.id, base, requestRef, applicationsRecorded });
+  const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
+  const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment }).text;
 
-  // The re-entry steppers' seeds (the full form's rule): what a hands-off completion would persist.
-  // A side the tech never moved adopts a new seed; a moved side is never clobbered; a failed read
-  // hides the steppers and posts nothing.
-  useEffect(() => {
-    if (!enabled || !serviceId) return undefined;
-    let live = true;
-    requestRef.current(`${base}/reentry-defaults?applicationsRecorded=${applicationsRecorded ? 1 : 0}`)
-      .then((data) => {
-        if (!live) return;
-        const ext = Number(data?.exteriorMinutes);
-        const int = Number(data?.interiorMinutes);
-        const seeds = {
-          exteriorMinutes: Number.isFinite(ext) && ext > 0 ? Math.round(ext) : 0,
-          interiorMinutes: Number.isFinite(int) && int > 0 ? Math.round(int) : 0,
-        };
-        const prev = reentrySeedsRef.current;
-        reentrySeedsRef.current = seeds;
-        setReentrySeeds(seeds);
-        // A side whose seed drops to 0 hides its stepper, so its value follows to 0 too.
-        setReentryExt((cur) => (seeds.exteriorMinutes === 0 || cur == null || cur === prev?.exteriorMinutes ? seeds.exteriorMinutes : cur));
-        setReentryInt((cur) => (seeds.interiorMinutes === 0 || cur == null || cur === prev?.interiorMinutes ? seeds.interiorMinutes : cur));
-      })
-      .catch(() => {
-        if (!live) return;
-        reentrySeedsRef.current = null;
-        setReentrySeeds(null);
-        setReentryExt(null);
-        setReentryInt(null);
-      });
-    return () => { live = false; };
-  }, [enabled, serviceId, base, applicationsRecorded]);
+  const state = { ...choice, adjusted: isAdmin ? choice.adjusted : '', isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
+  const latest = useRef(state);
+  latest.current = state;
+  useEffect(() => { setNotice(''); }, [choice.reviewTiming, choice.reviewCustomAt, choice.adjusted, choice.requestReview]);
 
-  useEffect(() => {
-    if (!enabled || !customerId) return undefined;
-    let live = true;
-    requestRef.current(`/admin/schedule/next-visit?customerId=${customerId}`)
-      .then((data) => { if (live && data?.nextVisit) setNextVisit(data.nextVisit); })
-      .catch(() => {});
-    return () => { live = false; };
-  }, [enabled, customerId]);
-
-  // The server preview of the "Automatic" send time, read again each minute while the review is
-  // asked for (the smart window is bucketed by time of day). Off, it is forgotten: a preview cached
-  // from before must not count as known at submit.
-  const fetchPreview = () => requestRef.current(reviewSendPreviewPath(serviceType)).catch(() => null);
-  useEffect(() => {
-    if (!enabled || !willReview) {
-      setPreview(null);
-      return undefined;
+  // The submit-time guards of the full form, in its order: a problem is a words-only stop.
+  const runCheck = async () => {
+    const early = adjustedTimeProblem(latest.current) || reviewTimeMissingProblem(latest.current);
+    if (early) return early;
+    const schedulerStateKnown = typeof review.previewRef.current?.schedulerEnabled === 'boolean';
+    if (previewRecheckWanted({ ...latest.current, schedulerStateKnown })) {
+      const verdict = await review.recheck(latest.current.reviewTiming);
+      if (verdict) return verdict.message;
     }
-    let cancelled = false;
-    const load = () => fetchPreview().then((data) => {
-      if (cancelled) return;
-      setPreview(data);
-      if (data) failureNoticedRef.current = false;
-    });
-    load();
-    const timer = setInterval(load, PREVIEW_POLL_MS);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [enabled, serviceId, serviceType, willReview]);
-
-  // The body fragment. Untouched it is the four flags the sheets always posted; every other key
-  // appears only when the tech changed it, as on the full form.
-  const extDirty = reentryExt != null && reentryExt !== (reentrySeeds?.exteriorMinutes ?? null);
-  const intDirty = reentryInt != null && reentryInt !== (reentrySeeds?.interiorMinutes ?? null);
-  const timing = { willReview, reviewTiming, reviewCustomAt };
-  const fields = {
-    sendCompletionSms: sendSms,
-    includePayLink: willInvoice && sendSms ? includePayLink : true,
-    requestReview: willReview,
-    reviewTiming,
-    ...(reviewTiming !== REVIEW_TIMING_DEFAULT
-      ? { reviewDelayMinutes: reviewDelayMinutesOf(timing), reviewScheduledFor: reviewScheduledForOf(timing) }
-      : {}),
-    // Blank sends nothing (the server measures check-in to Complete); a number overrides the timer.
-    ...(isAdmin ? completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }) : {}),
-    ...(extDirty ? { reentryExteriorMinutes: reentryExt } : {}),
-    ...(intDirty ? { reentryInteriorMinutes: reentryInt } : {}),
+    return customTimeProblem(latest.current);
   };
-  const latest = useRef(null);
-  latest.current = { fields, willReview, reviewTiming, reviewCustomAt, isAdmin, adjusted };
-
-  useEffect(() => { setNotice(''); }, [reviewTiming, reviewCustomAt, adjusted, requestReview]);
-
-  // The submit-time guards of the full form, in its order. Resolves true to go on; false after
-  // saying why in `notice`. The sheet skips it for a stored attempt it replays (immutable body).
+  // Resolves true to go on; false after saying why in `notice`, or when the sheet is gone by the
+  // time the answer lands. While it runs the sheet is locked like a submit (`checking`).
   const check = async () => {
-    const stop = (message) => { setNotice(message); return false; };
+    if (checkingRef.current) return false;
+    checkingRef.current = true;
     setNotice('');
-    let now = latest.current;
-    // A typo in the override must never silently fall back to the inflated timer.
-    if (now.isAdmin && String(now.adjusted || '').trim() !== '') {
-      const minutes = Math.round(Number(now.adjusted));
-      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 720) return stop(ADJUSTED_RANGE_MESSAGE);
+    setChecking(true);
+    onCheckingRef.current?.(true);
+    try {
+      const problem = await runCheck();
+      if (!aliveRef.current) return false;
+      setNotice(problem || '');
+      return !problem;
+    } finally {
+      checkingRef.current = false;
+      if (aliveRef.current) setChecking(false);
+      onCheckingRef.current?.(false);
     }
-    if (now.willReview && reviewDelayMinutesOf(now) === null) return stop('Choose a review request time.');
-    // "Automatic" is a server decision bucketed by time of day: read it again so the tech never
-    // submits against a preview a boundary just invalidated. Every other timing is read again only
-    // while the scheduler's state is unknown, so a submit never silently accepts an ask that may
-    // never send.
-    const schedulerStateKnown = typeof previewRef.current?.schedulerEnabled === 'boolean';
-    if (now.willReview && (now.reviewTiming === REVIEW_TIMING_DEFAULT || !schedulerStateKnown)) {
-      if (recheckingRef.current) return false;
-      recheckingRef.current = true;
-      let fresh;
-      try {
-        fresh = await fetchPreview();
-      } finally {
-        recheckingRef.current = false;
-      }
-      const shown = previewRef.current;
-      if (fresh) setPreview(fresh);
-      const verdict = reviewPreviewSubmitVerdict({ reviewTiming: now.reviewTiming, fresh, shown, failureNoticed: failureNoticedRef.current });
-      if (verdict) {
-        if (verdict.noticed) failureNoticedRef.current = true;
-        if (verdict.dropShown) setPreview(null);
-        return stop(verdict.message);
-      }
-      now = latest.current;
-    }
-    if (now.willReview && now.reviewTiming === 'custom') {
-      const problem = customReviewTimeProblem(now.reviewCustomAt);
-      if (problem) return stop(problem);
-    }
-    return true;
   };
 
   return {
     enabled,
     isAdmin,
-    fields: () => latest.current.fields,
+    checking,
+    // The body's customer-text part: the section's choices, or `fallback` while it is off.
+    fields: (fallback) => (enabled ? wrapUpFields(latest.current) : fallback),
+    // A stored attempt replays its body unchanged, so only a fresh submit is checked.
+    needsCheck: () => enabled && !submission?.hasPendingBody(),
+    // While the check reads, the footer shows the submit's busy state and cannot be tapped twice.
+    lock: (current) => (checking ? { ...current, submitting: true } : current),
     check,
     // What the section draws.
     view: {
-      sendSms, setSendSms,
-      includePayLink, setIncludePayLink,
-      requestReview, setRequestReview,
-      reviewTiming, setReviewTiming,
-      reviewCustomAt, setReviewCustomAt,
-      adjusted, setAdjusted,
-      reentrySeeds, reentryExt, reentryInt,
-      stepExt: (delta) => setReentryExt(stepReentry(delta)),
-      stepInt: (delta) => setReentryInt(stepReentry(delta)),
+      choice,
+      set: (key) => (value) => setChoice((prev) => ({ ...prev, [key]: value })),
+      stepper,
       nextVisit,
-      willInvoice, payerBanner, suppression, willReview, hint, notice,
+      willReview,
+      suppression,
+      hint,
+      notice,
+      willInvoice: billing.willInvoice,
+      payerBanner: billing.payerBanner,
     },
   };
 }
@@ -255,86 +158,95 @@ function ReentryRow({ label, step, value, onStep }) {
   );
 }
 
+function AdjustTimeRow({ value, onChange }) {
+  const id = useId();
+  return (
+    <div className="tech-wrapup-block">
+      <label htmlFor={id} className="tech-product-editor-label">Adjust time on site (minutes)</label>
+      <Input id={id} className="tech-visit-control" type="number" inputMode="numeric" min="1" max="720" step="1" value={value} placeholder="Use timer" onChange={(e) => onChange(e.target.value)} />
+      <p className="tech-visit-muted">Overrides the running timer in the recorded duration. Leave blank to record the timer.</p>
+    </div>
+  );
+}
+
+function ReentryBlock({ stepper }) {
+  const { seeds } = stepper;
+  if (!seeds || (seeds.exteriorMinutes <= 0 && seeds.interiorMinutes <= 0)) return null;
+  return (
+    <div className="tech-wrapup-block">
+      <span className="tech-product-editor-label">Re-entry countdown</span>
+      <p className="tech-visit-muted">What the customer&apos;s report counts down before treated areas are ready.</p>
+      {seeds.exteriorMinutes > 0 && (
+        <ReentryRow label="Exterior (dry-down)" step={REENTRY_STEPS.exterior} value={stepper.ext ?? seeds.exteriorMinutes} onStep={stepper.stepExt} />
+      )}
+      {seeds.interiorMinutes > 0 && (
+        <ReentryRow label="Interior re-entry" step={REENTRY_STEPS.interior} value={stepper.int ?? seeds.interiorMinutes} onStep={stepper.stepInt} />
+      )}
+    </div>
+  );
+}
+
+function PayLinkRow({ checked, onChange }) {
+  return (
+    <Toggle indent checked={checked} onChange={onChange}>
+      Include payment link in the text
+      <span className="tech-visit-muted">
+        {checked ? 'Texts the service report and the pay link.' : 'Report only — no pay link (e.g. paid in person).'}
+      </span>
+    </Toggle>
+  );
+}
+
+function ReviewTiming({ choice, set, hint }) {
+  return (
+    <div className="tech-wrapup-timing tech-wrapup-indent">
+      <Select className="tech-visit-control" aria-label="Review request timing" value={choice.reviewTiming} onChange={(e) => set('reviewTiming')(e.target.value)}>
+        {REVIEW_TIMING_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </Select>
+      {choice.reviewTiming === 'custom' && (
+        <Input
+          className="tech-visit-control"
+          type="datetime-local"
+          aria-label="Custom review time"
+          value={choice.reviewCustomAt}
+          max={`${etDateString(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}T23:59`}
+          onChange={(e) => set('reviewCustomAt')(e.target.value)}
+        />
+      )}
+      <p className="tech-visit-muted">{hint}</p>
+    </div>
+  );
+}
+
+function NextVisitBlock({ nextVisit }) {
+  return (
+    <div className="tech-wrapup-block">
+      <span className="tech-product-editor-label">Next scheduled visit</span>
+      <p className="tech-wrapup-next">{formatETDateOnly(nextVisit.date, NEXT_VISIT_DATE) || 'N/A'}</p>
+      <p className="tech-visit-muted">{nextVisit.serviceType || 'Standard service'}</p>
+    </div>
+  );
+}
+
 export default function FastCompleteWrapUp({ wrapUp }) {
-  const adjustId = useId();
   if (!wrapUp?.enabled) return null;
-  const v = wrapUp.view;
-  const seeds = v.reentrySeeds;
-  const showReentry = !!seeds && (seeds.exteriorMinutes > 0 || seeds.interiorMinutes > 0);
+  const { choice, set, stepper, nextVisit, willReview, suppression, hint, notice, willInvoice, payerBanner } = wrapUp.view;
   return (
     <section className="tech-visit-choice-section tech-wrapup" aria-label="Wrap-up">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Wrap-up</h3>
       </div>
-      {v.payerBanner && <p className="tech-visit-status--warn" role="status">{v.payerBanner}</p>}
-      {wrapUp.isAdmin && (
-        <div className="tech-wrapup-block">
-          <label htmlFor={adjustId} className="tech-product-editor-label">Adjust time on site (minutes)</label>
-          <Input
-            id={adjustId}
-            className="tech-visit-control"
-            type="number"
-            inputMode="numeric"
-            min="1"
-            max="720"
-            step="1"
-            value={v.adjusted}
-            placeholder="Use timer"
-            onChange={(e) => v.setAdjusted(e.target.value)}
-          />
-          <p className="tech-visit-muted">Overrides the running timer in the recorded duration. Leave blank to record the timer.</p>
-        </div>
-      )}
-      {showReentry && (
-        <div className="tech-wrapup-block">
-          <span className="tech-product-editor-label">Re-entry countdown</span>
-          <p className="tech-visit-muted">What the customer&apos;s report counts down before treated areas are ready.</p>
-          {seeds.exteriorMinutes > 0 && (
-            <ReentryRow label="Exterior (dry-down)" step={REENTRY_STEPS.exterior} value={v.reentryExt ?? seeds.exteriorMinutes} onStep={v.stepExt} />
-          )}
-          {seeds.interiorMinutes > 0 && (
-            <ReentryRow label="Interior re-entry" step={REENTRY_STEPS.interior} value={v.reentryInt ?? seeds.interiorMinutes} onStep={v.stepInt} />
-          )}
-        </div>
-      )}
-      <Toggle checked={v.sendSms} onChange={v.setSendSms}>Send completion text</Toggle>
-      {v.willInvoice && v.sendSms && !v.payerBanner && (
-        <Toggle indent checked={v.includePayLink} onChange={v.setIncludePayLink}>
-          Include payment link in the text
-          <span className="tech-visit-muted">
-            {v.includePayLink ? 'Texts the service report and the pay link.' : 'Report only — no pay link (e.g. paid in person).'}
-          </span>
-        </Toggle>
-      )}
-      <Toggle checked={v.willReview} disabled={!!v.suppression} onChange={v.setRequestReview}>
-        {v.suppression ? 'Review request suppressed' : 'Send review request'}
+      {payerBanner && <p className="tech-visit-status--warn" role="status">{payerBanner}</p>}
+      {wrapUp.isAdmin && <AdjustTimeRow value={choice.adjusted} onChange={set('adjusted')} />}
+      <ReentryBlock stepper={stepper} />
+      <Toggle checked={choice.sendSms} onChange={set('sendSms')}>Send completion text</Toggle>
+      {willInvoice && choice.sendSms && !payerBanner && <PayLinkRow checked={choice.includePayLink} onChange={set('includePayLink')} />}
+      <Toggle checked={willReview} disabled={!!suppression} onChange={set('requestReview')}>
+        {suppression ? 'Review request suppressed' : 'Send review request'}
       </Toggle>
-      {v.willReview && (
-        <div className="tech-wrapup-timing tech-wrapup-indent">
-          <Select className="tech-visit-control" aria-label="Review request timing" value={v.reviewTiming} onChange={(e) => v.setReviewTiming(e.target.value)}>
-            {REVIEW_TIMING_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </Select>
-          {v.reviewTiming === 'custom' && (
-            <Input
-              className="tech-visit-control"
-              type="datetime-local"
-              aria-label="Custom review time"
-              value={v.reviewCustomAt}
-              max={`${etDateString(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}T23:59`}
-              onChange={(e) => v.setReviewCustomAt(e.target.value)}
-            />
-          )}
-          <p className="tech-visit-muted">{v.hint}</p>
-        </div>
-      )}
-      {v.nextVisit && (
-        <div className="tech-wrapup-block">
-          <span className="tech-product-editor-label">Next scheduled visit</span>
-          <p className="tech-wrapup-next">{nextVisitDate(v.nextVisit.date)}</p>
-          <p className="tech-visit-muted">{v.nextVisit.serviceType || 'Standard service'}</p>
-        </div>
-      )}
-      {v.notice && <p className="tech-visit-feedback" role="alert">{v.notice}</p>}
+      {willReview && <ReviewTiming choice={choice} set={set} hint={hint} />}
+      {nextVisit && <NextVisitBlock nextVisit={nextVisit} />}
+      {notice && <p className="tech-visit-feedback" role="alert">{notice}</p>}
     </section>
   );
 }

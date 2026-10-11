@@ -80,13 +80,8 @@ import {
   reviewDelayMinutesOf,
   reviewPreviewSubmitVerdict,
   reviewScheduledForOf,
-  reviewSendPreviewPath,
 } from "../../lib/completion-review-timing";
 import { completionInvoicePrediction, isCallbackVisit } from "../../lib/completion-invoice-prediction";
-
-// The completion rules the Fast Complete Wrap-up shares live in lib/completion-review-timing.js;
-// these are re-exported for the tests that import them from here.
-export { completionReviewSuppressionReason, completionTimeOnSiteBody, completionWillReview, formatReentryStepperMinutes };
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
@@ -14183,7 +14178,8 @@ export function CompletionPanel({
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
   const fetchReviewSendPreview = useCallback(() => {
-    return fetch(`${API_BASE}${reviewSendPreviewPath(service?.serviceType)}`, {
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
     })
       .then((r) => (r.ok ? r.json() : null))

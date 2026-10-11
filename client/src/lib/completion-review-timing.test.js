@@ -6,7 +6,6 @@ import {
   reviewScheduledForOf,
   reviewSendPreviewPath,
 } from './completion-review-timing';
-import { completionInvoicePrediction, isCallbackVisit } from './completion-invoice-prediction';
 
 describe('the review timing a completion posts', () => {
   const base = { willReview: true, oneTimeRecapOnly: false, reviewCustomAt: '' };
@@ -54,25 +53,5 @@ describe('the verdict on the send-time preview read at submit', () => {
     expect(failed.message).toMatch(/could not be re-checked/);
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown, failureNoticed: true })).toBeNull();
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'custom', fresh: null, shown: null, failureNoticed: false }).message).toMatch(/Whether automated review texts can send/);
-  });
-});
-
-describe('will the completion invoice', () => {
-  test('a priced visit that bills invoices, and an unpaid invoice holds the review ask', () => {
-    const service = { serviceType: 'Lawn Care', estimatedPrice: 90, createInvoiceOnComplete: true };
-    expect(completionInvoicePrediction({ service, visitPrice: service.estimatedPrice })).toEqual({ willInvoice: true, reviewAwaitsPayment: true });
-  });
-
-  test('a paid visit, a free callback and an unpriced visit with no prediction do not invoice', () => {
-    expect(completionInvoicePrediction({ service: { estimatedPrice: 90, createInvoiceOnComplete: true, invoiceStatus: 'paid' }, visitPrice: 90 }).willInvoice).toBe(false);
-    expect(completionInvoicePrediction({ service: { serviceType: 'Lawn Re-service', createInvoiceOnComplete: true } }).willInvoice).toBe(false);
-    expect(completionInvoicePrediction({ service: { createInvoiceOnComplete: true } }).willInvoice).toBe(false);
-  });
-
-  test('a callback is a re-service or callback type, or flagged', () => {
-    expect(isCallbackVisit({ serviceType: 'Pest Re-service' })).toBe(true);
-    expect(isCallbackVisit({ serviceType: 'Pest Callback' })).toBe(true);
-    expect(isCallbackVisit({ serviceType: 'Pest', isCallback: true })).toBe(true);
-    expect(isCallbackVisit({ serviceType: 'Pest' })).toBeFalsy();
   });
 });

@@ -14,7 +14,7 @@ const PREVIEW = { schedulerEnabled: true, at: '2026-10-12T14:00:00.000Z', bucket
 
 let wrapUp;
 function Harness({ service = SERVICE, request, enabled = true, ...options }) {
-  wrapUp = useWrapUp({ enabled, service, request, base: '/admin/dispatch/svc-1', ...options });
+  wrapUp = useWrapUp({ gate: enabled, service, request, base: '/admin/dispatch/svc-1', ...options });
   return <FastCompleteWrapUp wrapUp={wrapUp} />;
 }
 
@@ -63,7 +63,7 @@ describe('defaults', () => {
     render(<Harness enabled={false} request={request} />);
     expect(screen.queryByRole('heading', { name: 'Wrap-up' })).toBeNull();
     expect(request).not.toHaveBeenCalled();
-    expect(wrapUp.fields()).toEqual(FOUR_FLAGS);
+    expect(wrapUp.fields(FOUR_FLAGS)).toEqual(FOUR_FLAGS);
   });
 });
 
