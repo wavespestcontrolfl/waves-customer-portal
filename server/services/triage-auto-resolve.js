@@ -1292,7 +1292,8 @@ async function loadCallbackSpamEvidence(conn, items, flag) {
   const voicemail = (p) => p.call_outcome === 'voicemail' || p.answered_by === 'voicemail' || p.processing_status === 'voicemail';
   // The callback must postdate the voicemail's end (the processor's lockCallbackPair boundary).
   // ...and the parent must have ended and settled (a reported duration, no live token), as lockCallbackPair requires.
-  const afterEnd = (c, p) => p.duration_seconds != null && !p.processing_token
+  const { RETRYABLE_PARENT_STATUSES } = require('./call-commitments');
+  const afterEnd = (c, p) => p.duration_seconds != null && !p.processing_token && !RETRYABLE_PARENT_STATUSES.includes(p.processing_status)
     && new Date(c.created_at).getTime() > new Date(p.created_at).getTime() + Math.max(0, Number(p.duration_seconds) || 0) * 1000;
   const key = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length === 11 && d.startsWith('1') ? d.slice(1) : d; };
   for (const item of candidates) {

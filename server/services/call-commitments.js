@@ -2071,6 +2071,10 @@ const CALLBACK_SPAM = "callback_spam";
 // refresh that ran mid-pass would record a solicitor call as the office
 // keeping its word, and the spam settlement scans open promises only.
 const UNSETTLED_CALLBACK_STATUSES = ["spam", "pending", "processing", "extraction_failed", "no_transcription"];
+// A PARENT voicemail in one of these is not settled either: a pass in flight
+// or a retryable failure (its token cleared, its old markers kept) that a
+// retry may yet read as an answered call. Shared by every settlement site.
+const RETRYABLE_PARENT_STATUSES = ["pending", "processing", "extraction_failed", "no_transcription"];
 // SQL twin over a call_log alias, for the lapse scan (constants inlined: the
 // scan's raw query binds by position).
 const settledNonSpamCallbackSql = (t) => `(${t}.processing_token IS NULL AND ((${t}.processing_status IS NULL AND ${t}.recording_sid IS NULL) OR ${t}.processing_status NOT IN (${UNSETTLED_CALLBACK_STATUSES.map((v) => `'${v}'`).join(", ")})))`;
@@ -2102,7 +2106,8 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
         // reported duration and no pass holding its token. Without the
         // duration the boundary reads the call as ended at its start, and a
         // callback placed while the caller was still recording would count.
-        .whereNotNull("parent.duration_seconds").whereNull("parent.processing_token");
+        .whereNotNull("parent.duration_seconds").whereNull("parent.processing_token")
+        .whereRaw("(parent.processing_status IS NULL OR parent.processing_status NOT IN (" + RETRYABLE_PARENT_STATUSES.map(() => "?").join(", ") + "))", RETRYABLE_PARENT_STATUSES);
     })
     .modify((b) => phoneWhere(b, "to_phone", phone))
     .orderBy("created_at", "asc")
@@ -4066,6 +4071,7 @@ module.exports = {
   callbackReachedSolicitor,
   reopenCallbackSpamDismissals,
   rejudgeCallbackSpamDismissals,
+  RETRYABLE_PARENT_STATUSES,
   UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,

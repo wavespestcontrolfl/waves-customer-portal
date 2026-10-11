@@ -1072,6 +1072,13 @@ function callbackAfterCallEnd(child, parent) {
 function isVoicemailParent(row) {
   return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
 }
+// Settled: ended (a reported duration), no pass holding its token, and not in
+// a retryable state (call-commitments RETRYABLE_PARENT_STATUSES) a retry may
+// yet read as an answered call.
+function isSettledParent(row) {
+  const { RETRYABLE_PARENT_STATUSES } = require('./call-commitments');
+  return row?.duration_seconds != null && !row?.processing_token && !RETRYABLE_PARENT_STATUSES.includes(row?.processing_status);
+}
 // The office callback this verdict belongs to, or null: an OUTBOUND row the
 // admin "Call back" action wrote (call_log.source admin-callback +
 // metadata.relatedCallId naming the voicemail).
@@ -1109,7 +1116,7 @@ async function lockCallbackPair(trx, call, parentId, { status, procGeneration, c
   if (!isVoicemailParent(parent)) return { reason: 'parent_not_voicemail' };
   // The parent must have ended and settled: a reported duration (callEndOf)
   // and no pass still holding its token.
-  if (parent.duration_seconds == null || parent.processing_token) return { reason: 'parent_not_settled' };
+  if (!isSettledParent(parent)) return { reason: 'parent_not_settled' };
   // The callback must postdate the voicemail's end: a callback started while
   // the inbound call was still underway says nothing about what the
   // voicemail then recorded (same boundary as the promise lifecycle's).
@@ -1213,6 +1220,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     .whereRaw("cb.created_at > now() - interval '7 days'")
     .whereRaw("p.metadata->'callback_verdict' IS NULL")
     .where({ 'p.direction': 'inbound' }).whereNull('p.processing_token').whereNotNull('p.duration_seconds')
+    .where((q) => q.whereNull('p.processing_status').orWhereNotIn('p.processing_status', require('./call-commitments').RETRYABLE_PARENT_STATUSES))
     .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
     .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(0, p.duration_seconds))")
     .whereRaw(`${phoneKey('cb.to_phone')} <> '' AND ${phoneKey('cb.to_phone')} = ${phoneKey('p.from_phone')}`)
@@ -1310,7 +1318,7 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
   // Today's parent eligibility first: a parent that no longer reads as a
   // settled inbound voicemail (a replaced recording, a pass in flight) has no
   // standing verdict, whatever its other callbacks say.
-  if (!isVoicemailParent(parent) || parent.duration_seconds == null || parent.processing_token) return [];
+  if (!isVoicemailParent(parent) || !isSettledParent(parent)) return [];
   // Gate off: no settlement stands (a correction then reopens everything).
   if (!isEnabled('callbackSpamClosesParent')) return [];
   const rows = await trx('call_log')

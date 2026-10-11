@@ -574,8 +574,13 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const commitments = require('../services/call-commitments');
     await commitments.refreshFulfillment(db, parentId);
     expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('open');
-    // The recording lands: the parent ended before the callback was placed, and the same proof now holds.
-    await db('call_log').where({ id: parentId }).update({ duration_seconds: 20 });
+    // A retryable failure (token cleared, old markers kept) is not settled either: card path and promise path agree.
+    await db('call_log').where({ id: parentId }).update({ duration_seconds: 20, processing_status: 'extraction_failed' });
+    expect(await close(NOEND_CHILD_SID)).toEqual({ applied: false, reason: 'parent_not_settled' });
+    await commitments.refreshFulfillment(db, parentId);
+    expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('open');
+    // The parent settles: it ended before the callback was placed, and the same proof now holds.
+    await db('call_log').where({ id: parentId }).update({ processing_status: 'processed' });
     await commitments.refreshFulfillment(db, parentId);
     expect((await db('call_commitments').where({ id: promiseId }).first()).status).toBe('dismissed');
   });
