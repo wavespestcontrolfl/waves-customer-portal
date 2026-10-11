@@ -404,6 +404,10 @@ const POST_COMMIT_STEPS = {
         customerId: step.target ? step.target.customer_id : customerIdOf(ctx),
         // A pinned plan runs the has_multi_home flip as its own pinned step.
         refreshMultiHome: !step.target,
+        // The card path approved NO visit (the card pins "no linked visit"), so
+        // the link touches none: a visit linked after the converter's last
+        // check is logged target_changed and left alone.
+        ...(step.target ? { approvedServiceIds: [] } : {}),
       });
     },
   },

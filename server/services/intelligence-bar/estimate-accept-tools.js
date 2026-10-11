@@ -656,14 +656,23 @@ function expectedFrom(approved) {
   };
 }
 
-function acceptedResult(preview, json, tierNow) {
+// The monthly rate after the accept: the conversion's figure when the accept
+// converted, else (a one-time-only accept changes neither rate nor tier) the
+// rate stored on the customer row read after the commit.
+function monthlyRateNow(json, stored) {
+  if (json.conversion?.monthlyRate != null) return json.conversion.monthlyRate;
+  const rate = Number(stored?.monthly_rate);
+  return stored && stored.monthly_rate != null && Number.isFinite(rate) ? round2(rate) : null;
+}
+
+function acceptedResult(preview, json, stored) {
   return {
     success: true,
     estimate_id: preview.estimate_id,
     customer_id: preview.customer_id,
     already_accepted: json.alreadyAccepted === true,
-    monthly_rate_now: json.conversion?.monthlyRate ?? null,
-    tier_now: tierNow,
+    monthly_rate_now: monthlyRateNow(json, stored),
+    tier_now: stored ? (stored.waveguard_tier || null) : null,
     warnings: Array.isArray(json.warnings) ? json.warnings : [],
     message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted. No visits were booked — book the first visit on the calendar.`,
   };
@@ -704,8 +713,8 @@ async function acceptEstimate(input, actionContext = {}) {
   logger.info(`[intelligence-bar:estimate-accept] estimate ${preview.estimate_id} accepted for customer ${preview.customer_id}`);
   // The tier as stored (the converter's result can say 'none' where it stores
   // a different value), read after the commit.
-  const stored = await db('customers').where({ id: preview.customer_id }).first('waveguard_tier').catch(() => null);
-  return acceptedResult(preview, reply.json, stored ? (stored.waveguard_tier || null) : null);
+  const stored = await db('customers').where({ id: preview.customer_id }).first('waveguard_tier', 'monthly_rate').catch(() => null);
+  return acceptedResult(preview, reply.json, stored);
 }
 
 async function executeEstimateAcceptTool(toolName, input, actionContext = {}) {

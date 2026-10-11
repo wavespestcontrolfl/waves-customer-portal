@@ -285,7 +285,14 @@ async function linkedAcceptPropertyId(database, estimate, customerId) {
   return linked && String(linked.customer_id) === String(customerId) && linked.active !== false ? linked.id : null;
 }
 
-async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null, refreshMultiHome = true }) {
+// approvedServiceIds (the Intelligence Bar card path): the exact set of visit
+// rows this linkage may touch, EMPTY when the card saw no visit. Unlike
+// onlyServiceIds, an empty array here means "touch none". Any other
+// non-terminal row of this estimate is logged target_changed and left alone.
+// Omitted, every caller behaves as before.
+async function linkAcceptedEstimateProperty({
+  estimateId, customerId, database = db, onlyServiceIds = null, refreshMultiHome = true, approvedServiceIds = null,
+}) {
   try {
     if (!estimateId || !customerId) return null;
     // Optional id scope (codex #3504 r10 hook P0): quote-wizard drafts are
@@ -309,10 +316,22 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     const sourceRow = await database('estimates').where({ id: estimateId }).first('source');
     const excludeSelfBooked = sourceRow?.source === 'quote_wizard'
       && !(Array.isArray(onlyServiceIds) && onlyServiceIds.length);
+    const approvedScope = Array.isArray(approvedServiceIds);
     const scopeToActivation = (qb) => {
-      if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) qb.whereIn('id', onlyServiceIds);
+      if (approvedScope) qb.whereIn('id', approvedServiceIds);
+      else if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) qb.whereIn('id', onlyServiceIds);
       else if (excludeSelfBooked) qb.whereNull('self_booking_id');
     };
+    if (approvedScope) {
+      const strays = await database('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+        .whereNotIn('id', approvedServiceIds)
+        .select('id');
+      if (strays.length) {
+        logger.warn(`[estimate-property-linkage] estimate ${estimateId}: target_changed — visit(s) ${strays.map((r) => r.id).join(', ')} linked after the card was approved; left untouched`);
+      }
+    }
     if (!customerPropertiesGateOn()) {
       // Gate OFF: no customer_properties writes — but a GROUPED accept still
       // stamps its booked visits' service address. service_address_* are
@@ -613,7 +632,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
       // address. Fill the missing address from the property row; rows
       // stamped with an address (any property) stay untouched.
       await database('scheduled_services')
-        .where({ source_estimate_id: estimateId, property_id: propertyId })
+        .where({ source_estimate_id: estimateId, property_id: propertyId }).modify(approvedScope ? (qb) => qb.whereIn('id', approvedServiceIds) : () => {})
         .whereNull('service_address_line1')
         .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
         .update({
@@ -650,7 +669,8 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         // anything, so it must never be auto-grouped (codex #3590 r15).
         .whereNotNull('window_start')
         .select('id');
-      if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
+      if (approvedScope) regroup.whereIn('id', approvedServiceIds);
+      else if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
       // Every linked row, in id order — a cap left rows beyond it with no
       // later regroup pass (codex #3590 r13 P2).
       for (const r of await regroup.orderBy('id', 'asc')) {
@@ -669,7 +689,9 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     // (it is not an accept retry anchor), so no update above reaches it.
     // Mirror the stamp onto it or it dispatches to the customer's primary
     // address. Gate-dark, best-effort (package-followup-booking.js).
-    await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
+    if (!(Array.isArray(approvedServiceIds) && approvedServiceIds.length === 0)) {
+      await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
+    }
   }
 }
 

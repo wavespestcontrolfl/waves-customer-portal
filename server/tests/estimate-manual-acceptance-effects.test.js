@@ -240,7 +240,7 @@ describe('the real run against the pinned list', () => {
     expect(world.state.committed).toBe(1);
     expect(result.estimate.status).toBe('accepted');
     expect(transferSpy).toHaveBeenCalledTimes(1);
-    expect(linkSpy).toHaveBeenCalledWith({ estimateId: 'est-1', customerId: 'cust-1', refreshMultiHome: false });
+    expect(linkSpy).toHaveBeenCalledWith({ estimateId: 'est-1', customerId: 'cust-1', refreshMultiHome: false, approvedServiceIds: [] });
     expect(leads.markLinkedLeadEstimateAccepted).toHaveBeenCalledTimes(1);
     expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledTimes(1);
   });

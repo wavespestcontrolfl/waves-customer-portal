@@ -695,6 +695,19 @@ describe('Confirm', () => {
     expect(result.tier_now).toBe('Commercial');
   });
 
+  test('a one-time-only accept still reports the member\'s unchanged monthly rate and tier (55 a month)', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      postCommit([]),
+    ];
+    const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    realReply = async () => ({ status: 200, json: { success: true, alreadyAccepted: false, conversion: null, warnings: [] } });
+    const result = await confirmWith(approved);
+    expect(result).toMatchObject({ success: true, monthly_rate_now: 55, tier_now: 'Bronze' });
+  });
+
   test('refuses without a verified card', async () => {
     const result = await confirmWith(undefined);
     expect(result.preview_changed).toBe(true);
