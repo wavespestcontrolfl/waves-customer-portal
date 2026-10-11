@@ -2116,6 +2116,17 @@ const settledParentSql = (t) => `(${t}.duration_seconds IS NOT NULL AND ${t}.pro
 // it, so an obsolete settlement must not wait on one). Never evidence for a
 // NEW settlement.
 const terminalParentSql = (t) => `(${settledParentSql(t)} OR (${t}.processing_token IS NULL AND ${exhaustedExtractionSql(t)}))`;
+// The write-time fence every callback_spam dismissal carries (the sweep's
+// card write has its twin): the parent must still be a settled voicemail IN
+// the conditional UPDATE, so an adoption or reprocess since
+// callbackReachedSolicitor read it makes the write skip (codex #6271 r40/r41).
+function whereParentStillSettledVoicemail(q, t, parentId) {
+  q.whereExists(function parentStillSettledVoicemail() {
+    this.select(t.raw("1")).from("call_log as p").where({ "p.id": parentId }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "p.source"))
+      .whereRaw(settledParentSql("p"))
+      .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')");
+  });
+}
 async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
   if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
@@ -2892,14 +2903,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // for the correction and then writes nothing.
         .modify((q) => {
           if (proof.kind !== CALLBACK_SPAM) return;
-          // ...and the parent is still a settled voicemail AT THE WRITE (an
-          // adoption or reprocess since callbackReachedSolicitor read it makes
-          // this write skip; codex #6271 r40 P1), as the sweep's card write does.
-          q.whereExists(function parentStillSettledVoicemail() {
-            this.select(t.raw("1")).from("call_log as p").where({ "p.id": callLogId }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "p.source"))
-              .whereRaw(settledParentSql("p"))
-              .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')");
-          });
+          whereParentStillSettledVoicemail(q, t, callLogId);
           q.whereExists(function callbackStillSpam() {
             this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": proof.record_id, "cb.processing_status": "spam" }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "cb.source")).whereNull("cb.processing_token").forShare();
           });
@@ -3013,6 +3017,8 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
         })
         .modify((q) => {
           if (keeps.kind !== CALLBACK_SPAM) return;
+          // Same fence as the open-row write (codex #6271 r41 P1).
+          whereParentStillSettledVoicemail(q, t, callLogId);
           q.whereExists(function callbackStillSpam() {
             this.select(t.raw("1")).from("call_log as cb").where({ "cb.id": keeps.record_id, "cb.processing_status": "spam" }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b, "cb.source")).whereNull("cb.processing_token").forShare();
           });
