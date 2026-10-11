@@ -156,9 +156,33 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
       .where({ id: jobId, status: 'reserved' })
       .first('customer_id', 'sender_phone');
     if (!existing) return false;
-    if (!existing.customer_id) {
+    let attachedTo = existing.customer_id;
+    if (!attachedTo) {
       const attached = await attachContactCorrectionContext(jobId, { senderPhone: existing.sender_phone, knex });
       if (!attached) return false;
+      const after = await knex('contact_correction_jobs').where({ id: jobId, status: 'reserved' }).first('customer_id');
+      attachedTo = after?.customer_id ?? null;
+    }
+    if (String(attachedTo) !== String(customerId)) {
+      // The route resolved the sender to a different account than the locked
+      // attach did (a primary-mark transfer or phone reassignment landed in
+      // between). Cancel and scrub the reservation in the same step (codex
+      // #6268 r5/r6): a reserved row with a body and a customer_id would
+      // otherwise be promoted by the stale sweep and the worker would apply
+      // one account's correction to the other. Only a still-reserved row
+      // with the stale linkage is cancelled, so a concurrent transition wins.
+      const cancelled = await knex('contact_correction_jobs')
+        .where({ id: jobId, status: 'reserved' })
+        .update({
+          status: 'cancelled',
+          cancel_reason: 'linkage_mismatch',
+          body: null,
+          expected_values: null,
+          completed_at: knex.fn.now(),
+          updated_at: knex.fn.now(),
+        });
+      logger.warn(`[contact-correction-queue] job ${jobId}: attached customer differs from the route's match; cancelled (${cancelled})`);
+      return false;
     }
     // The ATTACHED customer is authoritative (codex #3413 r34): the
     // locked attach matched, snapshotted, and floored ONE customer — the
@@ -180,7 +204,7 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
       });
     return updated > 0;
   } catch (err) {
-    logger.warn(`[contact-correction-queue] enqueue failed for job ${jobId}: ${err.message}`);
+    logger.warn(`[contact-correction-queue] enqueue failed for job ${jobId} (${err.code || err.name || 'unknown'})`);
     return false;
   }
 }
@@ -204,9 +228,32 @@ async function attachReservationBody(jobId, body, { knex = db } = {}) {
       .update({ body: body || null, updated_at: knex.fn.now() });
     return updated > 0;
   } catch (err) {
-    logger.warn(`[contact-correction-queue] body attach failed for job ${jobId}: ${err.message}`);
+    logger.warn(`[contact-correction-queue] body attach failed for job ${jobId} (${err.code || err.name || 'unknown'})`);
     return false;
   }
+}
+
+/**
+ * The sender's one account: a single non-deleted phone match, or — when more
+ * than one row shares the number and GATE_SMS_SHARED_PHONE_LINK is on — the
+ * one row staff marked primary (services/shared-phone-link.js, the same rule
+ * as the route's matcher, codex #6268 r3). Null = unlinked, fail closed.
+ */
+async function resolveSenderCustomerId(trx, senderKey) {
+  const matches = await trx('customers')
+    .whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+    .limit(2)
+    .select('id');
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    const link = require('./shared-phone-link');
+    if (link.sharedPhoneLinkEnabled()) {
+      const picked = await link.pickMarkedCustomerForPhone(trx, senderKey);
+      if (picked.customer) return picked.customer.id;
+    }
+  }
+  return null;
 }
 
 /**
@@ -237,18 +284,24 @@ async function attachContactCorrectionContext(jobId, { senderPhone, knex = db } 
     if (!senderKey) return false;
     return await knex.transaction(async (trx) => {
       const contactCorrection = require('./contact-correction');
-      const matches = await trx('customers')
-        .whereNull('deleted_at')
-        .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
-        .limit(2)
-        .select('id');
-      if (matches.length !== 1) return false;
+      // One matcher, run TWICE: once to find the row to lock, and again
+      // under that row's lock, so the locked row is still the sender's
+      // resolved account at commit time. A primary-mark transfer A→B or a
+      // phone reassignment between the two reads resolves to B (or to
+      // nothing) on the second pass, and the attach fails closed instead of
+      // pairing B's correction with A's row (codex #6268 r5). The clearing
+      // half of a transfer needs A's row, which this lock holds.
+      const firstId = await resolveSenderCustomerId(trx, senderKey);
+      if (!firstId) return false;
       const row = await trx('customers')
-        .where({ id: matches[0].id })
+        .where({ id: firstId })
         .whereNull('deleted_at')
         .forUpdate()
         .first();
       if (!row) return false;
+      if (tail10(row.phone) !== senderKey) return false;
+      const lockedId = await resolveSenderCustomerId(trx, senderKey);
+      if (lockedId !== row.id) return false;
       const snapshot = contactCorrection.snapshotContactCasFields(row);
       const floorRow = await trx('contact_correction_jobs')
         .where({ customer_id: row.id, status: 'done' })
@@ -265,7 +318,9 @@ async function attachContactCorrectionContext(jobId, { senderPhone, knex = db } 
       return updated > 0;
     });
   } catch (err) {
-    logger.warn(`[contact-correction-queue] context attach failed for job ${jobId}: ${err.message}`);
+    // Code only (codex #6268 r14): Knex formats bindings into a failed
+    // query's message, which would put the sender's number in the log.
+    logger.warn(`[contact-correction-queue] context attach failed for job ${jobId} (${err.code || err.name || 'unknown'})`);
     return false;
   }
 }
@@ -315,6 +370,47 @@ async function recoverStaleLocks(knex) {
       next_attempt_at: knex.fn.now(),
       updated_at: knex.fn.now(),
     });
+}
+
+/**
+ * A SHARED number's linkage is re-checked independently before promotion
+ * (codex #6268 r7/r10): the route's attach can pick the marked account, then
+ * the route's own match resolves to nothing or to the other account and its
+ * fire-and-forget 'unlinked' cancel fails. The stored linkage is never
+ * re-pointed; it is refused when the number is currently shared and the
+ * gated primary mark no longer names this customer. A single-owner number
+ * keeps replaying what the route matched. Returns a cancel reason or null.
+ * Checked after the sms_log read so both linkage decisions sit in one place.
+ */
+async function staleLinkageRefusal(knex, job, smsLog) {
+  // The route persists its own linkage decision on the inbound sms_log row
+  // (customer_id, null when it handled the sender as unlinked). A row whose
+  // customer differs from the stored context means the route decided NOT to
+  // link this message here (a failed marked lookup, a mark transfer) and its
+  // best-effort cancel was lost — never replay it (codex #6268 r9). No
+  // sms_log row = the route died before that write; the stored context stands.
+  if (smsLog && String(smsLog.customer_id || '') !== String(job.customer_id)) return 'stale_route_unlinked';
+  const senderKey = tail10(job.sender_phone);
+  if (!senderKey) return null;
+  try {
+    const live = await knex('customers')
+      .whereNull('deleted_at')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [senderKey])
+      .limit(2)
+      .select('id');
+    if (live.length < 2) return null;
+    const link = require('./shared-phone-link');
+    const picked = link.sharedPhoneLinkEnabled() ? await link.pickMarkedCustomerForPhone(knex, senderKey) : { customer: null };
+    return picked.customer && String(picked.customer.id) === String(job.customer_id) ? null : 'stale_link_mismatch';
+  } catch (err) {
+    // Knex formats bindings into a failed query's message, which would put
+    // the sender's full number in the log (codex #6268 r12). Re-throw a
+    // sanitized error: the sweep's catch logs it and the job stays reserved
+    // for the next pass — never promoted on an unanswered linkage check.
+    const safe = new Error(`shared-phone linkage lookup failed (${err.code || err.name || 'unknown'})`);
+    safe.code = err.code;
+    throw safe;
+  }
 }
 
 /**
@@ -396,8 +492,13 @@ async function promoteStaleReservations(knex) {
         ? await knex('sms_log')
           .where({ twilio_sid: job.message_sid, direction: 'inbound' })
           .orderBy('created_at', 'desc')
-          .first('id')
+          .first('id', 'customer_id')
         : null;
+      const linkRefusal = await staleLinkageRefusal(knex, job, smsLog);
+      if (linkRefusal) {
+        await cancelContactCorrectionJob(job.id, linkRefusal, { knex });
+        continue;
+      }
       // Flip to queued preserving the stored match-time context (linkage +
       // CAS baseline) — enqueueContactCorrectionJob would overwrite the
       // baseline, and the route already attached the authoritative one.
