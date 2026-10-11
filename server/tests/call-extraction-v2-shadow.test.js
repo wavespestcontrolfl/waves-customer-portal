@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v28');
-    expect(PROMPT_HASH).toMatch(/^v28-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v30');
+    expect(PROMPT_HASH).toMatch(/^v30-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -512,7 +512,7 @@ describe('quote_promised covers a promise with no "quote" word (prompt v28)', ()
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.27.0');
+    expect(SCHEMA_VERSION).toBe('1.28.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
