@@ -1296,6 +1296,9 @@ describe('scheduled-group guard — dry-run preflight and destination group (GH 
     // #4667): the proposal editor and the public paths take
     // address-verdict before any group lock.
     expect(order).toEqual(['address-verdict-lock', 'group-lock']);
+    // A pure revision of an open estimate takes no per-customer estimate lock (the booking's check is
+    // "any open estimate", which a revision cannot change).
+    expect(order).not.toContain('customer-estimates-lock');
   });
 
   test('dryRun refuses exactly like the real save (no reprice confirm the write would then 409)', async () => {

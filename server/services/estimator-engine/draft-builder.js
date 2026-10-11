@@ -1380,6 +1380,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       logger.info('[estimator-engine] duplicate guard bypassed — all open estimates are for different properties');
     }
 
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+    await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, (context?.customer?.id && !context?.customerPhoneAmbiguous) ? context.customer.id : null);
     const [estimate] = await trx('estimates').insert({
       // Engine drafts are priced by generateEstimate only (AGENTS.md
       // estimator-engine authority): the explicit SERVER stamp the send gate

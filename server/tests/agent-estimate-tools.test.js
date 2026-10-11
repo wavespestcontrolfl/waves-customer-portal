@@ -161,6 +161,7 @@ function makeDatabase({
       select: () => builder,
       limit: () => builder,
       forUpdate: () => builder,
+      forKeyShare: () => builder,
       first: async () => {
         if (table === 'leads') {
           leadReadCount += 1;
@@ -193,6 +194,8 @@ function makeDatabase({
     return builder;
   };
   database.fn = mockDb.fn;
+  // The per-customer estimate lock (utils/customer-estimate-lock.js) is a raw advisory call.
+  database.raw = jest.fn(async () => ({ rows: [] }));
   return { database, writes };
 }
 

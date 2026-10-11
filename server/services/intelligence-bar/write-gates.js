@@ -80,6 +80,8 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'remove_saved_payment_method',
   'correct_invoice_address',
   'update_lead_contact',
+  // start_program (owner 2026-10-06): series + tier + monthly bill, one card.
+  'start_program',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',
 ]);

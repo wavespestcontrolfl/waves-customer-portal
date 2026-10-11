@@ -17,6 +17,10 @@
  * validated by the executor UNDER its row locks, never in a caller-side
  * preflight; the final duplicate-queue eligibility decision runs there too.
  *
+ * start_program: start a recurring program for an existing monthly-plan
+ * customer (series + tier + monthly bill, one card) — start-program.js,
+ * dark behind GATE_IB_START_PROGRAM.
+ *
  * archive_customer (retire a record outright) was split out of this module:
  * it ships separately on a shared archive service with the DELETE
  * /api/admin/customers/:id route and cancellation-eligibility as a blocker.
@@ -32,6 +36,9 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
+// start_program (owner 2026-10-06): series + tier + monthly bill in one card;
+// the implementation lives in start-program.js.
+const { START_PROGRAM_TOOL, startProgram, startProgramLive } = require('./start-program');
 
 // Default-off capability gate (codex #4348 r14 P1): merge_customers is an
 // irreversible admin write and must not go live in every admin context the
@@ -429,6 +436,7 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
       additionalProperties: false,
     },
   },
+  START_PROGRAM_TOOL,
   {
     name: 'delete_duplicate_customer',
     description: `Delete ONE empty duplicate customer record: a stub, such as an "Unknown" record created from a call, that shares a real customer's phone. Only for a record that holds nothing: no visits, service records, invoices, payments, saved cards or Stripe profile, estimates, leads, calls, texts or emails, plan rates, monthly rate or plan, portal login, referral or credit balance, no notes, gate code or other field the stub creator does not write, and no saved property beyond one auto-created primary.
@@ -449,6 +457,7 @@ async function executeCustomerLifecycleTool(toolName, input, actionContext = {})
   try {
     switch (toolName) {
       case 'merge_customers': return await mergeCustomers(input, actionContext);
+      case 'start_program': return await startProgram(input, actionContext);
       case 'delete_duplicate_customer': return await deleteDuplicateCustomer(input, actionContext);
       default:
         return { error: `Unknown tool: ${toolName}` };
@@ -462,6 +471,7 @@ async function executeCustomerLifecycleTool(toolName, input, actionContext = {})
 module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   mergeCustomersEnabled,
+  startProgramLive,
   deleteDuplicateCustomerEnabled,
   executeCustomerLifecycleTool,
   // exported for tests

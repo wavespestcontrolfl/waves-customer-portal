@@ -90,8 +90,14 @@ async function visitProperty(customerId, scheduledServiceId, knex = db) {
     .where({ id: scheduledServiceId, customer_id: customerId })
     .first('property_id');
   if (!visit || !visit.property_id) return null;
+  return nonPrimaryProperty(customerId, visit.property_id, knex);
+}
+
+// The same property rule by property id (a visit not booked yet has no row to read it from).
+async function nonPrimaryProperty(customerId, propertyId, knex = db) {
+  if (!customerId || !propertyId) return null;
   const property = await knex('customer_properties')
-    .where({ id: visit.property_id, customer_id: customerId })
+    .where({ id: propertyId, customer_id: customerId })
     .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'city');
   if (!property || property.active === false || property.is_primary === true) return null;
   return property;
@@ -182,6 +188,33 @@ async function resolveAppointmentPrefs({ customerId, scheduledServiceId = null, 
   return { prefs: { ...(prefs || {}), ...effective }, property, propertyDecided: true, propertyToggles: effective };
 }
 
+/**
+ * The toggles a visit stamped with `propertyId` WILL resolve to, before the visit exists: the same rule as
+ * resolveAppointmentPrefs (same gates, same property rule, same default and chosen-toggle merge), keyed by the property
+ * the booking will stamp instead of a visit id. Writes no shadow-log row. A failed read follows the sender's posture: shadow mode
+ * answers the customer row, enforcement throws (the caller then holds the card).
+ */
+async function resolvePropertyPrefs({ customerId, propertyId = null, prefs = null }, knex = db) {
+  const unchanged = { prefs, property: null, propertyDecided: false, propertyToggles: null };
+  if (!appPropertyScopeEnabled() || !propertyId || !customerId) return unchanged;
+  try {
+    const property = await nonPrimaryProperty(customerId, propertyId, knex);
+    if (!property) return unchanged;
+    const row = await propertyPrefsRow(property.id, knex);
+    const effective = effectivePropertyToggles(property, row, prefs || {});
+    if (!propertyTextsEnforced()) return { ...unchanged, property, propertyToggles: effective };
+    return { prefs: { ...(prefs || {}), ...effective }, property, propertyDecided: true, propertyToggles: effective };
+  } catch (err) {
+    // The same posture as resolveAppointmentPrefs: shadow mode answers the customer row, enforcement throws.
+    if (propertyTextsEnforced()) throw err;
+    return unchanged;
+  }
+}
+
+async function prefsForProperty(prefs, customerId, propertyId, knex = db) {
+  return (await resolvePropertyPrefs({ customerId, propertyId, prefs }, knex)).prefs;
+}
+
 // Convenience for the senders that hold a prefs row and a visit id: the row
 // to read toggles from. Same failure posture as resolveAppointmentPrefs.
 async function prefsForVisit(prefs, customerId, scheduledServiceId, source, knex = db) {
@@ -220,5 +253,7 @@ module.exports = {
   visitProperty,
   propertyPrefsRow,
   resolveAppointmentPrefs,
+  resolvePropertyPrefs,
+  prefsForProperty,
   prefsForVisit,
 };

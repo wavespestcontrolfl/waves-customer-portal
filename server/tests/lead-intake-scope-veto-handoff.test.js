@@ -31,6 +31,7 @@ jest.mock('../models/db', () => {
       andWhere() { return chain; },
       orWhere() { return chain; },
       where() { return chain; },
+      forKeyShare() { return chain; },
       whereIn() { return chain; },
       whereNull() { return chain; },
       whereNot() { return chain; },

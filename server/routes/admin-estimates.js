@@ -4508,9 +4508,14 @@ router.put('/:id/proposal', async (req, res, next) => {
         ['estimate-group-send', String(groupId)],
       );
     }
+    // A revival reopens the estimate: customer -> estimate, like the merge (customer row share before the estimate row).
+    if (revivingBid) await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
     const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || (locked.estimate_group_id || null) !== groupId) {
       throw retry('This estimate changed groups while you were editing — reload and retry.');
+    }
+    if (revivingBid && (locked.customer_id || null) !== (estimate.customer_id || null)) {
+      throw retry('This estimate moved to a different customer while you were editing — reload and retry.');
     }
     if (estimateEditVersion(locked) !== estimateEditVersion(estimate)
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
@@ -4651,6 +4656,10 @@ router.put('/:id/proposal', async (req, res, next) => {
     // refuses acceptance), so there is nothing to reconstruct when a hold
     // moves — which is why the old shrink-reconstruction pass and its
     // groupWidenFloorExpiresAt floor are deleted rather than repaired.
+    // Reviving an expired bid makes the estimate open again: take the per-customer estimate
+    // lock (a reactivation, like an insert), after this transaction's row locks, so the
+    // booking's open-estimate check cannot miss it.
+    if (revivingBid) await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { ...estimate, ...locked });
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
@@ -5080,39 +5089,58 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
-    const [updated] = await db('estimates')
-      .where({ id: req.params.id, status: estimate.status })
-      // Observed-state guard, mirroring the archive route (codex pre-push
-      // P1 TOCTOU): a concurrent decline/accept that resolved the archived
-      // row owns its disposition — unarchiving from a stale pre-read must
-      // not erase it.
-      .whereNotNull('archived_at')
-      .modify((q) => (estimate.disposition
-        ? q.where({ disposition: estimate.disposition })
-        : q.whereNull('disposition')))
-      .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
-      .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
-      .update({
-        archived_at: null,
-        updated_at: db.fn.now(),
-        // A LIVE (sent/viewed) row can only have gotten its disposition from
-        // the archive action — reviving the courtship un-classifies it, or a
-        // later expiry would COALESCE-preserve a stale "archived" loss
-        // (codex pre-push P1). Terminal rows (declined/expired/accepted)
-        // keep theirs: those were stamped by their own resolution.
-        ...(['sent', 'viewed'].includes(estimate.status) ? {
-          disposition: null,
-          disposition_source: null,
-          disposition_at: null,
-          disposition_note: null,
-          competitor_name: null,
-          competitor_price: null,
-          // The archive path also wrote the legacy badge label — a revived
-          // live row must not keep displaying a stale loss (codex P1).
-          decline_reason: null,
-        } : {}),
-      })
-      .returning('*');
+    // Un-archiving makes the estimate open again: take the per-customer estimate lock (a reactivation,
+    // like an insert) so the booking's open-estimate check cannot miss it. Lock order, as in the public
+    // refresh: the estimate row first, then the per-customer lock (a leaf).
+    // The advisory-lock owner comes from the LOCKED row, not the pre-transaction snapshot: a merge or relink that
+    // committed while this request waited for the row lock has moved the estimate to another customer, and
+    // locking the old owner would leave the booking's open-estimate check unfenced. A moved owner refuses.
+    const unarchived = await db.transaction(async (trx) => {
+      // Customer -> estimate, like the merge: the customer row share first, then the estimate row.
+      await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
+      const locked = await trx('estimates').where({ id: req.params.id }).forUpdate().first();
+      if (!locked) return { gone: true };
+      if ((locked.customer_id || null) !== (estimate.customer_id || null)) return { ownerChanged: true };
+      await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, locked);
+      return { rows: await trx('estimates')
+        .where({ id: req.params.id, status: estimate.status })
+        // Observed-state guard, mirroring the archive route (codex pre-push
+        // P1 TOCTOU): a concurrent decline/accept that resolved the archived
+        // row owns its disposition — unarchiving from a stale pre-read must
+        // not erase it.
+        .whereNotNull('archived_at')
+        .modify((q) => (estimate.disposition
+          ? q.where({ disposition: estimate.disposition })
+          : q.whereNull('disposition')))
+        .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
+        .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
+        .update({
+          archived_at: null,
+          updated_at: db.fn.now(),
+          // A LIVE (sent/viewed) row can only have gotten its disposition from
+          // the archive action — reviving the courtship un-classifies it, or a
+          // later expiry would COALESCE-preserve a stale "archived" loss
+          // (codex pre-push P1). Terminal rows (declined/expired/accepted)
+          // keep theirs: those were stamped by their own resolution.
+          ...(['sent', 'viewed'].includes(estimate.status) ? {
+            disposition: null,
+            disposition_source: null,
+            disposition_at: null,
+            disposition_note: null,
+            competitor_name: null,
+            competitor_price: null,
+            // The archive path also wrote the legacy badge label — a revived
+            // live row must not keep displaying a stale loss (codex P1).
+            decline_reason: null,
+          } : {}),
+        })
+        .returning('*') };
+    });
+    if (unarchived.gone) return res.status(404).json({ error: 'Estimate not found' });
+    if (unarchived.ownerChanged) {
+      return res.status(409).json({ error: 'This estimate moved to a different customer while you were unarchiving it. Refresh and retry.', code: 'estimate_owner_changed' });
+    }
+    const [updated] = unarchived.rows;
     if (!updated) {
       // Zero rows: either a linkage marker (permanent) or a concurrent
       // writer moved the row. Re-read once to say which.

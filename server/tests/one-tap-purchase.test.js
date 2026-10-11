@@ -48,6 +48,7 @@ jest.mock('../models/db', () => {
       whereNotNull(col) { filters.push((r) => r[col] != null); return q; },
       orderBy() { return q; },
       forUpdate() { state.events.push({ type: 'row', table }); return q; },
+      forKeyShare() { state.events.push({ type: 'row-share', table }); return q; },
       _rows() { return (state.tables[table] || []).filter((r) => filters.every((f) => f(r))); },
       async first() { const r = q._rows()[0]; return r ? clone(r) : undefined; },
       update(patch) {
@@ -402,6 +403,23 @@ describe('initPurchase', () => {
     await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
       .rejects.toMatchObject({ status: 409 });
     expect(db.__state.tables.estimates).toHaveLength(0);
+  });
+
+  test('init takes the per-customer estimate lock before inserting the draft (booking open-estimate check waits on it)', async () => {
+    db.__state.events.length = 0;
+    await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    const lockAt = db.__state.events.findIndex((e) => e.bindings?.[0] === 'customer-estimates:cust-1');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(db.__state.tables.estimates).toHaveLength(1);
+  });
+
+  test('init locks the customer row before the per-customer estimate lock (round 8: same order as start_program)', async () => {
+    db.__state.events.length = 0;
+    await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    const rowAt = db.__state.events.findIndex((e) => e.type === 'row-share' && e.table === 'customers');
+    const lockAt = db.__state.events.findIndex((e) => e.bindings?.[0] === 'customer-estimates:cust-1');
+    expect(rowAt).toBeGreaterThanOrEqual(0);
+    expect(lockAt).toBeGreaterThan(rowAt);
   });
 
   test('the synthesized estimate carries the denormalized customer identity the admin list renders/searches', async () => {

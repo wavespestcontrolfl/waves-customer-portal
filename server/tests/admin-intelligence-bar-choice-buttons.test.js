@@ -273,6 +273,20 @@ describe('offer_choices availability', () => {
     }
   });
 
+  test('legacy per-context list: start_program follows the registry page allowlist, not every admin page', () => {
+    process.env.GATE_IB_START_PROGRAM = 'true';
+    try {
+      for (const context of registry.START_PROGRAM_CONTEXTS) {
+        expect(getToolsForContext(context, true, false).map(t => t.name)).toContain('start_program');
+      }
+      for (const context of ['seo', 'revenue', 'comms', 'email', 'tax', 'leads', 'estimates']) {
+        expect(getToolsForContext(context, true, false).map(t => t.name)).not.toContain('start_program');
+      }
+    } finally {
+      delete process.env.GATE_IB_START_PROGRAM;
+    }
+  });
+
   test('never offered to the tech portal, a technician token or the agent-estimate rail', () => {
     const lists = [
       registry.initialTools('tech', { role: 'technician', context: 'tech' }),

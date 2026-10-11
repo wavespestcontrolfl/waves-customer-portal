@@ -11,7 +11,7 @@ const {
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
-const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
+const { mergeCustomersEnabled, startProgramLive, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
@@ -126,6 +126,7 @@ function allowed(action, { role, context, fullAccess } = {}) {
   if (action.id === 'reprice_future_visits' && !repriceVisitsLive()) return false;
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
   if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
+  if (action.id === 'start_program' && !startProgramLive()) return false;
   if (action.id === 'delete_duplicate_customer' && !deleteDuplicateCustomerEnabled()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
@@ -193,6 +194,11 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'offer_choices',
 ]);
 
+// The pages where start_program is offered (its domain page plus the dashboard
+// and the schedule/dispatch screens). The platform list and the legacy
+// per-context list (admin-intelligence-bar.js getToolsForContext) both read it.
+const START_PROGRAM_CONTEXTS = Object.freeze(['customers', 'dashboard', 'schedule', 'dispatch']);
+
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
@@ -200,7 +206,7 @@ function initialTools(context, scope) {
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...discovery, ...[...actions.values()]
-    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
+    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain || (a.id === 'start_program' && START_PROGRAM_CONTEXTS.includes(context))))
     .map(a => a.definition)];
 }
 
@@ -232,4 +238,4 @@ function execute(name, input, { role, context, techContext, actionContext = {} }
   return action.executor(name, executionInput, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
 }
 
-module.exports = { actions, policyErrors, DISCOVERY_TOOL, EVERY_PAGE_TOOL_NAMES, initialTools, discover, validateInput, allowed, execute };
+module.exports = { actions, policyErrors, DISCOVERY_TOOL, EVERY_PAGE_TOOL_NAMES, START_PROGRAM_CONTEXTS, initialTools, discover, validateInput, allowed, execute };

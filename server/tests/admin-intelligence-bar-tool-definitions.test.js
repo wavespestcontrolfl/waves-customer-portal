@@ -228,6 +228,23 @@ describe('tool definitions handed to the model', () => {
     }
   });
 
+  test('GATE_IB_START_PROGRAM: start_program is handed to the model only while the gate is on', async () => {
+    const original = process.env.GATE_IB_START_PROGRAM;
+    try {
+      delete process.env.GATE_IB_START_PROGRAM;
+      scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+      await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'dashboard' })).status).toBe(200); });
+      expect(mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name)).not.toContain('start_program');
+      jest.clearAllMocks();
+      process.env.GATE_IB_START_PROGRAM = 'true';
+      scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+      await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'dashboard' })).status).toBe(200); });
+      expect(mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name)).toContain('start_program');
+    } finally {
+      if (original === undefined) delete process.env.GATE_IB_START_PROGRAM; else process.env.GATE_IB_START_PROGRAM = original;
+    }
+  });
+
   test('GATE_IB_DELETE_CUSTOMER: delete_duplicate_customer is handed to the model only while the gate is exactly true', async () => {
     const original = process.env.GATE_IB_DELETE_CUSTOMER;
     try {

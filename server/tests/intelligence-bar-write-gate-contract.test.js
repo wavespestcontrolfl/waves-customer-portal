@@ -75,10 +75,12 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  process.env.GATE_IB_START_PROGRAM = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
 });
 afterAll(() => {
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  delete process.env.GATE_IB_START_PROGRAM;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -93,7 +95,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js', 'start-program.js', 'start-program-marker.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -161,6 +163,7 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'update_lead_contact',
+  'start_program',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -612,6 +615,24 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
       ],
     }],
+    // start_program: a dues-billed customer with one earlier (unsplit) rate,
+    // no saved address, no series and no open estimate, so the preview
+    // reaches its confirmation gate.
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'start_program', {
+      customer_id: '00000000-0000-0000-0000-00000000e001', service: 'Lawn Care', cadence: 'monthly',
+      monthly: 61.33, tier: 'Silver', first_date: '2099-03-02', time_window: '9:00 AM',
+      technician_id: '00000000-0000-0000-0000-00000000e0aa',
+    }, {
+      customers: [{
+        id: '00000000-0000-0000-0000-00000000e001', first_name: 'Dana', last_name: 'Example', version: 'v1',
+        monthly_rate: '41.33', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', payer_id: null, deleted_at: null,
+      }],
+      services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', billing_type: 'recurring', is_active: true, default_duration_minutes: 60 }],
+      technicians: [{ id: '00000000-0000-0000-0000-00000000e0aa', name: 'Sam Tech', employment_status: 'active', field_dispatchable: true, active: true }],
+      customer_properties: [{ id: 'prop-e001', address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' }],
+      scheduled_services: [],
+      estimates: [],
+    }],
     // delete_duplicate_customer reads the stub (its own seed) and the merge
     // engine's emptiness readers and pair verdicts (spied below — their SQL is covered by
     // customer-dedupe.test.js).
@@ -867,6 +888,13 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    // start_program's overlap probe takes the occupancy advisory lock through
+    // trx.raw, which this recorder has no answer for (its own coverage is in
+    // intelligence-bar-start-program.test.js).
+    const overlapProbe = toolName === 'start_program'
+      ? jest.spyOn(require('../services/scheduling/window-rules'), 'probeSlotOverlap').mockResolvedValue([]) : null;
+    const creditProbe = toolName === 'start_program'
+      ? jest.spyOn(require('../services/inspection-credit'), 'projectRedeemableOfferAmount').mockResolvedValue(0) : null;
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     const receiptResolvers = toolName === 'resend_receipt'
@@ -913,6 +941,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     try { result = await executor(toolName, input); } finally {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
+      overlapProbe?.mockRestore();
+      creditProbe?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();

@@ -271,6 +271,70 @@ describe('new recurring welcome SMS', () => {
     }));
   });
 
+  describe('recipient key from a confirm card (round 9)', () => {
+    const Contact = require('../services/booking-contact-state');
+    const queuedRow = (meta) => ({
+      id: 'seq-1', customer_id: 'customer-1', step: 0,
+      metadata: JSON.stringify({ template_key: 'auto_new_recurring', scheduled_service_id: 'svc-1', recurring_pattern: 'quarterly', entry_point: 'admin_recurring_appointment_created', ...meta }),
+    });
+    const arrange = (meta) => {
+      mockDueSequences = [queuedRow(meta)];
+      mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+      mockScheduledServiceRow = { status: 'pending' };
+      mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+      mockSendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1', providerMessageId: 'SM123' });
+    };
+    afterEach(() => jest.restoreAllMocks());
+
+    test('the enqueue carries the key the card pinned; a booking without one stores none', async () => {
+      await service.sendNewRecurringWelcome({ customer: { id: 'customer-1', phone: '(941) 555-1234' }, scheduledServiceId: 'svc-1', recurringPattern: 'quarterly', contactKey: 'key-a' });
+      expect(JSON.parse(mockInserts[0].data.metadata).contact_key).toBe('key-a');
+      mockInserts = []; mockSequenceExists = false;
+      await service.sendNewRecurringWelcome({ customer: { id: 'customer-1', phone: '(941) 555-1234' }, scheduledServiceId: 'svc-1', recurringPattern: 'quarterly' });
+      expect(JSON.parse(mockInserts[0].data.metadata)).not.toHaveProperty('contact_key');
+    });
+
+    test('delivery with a matching key sends', async () => {
+      const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+      arrange({ contact_key: 'key-a' });
+      const results = await service.processDueWelcomes();
+      expect(spy).toHaveBeenCalledWith('customer-1', { kind: 'welcome' });
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('drift suppresses the send, marks the sequence cancelled with contact_drift, and audits', async () => {
+      jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-b');
+      arrange({ contact_key: 'key-a' });
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const closed = mockUpdates.find((u) => u.table === 'sms_sequences' && u.data.status === 'cancelled');
+      expect(JSON.parse(closed.data.metadata).skip_reason).toBe('contact_drift');
+      expect(mockInserts).toEqual(expect.arrayContaining([expect.objectContaining({
+        table: 'activity_log',
+        data: expect.objectContaining({ customer_id: 'customer-1', action: 'welcome_suppressed_contact_drift' }),
+      })]));
+    });
+
+    test('an unreadable recipient state requeues instead of sending or cancelling', async () => {
+      jest.spyOn(Contact, 'currentContactKey').mockResolvedValue(null);
+      arrange({ contact_key: 'key-a' });
+      await service.processDueWelcomes();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mockUpdates.some((u) => u.table === 'sms_sequences' && u.data.status === 'cancelled')).toBe(false);
+      expect(mockUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'sms_sequences', data: expect.objectContaining({ status: 'active' }) })]));
+    });
+
+    test('a row without a key (page bookings) sends as before and reads no recipient state', async () => {
+      const spy = jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-b');
+      arrange({});
+      const results = await service.processDueWelcomes();
+      expect(spy).not.toHaveBeenCalled();
+      expect(results.sent).toBe(1);
+    });
+  });
+
   test('does not queue when the customer already has the welcome sequence', async () => {
     mockSequenceExists = true;
 

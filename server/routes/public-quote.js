@@ -3290,11 +3290,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // pricing, it just mints no self-book handoff for it.
         await db.transaction(async (trx) => {
           await draftVerdictLock(trx);
+          // Customer -> estimate, like the merge: the customer row share before the estimate row lock. The refresh
+          // reactivates the draft, so the owner is the merged row (the lock below takes the same view).
+          await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, { ...existingEst, ...estFields });
           const lockedEst = await trx('estimates')
             .where({ id: existingEst.id })
             .forUpdate()
-            .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data');
+            .first('id', 'source', 'status', 'archived_at', 'address', 'estimate_data', 'customer_id');
           if (!lockedEst || lockedEst.source !== 'quote_wizard' || lockedEst.status !== 'draft') return;
+          // A merge or relink that committed while this waited moved the draft to another customer: refuse the refresh.
+          if (!estFields.customer_id && (lockedEst.customer_id || null) !== (existingEst.customer_id || null)) return;
           if (lockedEst.archived_at) {
             const consumedBy = await trx('scheduled_services')
               .where({ source_estimate_id: existingEst.id })
@@ -3316,6 +3321,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // stamped here would then be withdrawn under nobody's claim. A
           // refused refresh is retryable: no handoff is minted for it.
           const { DELIVERY_CLAIM_NOT_LIVE_SQL: CLAIM_NOT_LIVE } = require('../utils/estimate-claim-sql');
+          // The refresh un-archives the draft (archived_at: null) — a reactivation, so it
+          // takes the same per-customer estimate lock as an insert.
+          await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { ...existingEst, ...estFields });
           const refreshedExisting = await trx('estimates').where({ id: existingEst.id }).whereRaw(CLAIM_NOT_LIVE).update({
             ...estFields,
             ...(carried ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: carriedAddressFlag, addressUnverifiedClearedBy: null } } : {}),
@@ -3411,6 +3419,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             const newerForInsert = recInsert.newerFlag || null;
             if (newerForInsert) { draftAddressBlockCarried = true; carriedAddressFlag = newerForInsert; }
             if (recInsert.newerClean) { addressUnverified = null; cleanEvidenceAt = recInsert.newerClean; }
+            // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+            await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, customerId);
             const [inserted] = await trx('estimates').insert({
               ...estFields,
               ...(newerForInsert ? { estimate_data: { ...estimateDataObj, addressUnverified: true, addressUnverifiedFlag: newerForInsert, addressUnverifiedClearedBy: null } } : {}),

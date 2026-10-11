@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
       orderBy() { return builder; },
       select() { return builder; },
       forUpdate() { mockState.forUpdates.push(table); return builder; },
+      forKeyShare() { return builder; },
       first: async () => {
         if (mockState.firstError) { const e = mockState.firstError; mockState.firstError = null; throw e; }
         return mockState.firstQueue.length ? mockState.firstQueue.shift() : null;
@@ -489,8 +490,11 @@ describe('maybePreDraftForBooking — shell path', () => {
     expect(result.drafted).toBe(true);
     // The fallback lock keys on the booking id — concurrent hook replays
     // cannot both pass the idempotency probe.
-    expect(mockState.raws).toHaveLength(1);
-    expect(mockState.raws[0][1]).toEqual(['booking_predraft', 'svc-1']);
+    // (The per-customer estimate lock before the insert is the other raw call.)
+    const bookingLocks = mockState.raws.filter((r) => Array.isArray(r[1]) && r[1][0] === 'booking_predraft');
+    expect(bookingLocks).toHaveLength(1);
+    expect(bookingLocks[0][1]).toEqual(['booking_predraft', 'svc-1']);
+    expect(mockState.raws.some((r) => Array.isArray(r[1]) && String(r[1][0]).startsWith('customer-estimates:'))).toBe(true);
   });
 
   test('a booking cancelled while waiting on the lock never seeds a draft (in-lock recheck)', async () => {

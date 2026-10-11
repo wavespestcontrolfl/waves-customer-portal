@@ -2507,6 +2507,10 @@ async function createOrReuseAdminEstimate({
     }
 
     const token = randomBytes(16).toString('hex');
+    // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js). An admin estimate saved with no
+    // customer_id yet but a phone (or a group owner) that resolves to a customer is locked under that prospective owner,
+    // like the email-inquiry insert; a failed owner lookup aborts the save (503) rather than insert unfenced.
+    await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, writeFields);
     const [created] = await trx('estimates').insert({
       ...writeFields,
       ...(clientDraftId ? { id: clientDraftId } : {}),

@@ -80,6 +80,8 @@ const APPOINTMENT_TYPE_RULES = [
 
 class AppointmentTagger {
 
+  // opts.approvedWelcome (boolean) replaces the new-customer lookup with the verdict a confirm card pinned.
+  // opts.approvedContact (string) is that card's recipient key; the queued welcome carries it to delivery.
   // opts.suppressWelcome skips the new-recurring welcome branch. Callers
   // pass it when the triggering row is not a fresh booking they own the
   // welcome decision for: the admin regenerate-brief endpoint replays old
@@ -88,7 +90,7 @@ class AppointmentTagger {
   // welcome post-commit. The welcome's history checks are scoped to rows
   // created before the triggering booking, which is only meaningful for a
   // just-inserted row. Prep flows carry their own dedupe and always run.
-  async onServiceScheduled(scheduledServiceId, { suppressWelcome = false } = {}) {
+  async onServiceScheduled(scheduledServiceId, { suppressWelcome = false, approvedWelcome, approvedContact } = {}) {
     const service = await db('scheduled_services')
       .where('scheduled_services.id', scheduledServiceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -155,11 +157,13 @@ class AppointmentTagger {
       // Lazy require avoids a cycle.
       const { tierLabelStatus } = require('./self-booking-plan-sync');
       const labelOnly = (await tierLabelStatus(service.customer_id)) !== 'not_label';
-      const isNewSignup = !labelOnly && await isNewRecurringSignupCandidate(service.customer_id, {
-        excludeServiceId: service.id,
-      });
+      // approvedWelcome (a boolean from createScheduleBooking's card caller): the verdict the card pinned
+      // for this booking; no second lookup, so a fail-soft lookup cannot flip it.
+      const isNewSignup = !labelOnly && (typeof approvedWelcome === 'boolean'
+        ? approvedWelcome
+        : await isNewRecurringSignupCandidate(service.customer_id, { excludeServiceId: service.id }));
       if (isNewSignup) {
-        await this.triggerWelcomeSequence(service);
+        await this.triggerWelcomeSequence(service, approvedContact);
       }
     }
     if (service.is_recurring === false) {
@@ -868,7 +872,7 @@ class AppointmentTagger {
   }
 
   // Welcome sequence for new recurring customers
-  async triggerWelcomeSequence(service) {
+  async triggerWelcomeSequence(service, approvedContact) {
     const welcomeResult = await sendNewRecurringWelcome({
       customer: {
         id: service.customer_id,
@@ -879,6 +883,8 @@ class AppointmentTagger {
       scheduledServiceId: service.id,
       recurringPattern: service.recurring_pattern,
       entryPoint: 'appointment_tagger_welcome',
+      // The recipient key a confirm card pinned (start_program): delivery re-checks it against the live customer.
+      ...(typeof approvedContact === 'string' ? { contactKey: approvedContact } : {}),
     });
     if (!welcomeResult.sent) {
       return;

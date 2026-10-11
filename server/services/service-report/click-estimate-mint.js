@@ -593,6 +593,8 @@ async function mintReportClickEstimate(trx, {
 
   const token = randomBytes(16).toString('hex');
   const expiresAt = estimateExpiresAt(now);
+  // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+  await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, freshCustomer.id);
   const [created] = await trx('estimates').insert({
     estimate_data: JSON.stringify(estimateData),
     // The same address string the pricing lookup was keyed on — the offer is

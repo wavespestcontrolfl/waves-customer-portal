@@ -828,15 +828,22 @@ describe('where the recheck runs (source order)', () => {
     expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx, \{ date \} = \{\}\) => \{[\s\S]{0,700}lockedAreaAddOnRuleRefusal\(row, requestedServiceMode\)[\s\S]{0,80}lockedAreaAddOnLimitRefusal\(row, trx, date\)/);
     expect(read('services/slot-reservation.js')).toContain('await revalidateEstimate(estimate, trx, { date });');
     const schedule = read('routes/admin-schedule.js');
-    const book = schedule.indexOf('estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,\n          onlyServiceKeys: await requestedAreaAddOnServiceKeys(db, serviceId, serviceAddons),');
-    expect(book).toBeGreaterThan(0);
-    expect(book).toBeLessThan(schedule.indexOf('db.transaction', book));
-    const customerLock = schedule.indexOf('await lockCustomerComms(trx, customerId);', book);
-    const again = schedule.indexOf('await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {', customerLock);
-    const insert = schedule.indexOf("[svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');", again);
-    expect(customerLock).toBeGreaterThan(book);
+    const body = (name) => { const at = schedule.indexOf(`async function ${name}(`); return schedule.slice(at, schedule.indexOf('\n}\n', at)); };
+    // Before the transaction: the preflight stage asks the limit recheck on the posted add-ons.
+    expect(body('linkedEstimateGateRefusal')).toContain('estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true,\n      onlyServiceKeys: await requestedAreaAddOnServiceKeys(db, serviceId, serviceAddons),');
+    expect(body('linkedEstimatePreflight')).toContain('linkedEstimateGateRefusal(c, linkedEstimate)');
+    const handler = body('scheduleCreateHandler');
+    expect(handler.indexOf('await runBookingStages(c);')).toBeLessThan(handler.indexOf('await commitBooking(c);'));
+    // Inside it: the customer lock, then the recheck on the locked row (revalidateBookingUnderLock), then the visit insert.
+    const lock = body('lockBookingScope');
+    const customerLock = lock.indexOf('await lockCustomerComms(trx, customerId);');
+    const again = lock.indexOf('revalidateBookingUnderLock(');
+    expect(customerLock).toBeGreaterThan(0);
     expect(again).toBeGreaterThan(customerLock);
-    expect(insert).toBeGreaterThan(again);
+    expect(body('revalidateBookingUnderLock')).toContain('await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {');
+    const commit = body('commitBooking');
+    expect(commit.indexOf('await lockBookingScope(trx, c);')).toBeLessThan(commit.indexOf('await insertSeriesRows(trx, c);'));
+    expect(body('insertParentRow')).toContain("[svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');");
     const won = read('services/estimate-manual-acceptance.js');
     expect(won).toContain('estimate, staff: true, excludeVisitIds: bookedAppointmentIds, fenceCustomer');
     // comms lock, then the estimate row FOR UPDATE, then the recheck on the locked row (Codex round 14): never the first read
@@ -918,8 +925,11 @@ describe('the booking fence: every reader of a customer\'s add-on history holds 
     expect(markWon.indexOf('await lockCustomerComms(trx, estimate.customer_id);')).toBeLessThan(markWon.indexOf('await assertAddOnsAcceptable(trx, estimate, {'));
     // Staff booking: the limits are read AFTER lockCustomerComms(trx, customerId) of the booking's customer
     const schedule = read('routes/admin-schedule.js');
-    const lockAt = schedule.indexOf('await lockCustomerComms(trx, customerId);', schedule.indexOf('Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the'));
-    const recheckAt = schedule.indexOf('await assertLockedEstimateAddOns(trx, freshLinkedEstimate, {');
+    const lockStart = schedule.indexOf('async function lockBookingScope(');
+    const lockBody = schedule.slice(lockStart, schedule.indexOf('\n}\n', lockStart));
+    const lockAt = lockBody.indexOf('await lockCustomerComms(trx, customerId);');
+    // The recheck runs in revalidateBookingUnderLock, which lockBookingScope calls after the customer lock.
+    const recheckAt = lockBody.indexOf('revalidateBookingUnderLock(');
     expect(lockAt).toBeGreaterThan(0);
     expect(recheckAt).toBeGreaterThan(lockAt);
     // The extend commits no application and runs no recheck; the card intents mint a SetupIntent and read no history

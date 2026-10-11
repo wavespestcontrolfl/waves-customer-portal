@@ -84,11 +84,12 @@ describe('appointment email recipient resolution (fan-out to appointment contact
 
   test('the texts-only override applies to the account row BEFORE the property overlay (a property\'s own false still wins)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/appointment-email.js'), 'utf8');
-    const override = src.indexOf("callerDemotedForTextsOnly(customer.id)");
+    const override = src.indexOf("callerDemotedForTextsOnly(customer.id, conn)");
     // Ownership comes from the markers alone, not the row's status (a STOP declines the row before the restore).
     const optin = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
     expect(optin).toContain(".where({ customer_id: customerId })\n      .whereNotNull('caller_demoted_at')\n      .whereNull('caller_choice_at')\n      .first('phone_key');");
-    const overlay = src.indexOf("prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients')");
+    const overlay = src.indexOf('propertyScopedPrefs(prefs, customer.id, { scheduledServiceId, propertyId, conn })');
+    expect(src).toContain("Scoped.prefsForVisit(prefs, customerId, scheduledServiceId, 'email_recipients', conn)");
     expect(override).toBeGreaterThan(0);
     expect(override).toBeLessThan(overlay);
   });

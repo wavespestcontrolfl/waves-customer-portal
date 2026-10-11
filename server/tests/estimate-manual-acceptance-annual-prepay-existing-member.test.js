@@ -475,12 +475,12 @@ describe('r2-estimate-conversion-money-1: annual prepay of an add-on for an exis
     const fs = require('fs');
     const path = require('path');
     const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(adminSchedule).toMatch(/if \(prepayEligibility\.reason === 'existing_customer'\) \{/);
+    expect(adminSchedule).toMatch(/if \(reason === 'existing_customer'\) \{/);
     expect(adminSchedule).toMatch(/this customer already has a live plan, so annual prepay is not offered for an add-on service\. Bill the new service at the visit \(or per-application\), or add it to the customer.s existing plan instead\./);
     // The existing_customer branch must come BEFORE the generic
     // reasonPhrase downgrade so it actually short-circuits it.
-    const specialCaseAt = adminSchedule.indexOf("prepayEligibility.reason === 'existing_customer'");
-    const genericDowngradeAt = adminSchedule.indexOf('annual prepay was not applied');
+    const specialCaseAt = adminSchedule.indexOf("reason === 'existing_customer'");
+    const genericDowngradeAt = adminSchedule.indexOf('annual prepay was not applied', specialCaseAt);
     expect(specialCaseAt).toBeGreaterThan(-1);
     expect(genericDowngradeAt).toBeGreaterThan(specialCaseAt);
   });

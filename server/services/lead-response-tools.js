@@ -668,6 +668,8 @@ async function executeLeadTool(toolName, input, context) {
           };
         }
 
+        // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
+        await require('../utils/customer-estimate-lock').lockCustomerEstimates(trx, input.customer_id);
         const [estimate] = await trx('estimates').insert({
           customer_id: input.customer_id,
           customer_name: `${current.customer.first_name} ${current.customer.last_name}`,

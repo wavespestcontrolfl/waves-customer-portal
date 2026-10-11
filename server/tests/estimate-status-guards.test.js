@@ -517,23 +517,90 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
   beforeEach(() => { db.mockReset(); });
 
   test('predicates on observed status/disposition and 409s with a retry message when the row moved', async () => {
-    const estimate = { id: 'e1', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    const estimate = { id: 'e1', customer_id: 'cust-1', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
     const readBuilder = makeBuilder({ first: estimate });
-    const writeBuilder = makeBuilder({});
+    const writeBuilder = makeBuilder({ first: estimate });
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
+    writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.forKeyShare = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
     // freshness re-read: concurrent decline resolved the row
     const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
+    // The un-archive write runs in a transaction that first takes the per-customer
+    // estimate lock (a reactivation makes the estimate open again).
+    const trx = jest.fn(() => writeBuilder);
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(trx));
     db.mockImplementationOnce(() => readBuilder)
-      .mockImplementationOnce(() => writeBuilder)
       .mockImplementationOnce(() => freshBuilder);
     const res = makeRes();
     await unarchiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-1']);
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(writeBuilder.update.mock.invocationCallOrder[0]);
+    // One lock order (round 3): the estimate ROW first, then the per-customer lock.
+    expect(writeBuilder.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.raw.mock.invocationCallOrder[0]);
     expect(writeBuilder.where).toHaveBeenCalledWith({ id: 'e1', status: 'viewed' });
     expect(writeBuilder.whereNotNull).toHaveBeenCalledWith('archived_at');
     expect(writeBuilder.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+  });
+
+  test('an unlinked, phone-matched estimate: the unarchive takes the lock of the customer the accept resolves to (round 5)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'cust-owner', lookupFailed: false });
+    const estimate = { id: 'e2', customer_id: null, customer_phone: '(941) 555-0123', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    const readBuilder = makeBuilder({ first: estimate });
+    const writeBuilder = makeBuilder({ first: estimate });
+    writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
+    writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.forKeyShare = jest.fn(() => writeBuilder);
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
+    const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
+    const trx = jest.fn(() => writeBuilder);
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => freshBuilder);
+    await unarchiveHandler({ params: { id: 'e2' }, body: {} }, makeRes(), jest.fn());
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'e2', customer_id: null }), trx, { authoritative: true });
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-estimates:cust-owner']);
+    expect(writeBuilder.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.raw.mock.invocationCallOrder[0]);
+    resolver.mockRestore();
+  });
+
+  function unarchiveHarness(snapshot, locked) {
+    const readBuilder = makeBuilder({ first: snapshot });
+    const writeBuilder = makeBuilder({ first: locked });
+    writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
+    writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.forKeyShare = jest.fn(() => writeBuilder);
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: snapshot.id }]) }));
+    const trx = jest.fn(() => writeBuilder);
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    db.mockImplementationOnce(() => readBuilder);
+    return { trx, writeBuilder };
+  }
+
+  test('the owner changed between the snapshot and the row lock: refused 409 estimate_owner_changed, nothing locked or written (round 9)', async () => {
+    const snapshot = { id: 'e3', customer_id: 'cust-old', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    const { trx, writeBuilder } = unarchiveHarness(snapshot, { ...snapshot, customer_id: 'cust-new' });
+    const res = makeRes();
+    await unarchiveHandler({ params: { id: 'e3' }, body: {} }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'estimate_owner_changed' }));
+    expect(trx.raw).not.toHaveBeenCalled();
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('the advisory lock is resolved from the LOCKED row, not the pre-transaction snapshot (round 9)', async () => {
+    const RecurringCof = require('../services/recurring-card-on-file');
+    const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'cust-owner', lookupFailed: false });
+    const snapshot = { id: 'e4', customer_id: null, customer_phone: '(941) 555-0100', status: 'viewed', archived_at: 'THEN', disposition: 'archived_unresolved', estimate_data: {} };
+    unarchiveHarness(snapshot, { ...snapshot, customer_phone: '(941) 555-0199' });
+    await unarchiveHandler({ params: { id: 'e4' }, body: {} }, makeRes(), jest.fn());
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'e4', customer_phone: '(941) 555-0199' }), expect.anything(), { authoritative: true });
+    resolver.mockRestore();
   });
 });
 

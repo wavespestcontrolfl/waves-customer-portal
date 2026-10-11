@@ -275,6 +275,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // concurrent sweep flip (status guard). Zero rows → 409, callers surface
   // retry/failure.
   await db.transaction(async (trx) => {
+    // Lock order customer -> estimate, like the merge (customer rows first, then the estimate repoint): the customer
+    // row share comes BEFORE any estimate row lock. The snapshot names the customer; the locked row is re-checked below
+    // (409 estimate_owner_changed on a change).
+    await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
     let anchor;
     if (estimate.estimate_group_id) {
       // Proposal saves and grouped sends take this lock before row locks.
@@ -282,18 +286,26 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['estimate-group-send', String(estimate.estimate_group_id)]);
       const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
-        .orderBy('id').forUpdate().select('id', 'estimate_data');
+        .orderBy('id').forUpdate().select('*');
       anchor = locked.find((row) => row.id === estimate.id);
     } else {
       // A generic proposal save can add a fixed hold after public preflight.
       // Judge the locked row before the write so refusal keeps its public
       // FIXED_BID_VALIDITY / generic-404 classification.
       anchor = await trx('estimates').where({ id: estimate.id }).whereNull('estimate_group_id')
-        .forUpdate().first('estimate_data');
+        .forUpdate().first();
     }
     if (!anchor) {
       const err = new Error('Estimate changed groups while extending — retry.');
       err.statusCode = 409;
+      throw err;
+    }
+    // The lock owner below comes from this LOCKED row. A merge or relink that committed while the extension waited has
+    // moved the estimate to another customer; the snapshot would lock the old one and leave the booking check unfenced.
+    if ((anchor.customer_id || null) !== (estimate.customer_id || null)) {
+      const err = new Error('This estimate moved to a different customer while extending — retry.');
+      err.statusCode = 409;
+      err.code = 'estimate_owner_changed';
       throw err;
     }
     // The county-roll address block (and every other off-surface marker)
@@ -314,6 +326,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.code = 'FIXED_BID_VALIDITY';
       throw err;
     }
+    // An expired or send_failed row revived to sent/viewed becomes an open estimate: take the
+    // per-customer estimate lock, after the row locks above (it is a leaf).
+    await require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, anchor);
     const updated = await trx('estimates')
       .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id || null })
       .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)

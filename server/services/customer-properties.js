@@ -738,6 +738,15 @@ async function soleActivePropertyId(customerId, conn = db) {
  * customer's ACTIVE properties or the row has no complete street address —
  * a booking must never land on a half-recorded address.
  */
+// The fields a booking needs on a property, and the check bookingPropertyStamp applies. Shared with the
+// Intelligence Bar's start_program, which refuses an incomplete sole property at planning instead of building
+// a card that always fails at the booking.
+const BOOKING_PROPERTY_FIELD_LABELS = { address_line1: 'street', city: 'city', state: 'state', zip: 'ZIP code' };
+function missingBookingPropertyFields(property) {
+  return Object.keys(BOOKING_PROPERTY_FIELD_LABELS).filter((field) =>
+    !(typeof property?.[field] === 'string' && property[field].trim()));
+}
+
 async function bookingPropertyStamp({ customerId, propertyId }, conn = db, { lock = false } = {}) {
   if (propertyId === undefined || propertyId === null || propertyId === '') return null;
   const refuse = (message) => Object.assign(new Error(message), { statusCode: 422, isOperational: true, code: 'INVALID_BOOKING_PROPERTY' });
@@ -750,8 +759,7 @@ async function bookingPropertyStamp({ customerId, propertyId }, conn = db, { loc
   const query = conn('customer_properties').where({ id: propertyId, customer_id: customerId, active: true });
   if (lock) query.forShare();
   const property = await query.first();
-  if (!property || !['address_line1', 'city', 'state', 'zip'].every((field) =>
-    typeof property[field] === 'string' && property[field].trim())) {
+  if (!property || missingBookingPropertyFields(property).length) {
     throw refuse('Choose an active customer address with a street, city, state and ZIP code.');
   }
   return {
@@ -1159,6 +1167,8 @@ module.exports = {
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,
+  BOOKING_PROPERTY_FIELD_LABELS,
+  missingBookingPropertyFields,
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,

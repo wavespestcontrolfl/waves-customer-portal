@@ -2021,8 +2021,8 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
 
 // ── Get customer + tech info ──
 
-async function getCustomerAndTech(customerId, scheduledServiceId) {
-  const customer = await db('customers').where({ id: customerId }).first();
+async function getCustomerAndTech(customerId, scheduledServiceId, conn = db) {
+  const customer = await conn('customers').where({ id: customerId }).first();
   let techName = null;
 
   if (scheduledServiceId) {
@@ -2049,7 +2049,7 @@ async function getCustomerAndTech(customerId, scheduledServiceId) {
 // `customerRow` is an optional pre-fetched customers row (must include
 // account_id / is_primary_profile) so callers that already loaded the customer
 // skip the extra query. Falls back to the passed `prefs` row on any miss.
-async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null) {
+async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = null, conn = db) {
   let channelPrefs = prefs;
   // A FAILED owner-resolution read (as distinct from "no row") must surface
   // on the returned row (Codex #3361 r28 P1): the fallback prefs below are
@@ -2064,14 +2064,14 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
   const swallow = () => { resolutionFailed = true; return null; };
   const customer = (customerRow && customerRow.account_id !== undefined)
     ? customerRow
-    : await db('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(swallow);
+    : await conn('customers').where({ id: customerId }).first('account_id', 'is_primary_profile').catch(swallow);
   if (customer && customer.is_primary_profile !== true && customer.account_id) {
-    const primary = await db('customers')
+    const primary = await conn('customers')
       .where({ account_id: customer.account_id, is_primary_profile: true })
       .first('id')
       .catch(swallow);
     if (primary && String(primary.id) !== String(customerId)) {
-      const ownerPrefs = await db('notification_prefs').where({ customer_id: primary.id }).first().catch(swallow);
+      const ownerPrefs = await conn('notification_prefs').where({ customer_id: primary.id }).first().catch(swallow);
       if (ownerPrefs) channelPrefs = ownerPrefs;
     }
   }
@@ -2096,22 +2096,24 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 // by getReminderPrefs and the direct reschedule / cancellation / no-show /
 // series-cancellation notices, whose recipient list (appointment_notify_
 // primary) must follow the property too (GitHub codex r0 P1).
-async function visitPrefsRow(customerId, scheduledServiceId = null) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+async function visitPrefsRow(customerId, scheduledServiceId = null, propertyId = null, conn = db) {
+  const prefs = await conn('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
   // Sentinel read inline: partial test doubles of customer-contact carry
   // PREFS_UNAVAILABLE but not the prefsUnavailable() helper.
-  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !scheduledServiceId) return prefs;
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !(scheduledServiceId || propertyId)) return prefs;
   try {
-    return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
+    // A visit not booked yet (a confirm card) resolves by the property the booking will stamp: the same rule.
+    if (!scheduledServiceId) return await require('./property-notification-prefs').prefsForProperty(prefs, customerId, propertyId, conn);
+    return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders', conn);
   } catch (err) {
     logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
     return PREFS_UNAVAILABLE;
   }
 }
 
-async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
-  const prefs = await visitPrefsRow(customerId, scheduledServiceId);
-  const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
+async function getReminderPrefs(customerId, { scheduledServiceId = null, propertyId = null, conn = db } = {}) {
+  const prefs = await visitPrefsRow(customerId, scheduledServiceId, propertyId, conn);
+  const channelPrefs = await resolveChannelPrefsRow(customerId, prefs, null, conn);
 
   return {
     raw: prefs || {},
@@ -2436,6 +2438,50 @@ async function alertRegistrationFailure({ scheduledServiceId, customerId, source
 // ══════════════════════════════════════════════════════════════
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
+// The rows the deferred-confirmation recovery sweep (checkAndSendReminders) picks up: a live reminder whose
+// confirmation was never marked sent. A caller that decides a confirmation must NOT go out closes the row by
+// setting confirmation_sent=true, which takes it out of this set. Exported so that callers and tests use the
+// sweep's own filter.
+const STRANDED_CONFIRMATION_FILTER = { cancelled: false, confirmation_sent: false, windows_preclosed: false };
+
+// A visit booked from a confirm card carries the recipient key the card pinned (activity_log, written in the booking
+// transaction). Every confirmation send, the recovery sweep included, checks it against the live customer: a changed
+// phone, email or notification setting closes the row unsent and audits it, and a person sends it by hand. A visit with
+// no pin (every other booking path) is not touched. An unreadable recipient state sends nothing now; the row stays
+// unsent and the next run checks again. A failed close or audit write changes nothing: the next run reaches the same
+// mismatch and skips again, so the send never goes to the new recipients.
+async function contactPinBlocksConfirmation(record, scheduledServiceId) {
+  const { CONTACT_PIN_ACTION, currentContactKey } = require('./booking-contact-state');
+  const pin = await db('activity_log')
+    .where({ action: CONTACT_PIN_ACTION })
+    .whereRaw("metadata->>'scheduled_service_id' = ?", [String(scheduledServiceId)])
+    .first('metadata');
+  if (!pin) return false;
+  const meta = typeof pin.metadata === 'string' ? JSON.parse(pin.metadata) : (pin.metadata || {});
+  if (typeof meta.contact_key !== 'string') return false;
+  // The key was pinned for the property the visit is stamped with (null = the customer row).
+  const live = await currentContactKey(record.customer_id, { propertyId: meta.property_id || null });
+  if (live === meta.contact_key) return false;
+  if (live === null) {
+    logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} held: the recipients could not be verified`);
+    return true;
+  }
+  logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} not sent: phone, email or notification settings changed after the card`);
+  try {
+    // Audit first: a close that then fails is retried (and re-audited) by the next run, never lost.
+    await db('activity_log').insert({
+      customer_id: record.customer_id,
+      action: 'confirmation_suppressed_contact_drift',
+      description: `Visit ${scheduledServiceId}: the customer's phone, email or notification settings changed after the program card was approved, so the booking confirmation was not sent. Check the recipient, then send the confirmation by hand.`,
+    });
+    await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId, confirmation_sent: false })
+      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+  } catch (err) {
+    logger.error(`[appt-remind] could not close or audit the held confirmation for ${scheduledServiceId}: ${err.message}`);
+  }
+  return true;
+}
+
 const AppointmentReminders = {
 
   // Exposed for route-level registration wrappers (spawned-visit path in
@@ -2990,6 +3036,7 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] sendConfirmation: skipping cancelled appointment ${scheduledServiceId}`);
         return false;
       }
+      if (await contactPinBlocksConfirmation(record, scheduledServiceId)) return false;
       return await deliverConfirmation(record, {
         scheduledServiceId,
         customerId: record.customer_id,
@@ -3195,7 +3242,7 @@ const AppointmentReminders = {
         // windows_preclosed belt-and-braces: placeholders insert with the
         // confirmation already closed, but a pre-closed row must never be
         // healable into an 08:00 confirmation even if a flag write regresses.
-        .where({ cancelled: false, confirmation_sent: false, windows_preclosed: false })
+        .where(STRANDED_CONFIRMATION_FILTER)
         .where('created_at', '<', staleCutoff)
         .whereNotExists(function () {
           this.select(1)
@@ -5806,6 +5853,8 @@ AppointmentReminders.deliverConfirmationByChannel = deliverConfirmationByChannel
 // resolution the appointment reminders use.
 AppointmentReminders.apptChannel = apptChannel;
 AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
+// The confirmation text sender's own customer read (the RAW row: no backfill from the account primary).
+AppointmentReminders.getCustomerAndTech = getCustomerAndTech;
 // Shared re-arm boundaries (see each function's own comment) — the dispatch
 // and reschedule-sms compensating re-arms consult these instead of hardcoding
 // the cron's 24.25h / start-in-the-future cutoffs.
@@ -5870,6 +5919,9 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // The visit-aware prefs row for the call-booking confirmation email and the
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
+// The confirmation and reminder toggles and channel, as the senders read them (booking-contact-state.js pins them).
+AppointmentReminders.getReminderPrefs = getReminderPrefs;
+AppointmentReminders.STRANDED_CONFIRMATION_FILTER = STRANDED_CONFIRMATION_FILTER;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({

@@ -25,6 +25,11 @@ const {
   estimateEditVersion,
 } = require('../services/admin-estimate-persistence');
 
+// The insert locks the prospective owner (utils/customer-estimate-lock.js); these fakes have no customers to match.
+beforeEach(() => {
+  jest.spyOn(require('../services/recurring-card-on-file'), 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: null, lookupFailed: false });
+});
+
 describe('estimate edit version', () => {
   const row = { id: 'synthetic-estimate', status: 'sent', updated_at: '2026-01-01', estimate_data: { selectedTier: 'quarterly' }, monthly_total: '50.00', view_count: 1, last_viewed_at: '2026-01-01' };
   test('repeat customer opens do not invalidate the reviewed offer', () => {
@@ -67,6 +72,9 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     where(clause) {
       return {
         forUpdate() {
+          return this;
+        },
+        forKeyShare() {
           return this;
         },
         whereNull() {
@@ -189,6 +197,31 @@ describe('admin estimate persistence', () => {
     });
     expect(estimate.customer_phone).toBe('(203) 555-0123');
     expect(fixture.inserts.filter((entry) => entry.table === 'estimates')).toHaveLength(1);
+  });
+
+  test('an estimate with no customer_id whose phone resolves to a customer locks that prospective owner before the insert (round 12)', async () => {
+    const Lock = require('../utils/customer-estimate-lock');
+    const resolver = require('../services/recurring-card-on-file').resolveProspectiveAcceptCustomer;
+    resolver.mockResolvedValue({ customerId: 'cust-owner', lookupFailed: false });
+    const lockSpy = jest.spyOn(Lock, 'lockCustomerEstimatesForEstimate');
+    const fixture = makeDatabase({});
+    await createOrReuseAdminEstimate({ database: fixture.database,
+      body: { ...baseBody, leadId: null, customerPhone: '(203) 555-0123' },
+      technicianId: 'qa-admin', recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    expect(lockSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customer_phone: '(203) 555-0123' }));
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ customer_id: null, customer_phone: '(203) 555-0123' }), expect.anything(), { authoritative: true });
+    expect(fixture.inserts.filter((entry) => entry.table === 'estimates')).toHaveLength(1);
+  });
+
+  test('a failed prospective-owner lookup aborts the admin save instead of inserting unfenced (round 12)', async () => {
+    require('../services/recurring-card-on-file').resolveProspectiveAcceptCustomer.mockResolvedValue({ customerId: null, lookupFailed: true });
+    const fixture = makeDatabase({});
+    await expect(createOrReuseAdminEstimate({ database: fixture.database,
+      body: { ...baseBody, leadId: null, customerPhone: '(203) 555-0123' },
+      technicianId: 'qa-admin', recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    })).rejects.toMatchObject({ code: 'ESTIMATE_OWNER_UNVERIFIED', statusCode: 503 });
+    expect(fixture.inserts.filter((entry) => entry.table === 'estimates')).toHaveLength(0);
   });
 
   test('a retried draft identity cannot overwrite a different form', async () => {

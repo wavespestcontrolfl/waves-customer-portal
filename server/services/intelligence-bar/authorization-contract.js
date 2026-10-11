@@ -93,7 +93,7 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
 
 // Tools whose card lines are curated below from their own preview, not the
 // generic one-line-per-preview-key dump.
-const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'delete_duplicate_customer']);
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'start_program', 'delete_duplicate_customer']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -156,6 +156,7 @@ const ACTION_LABELS = {
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
   merge_customers: 'Merge duplicate customer',
+  start_program: 'Start a recurring program',
   delete_duplicate_customer: 'Delete empty duplicate customer',
   add_customer_property: 'Add saved property',
   update_customer_property: 'Update saved property',
@@ -796,6 +797,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('operational', String(preview.does_not));
     push('operational', 'A critical before/after audit row is written with the change');
   }
+  // start_program: the server-built card lines (start-program.js cardLines):
+  // the series, the first visit, every bill line before -> after and the
+  // total, the tier, and exactly which texts go out.
+  if (toolName === 'start_program' && Array.isArray(preview?.card_lines)) {
+    for (const line of preview.card_lines) {
+      push(['comms', 'billing', 'customer'].includes(line.kind) ? line.kind : 'operational', String(line.text));
+    }
+  }
   if (!CURATED_PREVIEW_TOOL_NAMES.has(toolName) && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
@@ -1000,6 +1009,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The portal's own Auto Pay-off / payment-method-removed notices, only
       // when their gate is on and an email is on file (the plan says which).
       || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
+      // start_program sends the Schedule screen's booking confirmation (and
+      // a first-ever welcome) only when its send-texts switch is on.
+      || (toolName === 'start_program' && preview?.notifies_customer === true)
       || tierUpgradeEmail
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
@@ -1010,6 +1022,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
+    if (toolName === 'start_program') contactLabel = 'Customer will be contacted: the texts listed on this card';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,
@@ -1070,6 +1083,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // customer notice above rather than promising a certain send.
   const cancelTechnicianNotice = toolName === 'cancel_appointment'
     ? (preview?.cancellation?.technician_notice || 'none') : 'none';
+  // start_program's new-visit notice to the booked technician: its card line
+  // is curated (start-program.js); the flag follows the preview.
+  const programTechnicianNotice = toolName === 'start_program' && preview?.notifies_technician === true;
   if (cancelTechnicianNotice !== 'none') {
     push('comms', 'The assigned technician MAY get a cancelled-visit notice (tech home card + push) by the existing tech-notifications system, depending on conditions at the moment it processes the cancellation');
   }
@@ -1118,7 +1134,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // tool (it never deletes a variable or writes anything but true/false).
       || (toolName === 'set_railway_gate' && preview?.prior_kind !== 'boolean'),
     notifies_customer: notifiesCustomer,
-    notifies_technician: cancelTechnicianNotice !== 'none',
+    notifies_technician: cancelTechnicianNotice !== 'none' || programTechnicianNotice,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)

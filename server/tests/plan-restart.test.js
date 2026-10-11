@@ -195,6 +195,7 @@ function builder(table) {
   b.leftJoin = () => b;
   b.select = () => b;
   b.forUpdate = () => b;
+  b.forKeyShare = () => b;
   b.limit = (n) => { limitN = n; return b; };
   b.first = async () => rows()[0] || null;
   b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };

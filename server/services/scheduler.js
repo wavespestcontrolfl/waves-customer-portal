@@ -4167,6 +4167,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN — start_program phase markers. A program start that booked its
+  // visits but never finished the tier and monthly bill leaves an open marker;
+  // one still open after 10 minutes raises one needs-you alert.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('start-program-pending-bill', async () => {
+        const raised = await require('./intelligence-bar/start-program-marker').sweepStalePending();
+        if (raised) logger.warn(`[start-program] ${raised} program start(s) booked visits but did not finish the bill`);
+      });
+    } catch (err) {
+      logger.error(`start_program marker sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :30, 5AM-6PM — Auto-dispatch rain pass. The 4:10 run above
   // cannot see rain (it never moves a visit inside 72 hours; the hourly
   // forecast is good for 3 dates), so this reads the booked outdoor visits

@@ -213,11 +213,19 @@ describe('the staff booking transaction asks it of the locked row, before anythi
   });
 
   test('source order: the locked read, then the guard, then the first insert; the locked row carries pricing_authority', () => {
-    const call = "assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });";
-    expect(src).toContain(call);
-    expect(src.indexOf('lockedLinkedEstimate = freshLinkedEstimate;')).toBeLessThan(src.indexOf(call));
-    expect(src.indexOf(call)).toBeLessThan(src.indexOf('[svc] = await trx(\'scheduled_services\').insert(adminCreateInsert).returning(\'*\');'));
-    expect(src.indexOf(call)).toBeLessThan(src.indexOf('await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);'));
+    const body = (name) => { const at = src.indexOf(`async function ${name}(`); return src.slice(at, src.indexOf('\n}\n', at)); };
+    const call = 'assertPostedAreaAddOnsSold(c.lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });';
+    // The transaction runs lockBookingScope (the locked read, then the guard), then insertSeriesRows (the first insert).
+    const lock = body('lockBookingScope');
+    expect(body('revalidateBookingUnderLock')).toContain('lockedLinkedEstimate = freshLinkedEstimate;');
+    expect(lock).toContain(call);
+    expect(lock.indexOf('c.lockedLinkedEstimate = await revalidateBookingUnderLock(')).toBeLessThan(lock.indexOf(call));
+    expect(lock.indexOf(call)).toBeLessThan(lock.indexOf('runApprovedBookingRails('));
+    const commit = body('commitBooking');
+    expect(commit.indexOf('await lockBookingScope(trx, c);')).toBeLessThan(commit.indexOf('await insertSeriesRows(trx, c);'));
+    const parent = body('insertParentRow');
+    expect(parent).toContain("[svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');");
+    expect(parent.indexOf("[svc] = await trx('scheduled_services')")).toBeLessThan(parent.indexOf('await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);'));
     expect(router._test.LINKED_ESTIMATE_COLUMNS).toContain('pricing_authority');
   });
 });
@@ -544,8 +552,8 @@ describe('assertAreaAddOnsNotYetBooked', () => {
 
   test('the staff booking asks it right after the sold-lines guard, inside the transaction (source)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    const sold = src.indexOf('assertPostedAreaAddOnsSold(lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });');
-    const again = src.indexOf('assertAreaAddOnsNotYetBooked(trx, lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));');
+    const sold = src.indexOf('assertPostedAreaAddOnsSold(c.lockedLinkedEstimate, postedAreaAddOnLines(pricing), { recurring: isRecurring, totals: postedAreaAddOnTotals(pricing) });');
+    const again = src.indexOf('assertAreaAddOnsNotYetBooked(trx, c.lockedLinkedEstimate, postedAreaAddOnLines(pricing).map((line) => line.key));');
     expect(again).toBeGreaterThan(sold);
     expect(again - sold).toBeLessThan(700);
   });

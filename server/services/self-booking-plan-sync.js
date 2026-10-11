@@ -904,6 +904,41 @@ async function scheduledServiceRowsForCustomer(database, customerId) {
   }
 }
 
+// The member branch's alignment, from the customer row and its schedule
+// rows (pure). Shared with the Intelligence Bar's start_program, which runs
+// it over the schedule plus the series it is about to book so its card shows
+// what this sync will change.
+function memberAlignmentFromRows(customer, rows, customerColumns, today) {
+  const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  // With the auto-tier gate on, the member branch uses the SAME upcoming-only
+  // evidence as enrollment and the nightly realignment — otherwise a stale
+  // past pending row from one family plus a newly seeded family upgrades a
+  // label beyond what upcoming coverage supports, and the bounded nightly
+  // sampling can leave that mispricing in place for days (Codex #3011 r2).
+  // Gate off keeps the legacy all-nonterminal evidence byte-identical.
+  const upcomingOnly = isEnabled('autoWaveguardTierEnroll');
+  const detectedPlanKeys = [];
+  let earliestServiceDate = null;
+
+  for (const row of recurringRows) {
+    const rowDate = normalizeDateString(row.scheduled_date);
+    if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
+    if (upcomingOnly && (!rowDate || rowDate < today)) continue;
+    if (upcomingOnly && (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row))) continue;
+    for (const key of detectWaveGuardPlanKeys(row)) {
+      if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
+    }
+  }
+
+  const alignment = buildCustomerWaveGuardAlignmentUpdates(
+    { ...customer, earliest_service_date: earliestServiceDate },
+    detectedPlanKeys,
+    customerColumns,
+    today,
+  );
+  return { detectedPlanKeys, alignment };
+}
+
 async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   const {
     database = db,
@@ -978,33 +1013,7 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   }
 
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
-  const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
-  // With the auto-tier gate on, the member branch uses the SAME upcoming-only
-  // evidence as enrollment and the nightly realignment — otherwise a stale
-  // past pending row from one family plus a newly seeded family upgrades a
-  // label beyond what upcoming coverage supports, and the bounded nightly
-  // sampling can leave that mispricing in place for days (Codex #3011 r2).
-  // Gate off keeps the legacy all-nonterminal evidence byte-identical.
-  const upcomingOnly = isEnabled('autoWaveguardTierEnroll');
-  const detectedPlanKeys = [];
-  let earliestServiceDate = null;
-
-  for (const row of recurringRows) {
-    const rowDate = normalizeDateString(row.scheduled_date);
-    if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
-    if (upcomingOnly && (!rowDate || rowDate < today)) continue;
-    if (upcomingOnly && (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row))) continue;
-    for (const key of detectWaveGuardPlanKeys(row)) {
-      if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
-    }
-  }
-
-  const alignment = buildCustomerWaveGuardAlignmentUpdates(
-    { ...customer, earliest_service_date: earliestServiceDate },
-    detectedPlanKeys,
-    customerColumns,
-    today,
-  );
+  const { detectedPlanKeys, alignment } = memberAlignmentFromRows(customer, rows, customerColumns, today);
 
   if (Object.keys(alignment.updates).length) {
     await database('customers').where({ id: customerId }).update(alignment.updates);
@@ -1642,6 +1651,8 @@ module.exports = {
   resolveTreeShrubRecurringPlan,
   serviceFamilyKey,
   liveWaveGuardServiceFamilies,
+  memberAlignmentFromRows,
+  scheduledServiceRowsForCustomer,
   serviceRowCountsTowardWaveGuard,
   tierLabelStatus,
   syncCustomerWaveGuardPlanFromScheduledServices,

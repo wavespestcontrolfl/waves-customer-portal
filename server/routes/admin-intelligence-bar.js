@@ -69,7 +69,7 @@ const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/
 const { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, repriceVisitsLive } = require('../services/intelligence-bar/reprice-visits-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
-const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled, startProgramLive, deleteDuplicateCustomerEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
@@ -223,6 +223,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  // Starting a program books a series and changes the monthly bill — admin
+  // only, like the requireAdmin Schedule POST and customers PUT it mirrors.
+  'start_program',
   'delete_duplicate_customer', // mirrors requireAdmin DELETE /api/admin/customers/:id
   // Billing readers show invoices, balances and payment evidence: admin only,
   // like the requireAdmin invoice routes they mirror.
@@ -810,6 +813,9 @@ function deleteDuplicatePins(livePreview) {
 }
 
 const PINNED_DISPLAY_BUILDERS = {
+  // start_program's card lines are curated in authorization-contract.js from
+  // the preview; the display params only name the customer.
+  start_program: (_params, preview) => (preview?.preview === true ? { customer: preview.customer_name } : null),
   delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
   reply_via_sms: pinnedRecipientDisplay,
@@ -922,6 +928,9 @@ const VERIFIED_VERSION_PARAMS = {
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
   resend_receipt: '_verified_receipt_version',
+  // start_program binds the customer version, bill, tier, series and texts
+  // the card showed (start-program.js plan version).
+  start_program: '_verified_program_version',
   // reprice_future_visits binds every listed visit's id, date, status, price
   // and row version (reprice-visits-tools.js plan version).
   reprice_future_visits: '_verified_reprice_version',
@@ -1191,7 +1200,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // lets ActionRegistry.execute's own allowed() check pass for an outside-
     // service write proposed by the full-access owner, and correctly refuse
     // one from anyone else even if a forged tool_use reached this far.
-    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
+    // technicianId (the proposing actor, as the confirm re-run and commit
+    // already pass it): start_program's card says whether the booked
+    // technician gets a new-visit notice, which is silent for the creator.
+    preview = await executeToolByName(toolUse.name, { ...params }, null, {
+      fullAccess: ibFullAccess(req), technicianId: req.technicianId || req.technician?.id || null,
+    });
     // A stock write's failed preview is judged by the stock layer below (it
     // may offer a "choose the product" card instead).
     if (isToolFailure(preview) && !STOCK_WRITE_TOOL_NAMES.has(toolUse.name)) {
@@ -2938,7 +2952,10 @@ function getToolsForContext(context, isAdmin = false, fullAccess = false) {
     // below) — never offered without full access, whatever module it rides.
     .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
     .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
-  return (mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers')).filter(t => deleteDuplicateCustomerEnabled() || t.name !== 'delete_duplicate_customer');
+  return (mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers'))
+    .filter(t => deleteDuplicateCustomerEnabled() || t.name !== 'delete_duplicate_customer')
+    // start_program rides the same page allowlist the registry uses (legacy lists included).
+    .filter(t => t.name !== 'start_program' || (startProgramLive() && ActionRegistry.START_PROGRAM_CONTEXTS.includes(context)));
 }
 
 function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {

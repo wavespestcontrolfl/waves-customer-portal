@@ -78,9 +78,9 @@ async function stampedPropertyLabel(scheduledServiceId) {
   }
 }
 
-async function loadCustomer(customerId) {
+async function loadCustomer(customerId, conn = db) {
   if (!customerId) return null;
-  const row = await db('customers')
+  const row = await conn('customers')
     .where({ id: customerId })
     .select(
       'id',
@@ -128,8 +128,23 @@ async function loadCustomer(customerId) {
 // failed property read under enforcement reads as prefs-unavailable.
 const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
 
-async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
-  let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+// The visit's property rule on the account prefs. A visit not booked yet (a confirm card) resolves by the property the
+// booking will stamp: the same rule. A failed read holds the sends (PREFS_UNAVAILABLE).
+async function propertyScopedPrefs(prefs, customerId, { scheduledServiceId, propertyId, conn = db }) {
+  if (!scheduledServiceId && !propertyId) return prefs;
+  const Scoped = require('./property-notification-prefs');
+  try {
+    return scheduledServiceId
+      ? await Scoped.prefsForVisit(prefs, customerId, scheduledServiceId, 'email_recipients', conn)
+      : await Scoped.prefsForProperty(prefs, customerId, propertyId, conn);
+  } catch (err) {
+    logger.warn(`[appointment-email] property notification settings unreadable for ${scheduledServiceId ? `visit ${scheduledServiceId}` : `property ${propertyId}`}: ${err.message}`);
+    return PREFS_UNAVAILABLE;
+  }
+}
+
+async function resolveRecipients(customer, { scheduledServiceId = null, propertyId = null, conn = db } = {}) {
+  let prefs = await conn('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
   // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
   // the holder's appointment TEXTS off; their emails are untouched. A false
@@ -138,17 +153,10 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   // own chosen false still wins, and an inheriting property inherits true.
   // The holder's own opt-out stays an opt-out.
   if (!unreadable(prefs) && prefs?.appointment_notify_primary === false
-    && await require('./recipient-optin').callerDemotedForTextsOnly(customer.id)) {
+    && await require('./recipient-optin').callerDemotedForTextsOnly(customer.id, conn)) {
     prefs = { ...prefs, appointment_notify_primary: true };
   }
-  if (!unreadable(prefs) && scheduledServiceId) {
-    try {
-      prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients');
-    } catch (err) {
-      logger.warn(`[appointment-email] property notification settings unreadable for visit ${scheduledServiceId}: ${err.message}`);
-      prefs = PREFS_UNAVAILABLE;
-    }
-  }
+  if (!unreadable(prefs)) prefs = await propertyScopedPrefs(prefs, customer.id, { scheduledServiceId, propertyId, conn });
   // ONE posture for an unreadable row — the customer row's read or the
   // property's under enforcement: the recipient list cannot be built (the
   // service-contact fan-out and the primary fallback below would send a
