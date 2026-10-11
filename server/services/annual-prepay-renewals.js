@@ -6576,8 +6576,14 @@ async function restampUnstampedActiveTerms({
  * chargeback (the dispute reopen flips the invoice off 'paid', which drops
  * decided coverage and — via the term suspend — live coverage).
  */
-async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
-  if (!(await annualPrepayTableExists())) return new Set();
+async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db, { throwOnError = false } = {}) {
+  // Strict callers (the dues-eligibility verdict) must see a schema-probe FAILURE
+  // as unreadable, not as "no table, nobody covered": annualPrepayTableExists
+  // swallows the probe error and returns false. Same shape as
+  // getPaymentPendingCustomerIds below; the default path is unchanged.
+  if (throwOnError) {
+    if (!(await conn.schema.hasTable('annual_prepay_terms'))) return new Set();
+  } else if (!(await annualPrepayTableExists())) return new Set();
   const coverageDate = dateOnly(asOf) || etDateString();
   // Covered = a paid-coverage status, OR a payment_pending term whose invoice is
   // in fact paid (webhook/reconcile lag — activatePaidPendingTerms() is the

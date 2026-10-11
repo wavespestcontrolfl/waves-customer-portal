@@ -12,6 +12,7 @@ import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
 import { UNIT_CHOICES, isOutOfStock } from '../../lib/fast-complete-products';
+import { elapsedSince } from '../../lib/on-site-time';
 import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
@@ -261,6 +262,28 @@ export function SavedView({ service, summary, notice, onCompleted, children }) {
         <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
       </div>
     </div>
+  );
+}
+
+// "Time on-site", as the full form's Complete service page shows it: a small
+// label over the live elapsed time since check-in (h:mm:ss), ticking every
+// second. The page shows the card only when the visit has a check-in time, and so
+// does this: no check-in time, no card. `onSiteAt` is that time (the on-site
+// status-log entry, else checkInTime; see lib/on-site-time.js), passed by Dispatch.
+// Shared by the lawn sheet and (with the Wrap-up) the Tree & Shrub sheet.
+export function TimeOnSite({ since }) {
+  const [elapsed, setElapsed] = useState(() => elapsedSince(since));
+  useEffect(() => {
+    setElapsed(elapsedSince(since));
+    const iv = setInterval(() => setElapsed(elapsedSince(since)), 1000);
+    return () => clearInterval(iv);
+  }, [since]);
+  if (!since) return null;
+  return (
+    <section className="tech-visit-choice-section tech-visit-on-site" aria-label="Time on-site">
+      <h3 className="tech-visit-section-title">Time on-site</h3>
+      <p className="tech-visit-on-site-time">{elapsed}</p>
+    </section>
   );
 }
 
