@@ -35,6 +35,21 @@ describe('every terminal-verdict write stamps processed_at', () => {
     for (const i of hits) expect(src.slice(i, i + 8).join('\n')).toMatch(/processed_at: null,/);
   });
 
+  test('the detached retry-lane push and both recording-reset writes clear the stamp', () => {
+    const read = (f) => fs.readFileSync(path.join(__dirname, f), 'utf8');
+    const retry = src.findIndex((l, i) => l.includes("processing_status: 'extraction_failed',") && src.slice(Math.max(0, i - 8), i).join('\n').includes('lastResortQ'));
+    expect(retry).toBeGreaterThan(0);
+    expect(src.slice(retry, retry + 4).join('\n')).toMatch(/processed_at: null,/);
+    expect(read('../routes/twilio-voice-webhook.js')).toMatch(/write\.processing_status = null;[\s\S]{0,200}write\.processed_at = null;/);
+    expect(read('../routes/admin-call-recordings.js')).toMatch(/processing_status: null,[\s\S]{0,200}processed_at: null,/);
+  });
+
+  test('a not-ready deferral restores the pre-claim stamp with the pre-claim status', () => {
+    const i = src.findIndex((l) => l.includes('processing_status: preClaimStatus,'));
+    expect(i).toBeGreaterThan(0);
+    expect(src.slice(i, i + 5).join('\n')).toMatch(/processed_at: preClaimStatus \? \(call\.processed_at \|\| null\) : null,/);
+  });
+
   test('retry-lane statuses do not stamp', () => {
     for (const status of ['no_transcription', 'extraction_failed']) {
       src.forEach((l, i) => {

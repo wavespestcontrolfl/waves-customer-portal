@@ -3084,6 +3084,8 @@ async function pushCallToRetryLaneAfterQuarantineFailure({
     }
     const pushedRows = await lastResortQ.update({
       processing_status: 'extraction_failed',
+      // A retry-lane row carries no verdict time (Codex #6269 r2).
+      processed_at: null,
       extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
       metadata: db.raw(QUARANTINE_QUEUE_APPEND_SQL, [String(reason), JSON.stringify(quarantineQueueEntry(reason, procGeneration))]),
       updated_at: new Date(),
@@ -10043,6 +10045,9 @@ const CallRecordingProcessor = {
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
       await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
+        // The claim cleared the verdict time; a restored terminal status gets
+        // its own stamp back, a NULL / pending status none (Codex #6269 r2).
+        processed_at: preClaimStatus ? (call.processed_at || null) : null,
         processing_token: null,
         updated_at: new Date(),
       });
