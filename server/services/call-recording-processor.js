@@ -1033,6 +1033,79 @@ function isOutboundCall(call = {}) {
   return String(call.direction || '').toLowerCase().startsWith('outbound');
 }
 
+// A callback (the admin "Call back" action on a voicemail writes
+// metadata.relatedCallId on the outbound row) that reaches a SOLICITOR
+// settles the parent voicemail too: its open Needs Review cards and its open
+// callback promise are nobody's work once the callee turned out to be spam
+// (2026-10-09: the 11:00 voicemail kept 3 cards and a callback task open all
+// day after the 11:38 callback was classified spam). Dark behind
+// GATE_CALLBACK_SPAM_CLOSES_PARENT. Runs AFTER the callback's fenced terminal
+// write, so only a verdict that landed closes anything; fail-soft, the
+// callback's own verdict never depends on it. The parent's processing_status
+// and lead stay as they are: this closes the asks, it does not re-grade the
+// voicemail. Nothing is sent.
+const CALLBACK_PARENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CALLBACK_SPAM_RULE = 'callback_spam';
+function callMetadataObject(call) {
+  try {
+    return typeof call?.metadata === 'string' ? (JSON.parse(call.metadata) || {}) : (call?.metadata || {});
+  } catch (_e) {
+    return {};
+  }
+}
+async function closeParentOnCallbackSpam(call, { callSid = null } = {}) {
+  if (!isEnabled('callbackSpamClosesParent')) return { applied: false, reason: 'gated_off' };
+  if (!isOutboundCall(call)) return { applied: false, reason: 'not_outbound' };
+  const parentId = callMetadataObject(call).relatedCallId;
+  if (!parentId || !CALLBACK_PARENT_UUID_RE.test(String(parentId))) return { applied: false, reason: 'no_parent' };
+  try {
+    return await db.transaction(async (trx) => {
+      const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate().first('id');
+      if (!parent) return { applied: false, reason: 'parent_not_found' };
+      const now = new Date();
+      const cards = await trx('triage_items')
+        .where({ call_log_id: parentId })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({
+          status: 'resolved',
+          resolution_note: 'Closed: the callback reached a solicitor, so the voicemail was spam.',
+          resolution_source: 'auto',
+          resolution_rule: CALLBACK_SPAM_RULE,
+          resolved_at: now,
+          updated_at: now,
+        });
+      const promises = await trx('call_commitments')
+        .where({ call_log_id: parentId, party: 'waves', kind: 'callback', status: 'open' })
+        .update({
+          status: 'dismissed',
+          fulfillment: JSON.stringify({ closed_by: CALLBACK_SPAM_RULE, closed_at: now.toISOString(), callback_call_log_id: call.id }),
+          fulfilled_at: null,
+          updated_at: now,
+        });
+      // Mirror triage-auto-resolve's review_status sync: a call with no
+      // open/in_progress card left takes the status that cleared it.
+      let reviewSynced = false;
+      if (cards > 0) {
+        const remaining = await trx('triage_items').where({ call_log_id: parentId }).whereIn('status', ['open', 'in_progress']).count({ n: '*' }).first();
+        if (Number(remaining?.n || 0) === 0) {
+          await trx('call_log').where({ id: parentId }).update({ review_status: 'resolved', updated_at: now });
+          reviewSynced = true;
+        }
+      }
+      await trx('call_log').where({ id: parentId }).update({
+        metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
+          [JSON.stringify({ spam: true, callback_call_log_id: call.id, at: now.toISOString() })]),
+        updated_at: now,
+      });
+      logger.info(`[call-proc] callback ${maskSid(callSid)} was spam: parent voicemail settled (${cards} card(s) resolved, ${promises} callback promise(s) dismissed${reviewSynced ? ', review closed' : ''})`);
+      return { applied: true, cards, promises, reviewSynced };
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] callback ${maskSid(callSid)} was spam but the parent voicemail could not be settled: ${err.message}`);
+    return { applied: false, reason: 'error', error: err.message };
+  }
+}
+
 // The customer's OWN inbound contact, and recent (owner ruling 2026-09-30: a
 // reply to it is never held to 8 AM). Freshness bound mirrors the dropped-
 // call lane's MAX_CALL_AGE_MS: a retry of a no_transcription row, a 7-day
@@ -10853,6 +10926,9 @@ const CallRecordingProcessor = {
         // this pass finished nothing. See the note on the rejection path.
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // A callback that reached a solicitor settles its parent voicemail
+      // (closeParentOnCallbackSpam, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
+      if (extracted.is_spam) await closeParentOnCallbackSpam(call, { callSid });
       // A previously classified call reprocessed into spam/non-workable
       // must not leave its property_role_confirm card actionable — the
       // office could still one-click property mutations from the
@@ -12492,6 +12568,9 @@ const CallRecordingProcessor = {
         // this pass finished nothing. See the note on the rejection path.
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // A callback that reached a solicitor settles its parent voicemail
+      // (closeParentOnCallbackSpam, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
+      if (extracted.is_spam) await closeParentOnCallbackSpam(call, { callSid });
       // Retire any open property_role_confirm card from a prior pass — the
       // veto blocks every canonical write, so its parked mutations are
       // superseded and must not stay one-click applicable (codex #3418
@@ -23863,6 +23942,10 @@ CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCust
 // same reason as the two promotions above — promoted rather than
 // reimplemented (CLAUDE.md rule 15).
 CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
+
+// Callback-spam parent settlement: on the module surface for its live-PG
+// suite (callback-spam-closes-parent.test.js), which drives it directly.
+CallRecordingProcessor.closeParentOnCallbackSpam = closeParentOnCallbackSpam;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.
