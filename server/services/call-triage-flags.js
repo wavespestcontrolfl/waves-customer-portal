@@ -801,6 +801,9 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 //      an empty record, and only the card gets it reviewed). A new service
 //      ask, a quote, or any time asked, offered or confirmed keeps them all.
 //      out_of_service_area is never touched.
+//   3b. address_unverifiable beside missing_service_address: the model's
+//      flag repeats the deterministic one (no address was given at all), so
+//      the second card is dropped; the routing verdict keeps both flags.
 //   4. caller_not_authorized on a call that asked for no visit time (status
 //      none / canceled) from a caller the owner treats as authorized: a
 //      family member (owner ruling 2026-09-28), a client's own employee, or a
@@ -843,6 +846,14 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
   if (callMakesNoServiceAsk(extraction) && !statedStreet) {
     for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
   }
+  // One address card, not two (2026-10-09 audit: the pair landed on 6 of 16
+  // calls that day). missing_service_address is deterministic: the call gave
+  // no street, city or postal code. The model's address_unverifiable on the
+  // same call says the same thing a second time, so the office saw two cards
+  // for one ask. With a stated street both cards stay (each may carry a
+  // different reading for review). The routing verdict keeps both flags;
+  // only the card goes.
+  if (has('missing_service_address') && !statedStreet) dropped.add('address_unverifiable');
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (SCHEDULING_NO_ASK_STATUSES.has(status)
       && (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)

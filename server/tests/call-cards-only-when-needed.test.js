@@ -31,6 +31,20 @@ describe('dropUnneededCallCards', () => {
     expect(r.flags).toEqual(['reschedule_or_cancel']);
   });
 
+  test('no address given: one address card, not missing_service_address plus address_unverifiable', () => {
+    // A quote request with a street named elsewhere would keep both, but here
+    // the call stated no address at all, so the model's flag repeats the
+    // deterministic one.
+    const r = dropUnneededCallCards(['address_unverifiable', 'missing_service_address', 'low_confidence_address'], ext({ status: 'requested', intent: 'new_service', quoteRequested: true }));
+    expect(r.flags).toEqual(['missing_service_address', 'low_confidence_address']);
+    expect(r.dropped).toEqual(['address_unverifiable']);
+  });
+
+  test('address_unverifiable alone (a street was named but could not be verified) keeps its card', () => {
+    const r = dropUnneededCallCards(['address_unverifiable'], ext({ status: 'requested', intent: 'new_service' }));
+    expect(r.flags).toEqual(['address_unverifiable']);
+  });
+
   test('coordination with no change asked files no card', () => {
     const r = dropUnneededCallCards(['existing_appointment_coordination'], ext({ status: 'none', intent: 'follow_up_existing_service' }));
     expect(r.flags).toEqual([]);
@@ -64,13 +78,13 @@ describe('dropUnneededCallCards', () => {
     expect(dropUnneededCallCards(flags, e).flags).toEqual(flags);
   });
 
-  test('address cards stay on a new-service ask, a quote, or any time asked', () => {
+  test('address cards stay on a new-service ask, a quote, or any time asked (one card when no street was stated)', () => {
     const flags = ['address_unverifiable', 'missing_service_address'];
-    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'active_infestation_treatment' })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'follow_up_existing_service', quoteRequested: true })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: null, quotePromised: true })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'requested', intent: 'follow_up_existing_service' })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'offered', intent: null })).flags).toEqual(flags);
+    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'active_infestation_treatment' })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'follow_up_existing_service', quoteRequested: true })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: null, quotePromised: true })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'requested', intent: 'follow_up_existing_service' })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'offered', intent: null })).flags).toEqual(['missing_service_address']);
   });
 
   test('out_of_service_area is never dropped', () => {
