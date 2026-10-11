@@ -15,6 +15,11 @@ const {
   resolveServerAuthoritativePricing,
   compareClientToServer,
 } = require('../services/admin-estimate-persistence');
+
+// The insert locks the prospective owner (utils/customer-estimate-lock.js); these fakes have no customers to match.
+beforeEach(() => {
+  jest.spyOn(require('../services/recurring-card-on-file'), 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: null, lookupFailed: false });
+});
 const logger = require('../services/logger');
 const { clearAllEstimatePricingCache } = require('../services/estimate-pricing-cache');
 

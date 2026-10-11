@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
   const mockRaws = [];
   const dbFn = jest.fn((table) => {
     const b = { _table: table, _whereIn: null, _whereRaw: [] };
-    for (const m of ['where', 'whereNull', 'whereNotNull', 'forUpdate']) b[m] = jest.fn(() => b);
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'forUpdate', 'forKeyShare']) b[m] = jest.fn(() => b);
     b.whereRaw = jest.fn((sql) => { b._whereRaw.push(sql); mockRaws.push({ table, sql }); return b; });
     b.whereIn = jest.fn((...args) => { b._whereIn = args; return b; });
     b.first = jest.fn(async () => mockLockedRow || { estimate_data: {} });
@@ -183,7 +183,7 @@ describe('extendEstimate validation (pre-write throws)', () => {
     const estimate = { id: 'ordinary', customer_id: 'cust-1', status: 'expired', sent_at: PAST, expires_at: PAST, estimate_data: {} };
     const update = jest.fn(async () => 0);
     const query = { update, first: jest.fn(async () => ({ customer_id: 'cust-1', estimate_data: {} })) };
-    for (const method of ['where', 'whereNull', 'whereRaw', 'whereIn', 'forUpdate', 'modify']) query[method] = jest.fn(() => query);
+    for (const method of ['where', 'whereNull', 'whereRaw', 'whereIn', 'forUpdate', 'forKeyShare', 'modify']) query[method] = jest.fn(() => query);
     const trx = jest.fn(() => query);
     trx.raw = jest.fn(async () => ({}));
     trx.fn = { now: jest.fn(() => 'NOW()') };

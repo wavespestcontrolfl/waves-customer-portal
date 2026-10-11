@@ -161,6 +161,7 @@ function makeDatabase({
       select: () => builder,
       limit: () => builder,
       forUpdate: () => builder,
+      forKeyShare: () => builder,
       first: async () => {
         if (table === 'leads') {
           leadReadCount += 1;

@@ -8746,12 +8746,27 @@ async function pinBookingContact(trx, c) {
   if (rows.length) await trx('activity_log').insert(rows);
 }
 
+// A card-approved booking carrying an action key (req.approvedActionKey, the start_program ledger row) stamps it on every
+// visit it creates, in this transaction: the ledger binds the series to its row by this stamp, never by service name or
+// time. scheduled_services has no metadata column, so the stamp is an activity_log row per visit, like the contact pin.
+async function stampBookingAction(trx, c) {
+  const { STAMP_ACTION } = require('../services/intelligence-bar/start-program-marker');
+  const rows = c.createdAppointments.map((a) => ({
+    customer_id: c.customerId,
+    action: STAMP_ACTION,
+    description: `Visit ${a.id} was booked by a program start; the program ledger finds the series by this stamp.`,
+    metadata: JSON.stringify({ scheduled_service_id: a.id, action_key: c.req.approvedActionKey }),
+  }));
+  if (rows.length) await trx('activity_log').insert(rows);
+}
+
 const IN_TRANSACTION_HOOKS = [
   { when: (c) => c.req.body.prepaid && c.isRecurring, run: stampPrepaidSeries },
   { when: (c) => c.isRecurring && (!c.linkedEstimateId || c.acceptEstimateOnBook), run: stampDirectRodentSetup },
   { when: (c) => c.isRecurring && c.linkedEstimateId && !c.acceptEstimateOnBook, run: stampAcceptedEstimateRodentSetup },
   { when: (c) => c.isRecurring, run: syncSeriesWaveGuardPlan },
   { when: (c) => typeof c.req.approvedContact === 'string', run: pinBookingContact },
+  { when: (c) => typeof c.req.approvedActionKey === 'string', run: stampBookingAction },
 ];
 
 async function runInTransactionHooks(trx, c) {
@@ -10586,11 +10601,11 @@ async function scheduleCreateHandler(req, res, next) {
 // approvedContact: the recipient key (booking-contact-state.js) the card pinned; CONTACT_CHANGED on any difference under the
 // lock, and the deferred confirmation and welcome re-check it before they send. approvedWelcomeContact: the account-level welcome key
 // (the confirmation key is property-scoped). approvedNotCommercial: COMMERCIAL_CHANGED if the account became commercial.
-// approvedLedgerPin: LEDGER_CHANGED if the monthly bill lines moved.
+// approvedLedgerPin: LEDGER_CHANGED if the monthly bill lines moved. approvedActionKey: stamped on every created visit (start_program ledger). approvedCatalog: CATALOG_CHANGED if the catalog row moved.
 async function createScheduleBooking({
   body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling,
   approvedVisitDates, approvedNoOpenEstimate, approvedWelcome, approvedConsultations, approvedContact, approvedWelcomeContact,
-  approvedNotCommercial, approvedLedgerPin,
+  approvedNotCommercial, approvedLedgerPin, approvedActionKey, approvedCatalog,
 }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
@@ -10603,6 +10618,8 @@ async function createScheduleBooking({
     ...(Array.isArray(approvedConsultations) ? { approvedConsultations } : {}),
     ...(typeof approvedContact === 'string' ? { approvedContact } : {}),
     ...(typeof approvedWelcomeContact === 'string' ? { approvedWelcomeContact } : {}),
+    ...(typeof approvedActionKey === 'string' ? { approvedActionKey } : {}),
+    ...(typeof approvedCatalog === 'string' ? { approvedCatalog } : {}),
     ...(approvedNotCommercial === true ? { approvedNotCommercial: true } : {}),
     ...(typeof approvedLedgerPin === 'string' ? { approvedLedgerPin } : {}),
     ...(approvedNoOpenEstimate === true ? { approvedNoOpenEstimate: true } : {}),

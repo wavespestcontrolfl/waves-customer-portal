@@ -522,6 +522,7 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     const writeBuilder = makeBuilder({ first: estimate });
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
     writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.forKeyShare = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
     // freshness re-read: concurrent decline resolved the row
     const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
@@ -553,6 +554,7 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     const writeBuilder = makeBuilder({ first: estimate });
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
     writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.forKeyShare = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
     const freshBuilder = makeBuilder({ first: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price' } });
     const trx = jest.fn(() => writeBuilder);
@@ -571,6 +573,7 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     const writeBuilder = makeBuilder({ first: locked });
     writeBuilder.whereNotNull = jest.fn(() => writeBuilder);
     writeBuilder.forUpdate = jest.fn(() => writeBuilder);
+    writeBuilder.forKeyShare = jest.fn(() => writeBuilder);
     writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: snapshot.id }]) }));
     const trx = jest.fn(() => writeBuilder);
     trx.raw = jest.fn(async () => ({}));

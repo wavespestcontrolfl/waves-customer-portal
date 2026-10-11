@@ -41,6 +41,7 @@ function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
       whereRaw() { return q; },
       orderBy() { return q; },
       forUpdate() { q._forUpdate = true; return q; },
+      forKeyShare() { return q; },
       noWait() { q._noWait = true; ops.noWaitLocks.push({ table, forUpdate: !!q._forUpdate }); return q; },
       // Awaiting the bare chain (the prior-mint lineage query) resolves the
       // row LIST for estimates.

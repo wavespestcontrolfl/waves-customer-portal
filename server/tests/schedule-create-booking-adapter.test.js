@@ -70,7 +70,7 @@ const SVC = {
 function chain(row) {
   const builder = {};
   const self = () => builder;
-  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'forUpdate', 'forShare', 'returning', 'leftJoin', 'join', 'groupBy', 'distinct', 'andWhere', 'orWhere', 'modify', 'clone']) {
+  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'forUpdate', 'forShare', 'forKeyShare', 'returning', 'leftJoin', 'join', 'groupBy', 'distinct', 'andWhere', 'orWhere', 'modify', 'clone']) {
     builder[m] = jest.fn(self);
   }
   builder.first = jest.fn().mockResolvedValue(row);
@@ -243,11 +243,34 @@ describe('createScheduleBooking runs the POST / handler', () => {
       spy.mockRestore();
     });
 
+    test('the booking transaction stamps the ledger action key on each created visit; a booking without a key writes no stamp (round 12)', async () => {
+      const stamps = [];
+      const baseTransaction = db.transaction.getMockImplementation();
+      db.transaction = jest.fn(async (cb) => baseTransaction(async (trx) => {
+        const wrapped = jest.fn((table) => {
+          const c = trx(table);
+          if (table === 'activity_log') c.insert = jest.fn(async (rows) => { stamps.push(...[].concat(rows)); return [1]; });
+          return c;
+        });
+        Object.assign(wrapped, trx);
+        return cb(wrapped);
+      }));
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedActionKey: 'v1:phase-1' })).status).toBe(201);
+      const mine = stamps.filter((r) => r.action === 'booking_action_stamp');
+      expect(mine).toHaveLength(1);
+      expect(mine[0]).toMatchObject({ customer_id: 'cust-1' });
+      expect(JSON.parse(mine[0].metadata)).toEqual({ scheduled_service_id: 'new-1', action_key: 'v1:phase-1' });
+      stamps.length = 0;
+      expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
+      expect(stamps.filter((r) => r.action === 'booking_action_stamp')).toEqual([]);
+    });
+
     test('the pin stores the stamped property, and the adapter threads the round 11 pins to the rails (round 11)', async () => {
       const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
       expect(src).toContain('property_id: c.req.approvedServiceAnchor?.propertyId || null');
       expect(src).toContain("...(typeof approvedWelcomeContact === 'string' ? { approvedWelcomeContact } : {})");
       expect(src).toContain('...(approvedNotCommercial === true ? { approvedNotCommercial: true } : {})');
+      expect(src).toContain("...(typeof approvedCatalog === 'string' ? { approvedCatalog } : {})");
       expect(src).toContain("...(typeof approvedLedgerPin === 'string' ? { approvedLedgerPin } : {})");
       // The send-time check reads the confirmation key for the stamped property and the welcome key for the account.
       expect(src).toContain("currentContactKey(c.customerId, { propertyId: c.req.approvedServiceAnchor?.propertyId || null })");

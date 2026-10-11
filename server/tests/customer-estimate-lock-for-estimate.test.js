@@ -8,7 +8,14 @@ const RecurringCof = require('../services/recurring-card-on-file');
 const { lockCustomerEstimatesForEstimate } = require('../utils/customer-estimate-lock');
 
 const keys = (trx) => trx.raw.mock.calls.map((c) => c[1][0]);
-const makeTrx = () => ({ raw: jest.fn(async () => ({})) });
+// The customer row share (FOR KEY SHARE) comes first, then the advisory lock; `rows` records the customer rows locked.
+const makeTrx = () => {
+  const rows = [];
+  const trx = jest.fn((table) => ({ where: ({ id }) => ({ forKeyShare: () => ({ first: async () => { rows.push(`${table}:${id}`); return { id }; } }) }) }));
+  trx.raw = jest.fn(async () => ({}));
+  trx.rows = rows;
+  return trx;
+};
 
 afterEach(() => jest.restoreAllMocks());
 
@@ -45,4 +52,26 @@ test('a failed lookup still locks the linked customer; no owner and no link lock
   RecurringCof.resolveProspectiveAcceptCustomer.mockResolvedValue({ customerId: null, lookupFailed: false });
   await lockCustomerEstimatesForEstimate(empty, { id: 'e2', customer_id: null });
   expect(empty.raw).not.toHaveBeenCalled();
+});
+
+test('a failed lookup (a throw or lookupFailed) locks the known linked owner and does not abort; an ownerless estimate fails closed', async () => {
+  const linked = makeTrx();
+  const resolver = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: null, lookupFailed: true });
+  await lockCustomerEstimatesForEstimate(linked, { id: 'e1', customer_id: 'cust-a' });
+  expect(keys(linked)).toEqual(['customer-estimates:cust-a']);
+  const ownerless = makeTrx();
+  await expect(lockCustomerEstimatesForEstimate(ownerless, { id: 'e2', customer_id: null })).rejects.toMatchObject({ code: 'ESTIMATE_OWNER_UNVERIFIED', statusCode: 503 });
+  resolver.mockRejectedValue(new Error('db down'));
+  await expect(lockCustomerEstimatesForEstimate(makeTrx(), { id: 'e3' })).rejects.toMatchObject({ code: 'ESTIMATE_OWNER_UNVERIFIED' });
+  expect(ownerless.raw).not.toHaveBeenCalled();
+});
+
+test('every customer row is share-locked before any advisory lock, rows and locks both in sorted order', async () => {
+  const trx = makeTrx();
+  const order = [];
+  trx.mockImplementation((table) => ({ where: ({ id }) => ({ forKeyShare: () => ({ first: async () => { order.push(`row:${id}`); return { id }; } }) }) }));
+  trx.raw.mockImplementation(async (_sql, [key]) => { order.push(`adv:${key.split(':')[1]}`); });
+  jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'cust-a', lookupFailed: false });
+  await lockCustomerEstimatesForEstimate(trx, { id: 'e1', customer_id: 'cust-z' });
+  expect(order).toEqual(['row:cust-a', 'row:cust-z', 'adv:cust-a', 'adv:cust-z']);
 });

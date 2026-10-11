@@ -92,11 +92,11 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(body).toContain("code: 'estimate_owner_changed'");
   });
 
-  test('the reopen-site lock aborts, locking nothing, when the prospective owner lookup fails (round 11)', async () => {
+  test('the reopen-site lock aborts, locking nothing, when an OWNERLESS estimate owner lookup fails (round 11)', async () => {
     const RecurringCof = require('../services/recurring-card-on-file');
     const spy = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: null, lookupFailed: true });
     const trx = { raw: jest.fn() };
-    await expect(require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { id: 'e1', customer_id: 'cust-1' }))
+    await expect(require('../utils/customer-estimate-lock').lockCustomerEstimatesForEstimate(trx, { id: 'e1', customer_id: null }))
       .rejects.toMatchObject({ code: 'ESTIMATE_OWNER_UNVERIFIED', statusCode: 503 });
     expect(trx.raw).not.toHaveBeenCalled();
     spy.mockRestore();
@@ -135,5 +135,45 @@ describe('customer estimate lock order (row lock first, then the leaf lock)', ()
     expect(lock).toBeGreaterThan(-1);
     expect(insert).toBeGreaterThan(lock);
     expect(src.slice(0, lock)).toMatch(/resolveProspectiveAcceptCustomer\(/);
+  });
+});
+
+// Round 12: the customer ROW (FOR KEY SHARE) comes before the advisory lock at every site. The helper does it for all of
+// its callers; the sites below are the ones that INSERT or revive an estimate and so meet the customer foreign key.
+describe('customer row first, then the estimate advisory lock (round 12)', () => {
+  const INSERT_SITES = [
+    ['lead webhook estimate insert', '../routes/lead-webhook', "lockCustomerEstimates(trx, customer.id);\n          const [estimateRow] = await trx('estimates').insert({"],
+    ['lead intake', '../services/lead-intake', 'lockCustomerEstimates(trx, customer.id)'],
+    ['lead response tools', '../services/lead-response-tools', 'lockCustomerEstimates(trx, input.customer_id)'],
+    ['public quote draft', '../routes/public-quote', 'lockCustomerEstimates(trx, customerId)'],
+    ['one-tap purchase', '../services/one-tap-purchase', 'lockCustomerEstimates(trx, customerId)'],
+    ['admin estimate persistence', '../services/admin-estimate-persistence', 'lockCustomerEstimatesForEstimate(trx, writeFields)'],
+    ['email lead draft', '../services/email/email-actions', 'lockCustomerEstimates(trx, prospectiveOwnerId)'],
+    ['estimate tools (recognized)', '../services/intelligence-bar/estimate-tools', 'lockCustomerEstimates(trx, recognizedCustomerId)'],
+    ['estimate tools (account pricing)', '../services/intelligence-bar/estimate-tools', 'lockCustomerEstimates(trx, accountPricing.customerId || null)'],
+    ['estimator draft builder', '../services/estimator-engine/draft-builder', 'lockCustomerEstimates(trx,'],
+    ['booking predraft', '../services/estimator-engine/booking-predraft', 'lockCustomerEstimates(trx, customer.id)'],
+    ['click estimate mint', '../services/service-report/click-estimate-mint', 'lockCustomerEstimates(trx, freshCustomer.id)'],
+    ['cancellation restart', '../services/cancellation-resolution/restart', 'lockCustomerEstimates(trx, fresh.id)'],
+  ];
+  test.each(INSERT_SITES)('%s takes the lock through the shared helper (which shares the customer row first)', (name, rel, anchor) => {
+    const src = read(rel);
+    expect(src).toContain(anchor);
+    expect(src).not.toMatch(/hashtextextended\(\?, 0\)[^]{0,80}customer-estimates:/);
+  });
+  test('the lead webhook locks the customer before the estimate insert, with nothing between that touches estimates', () => {
+    const src = read('../routes/lead-webhook');
+    const at = src.indexOf("lockCustomerEstimates(trx, customer.id);\n          const [estimateRow] = await trx('estimates').insert({");
+    expect(at).toBeGreaterThan(-1);
+  });
+  test('the helper share-locks every customer row BEFORE the first advisory lock', () => {
+    const src = read('../utils/customer-estimate-lock');
+    const fn = src.slice(src.indexOf('async function lockCustomersThenEstimates'));
+    expect(fn.indexOf('forKeyShare()')).toBeGreaterThan(-1);
+    expect(fn.indexOf('forKeyShare()')).toBeLessThan(fn.indexOf('pg_advisory_xact_lock'));
+  });
+  test('the rails lock the customer row FOR UPDATE ahead of the estimate lock', () => {
+    const src = read('../services/scheduling/approved-booking-rails');
+    expect(src.indexOf('.forUpdate().first')).toBeLessThan(src.indexOf('lockCustomerEstimates(trx, ctx.customerId)'));
   });
 });

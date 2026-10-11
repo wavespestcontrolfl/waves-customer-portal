@@ -36,6 +36,15 @@ const BILLING_FINGERPRINT_COLS = ['payer_id', 'billing_mode', 'per_application_f
 // a change under the lock must refuse. Only this rail compares them: page bookings keep BILLING_FINGERPRINT_COLS.
 const PLAN_SYNC_FINGERPRINT_COLS = ['waveguard_tier_source', 'active', 'pipeline_stage', 'member_since', 'deleted_at'];
 const CARD_BILLING_COLS = [...BILLING_FINGERPRINT_COLS, ...PLAN_SYNC_FINGERPRINT_COLS];
+// The catalog row the card was built on (start_program's resolveProgramService reads these columns). The fingerprint is
+// one string, so a rename, a re-key, a deactivation, a duration or cadence edit, or any updated_at bump refuses.
+const CATALOG_COLS = ['id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'default_duration_minutes', 'frequency', 'visits_per_year', 'updated_at'];
+function catalogFingerprint(row) {
+  if (!row) return null;
+  const cell = (v) => (v instanceof Date ? v.toISOString() : (v ?? null));
+  return JSON.stringify([...CATALOG_COLS.map((c) => cell(row[c])), row.is_active !== false]);
+}
+
 const ADDRESS_COLS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
 function httpError(status, message) {
@@ -72,6 +81,17 @@ const RAILS = [
       await trx('customers').where({ id: ctx.customerId }).first('waveguard_tier', 'property_type'),
     ),
     approved: () => false,
+  },
+  {
+    // The catalog service the card named: same row, same name and key, still active, same duration and cadence, same
+    // updated_at. The row is share-locked first so a catalog edit waits for this booking instead of slipping between
+    // the read and the visit inserts.
+    code: 'CATALOG_CHANGED',
+    message: 'The service catalog entry changed since the card was shown. Nothing was booked.',
+    applies: (ctx) => typeof ctx.req.approvedCatalog === 'string' && !!ctx.req.body?.serviceId,
+    lock: (trx, ctx) => trx('services').where({ id: ctx.req.body.serviceId }).forShare().first('id'),
+    read: async (trx, ctx) => catalogFingerprint(await trx('services').where({ id: ctx.req.body.serviceId }).first(...CATALOG_COLS, 'is_active')),
+    approved: (ctx) => ctx.req.approvedCatalog,
   },
   {
     // The monthly bill lines the card was built on: the ledger pin (rate and every plan-rate line). The billing
@@ -245,4 +265,4 @@ async function runApprovedBookingRails(trx, ctx, rails = RAILS) {
   }
 }
 
-module.exports = { RAILS, runApprovedBookingRails, BILLING_FINGERPRINT_COLS, PLAN_SYNC_FINGERPRINT_COLS, CARD_BILLING_COLS };
+module.exports = { catalogFingerprint, CATALOG_COLS, RAILS, runApprovedBookingRails, BILLING_FINGERPRINT_COLS, PLAN_SYNC_FINGERPRINT_COLS, CARD_BILLING_COLS };

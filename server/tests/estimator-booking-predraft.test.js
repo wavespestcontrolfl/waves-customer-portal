@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
       orderBy() { return builder; },
       select() { return builder; },
       forUpdate() { mockState.forUpdates.push(table); return builder; },
+      forKeyShare() { return builder; },
       first: async () => {
         if (mockState.firstError) { const e = mockState.firstError; mockState.firstError = null; throw e; }
         return mockState.firstQueue.length ? mockState.firstQueue.shift() : null;

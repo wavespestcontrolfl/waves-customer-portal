@@ -124,6 +124,8 @@ function bookWithPlanSync(reply) {
   });
 }
 
+// The visits the booking transaction stamped with the ledger's action key (the booking mock does not run the real handler).
+let stamped;
 let contactState;
 function contactStateFixture(overrides = {}) {
   return {
@@ -150,6 +152,8 @@ beforeEach(() => {
     technicians: [{ id: TECH_ID, name: 'Sam Tech', employment_status: 'active', field_dispatchable: true, active: true }],
     estimates: [],
   };
+  stamped = ['visit-1'];
+  jest.spyOn(require('../services/intelligence-bar/start-program-marker'), 'stampedVisitIds').mockImplementation(async () => stamped);
   contactState = contactStateFixture();
   jest.spyOn(BookingContact, 'bookingContactState').mockImplementation(async () => contactState);
   fakeDb();
@@ -345,6 +349,15 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     expect(args.approvedWelcomeContact).toBe(BookingContact.welcomeKey(contactStateFixture()));
     expect(args.approvedLedgerPin).toBe('41.33|pest_control=41.33');
     expect(args.approvedNotCommercial).toBe(true);
+  });
+
+  test('the booking carries the catalog pin, and a CATALOG_CHANGED refusal is preview_changed (round 12)', async () => {
+    const version = (await run(BASE_INPUT))._version;
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'The service catalog entry changed since the card was shown. Nothing was booked.', code: 'CATALOG_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
+    const { catalogFingerprint } = require('../services/scheduling/approved-booking-rails');
+    expect(createScheduleBooking.mock.calls[0][0].approvedCatalog).toBe(catalogFingerprint(tables.services.find((r) => r.id === 'svc-lawn')));
+    expect(result).toMatchObject({ preview_changed: true, nothing_changed: true, code: 'CATALOG_CHANGED' });
   });
 
   test('a property override that changes who the confirmation reaches changes the card version', async () => {
@@ -935,15 +948,20 @@ describe('commit', () => {
     });
   });
 
-  describe('phase row and resume (rounds 10 and 11)', () => {
+  describe('phase ledger (rounds 10 to 12): a ledger only, no replay of the stored bill', () => {
+    const Marker = require('../services/intelligence-bar/start-program-marker');
     const rowInserts = () => writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'insert');
     const rowUpdates = () => writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'update');
     const auditPhases = () => writes.filter((w) => w.table === 'audit_log' && w.op === 'insert').map((w) => w.data.metadata.phase);
+    const ago = (minutes) => new Date(Date.now() - minutes * 60 * 1000).toISOString();
     // The fake ignores where clauses, so a row only reaches the lookup when the test stages it as an OPEN row.
-    const phaseRow = (insert, phase = 'booked_pending_bill', createdAt = '2026-10-11T10:00:00Z') => ({
-      id: insert.data.id, tool: 'start_program', customer_id: CUSTOMER_ID, created_at: createdAt, phase, payload: insert.data.payload,
+    const phaseRow = (overrides = {}) => ({
+      id: 'phase-1', tool: 'start_program', customer_id: CUSTOMER_ID, action_key: 'v1:phase-1', created_at: ago(2), phase: 'booking',
+      payload: JSON.stringify({ target: { customerName: 'Dana Example' } }), ...overrides,
     });
-    // A first run whose bill step fails after the visits are booked: leaves the row open.
+    // The stamped visits the booking transaction wrote (the booking mock does not run the real handler).
+    // (`stamped` is the file-level fixture: ['visit-1'] unless a test empties it.)
+    // A first run whose bill step fails after the visits are booked: leaves the row booked_pending_bill.
     async function interruptedFirstRun() {
       const version = await approvedVersion();
       bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
@@ -953,7 +971,7 @@ describe('commit', () => {
       return rowInserts()[0];
     }
 
-    test('the phase row is written before the booking is attempted, with an append-only audit event', async () => {
+    test('the phase row is written before the booking, and its action_key is handed to the booking to stamp on the visits', async () => {
       const version = await approvedVersion();
       let insertsAtBooking = null;
       createScheduleBooking.mockImplementation(async () => {
@@ -966,22 +984,30 @@ describe('commit', () => {
       const row = rowInserts()[0].data;
       expect(row).toMatchObject({ tool: 'start_program', customer_id: CUSTOMER_ID, phase: 'booking' });
       expect(row.action_key).toBe(`${JSON.parse(row.payload).target.version}:${row.id}`);
-      expect(JSON.parse(row.payload).target).toMatchObject({ customerId: CUSTOMER_ID, tier: 'Silver', bill: { totalAfter: 102.66 } });
+      expect(createScheduleBooking.mock.calls[0][0].approvedActionKey).toBe(row.action_key);
       expect(writes.some((w) => w.table === 'audit_log' && w.op === 'update')).toBe(false);
       expect(writes.find((w) => w.table === 'audit_log').data).toMatchObject({ action: 'start_program.phase', resource_type: 'ib_action_phase', resource_id: row.id });
     });
 
-    test('the row moves to booked_pending_bill after the booking and to billed inside the bill transaction', async () => {
+    test('the row moves to booked_pending_bill only when stamped visits exist, and to billed inside the bill transaction', async () => {
       const version = await approvedVersion();
       bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
       await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
-      const updates = rowUpdates();
-      expect(updates).toHaveLength(2);
-      expect(updates[0].data.phase).toBe('booked_pending_bill');
-      expect(updates[1].data.phase).toBe('billed');
+      expect(Marker.stampedVisitIds).toHaveBeenCalledWith(rowInserts()[0].data.action_key);
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['booked_pending_bill', 'billed']);
       const order = writes.map((w) => `${w.table}:${w.op}`);
       expect(order.lastIndexOf('customers:update')).toBeLessThan(order.lastIndexOf('ib_action_phases:update'));
       expect(auditPhases()).toEqual(['booking', 'booked_pending_bill', 'billed']);
+    });
+
+    test('a booking that reports success but left no stamped visit is an unknown outcome: no bill step, the row stays booking', async () => {
+      stamped = [];
+      const version = await approvedVersion();
+      bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result.outcome_unknown).toBe(true);
+      expect(rowUpdates()).toEqual([]);
+      expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
     });
 
     test('a refused booking abandons the row; an unexpected booking error leaves it open', async () => {
@@ -998,110 +1024,152 @@ describe('commit', () => {
 
     test('a phase row that cannot be written books nothing', async () => {
       const version = await approvedVersion();
-      jest.spyOn(require('../services/intelligence-bar/start-program-marker'), 'writeMarker').mockRejectedValue(new Error('disk full'));
+      jest.spyOn(Marker, 'writeMarker').mockRejectedValue(new Error('disk full'));
       const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
       expect(result).toMatchObject({ code: 'program_marker_failed' });
       expect(createScheduleBooking).not.toHaveBeenCalled();
     });
 
-    test('an interrupted bill step resumes on the next card instead of refusing because the series exists', async () => {
+    test('an interrupted bill step leaves the row booked_pending_bill, and the next start is refused with the hand-set instruction', async () => {
       const insert = await interruptedFirstRun();
-      // The next ask: the series exists (the planner would refuse), the row is open.
       createScheduleBooking.mockReset();
       writes = [];
-      tables.ib_action_phases = [phaseRow(insert)];
-      const preview = await run(BASE_INPUT);
-      expect(preview).toMatchObject({ preview: true, resume: true, notifies_customer: false });
-      expect(preview.tier).toEqual({ before: 'Bronze', after: 'Silver' });
-      expect(preview.bill).toEqual({ total_before: 41.33, total_after: 102.66 });
-      expect(typeof preview._version).toBe('string');
-      // The lookup ran under the customer row lock (the lock the booking takes), before it read the phase rows.
+      tables.ib_action_phases = [phaseRow({ id: insert.data.id, action_key: insert.data.action_key, phase: 'booked_pending_bill' })];
+      for (const ctx of [{}, { confirmed: true }]) {
+        const refused = await run(BASE_INPUT, ctx);
+        expect(refused).toMatchObject({ code: 'program_bill_step_owed', nothing_changed: true });
+        expect(refused.error).toContain('Set the tier and monthly bill by hand on the customer page, then mark this done.');
+      }
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+      expect(nonMarkerWrites()).toEqual([]);
+      // The lookup ran under the customer row lock, before it read the phase rows.
       const lockAt = calls.findIndex((c) => c.table === 'customers' && c.method === 'forUpdate');
       const readAt = calls.findIndex((c) => c.table === 'ib_action_phases' && c.method === 'whereIn');
       expect(lockAt).toBeGreaterThan(-1);
       expect(lockAt).toBeLessThan(readAt);
-      // Confirmed with the resume card's version: the stored bill step runs, nothing is booked.
-      const done = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
-      expect(done).toMatchObject({ success: true, resumed: true, tier: { after: 'Silver' }, monthly_bill: { before: 41.33, after: 102.66 } });
-      expect(createScheduleBooking).not.toHaveBeenCalled();
-      expect(writes.find((w) => w.table === 'customers' && w.op === 'update').data).toMatchObject({ waveguard_tier: 'Silver', monthly_rate: 102.66 });
-      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['billed']);
-      expect(PlanRateLedger.setLineForScalarWrite).toHaveBeenLastCalledWith(expect.anything(), CUSTOMER_ID,
-        { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 102.66 }, { source: 'ib_update' });
     });
 
-    test('resume refuses a stale card version, and an earlier landed commit is reported done without a second write', async () => {
-      const insert = await interruptedFirstRun();
-      writes = [];
-      tables.ib_action_phases = [phaseRow(insert)];
-      const stale = await run({ ...BASE_INPUT, _verified_program_version: 'old-card' }, { confirmed: true });
-      expect(stale.preview_changed).toBe(true);
-      expect(nonMarkerWrites()).toEqual([]);
-      // The earlier commit actually landed (ack lost): row and lines are at the target.
-      const preview = await run(BASE_INPUT);
-      tables.customers = [memberCustomer({ waveguard_tier: 'Silver', waveguard_tier_source: 'manual', monthly_rate: 102.66 })];
-      PlanRateLedger.loadComponents.mockResolvedValue([{ family_key: 'pest_control', monthly_rate: '41.33' }, { family_key: 'lawn_care', monthly_rate: '61.33' }]);
-      const done = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
-      expect(done).toMatchObject({ success: true, resumed: true });
-      expect(done.message).toContain('already landed');
-      expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+    test('the series is found by the stamp alone: the action_key on activity_log, joined to the visit rows, never by name or time', async () => {
+      Marker.stampedVisitIds.mockRestore();
+      tables.activity_log = [{ metadata: { scheduled_service_id: 'visit-1', action_key: 'v1:phase-1' } }, { metadata: JSON.stringify({ scheduled_service_id: 'visit-2', action_key: 'v1:phase-1' }) }];
+      tables.scheduled_services = [{ id: 'visit-1' }];
+      expect(await Marker.stampedVisitIds('v1:phase-1')).toEqual(['visit-1']);
+      const where = calls.filter((c) => c.table === 'activity_log' && c.method === 'whereRaw');
+      expect(where[0].args).toEqual(["metadata->>'action_key' = ?", ['v1:phase-1']]);
+      expect(calls.some((c) => c.table === 'scheduled_services' && ['where', 'whereRaw'].includes(c.method))).toBe(false);
+      tables.activity_log = [];
+      expect(await Marker.stampedVisitIds('v1:phase-1')).toEqual([]);
     });
 
-    test('a completed row is not open, so the next card is the normal one', async () => {
-      await interruptedFirstRun();
-      tables.ib_action_phases = []; // the lookup selects open phases only
-      const preview = await run(BASE_INPUT);
-      expect(preview.resume).toBeUndefined();
+    test('there is no resume path: no resume card, no stored-bill replay', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/intelligence-bar/start-program'), 'utf8');
+      for (const gone of ['commitResume', 'resumePreview', 'resumeReceipt', 'planFromMarker', 'resumeVersion', 'findResumable']) expect(src).not.toContain(gone);
+      expect(Marker.findResumable).toBeUndefined();
     });
 
-    test('a booking row older than 30 minutes with no series is abandoned and the normal card follows', async () => {
-      const insert = await interruptedFirstRun();
-      writes = [];
-      tables.ib_action_phases = [phaseRow(insert, 'booking', new Date(Date.now() - 31 * 60 * 1000).toISOString())];
-      tables.scheduled_services = [];
+    test('an owed row clears when the office marks its alert done, and expires after 24 hours', async () => {
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', payload: JSON.stringify({ target: {}, alert_id: 'n1' }) })];
+      tables.notifications = [{ id: 'n1', done_at: ago(1) }];
       const preview = await run(BASE_INPUT);
-      expect(preview.resume).toBeUndefined();
+      expect(preview.preview).toBe(true);
       expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
       expect(auditPhases()).toEqual(['abandoned']);
+      writes = [];
+      tables.notifications = [{ id: 'n1', done_at: null }];
+      expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_bill_step_owed' });
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', created_at: ago(25 * 60) })];
+      expect((await run(BASE_INPUT)).preview).toBe(true);
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
     });
 
-    test('a booking row inside the 30 minute window stays pending: a concurrent request waits, never abandons it', async () => {
-      const insert = await interruptedFirstRun();
-      writes = [];
-      createScheduleBooking.mockReset();
-      tables.ib_action_phases = [phaseRow(insert, 'booking', new Date(Date.now() - 2 * 60 * 1000).toISOString())];
-      tables.scheduled_services = [];
+    test('a booking row inside the 30 minute window with no stamped visits refuses program_start_in_progress and changes nothing', async () => {
+      stamped = [];
+      tables.ib_action_phases = [phaseRow({ created_at: ago(2) })];
       const result = await run(BASE_INPUT);
-      expect(result).toMatchObject({ code: 'program_start_in_progress' });
+      expect(result).toMatchObject({ code: 'program_start_in_progress', nothing_changed: true });
       expect(rowUpdates()).toEqual([]);
       expect(createScheduleBooking).not.toHaveBeenCalled();
     });
 
-    test('a booking row whose series now exists becomes booked_pending_bill and resumes', async () => {
-      const insert = await interruptedFirstRun();
-      writes = [];
-      tables.ib_action_phases = [phaseRow(insert, 'booking', new Date(Date.now() - 2 * 60 * 1000).toISOString())];
-      tables.scheduled_services = [{ id: 'visit-1' }];
-      const preview = await run(BASE_INPUT);
-      expect(preview).toMatchObject({ resume: true });
+    test('a booking row whose stamped visits exist becomes booked_pending_bill and the start is refused as owed', async () => {
+      tables.ib_action_phases = [phaseRow({ created_at: ago(2) })];
+      const result = await run(BASE_INPUT);
+      expect(result).toMatchObject({ code: 'program_bill_step_owed' });
       expect(rowUpdates().map((w) => w.data.phase)).toEqual(['booked_pending_bill']);
     });
 
-    test('the stale-row sweep raises one bell for a row open past 10 minutes, then stamps alerted_at', async () => {
-      const Marker = require('../services/intelligence-bar/start-program-marker');
+    test('a booking row older than 30 minutes with no stamped visits is abandoned with one bell, and the normal card follows', async () => {
+      stamped = [];
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n9' });
+      tables.ib_action_phases = [phaseRow({ created_at: ago(31) })];
+      const preview = await run(BASE_INPUT);
+      expect(preview.preview).toBe(true);
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
+      expect(alert).toHaveBeenCalledTimes(1);
+      expect(alert.mock.calls[0][1].why).toBe('A program start for Dana Example may not have finished; check the schedule.');
+      expect(alert.mock.calls[0][2]).toMatchObject({ bell: true, dedupeKey: 'start-program-unfinished:phase-1' });
+    });
+
+    test('an unreadable ledger refuses (retryable) and never falls through to planning', async () => {
+      db.transaction.mockImplementationOnce(async () => { throw new Error('connection reset'); });
+      const result = await run(BASE_INPUT);
+      expect(result).toMatchObject({ code: 'program_marker_unreadable', nothing_changed: true });
+      expect(result.preview).toBeUndefined();
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['no action_key', { action_key: null }],
+      ['an unknown phase', { phase: 'weird' }],
+      ['bad payload JSON', { payload: '{not json' }],
+      ['no payload', { payload: null }],
+      ['an unreadable created_at', { created_at: 'not a date' }],
+    ])('a malformed row (%s) refuses program_marker_unreadable', async (_name, overrides) => {
+      tables.ib_action_phases = [phaseRow(overrides)];
+      const result = await run(BASE_INPUT, { confirmed: true });
+      expect(result).toMatchObject({ code: 'program_marker_unreadable' });
+      expect(createScheduleBooking).not.toHaveBeenCalled();
+      expect(rowUpdates()).toEqual([]);
+    });
+
+    test('the stale-row sweep rings the bill-owed bell once for a booked_pending_bill row, stores the alert id, and stamps alerted_at', async () => {
       const AdminAlert = require('../services/admin-alert-compose');
       const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
-      const insert = await interruptedFirstRun();
-      writes = [];
-      tables.ib_action_phases = [phaseRow(insert)];
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', created_at: ago(11) })];
       expect(await Marker.sweepStalePending()).toBe(1);
-      expect(alert).toHaveBeenCalledWith('billing', expect.objectContaining({ severity: 'needs-you', subject: { type: 'customer', id: CUSTOMER_ID } }),
-        expect.objectContaining({ dedupeKey: `start-program-pending-bill:${insert.data.id}`, bell: true }));
-      expect(rowUpdates()[0].data.alerted_at).toBeInstanceOf(Date);
+      expect(alert).toHaveBeenCalledWith('billing', expect.objectContaining({
+        action: 'Program bill not set', severity: 'needs-you', who: 'person', subject: { type: 'customer', id: CUSTOMER_ID },
+        why: 'A program start for Dana Example booked its visits, but the bill update did not finish.',
+      }), expect.objectContaining({
+        dedupeKey: 'start-program-pending-bill:phase-1', bell: true,
+        detail: 'A program start for Dana Example booked its visits but the monthly bill update did not finish. Set the tier and monthly bill by hand on the customer page, then mark this done.',
+      }));
+      const update = rowUpdates()[0].data;
+      expect(update.alerted_at).toBeInstanceOf(Date);
       expect(calls.some((c) => c.table === 'ib_action_phases' && c.method === 'whereNull' && c.args[0] === 'alerted_at')).toBe(true);
       const cutoff = calls.find((c) => c.table === 'ib_action_phases' && c.method === 'where' && c.args[0] === 'created_at');
       expect(cutoff.args[1]).toBe('<');
       expect(Date.now() - cutoff.args[2].getTime()).toBeGreaterThanOrEqual(Marker.ALERT_MINUTES * 60 * 1000 - 1000);
+    });
+
+    test('the sweep: an old booking row with stamped visits rings the bill-owed bell; with none it rings "may not have finished" and abandons; a young one waits', async () => {
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
+      tables.ib_action_phases = [phaseRow({ created_at: ago(15) })];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(alert.mock.calls[0][1].action).toBe('Program bill not set');
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['booked_pending_bill', undefined]);
+      alert.mockClear(); writes = []; stamped = [];
+      tables.ib_action_phases = [phaseRow({ created_at: ago(12) })];
+      expect(await Marker.sweepStalePending()).toBe(0);
+      expect(alert).not.toHaveBeenCalled();
+      expect(rowUpdates()).toEqual([]);
+      tables.ib_action_phases = [phaseRow({ created_at: ago(45) })];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(alert.mock.calls[0][1].action).toBe('Program start unfinished');
+      expect(alert.mock.calls[0][1].why).toBe('A program start for Dana Example may not have finished; check the schedule.');
+      expect(rowUpdates().map((w) => w.data.phase)).toContain('abandoned');
     });
 
     test('the scheduler runs the stale-row sweep every 10 minutes under an exclusive lock', () => {
@@ -1118,12 +1186,17 @@ describe('commit', () => {
       for (const phase of ['record', 'book', 'count', 'bill']) expect(src).toMatch(new RegExp(`async ${phase}\\(run\\)`));
     });
 
-    test('the alert copy obeys the admin notification rules', () => {
-      const { composeAdminAlert } = require('../services/admin-alert-compose');
-      expect(() => composeAdminAlert({
-        area: 'Billing', action: 'Program booked, bill not set', why: 'A program start booked the visits, but the tier and monthly bill did not finish.',
-        severity: 'needs-you', link: `/admin/customers?customerId=${CUSTOMER_ID}`, subject: { type: 'customer', id: CUSTOMER_ID }, doneWhen: 'bill_step_finished', who: 'person',
-      })).not.toThrow();
+    test('both alert copies obey the admin notification rules (the real composer runs, only the delivery is stubbed)', async () => {
+      const Notifications = require('../services/notification-service');
+      const notify = jest.spyOn(Notifications, 'notifyAdmin').mockResolvedValue({ id: 'n1' });
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', created_at: ago(11), payload: JSON.stringify({ target: { customerName: 'Dana Example-Longname Verylongsurname' } }) })];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      stamped = [];
+      tables.ib_action_phases = [phaseRow({ created_at: ago(45) })];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(notify).toHaveBeenCalledTimes(2);
+      expect(notify.mock.calls.map((c) => c[1])).toEqual(['Billing — Program bill not set', 'Billing — Program start unfinished']);
+      for (const call of notify.mock.calls) expect(call[3].link).toBe(`/admin/customers?customerId=${CUSTOMER_ID}`);
     });
   });
 

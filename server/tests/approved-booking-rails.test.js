@@ -15,6 +15,7 @@ const Tools = require('../services/intelligence-bar/tools');
 const CUSTOMER_ID = '00000000-0000-4000-8000-00000000c0a1';
 let log;
 let billingRow;
+let catalogRow;
 
 function fakeTrx() {
   return (table) => {
@@ -22,7 +23,8 @@ function fakeTrx() {
     const b = {
       where: () => b,
       forUpdate: () => { locked = true; log.push(`lock:${table}`); return b; },
-      first: async () => { if (!locked) log.push(`read:${table}`); return table === 'customers' ? billingRow : { address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' }; },
+      forShare: () => { locked = true; log.push(`lock:${table}`); return b; },
+      first: async () => { if (!locked) log.push(`read:${table}`); if (table === 'services') return locked ? { id: 'svc-1' } : catalogRow; return table === 'customers' ? billingRow : { address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' }; },
     };
     return b;
   };
@@ -35,6 +37,7 @@ const baseCtx = (req) => ({
   resolveAnchorPropertyId: jest.fn(async () => 'prop-1'),
 });
 
+const CATALOG = { id: 'svc-1', name: 'Lawn Care', short_name: 'Lawn', service_key: 'lawn_care', base_price: null, price_range_min: null, category: 'lawn', billing_type: 'recurring', default_duration_minutes: 60, frequency: null, visits_per_year: null, updated_at: new Date('2026-10-01T00:00:00Z'), is_active: true };
 const BILLING = { payer_id: null, billing_mode: 'monthly_membership', per_application_fee: null, waveguard_tier: 'Bronze', monthly_rate: '41.33' };
 
 beforeEach(() => {
@@ -42,6 +45,7 @@ beforeEach(() => {
   jest.spyOn(require('../services/booking-contact-state'), 'currentContactKey').mockImplementation(async () => { log.push('read:contact'); return 'key-a'; });
   jest.spyOn(require('../services/consultation-outcomes'), 'openConsultationCandidates').mockImplementation(async () => { log.push('read:consultations'); return []; });
   billingRow = { ...BILLING };
+  catalogRow = { ...CATALOG };
   jest.spyOn(EstimateLock, 'lockCustomerEstimates').mockImplementation(async () => { log.push('lock:estimates-advisory'); });
   jest.spyOn(StartProgram, 'openEstimateForCustomer').mockImplementation(async () => { log.push('read:open-estimate'); return null; });
   jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockImplementation(async () => { log.push('read:credit'); return 0; });
@@ -55,7 +59,7 @@ const codeOf = async (promise) => { try { await promise; return null; } catch (e
 
 test('the table names every rail code once', () => {
   expect(RAILS.map((r) => r.code)).toEqual([
-    'BILLING_CHANGED', 'COMMERCIAL_CHANGED', 'LEDGER_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
+    'BILLING_CHANGED', 'COMMERCIAL_CHANGED', 'CATALOG_CHANGED', 'LEDGER_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
   ]);
 });
 
@@ -83,6 +87,24 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     log = [];
     billingRow = { ...BILLING, property_type: 'business' };
     expect(await codeOf(run({}))).toBeNull();
+    expect(log).toEqual([]);
+  });
+  test('CATALOG_CHANGED (a renamed, re-keyed, deactivated or re-timed catalog row, or a bumped updated_at; the row is share-locked first)', async () => {
+    const { catalogFingerprint } = require('../services/scheduling/approved-booking-rails');
+    const pin = catalogFingerprint({ ...CATALOG, is_active: undefined });
+    const req = { approvedCatalog: pin, body: { serviceId: 'svc-1' } };
+    expect(await codeOf(run(req))).toBeNull();
+    for (const change of [{ name: 'Lawn Care Plus' }, { service_key: 'lawn_care_v2' }, { is_active: false }, { default_duration_minutes: 90 }, { frequency: 'monthly' }, { updated_at: new Date('2026-10-02T00:00:00Z') }]) {
+      catalogRow = { ...CATALOG, ...change };
+      expect(await codeOf(run(req))).toBe('CATALOG_CHANGED');
+    }
+    // The row is locked before it is read; a booking with no pinned catalog reads nothing.
+    log = [];
+    catalogRow = { ...CATALOG };
+    await run(req);
+    expect(log.indexOf('lock:services')).toBeGreaterThan(-1);
+    log = [];
+    expect(await codeOf(run({ body: { serviceId: 'svc-1' } }))).toBeNull();
     expect(log).toEqual([]);
   });
   test('LEDGER_CHANGED (a monthly bill line moved under the lock)', async () => {
