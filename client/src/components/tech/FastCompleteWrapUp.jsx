@@ -50,9 +50,10 @@ const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: tru
 // the review ask (the sheets offer three choices, so they pass false). `omitAutoTiming`: the sheet
 // posted no `reviewTiming` before (the pest report flow), so the key stays absent while the timing is
 // Automatic. `noPayLink`: the sheet's text carries no pay link (a pest re-service), so the row is not
-// shown and `includePayLink` posts false. `onChecking(busy)`: the sheet that owns Close and the lock
+// shown and `includePayLink` posts false. `reviewMarker`: a re-service sheet, whose review ask rides the body with
+// `wrapUpReviewAsk: true` (the server refuses it once the gate is off). `onChecking(busy)`: the sheet that owns Close and the lock
 // hears when the submit-time check starts and ends.
-export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, onChecking }) {
+export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, reviewMarker, onChecking }) {
   const enabled = gate === true && !submission?.preparing && sharedNote == null;
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -77,7 +78,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
   const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
   const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment }).text;
 
-  const state = { ...choice, omitAutoTiming, noPayLink, adjusted: isAdmin ? choice.adjusted : '', isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
+  const state = { ...choice, omitAutoTiming, noPayLink, reviewMarker, adjusted: isAdmin ? choice.adjusted : '', isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };
   const latest = useRef(state);
   latest.current = state;
   useEffect(() => { setNotice(''); }, [choice.reviewTiming, choice.reviewCustomAt, choice.adjusted, choice.requestReview]);

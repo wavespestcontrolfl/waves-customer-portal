@@ -100,7 +100,7 @@ describe('gate off (the context carries no wrapUp)', () => {
     const body = await complete(request);
     expect(body).toMatchObject(TODAY);
     expect(body).not.toHaveProperty('customerRecapMode');
-    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+    for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
     expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
   });
 });
@@ -117,7 +117,7 @@ describe('gate on', () => {
     expect(screen.queryByRole('checkbox', { name: /Include payment link/ })).toBeNull();
     tapRequired();
     const body = await complete(request);
-    expect(body).toMatchObject({ ...TODAY, requestReview: true });
+    expect(body).toMatchObject({ ...TODAY, requestReview: true, wrapUpReviewAsk: true });
     expect(body).not.toHaveProperty('customerRecapMode');
     for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
   });
@@ -130,7 +130,7 @@ describe('gate on', () => {
     fireEvent.click(row);
     tapRequired();
     const body = await complete(request);
-    expect(body).toMatchObject({ sendCompletionSms: true, requestReview: true, includePayLink: false });
+    expect(body).toMatchObject({ sendCompletionSms: true, requestReview: true, wrapUpReviewAsk: true, includePayLink: false });
   });
 
   test('each change rides the body', async () => {
@@ -143,7 +143,7 @@ describe('gate on', () => {
     tapRequired();
     const body = await complete(request);
     expect(body).toMatchObject({
-      ...TODAY, requestReview: true, reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0, timeOnSite: 35, reentryExteriorMinutes: 25,
+      ...TODAY, requestReview: true, wrapUpReviewAsk: true, reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0, timeOnSite: 35, reentryExteriorMinutes: 25,
     });
     expect(body.reviewScheduledFor).toMatch(/^\d{4}-\d{2}-\d{2}T08:00$/);
   });
@@ -155,7 +155,7 @@ describe('gate on', () => {
     tapRequired();
     const body = await complete(request);
     expect(body).toMatchObject(TODAY);
-    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+    for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
   });
 });
 

@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  MODE, TEMPLATE_KEY, SAFETY_LINE, buildReserviceFixedRecap, fixedRecapAllowsReviewAsk, isWetMethod, providerBody, reserviceFixedRecapHonored,
+  MODE, TEMPLATE_KEY, SAFETY_LINE, buildReserviceFixedRecap, reviewAskAllowed, isWetMethod, providerBody, reserviceFixedRecapHonored,
   loadReserviceFixedRecapFacts, customerTextOutcome,
 } = require('../services/reservice-fixed-recap');
 
@@ -232,8 +232,11 @@ describe('complete-scheduled-service wiring', () => {
   });
 
   test('no review ask rides it, and none follows it unless the Wrap-up gate is on (owner 2026-10-10)', () => {
-    // The ask is refused in fixed mode by the helper (gate off: always refused) ...
-    expect(src).toMatch(/&& !suppressTypedCustomerComms\s*(?:\/\/[^\n]*\n\s*)+&& require\('\.\/reservice-fixed-recap'\)\.fixedRecapAllowsReviewAsk\(\{\s*fixedRecap: reserviceFixedRecap,\s*wrapUpGate: require\('\.\.\/config\/feature-gates'\)\.fastCompleteWrapUpLive\(\),\s*\}\);/);
+    // One decision, made once beside the fixed-mode handling, read live ...
+    expect(src).toMatch(/const reviewAskAllowed = ReserviceFixedRecap\.reviewAskAllowed\(\{\s*marker: wrapUpReviewAsk === true,\s*wrapUpGate: require\('\.\.\/config\/feature-gates'\)\.fastCompleteWrapUpLive\(\),\s*fixedRequested: reserviceFixedRecapRequested,\s*fixedHonored: reserviceFixedRecap,\s*\}\);/);
+    // ... and it ends the effective ask; the stored intent drops only a marked, refused ask.
+    expect(src).toMatch(/&& !suppressTypedCustomerComms\s*(?:\/\/[^\n]*\n\s*)+&& reviewAskAllowed;/);
+    expect(src).toContain(': requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),');
     // ... and it is never bundled into the fixed text: it follows as its own message (enrollPostService).
     expect(src).toMatch(/!serviceReportV1Delivery &&\s*(?:\/\/[^\n]*\n\s*)+!reserviceFixedRecap &&/);
     expect(src).toMatch(/if \(effectiveRequestReview && \(svc\.cust_phone \|\| reviewCadenceEnabled\) && !bundledReviewUrl\) \{\s*try \{\s*const ReviewService = require\('\.\.\/services\/review-request'\);\s*await ReviewService\.enrollPostService\(/);
@@ -476,20 +479,37 @@ describe('pre-push fix (#5363 r7)', () => {
   });
 });
 
-describe('the review ask after the fixed re-service text (GATE_FAST_COMPLETE_WRAP_UP)', () => {
-  test('gate off: fixed mode never asks for a review, as before', () => {
-    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: false })).toBe(false);
-    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: undefined })).toBe(false);
-    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: 'true' })).toBe(false);
+describe('the review ask on a re-service (GATE_FAST_COMPLETE_WRAP_UP)', () => {
+  // Every combination of {marker, gate live, fixed requested, fixed honored}. Honored implies requested.
+  const rules = ({ marker, gate, requested, honored }) => {
+    if (marker && !gate) return false;
+    if (requested && !honored) return false;
+    return !(honored && !gate);
+  };
+  const combos = [];
+  for (const marker of [false, true]) for (const gate of [false, true]) {
+    for (const [requested, honored] of [[false, false], [true, false], [true, true]]) combos.push({ marker, gate, requested, honored });
+  }
+  test.each(combos)('marker=$marker gate=$gate requested=$requested honored=$honored', ({ marker, gate, requested, honored }) => {
+    expect(reviewAskAllowed({ marker, wrapUpGate: gate, fixedRequested: requested, fixedHonored: honored })).toBe(rules({ marker, gate, requested, honored }));
   });
 
-  test('gate on: fixed mode no longer blocks the ask (the body\'s requestReview decides, with every other blocker kept by the caller)', () => {
-    expect(fixedRecapAllowsReviewAsk({ fixedRecap: true, wrapUpGate: true })).toBe(true);
+  test('the cases that matter, by name', () => {
+    // The full form (no marker, not fixed): untouched, gate on or off.
+    expect(reviewAskAllowed({ marker: false, wrapUpGate: false, fixedRequested: false, fixedHonored: false })).toBe(true);
+    expect(reviewAskAllowed({ marker: false, wrapUpGate: true, fixedRequested: false, fixedHonored: false })).toBe(true);
+    // A marked ask from a sheet left open after the gate went off: refused.
+    expect(reviewAskAllowed({ marker: true, wrapUpGate: false, fixedRequested: false, fixedHonored: false })).toBe(false);
+    // The fixed text asked for but not honored (no text goes): no ask, gate on or off.
+    expect(reviewAskAllowed({ marker: true, wrapUpGate: true, fixedRequested: true, fixedHonored: false })).toBe(false);
+    // The fixed text honored: today's rule, the gate decides.
+    expect(reviewAskAllowed({ marker: true, wrapUpGate: true, fixedRequested: true, fixedHonored: true })).toBe(true);
+    expect(reviewAskAllowed({ marker: false, wrapUpGate: false, fixedRequested: true, fixedHonored: true })).toBe(false);
   });
 
-  test('outside fixed mode the helper changes nothing, gate on or off', () => {
-    expect(fixedRecapAllowsReviewAsk({ fixedRecap: false, wrapUpGate: false })).toBe(true);
-    expect(fixedRecapAllowsReviewAsk({ fixedRecap: false, wrapUpGate: true })).toBe(true);
+  test('only exactly true counts as live or marked', () => {
+    expect(reviewAskAllowed({ marker: true, wrapUpGate: 'true', fixedRequested: false, fixedHonored: false })).toBe(false);
+    expect(reviewAskAllowed({ marker: 'yes', wrapUpGate: false, fixedRequested: false, fixedHonored: false })).toBe(true);
   });
 
   test('the fixed text is the same whether or not a review will be asked: it carries no review line', () => {

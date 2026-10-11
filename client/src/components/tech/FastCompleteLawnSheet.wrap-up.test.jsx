@@ -122,7 +122,7 @@ async function complete() {
   return completeCalls()[0].body;
 }
 const FOUR_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' };
-const WRAP_UP_KEYS = ['timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'reviewDelayMinutes', 'reviewScheduledFor'];
+const WRAP_UP_KEYS = ['timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'reviewDelayMinutes', 'reviewScheduledFor', 'wrapUpReviewAsk'];
 const reads = (pattern) => requests.filter((r) => pattern.test(r.path));
 
 describe('gate off (the context carries no wrapUp)', () => {

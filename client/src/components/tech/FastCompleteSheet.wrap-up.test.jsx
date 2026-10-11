@@ -141,7 +141,7 @@ const wrapUpHeading = () => screen.queryByRole('heading', { name: 'Wrap-up' });
 const WRAP_UP_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor', 'timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote'];
 const expectToday = (body) => {
   expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: true, requestReview: true });
-  for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+  for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
 };
 
 describe.each([
@@ -230,7 +230,7 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
     expect(wrapUpHeading()).toBeNull();
     const body = await send(request);
     expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: false });
-    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+    for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
   });
 
   test('gate on, untouched: the one change is requestReview true; no pay-link row, pay link stays false, no reviewTiming', async () => {
@@ -241,7 +241,7 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
     expect(screen.getByRole('checkbox', { name: 'Send review request' }).checked).toBe(true);
     expect(screen.queryByRole('checkbox', { name: /Include payment link/ })).toBeNull();
     const body = await send(request);
-    expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: true });
+    expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: true, wrapUpReviewAsk: true });
     for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
   });
 
@@ -252,7 +252,17 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
     fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'customer_requested' } });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Send completion text' }));
     const body = await send(request);
-    expect(body).toMatchObject({ sendCompletionSms: false, includePayLink: false, requestReview: true, reviewTiming: 'customer_requested', reviewDelayMinutes: 0 });
+    expect(body).toMatchObject({ sendCompletionSms: false, includePayLink: false, requestReview: true, wrapUpReviewAsk: true, reviewTiming: 'customer_requested', reviewDelayMinutes: 0 });
+  });
+
+  test('review turned off: requestReview false and no marker', async () => {
+    const request = makeRequest({ service: RESERVICE_VISIT });
+    await openSheet(request, RESERVICE_SERVICE);
+    await generate();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Send review request' }));
+    const body = await send(request);
+    expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: false, requestReview: false });
+    expect(body).not.toHaveProperty('wrapUpReviewAsk');
   });
 
   test('a callback booked under a regular service key is a re-service too', async () => {
@@ -260,7 +270,7 @@ describe('a re-service in the report flow (owner 2026-10-10: the review request 
     await openSheet(request);
     await generate();
     expect(wrapUpHeading()).toBeTruthy();
-    expect(await send(request)).toMatchObject({ includePayLink: false, requestReview: true });
+    expect(await send(request)).toMatchObject({ includePayLink: false, requestReview: true, wrapUpReviewAsk: true });
   });
 });
 

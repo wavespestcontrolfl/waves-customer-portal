@@ -591,7 +591,7 @@ function LawnForm({ ctx, service, request, submission, locked, dictationPending,
   // (owner 2026-10-10); this sheet posted no `reviewTiming` before, and its pay link follows the usual
   // will-invoice rule (a free callback does not invoice, so it shows none).
   const wrapUp = useWrapUp({
-    gate: ctx.wrapUp, submission, service, request, base: `/admin/dispatch/${service?.id}`, applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => row.method), omitAutoTiming: true, onChecking: onWrapChecking,
+    gate: ctx.wrapUp, submission, service, request, base: `/admin/dispatch/${service?.id}`, applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => row.method), omitAutoTiming: true, reviewMarker: true, onChecking: onWrapChecking,
   });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;

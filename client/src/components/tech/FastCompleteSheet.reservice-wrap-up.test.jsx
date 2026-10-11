@@ -86,7 +86,7 @@ describe('gate off (the context carries no wrapUp)', () => {
     expect(wrapUpHeading()).toBeNull();
     const body = await complete(request);
     expect(body).toMatchObject(TODAY);
-    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+    for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
     expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
   });
 
@@ -111,7 +111,7 @@ describe('gate on', () => {
     expect(screen.queryByRole('checkbox', { name: /Include payment link/ })).toBeNull();
     tapRequired();
     const body = await complete(request);
-    expect(body).toMatchObject({ ...TODAY, requestReview: true });
+    expect(body).toMatchObject({ ...TODAY, requestReview: true, wrapUpReviewAsk: true });
     for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
   });
 
@@ -131,7 +131,7 @@ describe('gate on', () => {
     tapRequired();
     const body = await complete(request);
     expect(body).toMatchObject({
-      ...TODAY, requestReview: true, includePayLink: false, reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0, timeOnSite: 35, reentryExteriorMinutes: 25,
+      ...TODAY, requestReview: true, wrapUpReviewAsk: true, includePayLink: false, reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0, timeOnSite: 35, reentryExteriorMinutes: 25,
     });
     expect(body.reviewScheduledFor).toMatch(/^\d{4}-\d{2}-\d{2}T08:00$/);
   });
@@ -143,7 +143,7 @@ describe('gate on', () => {
     tapRequired();
     const body = await complete(request);
     expect(body).toMatchObject(TODAY);
-    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+    for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
   });
 
   test('completion text off posts sendCompletionSms false and keeps the fixed-text mode (the server accepts it)', async () => {
@@ -152,7 +152,7 @@ describe('gate on', () => {
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Send completion text' }));
     tapRequired();
     const body = await complete(request);
-    expect(body).toMatchObject({ sendCompletionSms: false, includePayLink: false, customerRecapMode: 'reservice_fixed' });
+    expect(body).toMatchObject({ sendCompletionSms: false, includePayLink: false, customerRecapMode: 'reservice_fixed', requestReview: true, wrapUpReviewAsk: true });
   });
 
   test('the fixed text off (GATE_FAST_COMPLETE_RECAP): no section at all, and the all-false flags go', async () => {
@@ -163,7 +163,7 @@ describe('gate on', () => {
     const body = await complete(request);
     expect(body).toMatchObject({ sendCompletionSms: false, requestReview: false, includePayLink: false });
     expect(body).not.toHaveProperty('customerRecapMode');
-    for (const key of WRAP_UP_KEYS) expect(body).not.toHaveProperty(key);
+    for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
     expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
   });
 });

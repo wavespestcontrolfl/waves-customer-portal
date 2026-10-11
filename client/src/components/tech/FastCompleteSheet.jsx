@@ -406,6 +406,7 @@ function useShortFormWrapUp({ ctx, service, submission, request, rows, form, onC
     applicationsRecorded: rowsShowSpray(rows.filter((row) => row.active), (row) => rowMethod(row, form.method)),
     omitAutoTiming: true,
     noPayLink: true,
+    reviewMarker: true,
     onChecking,
   });
   const customerText = () => {
@@ -1806,7 +1807,7 @@ function ReportFlowForm({
   // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section on the report step. The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
   // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
-  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, onChecking: onWrapChecking });
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
   // After the note's read: the best tip for the pests the reader heard and the
   // words of the note. Offered only while the tech has no tip of their own
   // choosing (or has taken this one); never picked for them.
