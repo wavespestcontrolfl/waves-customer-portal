@@ -632,6 +632,10 @@ function summarizeProposal(toolName, params, displayParams = params) {
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
   }
+  // A phone edit (single or bulk) may clear the shared-phone texting mark (codex #6268 r8/r9).
+  if ((toolName === 'update_customer' || toolName === 'bulk_update_customers') && params?.updates?.phone !== undefined) {
+    rippleParts.push(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
+  }
   const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
   // The ripple is long by design (it names every synced surface) and sits
   // OUTSIDE the cap — the base summary (who + what changes) keeps its full

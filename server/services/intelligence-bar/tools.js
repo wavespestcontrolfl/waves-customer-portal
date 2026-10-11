@@ -48,6 +48,7 @@ const {
   normalizeContactZip,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
+  clearSharedPhoneMarkOnPhoneChange,
 } = require('../../utils/intake-normalize');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
@@ -1354,6 +1355,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
+  // Phone change → drop the shared-phone texting mark (codex #6268 r3); the IB
+  // never sets the mark, so there is no same-write exception here.
+  clearSharedPhoneMarkOnPhoneChange(clean, before);
 
   // Stage change → the FULL canonical lifecycle stamps, identical to the
   // admin route (codex #3282 audit P1 — the old member_since-only handling
@@ -1445,6 +1449,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.customerNoLongerLive = true;
         throw err;
       }
+      // REBUILD the shared-phone mark clear from the LOCKED row (codex #6268
+      // r4/r8): the pre-lock pass may have derived `false` from a stale phone;
+      // a save that moved the number and marked it since must keep its mark
+      // when this write no longer changes the identity. The IB never sets
+      // the mark itself, so the derived value is dropped and decided again.
+      delete clean.sms_primary_for_shared_phone;
+      clearSharedPhoneMarkOnPhoneChange(clean, lockedBefore);
       if (expectedVersion) {
         // Compare Postgres' full-precision version while holding the same row
         // lock as the domain write; JS Date equality loses microseconds.
@@ -1642,6 +1653,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       changes[key] = { from: before[dbCol], to: after[dbCol] };
     }
   }
+  // Server-derived effect the card disclosed (codex #6268 r8): the phone
+  // change cleared this customer's shared-phone texting mark.
+  const sharedPhoneMarkCleared = clean.sms_primary_for_shared_phone === false && committedRows?.before?.sms_primary_for_shared_phone === true;
+  if (sharedPhoneMarkCleared) changes.sms_primary_for_shared_phone = { from: true, to: false };
 
   // notes maps to free-text crm_notes (gate codes, access details) — redact
   // it from logs while still persisting the value.
@@ -1677,6 +1692,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
     customer_id: customerId,
     customer_name: `${after.first_name} ${after.last_name}`,
     changes,
+    ...(sharedPhoneMarkCleared ? { shared_phone_mark_cleared: true, shared_phone_mark_note: 'The phone change cleared this customer\'s shared-phone texting mark; texts from the shared phone go unlinked until staff mark an account again.' } : {}),
     // Disclosed commit effect (#3140): this write made the customer an
     // implied monthly member, so the lane inference was stamped explicitly.
     ...(impliedLaneStamp ? {
@@ -1750,7 +1766,18 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
   // when phone is part of the update).
-  if (clean.phone !== undefined) clean.line_type = null;
+  if (clean.phone !== undefined) {
+    clean.line_type = null;
+    // ...and the shared-phone texting mark, chosen for the old number — but
+    // only on rows whose number IDENTITY changes (codex #6268 r3/r8): a row
+    // already holding this number keeps its mark. Decided per row inside the
+    // UPDATE against the row's current phone, since there is no per-row
+    // before-state here.
+    const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+    clean.sms_primary_for_shared_phone = db.raw(
+      "CASE WHEN RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN sms_primary_for_shared_phone ELSE false END",
+      [newKey]);
+  }
 
   // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
   // per row, since there's no per-row before-state) — codex #3282 audit P1:
@@ -1818,7 +1845,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared = 0 } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
@@ -1931,6 +1958,20 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
+      // Receipt for the shared-phone mark clear the card disclosed (codex
+      // #6268 r9): rows marked primary whose number identity this write
+      // changes. Counted under the same statement's lock set, before the CASE
+      // in `clean` clears them.
+      let sharedPhoneMarksCleared = 0;
+      if (clean.phone !== undefined) {
+        const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+        const marked = await trx('customers')
+          .whereIn('id', targetIds)
+          .where({ sms_primary_for_shared_phone: true })
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) <> ?", [newKey])
+          .count({ n: '*' });
+        sharedPhoneMarksCleared = Number(marked?.[0]?.n || 0);
+      }
       const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
@@ -1941,7 +1982,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
@@ -1972,6 +2013,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
+      ...(sharedPhoneMarksCleared ? { shared_phone_marks_cleared: sharedPhoneMarksCleared, shared_phone_mark_note: `${sharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
       ...bulkLaneStampResult(laneStampIds),
       // Skipped rows surface on the card, never a silent Done (same
       // contract as the per-row address/email path; GH r9 P1). Each skipped
@@ -2021,6 +2063,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
+  // Receipt for the shared-phone mark clear the card disclosed (codex #6268
+  // r13): rows marked primary whose number identity this write changes.
+  let perRowSharedPhoneMarksCleared = 0;
   const perRowLaneStampIds = [];
   let churnWoundDownCount = 0;
   // Codex #4715 r4 P2: rows where churnGuardOrRepair only repaired the
@@ -2044,6 +2089,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     }
     let emailSync = null;
     let rowLaneStamp = null;
+    let rowMarkCleared = false;
     let rowRailsRepairedOnly = false;
     try {
       await db.transaction(async (trx) => {
@@ -2110,6 +2156,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
         await trx('customers').where('id', customerId).update(
           rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
         );
+        // Flag only; counted after the transaction commits (codex #6268 r14).
+        rowMarkCleared = clean.phone !== undefined && lockedBefore.sms_primary_for_shared_phone === true
+          && String(lockedBefore.phone || '').replace(/\D/g, '').slice(-10) !== String(clean.phone || '').replace(/\D/g, '').slice(-10);
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
             !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -2183,6 +2232,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       }).catch(() => null);
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
+    if (rowMarkCleared) perRowSharedPhoneMarksCleared += 1;
     // Reaching here means the per-row transaction committed — a blocked
     // churnGuardForRow throws churnBlocked above and lands in `errors`
     // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,
@@ -2211,6 +2261,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     updated_count: count,
     fields_updated: Object.keys(updates),
     ...bulkLaneStampResult(perRowLaneStampIds),
+    ...(perRowSharedPhoneMarksCleared ? { shared_phone_marks_cleared: perRowSharedPhoneMarksCleared, shared_phone_mark_note: `${perRowSharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
     ...(errors.length ? {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never

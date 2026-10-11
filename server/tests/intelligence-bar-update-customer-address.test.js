@@ -17,6 +17,10 @@ jest.mock('../models/db', () => {
   // #3140 implied-monthly lane stamp. Empty = no rate changes, no stamps.
   qb.select = jest.fn(() => Promise.resolve([]));
   qb.update = jest.fn(() => Promise.resolve(1));
+  // A bulk phone change counts the marked rows whose number identity changes
+  // (shared-phone mark receipt, #6268): whereRaw + count on the same chain.
+  qb.whereRaw = jest.fn(() => qb);
+  qb.count = jest.fn(() => Promise.resolve([{ n: 0 }]));
   const db = jest.fn(() => qb);
   // trx behaves like db() — the executor only uses trx('customers').where().update()
   db.transaction = jest.fn(async (cb) => cb(db));
