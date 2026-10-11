@@ -110,6 +110,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
+import { rowsShowSpray } from '../../lib/spray-evidence';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock';
 import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
@@ -1680,7 +1681,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const doseKey = JSON.stringify(dosesRef.current);
   useEffect(() => { pruneRefused(JSON.parse(doseKey)); }, [doseKey, pruneRefused]);
   // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section. Not a part of a grouped stop, which keeps the fixed flags.
-  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: rows.length > 0, onChecking: onWrapChecking });
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: rowsShowSpray(rows, (row) => row.method), onChecking: onWrapChecking });
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).

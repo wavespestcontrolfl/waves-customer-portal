@@ -166,6 +166,12 @@ describe('gate on', () => {
     expect(body).not.toHaveProperty('reentryExteriorMinutes');
   });
 
+  test('the plan\'s spray row asks for the re-entry seeds with applicationsRecorded=1', async () => {
+    await openSheet();
+    await screen.findByRole('heading', { name: 'Wrap-up' });
+    await waitFor(() => expect(reads(/reentry-defaults/).map((r) => r.path.split('?')[1])).toEqual(['applicationsRecorded=1']));
+  });
+
   test('the Time on-site clock still shows once, from the shared component', async () => {
     await openSheet({ props: { service: { ...SERVICE, onSiteAt: new Date(Date.now() - 5 * 60 * 1000).toISOString() } } });
     expect(screen.getAllByRole('heading', { name: 'Time on-site' })).toHaveLength(1);

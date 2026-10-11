@@ -6,7 +6,7 @@
 // locked while the review send-time re-check reads. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import FastCompleteSheet from './FastCompleteSheet';
 
 vi.mock('./TechTreatmentZoneModal', () => ({ default: () => null }));
@@ -16,7 +16,10 @@ vi.setConfig({ testTimeout: 30000 });
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); localStorage.clear(); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
 
-const CATALOG = [{ id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' }];
+const CATALOG = [
+  { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
+  { id: 'bait', name: 'Example Termite Bait Cartridge', category: 'Termite Bait', formulation: 'cartridge', active_ingredient: 'noviflumuron' },
+];
 const REGULAR = {
   id: 'svc-1', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
   serviceType: 'Quarterly Pest Control', scheduledDate: '2026-10-01', address: { line1: '123 Main St' },
@@ -286,5 +289,26 @@ describe('while the review send time is being re-checked', () => {
     await act(async () => { request.release(); });
     await act(async () => { await Promise.resolve(); });
     expect(request.bodies('/complete')).toHaveLength(0);
+  });
+});
+
+describe('the re-entry steppers are asked for with the same spray evidence the full form uses', () => {
+  const seedReads = (request) => request.reads(/reentry-defaults/).map((call) => call.path.split('?')[1]);
+  function addProduct(name, amount) {
+    if (!screen.queryByRole('button', { name: '+ Other product' })) fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: new RegExp(`^${name}\\b`) }));
+    fireEvent.change(within(screen.getByRole('group', { name })).getByLabelText('How much?'), { target: { value: amount } });
+  }
+
+  test('a bait station visit with only a bait row asks for applicationsRecorded=0; a liquid spray added asks again with =1', async () => {
+    const request = makeRequest({ kind: 'station' });
+    await openSheet(request, TERMITE_SERVICE);
+    await waitFor(() => expect(seedReads(request)).toEqual(['applicationsRecorded=0']));
+    addProduct('Example Termite Bait Cartridge', '1');
+    await act(async () => { await Promise.resolve(); });
+    expect(seedReads(request)).toEqual(['applicationsRecorded=0']);
+    addProduct('Taurus SC', '1');
+    await waitFor(() => expect(seedReads(request)).toEqual(['applicationsRecorded=0', 'applicationsRecorded=1']));
   });
 });

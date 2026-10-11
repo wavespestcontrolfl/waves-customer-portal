@@ -82,6 +82,7 @@ import useFastCompleteSubmit, { PREPARE_REFUSAL } from '../../hooks/useFastCompl
 import { isReserviceVisit } from '../../lib/pest-fast-complete';
 import { completionInvoiceFields } from '../../lib/completion-invoice-fields';
 import FastCompleteWrapUp, { WrapUpClock, useWrapUp } from './FastCompleteWrapUp';
+import { rowsShowSpray } from '../../lib/spray-evidence';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
@@ -403,6 +404,10 @@ function sheetVisitIdentity(visit, reportFlow) {
     ? { ...recapVisitIdentity(visit), isCallback: visit.isCallback }
     : recapVisitIdentity(visit);
 }
+
+// Whether the products on the sheet show spray evidence, which keeps the re-entry steppers (a bait-station
+// visit with only bait or station rows does not): each row at the method it will be recorded with.
+const pestSprayEvidence = (active, draft) => rowsShowSpray(active, (row) => rowMethod(row, reportSprayMethod(draft?.facts)));
 
 // The Wrap-up section (GATE_FAST_COMPLETE_WRAP_UP) is on for the report flow's regular visits: a
 // re-service (or a callback) keeps its fixed customer text, and the short form has no report step.
@@ -1726,10 +1731,6 @@ function ReportFlowForm({
   const { rows, addProduct } = products;
   const active = rows.filter((row) => row.active);
   const isReservice = isReserviceVisit(ctx.visit);
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section on the report step. The report flow posted no
-  // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
-  // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
-  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: active.length > 0, omitAutoTiming: true, onChecking: onWrapChecking });
   const [ownForm, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
@@ -1768,6 +1769,10 @@ function ReportFlowForm({
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
   usePartBusy('pest-report', !!writing);
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section on the report step. The report flow posted no
+  // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
+  // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
+  const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, onChecking: onWrapChecking });
   // After the note's read: the best tip for the pests the reader heard and the
   // words of the note. Offered only while the tech has no tip of their own
   // choosing (or has taken this one); never picked for them.
