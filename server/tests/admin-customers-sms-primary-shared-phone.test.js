@@ -126,6 +126,13 @@ describe('PUT /admin/customers/:id smsPrimaryForSharedPhone', () => {
     expect(mockState.patches[0]).toMatchObject({ sms_primary_for_shared_phone: false });
   });
 
+  test('a concurrent save that moved the number and marked it keeps its mark when this write matches the new number', async () => {
+    mockState.initial = { ...mockState.initial, phone: '+19415550100', sms_primary_for_shared_phone: true };
+    mockState.locked = { ...mockState.locked, phone: '+19415550199', sms_primary_for_shared_phone: true };
+    await saveCustomer({ phone: '+19415550199' });
+    expect(mockState.patches[0]).not.toHaveProperty('sms_primary_for_shared_phone');
+  });
+
   test('the same number in another format keeps the mark', async () => {
     mockState.initial.sms_primary_for_shared_phone = true;
     mockState.locked.sms_primary_for_shared_phone = true;

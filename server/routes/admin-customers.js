@@ -4279,9 +4279,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
-          // The mark clear above ran on the unlocked read; a save that marked this
-          // number may have committed since, so decide again from the locked row
-          // (codex #6268 r4). A no-op when the first pass already cleared it.
+          // REBUILD the shared-phone mark clear from the locked row (codex #6268
+          // r4/r8): the pre-lock pass may have derived `false` from a stale
+          // phone; a save that moved the number and marked it since keeps its
+          // mark when this write no longer changes the identity. Only a derived
+          // value is dropped — a mark this request sets explicitly stands.
+          if (req.body.smsPrimaryForSharedPhone === undefined) delete updates.sms_primary_for_shared_phone;
           require('../utils/intake-normalize').clearSharedPhoneMarkOnPhoneChange(updates, lockedBefore);
           contactAuditAt = new Date();
           // ADMIN-BUG-R10 (round 3): on EVERY write of pipeline_stage=

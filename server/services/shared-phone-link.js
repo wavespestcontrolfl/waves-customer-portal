@@ -31,4 +31,9 @@ async function pickMarkedCustomerForPhone(knex, key) {
   return { customer: null, reason: rows.length === 0 ? 'none' : 'ambiguous' };
 }
 
-module.exports = { sharedPhoneLinkEnabled, pickMarkedCustomerForPhone };
+// Confirmation-card wording for every phone writer the Intelligence Bar
+// proposes (codex #6268 r8): the mark clear is a server-derived effect the
+// operator's Confirm must cover, since it is not in the card's params.
+const SHARED_PHONE_MARK_CLEAR_DISCLOSURE = 'if this customer is the marked texting account for a phone that another account shares, a changed number clears that mark and texts from the shared phone go unlinked until staff mark an account again';
+
+module.exports = { sharedPhoneLinkEnabled, pickMarkedCustomerForPhone, SHARED_PHONE_MARK_CLEAR_DISCLOSURE };

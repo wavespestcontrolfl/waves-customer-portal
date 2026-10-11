@@ -155,6 +155,7 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   expect(labels).toContainEqual(EMAIL_FANOUT_DISCLOSURE);
   // A phone change appends the hold-clear clause (codex round-5 P2).
   expect(labels).toContainEqual(`${CONTACT_FANOUT_DISCLOSURE} ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`);
+  expect(labels).toContainEqual(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   const only = buildContract({ toolName: 'update_customer', params: { updates: { notes: 'gate code 1234' } }, displayParams: { updates: { notes: 'gate code 1234' } } });
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
 });
@@ -169,6 +170,7 @@ test('codex round-5 P2: a name-only update_customer edit discloses the fan-out W
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContainEqual(CONTACT_FANOUT_DISCLOSURE);
   expect(labels.some((l) => l.includes(CONTACT_FANOUT_PHONE_HOLD_CLAUSE))).toBe(false);
+  expect(labels.some((l) => l.includes('clears that mark'))).toBe(false);
 });
 
 test('bulk_update_customers with an email change discloses the per-customer email fan-out (email only)', () => {

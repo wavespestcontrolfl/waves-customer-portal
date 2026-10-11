@@ -630,6 +630,8 @@ function summarizeProposal(toolName, params, displayParams = params) {
     rippleParts.push(params?.updates?.phone !== undefined
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
+    // A phone edit may also clear the shared-phone texting mark (codex #6268 r8).
+    if (params?.updates?.phone !== undefined) rippleParts.push(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   }
   const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
   // The ripple is long by design (it names every synced surface) and sits

@@ -1449,9 +1449,12 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.customerNoLongerLive = true;
         throw err;
       }
-      // Decide the shared-phone mark clear again from the LOCKED row: a save
-      // that marked this number may have committed after the unlocked read
-      // (codex #6268 r4). No-op when the first pass already cleared it.
+      // REBUILD the shared-phone mark clear from the LOCKED row (codex #6268
+      // r4/r8): the pre-lock pass may have derived `false` from a stale phone;
+      // a save that moved the number and marked it since must keep its mark
+      // when this write no longer changes the identity. The IB never sets
+      // the mark itself, so the derived value is dropped and decided again.
+      delete clean.sms_primary_for_shared_phone;
       clearSharedPhoneMarkOnPhoneChange(clean, lockedBefore);
       if (expectedVersion) {
         // Compare Postgres' full-precision version while holding the same row
@@ -1650,6 +1653,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       changes[key] = { from: before[dbCol], to: after[dbCol] };
     }
   }
+  // Server-derived effect the card disclosed (codex #6268 r8): the phone
+  // change cleared this customer's shared-phone texting mark.
+  const sharedPhoneMarkCleared = clean.sms_primary_for_shared_phone === false && committedRows?.before?.sms_primary_for_shared_phone === true;
+  if (sharedPhoneMarkCleared) changes.sms_primary_for_shared_phone = { from: true, to: false };
 
   // notes maps to free-text crm_notes (gate codes, access details) — redact
   // it from logs while still persisting the value.
@@ -1685,6 +1692,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
     customer_id: customerId,
     customer_name: `${after.first_name} ${after.last_name}`,
     changes,
+    ...(sharedPhoneMarkCleared ? { shared_phone_mark_cleared: true, shared_phone_mark_note: 'The phone change cleared this customer\'s shared-phone texting mark; texts from the shared phone go unlinked until staff mark an account again.' } : {}),
     // Disclosed commit effect (#3140): this write made the customer an
     // implied monthly member, so the lane inference was stamped explicitly.
     ...(impliedLaneStamp ? {
@@ -1760,8 +1768,15 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // when phone is part of the update).
   if (clean.phone !== undefined) {
     clean.line_type = null;
-    // ...and the shared-phone texting mark, chosen for the old number (codex #6268 r3).
-    clean.sms_primary_for_shared_phone = false;
+    // ...and the shared-phone texting mark, chosen for the old number — but
+    // only on rows whose number IDENTITY changes (codex #6268 r3/r8): a row
+    // already holding this number keeps its mark. Decided per row inside the
+    // UPDATE against the row's current phone, since there is no per-row
+    // before-state here.
+    const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+    clean.sms_primary_for_shared_phone = db.raw(
+      "CASE WHEN RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN sms_primary_for_shared_phone ELSE false END",
+      [newKey]);
   }
 
   // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
