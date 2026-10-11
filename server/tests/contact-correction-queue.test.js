@@ -584,11 +584,16 @@ describe('round-19 hardening', () => {
     }
   });
 
-  it('enqueue refuses when the attached customer differs from the route\'s match', async () => {
+  it('enqueue cancels and scrubs a reservation attached to a different customer than the route\'s match', async () => {
     const OTHER = '00000000-0000-4000-8000-0000000000c2';
     const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ customer_id: CUSTOMER_ID })] });
     expect(await queue.enqueueContactCorrectionJob(1, { customerId: OTHER, knex })).toBe(false);
-    expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
+    // Cancelled and scrubbed at once: the stale sweep must never promote it.
+    const row = knex._data.contact_correction_jobs[0];
+    expect(row.status).toBe('cancelled');
+    expect(row.cancel_reason).toBe('linkage_mismatch');
+    expect(row.body).toBeNull();
+    expect(row.expected_values).toBeNull();
   });
 
   it('each processing pass claims under a distinct lock owner', async () => {

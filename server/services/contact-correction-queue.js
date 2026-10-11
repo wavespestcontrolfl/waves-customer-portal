@@ -156,15 +156,32 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
       .where({ id: jobId, status: 'reserved' })
       .first('customer_id', 'sender_phone');
     if (!existing) return false;
-    if (!existing.customer_id) {
+    let attachedTo = existing.customer_id;
+    if (!attachedTo) {
       const attached = await attachContactCorrectionContext(jobId, { senderPhone: existing.sender_phone, knex });
       if (!attached) return false;
-    } else if (String(existing.customer_id) !== String(customerId)) {
+      const after = await knex('contact_correction_jobs').where({ id: jobId, status: 'reserved' }).first('customer_id');
+      attachedTo = after?.customer_id ?? null;
+    }
+    if (String(attachedTo) !== String(customerId)) {
       // The route resolved the sender to a different account than the locked
       // attach did (a primary-mark transfer or phone reassignment landed in
-      // between): fail closed — the reservation stays for the stale sweep to
-      // cancel, and no correction is applied to either account (codex #6268 r5).
-      logger.warn(`[contact-correction-queue] job ${jobId}: attached customer differs from the route's match; not enqueuing`);
+      // between). Cancel and scrub the reservation in the same step (codex
+      // #6268 r5/r6): a reserved row with a body and a customer_id would
+      // otherwise be promoted by the stale sweep and the worker would apply
+      // one account's correction to the other. Only a still-reserved row
+      // with the stale linkage is cancelled, so a concurrent transition wins.
+      const cancelled = await knex('contact_correction_jobs')
+        .where({ id: jobId, status: 'reserved' })
+        .update({
+          status: 'cancelled',
+          cancel_reason: 'linkage_mismatch',
+          body: null,
+          expected_values: null,
+          completed_at: knex.fn.now(),
+          updated_at: knex.fn.now(),
+        });
+      logger.warn(`[contact-correction-queue] job ${jobId}: attached customer differs from the route's match; cancelled (${cancelled})`);
       return false;
     }
     // The ATTACHED customer is authoritative (codex #3413 r34): the
