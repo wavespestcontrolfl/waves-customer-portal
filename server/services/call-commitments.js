@@ -2096,6 +2096,10 @@ async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
     })
     .modify((b) => phoneWhere(b, "to_phone", phone))
     .orderBy("created_at", "asc")
+    // Share-locked: inside the correction's transaction (rejudge) a pass that
+    // would claim this callback waits until the re-pointed dismissal commits;
+    // on a plain connection the lock ends with the statement.
+    .forShare()
     .first("id", "created_at");
   return row ? { kind: CALLBACK_SPAM, record_type: "call_log", record_id: row.id, matched_at: row.created_at, strength: "direct", basis: "callback_reached_solicitor" } : null;
 }

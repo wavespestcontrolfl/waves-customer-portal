@@ -1211,6 +1211,11 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
     .whereNot('id', exceptCallId)
     .whereRaw("metadata->>'relatedCallId' = ?", [String(parent.id)])
     .orderBy('created_at', 'asc')
+    // Share-locked for the correction's transaction: a pass that would claim
+    // one of these rows (its token write) waits, so a verdict retained or a
+    // dismissal re-pointed here rests on a callback that still reads settled
+    // spam at commit.
+    .forShare()
     .select('id', 'to_phone', 'customer_id', 'created_at', trx.raw("metadata->>'relatedCommitmentId' as related_commitment_id"));
   // The same eligibility as the callback being judged: dialed to the
   // voicemail's number, and placed after the voicemail ended.
