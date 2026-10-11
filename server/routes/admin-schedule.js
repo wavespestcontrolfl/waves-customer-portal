@@ -6037,6 +6037,11 @@ async function seriesExtensionUnbillable(conn, {
 // dates validated. A walk that hits this bound without finishing is refused as
 // unverified, never passed.
 const SERIES_VERDICT_MAX_ATTEMPTS = 3000;
+const SERIES_VERDICT_UNVERIFIED = {
+  error: 'Could not verify whether this recurring plan will bill — its schedule is too long to check. Change the billing type on the customer page.',
+  code: 'RECURRING_BILLING_UNVERIFIED',
+  fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+};
 
 // The billable-amount verdict (seriesExtensionUnbillable, the one the nightly
 // top-up asks per candidate date) for every visit the top-up would mint
@@ -6062,50 +6067,44 @@ const SERIES_VERDICT_MAX_ATTEMPTS = 3000;
 async function seriesNextOccurrencesUnbillable(conn, parentId, { customerOverride = null } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
-  if (!parent || !parent.is_recurring || !parent.recurring_pattern) return null;
+  if (!parent?.is_recurring || !parent.recurring_pattern) return null;
   parent = overlayRecurringTemplateOverrides(parent, cols);
   const latest = await latestLiveSeriesVisit(conn, parentId);
   if (!latest) return null;
+  const pattern = parent.recurring_pattern;
   const rOpts = {
     ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
     intervalDays: parent.recurring_interval_days,
   };
-  const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
-  const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
-  const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
-  const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
+  const latestStr = seriesExtendAnchor(latest, pattern, rOpts);
+  const skipParent = (cols.skip_weekends && !!parent.skip_weekends) || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const dirParent = cols.weekend_shift && parent.weekend_shift === 'back' ? 'back' : 'forward';
   const blackoutDates = await loadSeriesBlackoutDates(conn, latestStr);
   const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
   const { horizonDaysFromEnv } = require('../services/recurring-series-topup');
-  const horizonEnd = etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), horizonDaysFromEnv()));
   const today = etDateString();
-  // One representative date per distinct set of due add-ons.
+  const horizonEnd = etDateString(addETDays(parseETDateTime(`${today}T12:00`), horizonDaysFromEnv()));
+  // One representative date per distinct set of due add-ons. A date past the horizon is
+  // priced only while nothing inside it was (the next occurrence is always validated), and
+  // the first date past the horizon ends the walk with the verdict.
   const byPricing = new Map();
-  let walked = false;
   for (let attempt = 1; attempt <= SERIES_VERDICT_MAX_ATTEMPTS; attempt += 1) {
-    const candidate = seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, blackoutDates);
-    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, parent.recurring_pattern, candidate) || candidate <= today) continue;
-    const beyondHorizon = candidate > horizonEnd;
-    // Past the horizon the walk stops, once something is priced.
-    if (beyondHorizon && byPricing.size) { walked = true; break; }
-    const due = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent);
-    const key = due.map((addon) => parentAddons.indexOf(addon)).join(',');
-    if (!byPricing.has(key)) byPricing.set(key, candidate);
-    // Nothing fell inside the horizon: the next occurrence beyond it is priced alone.
-    if (beyondHorizon) { walked = true; break; }
+    const candidate = seasonalSafeShift(nextRecurringDate(latestStr, pattern, attempt, rOpts), pattern, skipParent, dirParent, blackoutDates);
+    if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, pattern, candidate) || candidate <= today) continue;
+    const past = candidate > horizonEnd;
+    const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
+      .map((addon) => parentAddons.indexOf(addon)).join(',');
+    if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
+    if (past) {
+      return seriesExtensionUnbillable(conn, {
+        parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent, customerOverride,
+        storedDiscountScope: await loadStoredDiscountScope(conn, parent, parentAddons),
+        seriesCioc: cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined,
+      });
+    }
   }
-  if (!walked) {
-    return {
-      error: 'Could not verify whether this recurring plan will bill — its schedule is too long to check. Change the billing type on the customer page.',
-      code: 'RECURRING_BILLING_UNVERIFIED',
-      fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
-    };
-  }
-  const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-  const seriesCioc = cols.create_invoice_on_complete ? await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) : undefined;
-  return seriesExtensionUnbillable(conn, {
-    parent, dates: [...byPricing.values()], cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc, customerOverride,
-  });
+  // The attempt cap ended the walk before the horizon: refused as unverified, never passed.
+  return SERIES_VERDICT_UNVERIFIED;
 }
 
 // GET /api/admin/schedule — day view (board + dispatch)

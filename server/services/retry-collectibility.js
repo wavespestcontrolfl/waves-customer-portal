@@ -153,6 +153,35 @@ async function deriveMonthlyChargeIdempotencyKey(customerId, monthKey, conn = db
   return attemptNumber > 0 ? `${base}_r${attemptNumber}` : base;
 }
 
+// The monthly already-collected predicate, ONE definition shared by the cron's
+// locked read and post-contention recheck and by the Intelligence Bar billing
+// type card (which asks for the still-`processing` dues alone). Metadata-first
+// (billed_month stamp), payment_date window + description marker as the legacy
+// fallback; exactly the dedupe charge-now and the retry classifier apply.
+// `statuses` narrows the payment statuses; `withDuesInvoice: false` leaves out
+// the completion-minted dues invoice fallback (it names no payment row).
+async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }, { conn = db, statuses = ['paid', 'processing'], withDuesInvoice = true } = {}) {
+  const payment = await conn('payments')
+    .where({ customer_id: customerId })
+    .whereIn('status', statuses)
+    .where(function () {
+      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .orWhere(function () {
+          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+            .andWhere('payment_date', '>=', monthStart)
+            .andWhere('payment_date', '<=', monthEnd)
+            .andWhere('description', 'like', '%WaveGuard Monthly%');
+        });
+    })
+    .first();
+  if (payment || !withDuesInvoice) return payment;
+  // A live completion-minted dues invoice (paid, processing or still open)
+  // IS this month's bill — an unpaid one is collected by the invoice
+  // follow-up ladder, never by a second charge. No payment row to name.
+  const duesInvoice = await findLiveStampedDuesInvoice(conn, customerId, monthKey);
+  return duesInvoice ? { id: null, dues_invoice_id: duesInvoice.id } : undefined;
+}
+
 async function hasUnresolvedSiblingStripeOutcome(customerId, monthKey, conn = db) {
   // Codex round-3 P1: an orphan that belongs to an INVOICE (the
   // invoice_card_on_file path and the webhook's invoice fences stamp
@@ -514,6 +543,7 @@ module.exports = {
   isMonthlyObligationRow,
   classifyFailedPaymentRetry,
   hasUnresolvedSiblingStripeOutcome,
+  findCollectedMonthlyPayment,
   deriveMonthlyChargeIdempotencyKey,
   _private: { monthKeyOf, dateKeyOf, pausedOn, isMonthlyObligationRow, parseMeta },
 };

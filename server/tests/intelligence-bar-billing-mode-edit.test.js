@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, traceTender: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -18,8 +18,8 @@ jest.mock('../models/db', () => {
     q.limit = (n) => { q.cap = n; return q; };
     // where(fn) runs its callback (the live-visit clause is built that way).
     q.where = (f) => { if (typeof f === 'function') f.call(q, q); return q; };
-    q.whereIn = (col) => { if (col === 'id') q.byId = true; return q; };
-    q.forUpdate = () => { q.locked = true; if (table === 'customers') mockState.log.push('customers:row'); if (table === 'invoices') mockState.log.push('invoices:lock'); return q; };
+    q.whereIn = (col, vals) => { if (col === 'id') q.byId = true; if (col === 'status') q.statuses = vals; return q; };
+    q.forUpdate = () => { q.locked = true; if (table === 'customers') mockState.log.push('customers:row'); if (table === 'invoices') mockState.log.push('invoices:lock'); if (table === 'payment_methods') mockState.log.push('methods:lock'); return q; };
     // NOWAIT on a locked invoice fails at once (Postgres 55P03), it never waits.
     q.noWait = () => { q.nowait = true; return q; };
     q.select = (...cols) => { q.cols = cols; return q; };
@@ -35,20 +35,24 @@ jest.mock('../models/db', () => {
       if (table === 'scheduled_services') return mockState.roots[0] || null;
       if (table.startsWith('service_completion_attempts')) return mockState.inFlight ? { id: 'att-1' } : null;
       if (table === 'stripe_orphan_charges') return mockState.orphan;
-      if (table === 'payments') return q.ambiguousQuery ? mockState.ambiguous : mockState.armed;
+      if (table === 'payments') return q.ambiguousQuery ? mockState.ambiguous : (q.statuses && q.statuses.includes('processing') ? mockState.processing : mockState.armed);
       return null;
     };
     q.then = (resolve, reject) => {
       let rows = [];
       if (table === 'scheduled_services') {
         rows = q.cols.includes('scheduled_date') ? mockState.unpriced : mockState.visits;
-        if (q.byId) rows = mockState.roots;
-        if (q.cols.flat().includes('payer_id')) mockState.log.push(q.locked ? 'visits:lock' : 'visits:read');
+        if (q.byId) { rows = mockState.roots; if (q.locked) mockState.log.push('roots:lock'); }
+        if (q.cols.flat().includes('is_recurring')) mockState.log.push(q.locked ? 'visits:lock' : 'visits:read');
       }
       if (table === 'invoices') {
         if (q.nowait && mockState.invoiceBusy) return Promise.reject(Object.assign(new Error('could not obtain lock on row'), { code: '55P03' })).then(resolve, reject);
         // The locked re-read is by id: every invoice row the mock holds.
         rows = q.duesQuery ? mockState.dues : (q.byId ? [...mockState.invoices, ...mockState.dues] : mockState.invoices);
+      }
+      if (table === 'payment_methods') {
+        if (q.nowait && mockState.methodsBusy) return Promise.reject(Object.assign(new Error('could not obtain lock on row'), { code: '55P03' })).then(resolve, reject);
+        rows = mockState.methodRows;
       }
       if (table === 'payments') rows = mockState.armed ? [].concat(mockState.armed) : [];
       if (q.cap != null) rows = rows.slice(0, q.cap);
@@ -81,7 +85,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/autopay-eligibility', () => ({
   ...jest.requireActual('../services/autopay-eligibility'),
-  getChargeableAutopayMethod: jest.fn(async () => mockState.method),
+  getChargeableAutopayMethod: jest.fn(async () => { if (mockState.traceTender) mockState.log.push('tender:read'); return mockState.method; }),
   customerOnAutopay: jest.fn(async () => { if (mockState.autopayUnreadable) throw new Error('payment_methods read failed'); return mockState.chargeable; }),
 }));
 jest.mock('../utils/customer-billing-lock', () => ({
@@ -144,6 +148,10 @@ beforeEach(() => {
   mockState.orphan = null;
   mockState.ambiguous = null;
   mockState.inFlight = false;
+  mockState.processing = null;
+  mockState.methodsBusy = false;
+  mockState.traceTender = false;
+  mockState.methodRows = [{ id: 'pm-1' }];
   mockState.invoiceBusy = false;
   mockState.autopayUnreadable = false;
   mockState.method = { id: 'pm-1', method_type: 'card' };
@@ -167,6 +175,7 @@ const pinFor = (row, visits, fields = {}) => BillingModeChange.cardPin(row, visi
   last4: mockState.chargeable ? (mockState.methodDetail.last_four || mockState.methodDetail.bank_last_four || null) : null,
   methodId: mockState.chargeable ? mockState.method.id : null,
   stampedZero: false,
+  savedMethods: mockState.methodRows.map((m) => m.id).join(','),
 });
 const propose = (updates) => BillingModeChange.billingEditProposal(CUSTOMER_ID, updates);
 const customerWrites = () => mockState.updates.filter((u) => u.table === 'customers');
@@ -492,7 +501,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       });
       expect(result).toMatchObject({ preview_changed: true });
       expect(result.error).toMatch(/billing or upcoming visits changed since the card/);
-      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
+      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock']);
       expect(customerWrites()).toHaveLength(0);
     });
 
@@ -505,7 +514,7 @@ describe('Codex round 3 on #6118: reuse the collectors\' own mechanisms', () => 
       mockState.log = [];
       const result = await commit(BASE, LEAVE, visits);
       expect(result.error).toBeUndefined();
-      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
+      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock']);
     });
   });
 
@@ -582,7 +591,7 @@ describe('Codex round 4 on #6118', () => {
       customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: pinFor(BASE, [], LEAVE),
     });
     expect(result.error).toBeUndefined();
-    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read']);
+    expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock']);
     // A non-billing edit takes no comms lock here.
     mockState.log = [];
     await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: { city: 'Sample City' } });
@@ -946,8 +955,8 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       const bank = await propose(LEAVE);
       expect(bank.display.next_visits).toContain('Future charges under this type go to the saved bank account ending 6789 (ACH).');
       expect(bank.display.next_visits.join(' ')).not.toMatch(/surcharge|saved card/);
-      expect(bank.pin).toContain('["bank","6789","pm-2"]');
-      expect(card.pin).toContain('["card","4242","pm-1"]');
+      expect(bank.pin).toContain('["bank","6789","pm-2","pm-1"]');
+      expect(card.pin).toContain('["card","4242","pm-1","pm-1"]');
       expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
         .toMatchObject({ preview_changed: true });
       expect(customerWrites()).toHaveLength(0);
@@ -1016,6 +1025,135 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       const window = calls.find((c) => c[0] === 'where' && c[1] === 'a.updated_at');
       expect(window[2]).toBe('>=');
       expect(Date.now() - window[3].getTime()).toBeGreaterThanOrEqual(require('../services/completion-attempts').STALE_SIDE_EFFECTS_MS - 1000);
+    });
+  });
+
+  describe('Codex round 13: dues still processing by bank debit', () => {
+    const thisMonth = require('../utils/datetime-et').etDateString().slice(0, 7);
+    const PROCESSING = { id: 'pay-proc', amount: '55.00', status: 'processing', description: 'Gold WaveGuard Monthly — Pat Sample' };
+    const label = new Date(`${thisMonth}-01T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+    test('processing dues that cover visits this month and a switch that would charge them again: refused (double collection)', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.processing = PROCESSING;
+      mockState.visits = [clean('p1', { scheduled_date: `${thisMonth}-28` })];
+      expect(await propose(LEAVE)).toMatchObject({
+        code: 'billing_dues_processing',
+        error: `The ${label} dues ($55.00) are still processing by bank debit and cover visits this month that would now be charged on the new billing type. Try again after the debit settles. Nothing was proposed.`,
+      });
+    });
+
+    test('processing dues that cover only past service: disclosed as an effect and pinned; a settle or a new one between card and commit refuses', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.processing = PROCESSING;
+      mockState.visits = [clean('p1', { scheduled_date: '2099-01-05' })];
+      const card = await propose(LEAVE);
+      expect(card.error).toBeUndefined();
+      expect(card.display.next_visits).toContain(`The ${label} dues ($55.00) are still processing by bank debit and will settle; it is not refunded by this change.`);
+      expect(card.pin).toContain('["pay-proc","55.00","processing"');
+      // The debit settled (or another appeared) before Confirm: the pin differs.
+      mockState.processing = { ...PROCESSING, status: 'paid' };
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+      mockState.processing = PROCESSING;
+      mockState.customer = { ...MONTHLY };
+      expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
+    });
+
+    test('a customer who is not leaving monthly, or has no processing dues, gets no line', async () => {
+      mockState.customer = { ...BASE };
+      mockState.processing = PROCESSING;
+      expect((await propose(LEAVE)).display.next_visits.join(' ')).not.toMatch(/processing by bank debit/);
+      mockState.customer = { ...MONTHLY };
+      mockState.processing = null;
+      expect((await propose(LEAVE)).display.next_visits.join(' ')).not.toMatch(/processing by bank debit/);
+    });
+
+    test('the cron\'s own already-collected predicate is asked, narrowed to processing and without the invoice fallback', async () => {
+      const calls = [];
+      const q = { where: (...a) => { calls.push(['where', ...a]); return q; }, whereIn: (...a) => { calls.push(['whereIn', ...a]); return q; }, first: async () => null };
+      const { findCollectedMonthlyPayment } = require('../services/retry-collectibility');
+      const conn = jest.fn(() => q);
+      expect(await findCollectedMonthlyPayment('c1', { monthKey: '2026-10', monthStart: '2026-10-01', monthEnd: '2026-10-31' }, { conn, statuses: ['processing'], withDuesInvoice: false })).toBeFalsy();
+      expect(calls).toContainEqual(['whereIn', 'status', ['processing']]);
+      expect(conn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Codex round 13: the saved payment methods are locked before the final tender read', () => {
+    test('FOR UPDATE NOWAIT on the customer\'s method rows, taken after the visits and invoices and before the tender is read', async () => {
+      mockState.customer = { ...MONTHLY };
+      const card = await propose(LEAVE);
+      mockState.log = [];
+      mockState.traceTender = true;
+      expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
+      expect(mockState.log).toEqual(['comms', 'prepay', 'customers:row', 'claim', 'visits:lock', 'visits:read', 'methods:lock', 'tender:read']);
+    });
+
+    test('a method row another writer holds is never waited on under the customer row: refuse, nothing written', async () => {
+      mockState.customer = { ...MONTHLY };
+      const card = await propose(LEAVE);
+      mockState.methodsBusy = true;
+      const busy = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+      expect(busy).toMatchObject({ preview_changed: true, error: expect.stringMatching(/saved payment method for this customer is being changed right now/) });
+      expect(customerWrites()).toHaveLength(0);
+    });
+
+    test('a method updated or INSERTED after the card (before the lock) changes the pin and refuses; the id list is pinned', async () => {
+      mockState.customer = { ...MONTHLY };
+      const card = await propose(LEAVE);
+      expect(card.pin).toContain('["card","","pm-1","pm-1"]');
+      // A new default bank method inserted after the card: the id list and the chargeable one change.
+      mockState.methodRows = [{ id: 'pm-1' }, { id: 'pm-2' }];
+      mockState.method = { id: 'pm-2', method_type: 'us_bank_account' };
+      mockState.methodDetail = { last_four: null, bank_last_four: '6789' };
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      // An extra method that does not change the chargeable one still changes the pin (a count change refuses).
+      mockState.method = { id: 'pm-1', method_type: 'card' };
+      mockState.methodDetail = { last_four: null, bank_last_four: null };
+      mockState.customer = { ...MONTHLY };
+      expect(await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin }))
+        .toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
+    });
+  });
+
+  describe('Codex round 13: an ongoing root stamped with a Bill-To payer', () => {
+    const rootRow = (payer) => ({ id: 'root-1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2026-09-01', payer_id: payer });
+
+    test('no live visit but a payer-stamped ongoing root: refused before the card says charges go to the customer\'s card', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [rootRow(7)];
+      expect(await propose(LEAVE)).toMatchObject({
+        code: 'billing_visits_payer_owned',
+        error: 'This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.',
+      });
+      // The top-up's own selector decides which roots count.
+      expect(require('../services/recurring-series-topup').eligibleSeriesParentIds).toHaveBeenCalledWith(expect.anything(), { customerId: CUSTOMER_ID });
+    });
+
+    test('an unstamped root passes; the roots are pinned and locked at the commit, and a payer stamped after the card refuses', async () => {
+      mockState.customer = { ...MONTHLY };
+      mockState.visits = [];
+      mockState.seriesIds = ['root-1'];
+      mockState.roots = [rootRow(null)];
+      const card = await propose(LEAVE);
+      expect(card.error).toBeUndefined();
+      expect(card.pin).toContain('[[["root-1",null]],[]]');
+      mockState.log = [];
+      expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
+      expect(mockState.log).toContain('roots:lock');
+      expect(mockState.log.indexOf('roots:lock')).toBeGreaterThan(mockState.log.indexOf('visits:lock'));
+      mockState.customer = { ...MONTHLY };
+      mockState.roots = [rootRow(7)];
+      mockState.updates = [];
+      const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
+      expect(stale).toMatchObject({ preview_changed: true });
+      expect(customerWrites()).toHaveLength(0);
     });
   });
 

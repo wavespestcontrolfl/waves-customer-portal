@@ -246,7 +246,7 @@ function visitsPin(visits) {
 // (whether a per-visit lane charges the saved method at completion) and
 // GATE_STAMPED_ZERO_FREE (billing-lane.js, how a stamped $0 reads). Enumerated
 // from billing-lane.js and monthly-dues-eligibility.js, which read no other gate.
-const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false, stampedZero: false, family: null, last4: null, methodId: null };
+const NO_CHARGE_CONTEXT = { autopayActive: false, gate: false, stampedZero: false, family: null, last4: null, methodId: null, savedMethods: '' };
 
 const AUTOPAY_UNVERIFIED = 'Could not verify Auto Pay eligibility. Try again in a moment. Nothing was changed.';
 
@@ -256,11 +256,15 @@ const AUTOPAY_UNVERIFIED = 'Could not verify Auto Pay eligibility. Try again in 
 async function savedMethodFacts(dbh, customerId) {
   const { getChargeableAutopayMethod, isBankMethodType } = require('../autopay-eligibility');
   const method = await getChargeableAutopayMethod({ id: customerId }, dbh, { rethrow: true });
-  if (!method) return { family: null, last4: null, methodId: null };
+  // Every saved method row of the customer, not only the chargeable one: a method
+  // added or removed changes which one the walk picks.
+  const savedMethods = (await dbh('payment_methods').where({ customer_id: customerId }).orderBy('id', 'asc').select('id'))
+    .map((m) => String(m.id)).join(',');
+  if (!method) return { family: null, last4: null, methodId: null, savedMethods };
   const detail = await dbh('payment_methods').where({ id: method.id }).first('last_four', 'bank_last_four');
   const bank = isBankMethodType(method.method_type);
   const last4 = (bank ? detail?.bank_last_four || detail?.last_four : detail?.last_four) || null;
-  return { family: bank ? 'bank' : 'card', last4: last4 ? String(last4) : null, methodId: String(method.id) };
+  return { family: bank ? 'bank' : 'card', last4: last4 ? String(last4) : null, methodId: String(method.id), savedMethods };
 }
 
 // The lookup runs fail-closed (customerOnAutopay failClosed: a broken read
@@ -270,7 +274,7 @@ async function savedMethodFacts(dbh, customerId) {
 async function chargeContext(dbh, customerId, row) {
   const gates = require('../../config/feature-gates');
   let autopayActive;
-  let method = { family: null, last4: null, methodId: null };
+  let method = { family: null, last4: null, methodId: null, savedMethods: '' };
   try {
     autopayActive = await require('../autopay-eligibility').customerOnAutopay({
       id: customerId, autopay_enabled: row.autopay_enabled, autopay_paused_until: row.autopay_paused_until,
@@ -287,15 +291,57 @@ async function chargeContext(dbh, customerId, row) {
   };
 }
 
+// Facts outside the visits that the card words and pins:
+//   roots      — the customer's ongoing recurring roots, the top-up's own selector
+//                (recurring-series-topup.js eligibleSeriesParentIds), with the payer
+//                stamped on each: the top-up copies a root's payer to every visit it
+//                mints, so a payer-stamped root is payer-owned billing even with no
+//                live visit today. Locked FOR UPDATE at commit (the Schedule save's
+//                row lock), after the visits.
+//   processing — when the edit leaves monthly membership, this month's (and last
+//                month's) dues payments still `processing` by bank debit: the debit
+//                settles after the lane moves (retry-collectibility.js
+//                findCollectedMonthlyPayment, the cron's own already-collected
+//                predicate, narrowed to processing).
+const NO_FACTS = { roots: [], processing: [] };
+
+async function ongoingRoots(dbh, customerId, { lock = false } = {}) {
+  const ids = await require('../recurring-series-topup').eligibleSeriesParentIds(dbh, { customerId });
+  if (!ids.length) return [];
+  const q = dbh('scheduled_services').whereIn('id', ids).orderBy('id', 'asc').select('id', 'payer_id');
+  return lock ? q.forUpdate() : q;
+}
+
+async function processingDues(dbh, customerId) {
+  const { findCollectedMonthlyPayment } = require('../retry-collectibility');
+  const [year, month] = require('../../utils/datetime-et').etDateString().split('-').map(Number);
+  const out = [];
+  for (const [y, m] of [[year, month], month === 1 ? [year - 1, 12] : [year, month - 1]]) {
+    const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+    const monthEnd = `${monthKey}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0')}`;
+    const payment = await findCollectedMonthlyPayment(customerId, { monthKey, monthStart: `${monthKey}-01`, monthEnd },
+      { conn: dbh, statuses: ['processing'], withDuesInvoice: false });
+    if (payment) out.push({ ...payment, monthKey });
+  }
+  return out;
+}
+
+async function billingFacts(dbh, customerId, row, fields, { lock = false } = {}) {
+  const leaving = resolveBillingLane(row).mode === 'monthly_membership' && resolveBillingLane({ ...row, ...fields }).mode !== 'monthly_membership';
+  return { roots: await ongoingRoots(dbh, customerId, { lock }), processing: leaving ? await processingDues(dbh, customerId) : [] };
+}
+
 // What the card was built from, as one string compared under the lock at commit:
 // the billing fields, every upcoming visit's billing columns and invoices, the
 // count of visits that carry billing (always 0 on a card that was shown), the
 // collection context, and the open membership-dues invoices.
-function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = []) {
+function cardPin(row, visits, fields = {}, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const dues = openDues.map((d) => [String(d.id), d.total == null ? null : String(d.total), d.status]);
-  const method = [charge.family || '', charge.last4 || '', charge.methodId || ''];
+  const method = [charge.family || '', charge.last4 || '', charge.methodId || '', charge.savedMethods || ''];
+  const roots = facts.roots.map((r) => [String(r.id), r.payer_id == null ? null : String(r.payer_id)]);
+  const processing = facts.processing.map((p) => [String(p.id), String(p.amount), p.status, p.monthKey]);
   const gates = `${+charge.autopayActive}${+charge.gate}${+charge.stampedZero}`;
-  return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}`;
+  return `${billingPin(row)}|${visitsPin(visits)}|${pricedVisitCount(visits)}|${gates}|${JSON.stringify(method)}|${JSON.stringify(dues)}|${JSON.stringify([roots, processing])}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -309,6 +355,8 @@ function startsMembership(before, after) {
   return !member(before) && member(after);
 }
 
+const ymd = (d) => String(d instanceof Date ? d.toISOString() : d ?? '').slice(0, 10);
+
 // '2026-10' -> 'October 2026'.
 const monthLabel = (key) => new Date(`${key}-01T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
@@ -320,8 +368,13 @@ const SIDE_FLOW_CHECKS = [
   // (payer.js resolveForInvoice reads customers.payer_id and each visit's own
   // scheduled_services.payer_id): a payer on the customer or on any upcoming
   // visit keeps billing changes on the customer page.
-  ({ row, visits }) => (row.payer_id || visits.some((v) => v.payer_id)
-    ? refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer') : null),
+  // An ongoing recurring root stamped with a payer counts too: the top-up copies it to
+  // every visit it mints, so the new lane would meet a payer-owned visit.
+  ({ row, visits, facts }) => {
+    if (row.payer_id || visits.some((v) => v.payer_id)) return refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer');
+    return facts.roots.some((r) => r.payer_id)
+      ? refuse('This customer has an ongoing recurring plan billed to a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'billing_visits_payer_owned') : null;
+  },
   // A move INTO monthly membership needs a customer the dues run would really
   // charge: the cron's own cohort and guards plus a chargeable saved method
   // (monthly-dues-eligibility.js, shared with billing-cron.js). Any reason the
@@ -346,8 +399,16 @@ const SIDE_FLOW_CHECKS = [
   // for this ET month's dues, which covers an unresolved invoice-less
   // stripe_orphan_charges row and a failed dues attempt parked with
   // metadata.ambiguous_outcome.
-  async ({ dbh, customerId, laneBefore, laneAfter }) => {
+  async ({ dbh, customerId, laneBefore, laneAfter, visits, facts }) => {
     if (laneBefore !== 'monthly_membership' || laneAfter === 'monthly_membership') return null;
+    // A dues debit still `processing` (normal ACH: recorded, lock released, settles days
+    // later) paid for its month's visits. Upcoming visits dated in that month would now be
+    // charged on the new lane too: double collection, so refuse. Dues that cover only past
+    // service are disclosed on the card instead (processingLine) and pinned.
+    const covered = facts.processing.find((p) => visits.some((v) => ymd(v.scheduled_date).startsWith(p.monthKey)));
+    if (covered) {
+      return refuse(`The ${monthLabel(covered.monthKey)} dues (${money(covered.amount)}) are still processing by bank debit and cover visits this month that would now be charged on the new billing type. Try again after the debit settles. Nothing was proposed.`, 'billing_dues_processing');
+    }
     const { armedRetryQuery, isMonthlyObligationRow, hasUnresolvedSiblingStripeOutcome } = require('../retry-collectibility');
     const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).select('id', 'description');
     if ((armed || []).some(isMonthlyObligationRow)) {
@@ -388,7 +449,7 @@ async function customerPageRefusal(dbh, customerId, row, fields) {
  * proposal and again at commit under the row lock (dbh = that transaction).
  * `visits` is upcomingVisits() read on the same handle.
  */
-async function billingEditRefusal(dbh, customerId, row, fields, visits) {
+async function billingEditRefusal(dbh, customerId, row, fields, visits, facts = NO_FACTS) {
   if (visits.length > VISIT_HARD_LIMIT) return refuse('This customer has too many upcoming visits to confirm from the bar; change it on the customer page. Nothing was proposed.', 'too_many_visits');
   if (row.billing_mode === 'annual_prepay') return refuse('This customer is on annual prepay; that lane follows the annual invoice and its term, so it is not changed from the bar. Nothing was proposed.', 'annual_prepay_lane');
   if (unchangedEdit(row, fields)) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
@@ -415,7 +476,7 @@ async function billingEditRefusal(dbh, customerId, row, fields, visits) {
   if (pageRefusal) return pageRefusal;
   const after = { ...row, ...fields };
   const ctx = {
-    dbh, customerId, row, after, fields, visits,
+    dbh, customerId, row, after, fields, visits, facts,
     laneBefore: resolveBillingLane(row).mode, laneAfter: resolveBillingLane(after).mode,
   };
   for (const check of SIDE_FLOW_CHECKS) {
@@ -474,7 +535,9 @@ const duesStopLine = (openDues) => {
   return `Monthly dues stop: no new monthly dues charge runs. ${plural(openDues.length, 'open membership-dues invoice', 'open membership-dues invoices')} (${money(total)}) stay${openDues.length === 1 ? 's' : ''} collectible: their pay links and follow-ups continue. Dues already paid for this month are not refunded.`;
 };
 
-function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = []) {
+const processingLine = (p) => `The ${monthLabel(p.monthKey)} dues (${money(p.amount)}) are still processing by bank debit and will settle; it is not refunded by this change.`;
+
+function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CONTEXT, openDues = [], facts = NO_FACTS) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
   // one_time and any other explicit lane bill like per_visit.
@@ -487,7 +550,7 @@ function nextVisitLines(row, fields, visits, dues = null, charge = NO_CHARGE_CON
   return [
     head,
     ...tenderLines(laneAfter, charge),
-    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues)] : []),
+    ...(laneBefore === 'monthly_membership' && laneAfter !== 'monthly_membership' ? [duesStopLine(openDues), ...facts.processing.map(processingLine)] : []),
   ];
 }
 
@@ -504,7 +567,8 @@ async function billingEditProposal(customerId, updates, dbh = db) {
       'payer_id', 'autopay_enabled', 'autopay_paused_until', dbh.raw('updated_at::text AS version'));
   if (!row) return refuse('No customer matches that id — nothing was proposed.', 'customer_not_found');
   const visits = await upcomingVisits(dbh, customerId);
-  const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields, visits);
+  const facts = await billingFacts(dbh, customerId, row, parsed.fields);
+  const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields, visits, facts);
   if (refusal) return refusal;
   const after = { ...row, ...parsed.fields };
   // Already monthly: the move-in check above did not run, so ask the dues
@@ -521,12 +585,12 @@ async function billingEditProposal(customerId, updates, dbh = db) {
   }
   const openDues = await require('../billing-lane').openStampedDuesInvoices(dbh, customerId);
   return {
-    pin: cardPin(row, visits, parsed.fields, charge, openDues),
+    pin: cardPin(row, visits, parsed.fields, charge, openDues, facts),
     version: row.version,
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues),
+      next_visits: nextVisitLines(row, parsed.fields, visits, dues, charge, openDues, facts),
     },
   };
 }
@@ -599,6 +663,22 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
     if (e && e.code === '55P03') throw changed('An invoice on this customer is being changed right now — nothing was updated. Try again in a minute.');
     throw e;
   }
+  // The roots the top-up would extend, locked after the visits; the saved payment methods
+  // locked NOWAIT so the tender is read from rows no writer can change before commit. The
+  // method writers (autopay-setup-link.js, stripe-webhook.js) take no customer lock, but
+  // they contend on these row locks; NOWAIT because they may hold a method row and then
+  // want the customer row this transaction holds. A method INSERTED after this read
+  // cannot be locked (no row exists to lock): the full list of method ids is pinned and
+  // re-read here, which covers every insert that committed before this point; only an
+  // insert in the instant between this read and the commit is not fenced.
+  let facts;
+  try {
+    facts = await billingFacts(trx, customerId, lockedBefore, fields, { lock: true });
+    await trx('payment_methods').where({ customer_id: customerId }).orderBy('id', 'asc').forUpdate().noWait().select('id');
+  } catch (e) {
+    if (e && e.code === '55P03') throw changed('A plan or saved payment method for this customer is being changed right now — nothing was updated. Try again in a minute.');
+    throw e;
+  }
   let charge;
   try {
     charge = await chargeContext(trx, customerId, lockedBefore);
@@ -606,10 +686,10 @@ async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields,
     if (e && e.billingUnverified) throw changed(e.billingUnverified.message);
     throw e;
   }
-  if (cardPin(lockedBefore, visits, fields, charge, openDues) !== pin) {
+  if (cardPin(lockedBefore, visits, fields, charge, openDues, facts) !== pin) {
     throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
-  const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits);
+  const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits, facts);
   if (refusal) throw changed(refusal.error.replace('Nothing was proposed.', 'Nothing was updated.'));
 }
 

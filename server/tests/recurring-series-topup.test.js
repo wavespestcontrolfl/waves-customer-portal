@@ -1015,6 +1015,17 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
     }
   });
 
+  test('the verdict function stays within the repository complexity limit (decisions, not a one-use helper)', () => {
+    const { Linter } = require('eslint');
+    const fs = require('fs');
+    const code = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+    const messages = new Linter().verify(code, {
+      languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs' },
+      rules: { complexity: ['error', 20] },
+    }, 'admin-schedule.js');
+    expect(messages.filter((m) => /seriesNextOccurrencesUnbillable/.test(m.message)).map((m) => m.message)).toEqual([]);
+  });
+
   test('a flat-priced root passes, and so does one with an add-on that recurs with it', async () => {
     const flat = topupScenario({ parentOverrides: { create_invoice_on_complete: false, estimated_price: '150.00' } });
     expect(await seriesNextOccurrencesUnbillable(flat.conn, 10, { customerOverride: PER_VISIT })).toBeNull();

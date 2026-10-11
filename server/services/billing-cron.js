@@ -9,7 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const BillingRetryEmail = require('./billing-retry-email-obligation');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-const { resolveBillingLane, findLiveStampedDuesInvoice } = require('./billing-lane');
+const { resolveBillingLane } = require('./billing-lane');
 const {
   REASONS: RETRY_REASONS,
   DISPOSITIONS: RETRY_DISPOSITIONS,
@@ -18,6 +18,7 @@ const {
   classifyFailedPaymentRetry,
   hasUnresolvedSiblingStripeOutcome,
   deriveMonthlyChargeIdempotencyKey,
+  findCollectedMonthlyPayment,
 } = require('./retry-collectibility');
 const { isEnabled } = require('../config/feature-gates');
 const { isCollectionHoldRefusal } = require('./collections/collection-hold');
@@ -189,33 +190,6 @@ async function renderTemplate(templateKey, vars, context = {}) {
 
 const MONTHLY_LOCK_RETRY_ATTEMPTS = 3;
 const MONTHLY_LOCK_RETRY_DELAY_MS = 3000;
-
-// The monthly already-collected predicate — ONE definition shared by the
-// locked read and the post-contention recheck. Metadata-first
-// (billed_month stamp), payment_date window + description marker as the
-// legacy fallback; exactly the dedupe charge-now and the retry classifier
-// (retry-collectibility.js) apply.
-async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }) {
-  const payment = await db('payments')
-    .where({ customer_id: customerId })
-    .whereIn('status', ['paid', 'processing'])
-    .where(function () {
-      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-        .orWhere(function () {
-          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-            .andWhere('payment_date', '>=', monthStart)
-            .andWhere('payment_date', '<=', monthEnd)
-            .andWhere('description', 'like', '%WaveGuard Monthly%');
-        });
-    })
-    .first();
-  if (payment) return payment;
-  // A live completion-minted dues invoice (paid, processing or still open)
-  // IS this month's bill — an unpaid one is collected by the invoice
-  // follow-up ladder, never by a second charge. No payment row to name.
-  const duesInvoice = await findLiveStampedDuesInvoice(db, customerId, monthKey);
-  return duesInvoice ? { id: null, dues_invoice_id: duesInvoice.id } : undefined;
-}
 
 // Run fn() under the per-customer collection lock; the lock closes the
 // check-then-charge race against charge-now and the retry sweep. Resolves
