@@ -4110,6 +4110,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       const phoneProblem = contactPhoneProblem(updates.phone);
       if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
     }
+    // The shared-phone texting mark was chosen for ONE number. A save that
+    // changes the number's identity drops the mark unless the same save sets
+    // it for the new number (codex #6268 r2): a stale mark on a number that is
+    // (or later becomes) shared would link the other account's texts here.
+    if (updates.phone !== undefined && req.body.smsPrimaryForSharedPhone === undefined
+      && before.sms_primary_for_shared_phone === true && phoneLast10(updates.phone) !== phoneLast10(before.phone)) {
+      updates.sms_primary_for_shared_phone = false;
+    }
     if (req.body.addressLine1 !== undefined || req.body.addressLine2 !== undefined) {
       const normalizedAddress = normalizeAdminAddressInput({
         addressLine1: req.body.addressLine1 !== undefined ? req.body.addressLine1 : before.address_line1,

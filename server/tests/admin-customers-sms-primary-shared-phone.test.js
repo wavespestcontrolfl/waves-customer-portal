@@ -10,6 +10,12 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
+// A phone change fans out to estimates, leads and threads through this
+// service; that propagation is covered by its own suites, not here.
+jest.mock('../services/customer-contact-fanout', () => {
+  const actual = jest.requireActual('../services/customer-contact-fanout');
+  return Object.fromEntries(Object.keys(actual).map((k) => [k, typeof actual[k] === 'function' ? jest.fn(async () => ({})) : actual[k]]));
+});
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/plan-rate-ledger', () => ({ syncScalarWriteToLedger: jest.fn(async () => {}) }));
 
@@ -18,9 +24,16 @@ const mockState = { initial: null, locked: null, patches: [] };
 jest.mock('../models/db', () => {
   const build = (table, inTransaction = false) => {
     const query = { lockedRead: false };
-    for (const method of ['where', 'whereNull', 'whereNot', 'whereRaw', 'select']) {
+    for (const method of ['where', 'whereNull', 'whereNot', 'whereRaw']) {
       query[method] = () => query;
     }
+    // A phone change runs a cross-account conflict read that awaits
+    // .select(...) as a row list; keep the chain and resolve to no rows.
+    query.select = () => {
+      const chained = Object.create(query);
+      chained.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      return chained;
+    };
     query.forUpdate = () => { query.lockedRead = true; return query; };
     query.first = async () => {
       if (table !== 'customers') return null;
@@ -51,6 +64,7 @@ const BASE = {
   account_id: 'account-1',
   first_name: 'Test',
   last_name: 'Customer',
+  phone: '+19415550100',
   active: true,
   pipeline_stage: 'active_customer',
   waveguard_tier: 'Bronze',
@@ -96,6 +110,27 @@ describe('PUT /admin/customers/:id smsPrimaryForSharedPhone', () => {
     mockState.locked.sms_primary_for_shared_phone = true;
     await saveCustomer({ smsPrimaryForSharedPhone: false });
     expect(mockState.patches[0]).toEqual({ sms_primary_for_shared_phone: false });
+  });
+
+  test('a new phone number drops a mark chosen for the old number', async () => {
+    mockState.initial.sms_primary_for_shared_phone = true;
+    mockState.locked.sms_primary_for_shared_phone = true;
+    await saveCustomer({ phone: '+19415550199' });
+    expect(mockState.patches[0]).toMatchObject({ phone: expect.any(String), sms_primary_for_shared_phone: false });
+  });
+
+  test('the same number in another format keeps the mark', async () => {
+    mockState.initial.sms_primary_for_shared_phone = true;
+    mockState.locked.sms_primary_for_shared_phone = true;
+    await saveCustomer({ phone: '(941) 555-0100' });
+    expect(mockState.patches[0]).not.toHaveProperty('sms_primary_for_shared_phone');
+  });
+
+  test('a new phone number with the mark set in the same save keeps it', async () => {
+    mockState.initial.sms_primary_for_shared_phone = true;
+    mockState.locked.sms_primary_for_shared_phone = true;
+    await saveCustomer({ phone: '+19415550199', smsPrimaryForSharedPhone: true });
+    expect(mockState.patches[0]).toMatchObject({ sms_primary_for_shared_phone: true });
   });
 
   test('a truthy string from a form is coerced, an unrelated string is not true', async () => {
