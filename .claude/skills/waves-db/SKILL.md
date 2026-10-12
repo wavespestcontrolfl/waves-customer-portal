@@ -221,12 +221,41 @@ needs `JSON.stringify(arr)`. Read side: pg hands jsonb back parsed, so a reader
 that must also work over a fake store parses strings defensively. Caught only
 by the real-DB ui-verify walkthrough (the step 4 PR 2b "Acquire anyway" 500).
 
+## 5e. A snapshot row must carry its own replay inputs
+
+A row that is replayed or re-rendered later — `irrigation_week_plans`,
+`message_drafts.facts_block`, a saved cost-plus quote, a parked
+`estimate_data` blob — must store every input its decision used: rate
+table, resolved cost basis, render/prompt version, opt-out state.
+Re-resolving any of them from live config at read time silently moves an
+answer the customer was already shown. A gate flip rebuilt a published
+week plan with a different rate and replay then rejected its own
+snapshot, hiding the plan (#6236); a widened company-facts render stopped
+matching stored drafts compared byte-for-byte, so grounded replies were
+marked unsafe (#6197); and live labor/drive-time inputs moved a saved
+4,500 sq ft quote from $693 to $864 on the customer's existing link
+(#6195). Version the render and treat legacy rows as the old version;
+never diff a stored blob against a freshly computed one.
+
 ## 6. Schema truth traps (wrong-answer generators)
 
-- `customers.active` is TRUE for leads. A "real customer" =
-  `pipeline_stage IN (active_customer, won, at_risk)` — use the
-  `whereRealCustomer` helper. `customers.status` does not exist.
-  `member_since` is canonical; `customer_since` is dead.
+- `customers.active` is TRUE for leads. A live customer = `active` AND
+  `deleted_at IS NULL` AND `pipeline_stage IN (active_customer, won,
+  at_risk)` — `modify(whereLiveCustomer)` from
+  `server/services/customer-stages.js`, which is the exported predicate.
+  (`whereRealCustomer` is a route-local copy in `admin-dashboard.js:152`
+  — not importable, don't reach for it.) A scope that checks `active`
+  alone counts leads as customers: a namesake lead in `new_lead` looked
+  like a live account and suppressed the unbooked-call pager (#6274).
+  `customers.status` does not exist. `member_since` is canonical;
+  `customer_since` is dead.
+- Eligibility and scope predicates are shared so they can't drift — reuse
+  `whereLiveCustomer`, `duplicatePairEligibility`, and
+  `seriesExtensionUnbillable` rather than re-deriving one inline. The tell
+  is a local check that consults FEWER conditions than the canonical one:
+  score alone instead of name/address conflict before archiving a
+  duplicate (#6115), the overlaid root's `estimated_price` instead of the
+  cadence-filtered occurrence floor (#6118).
 - `referrals.id` is a UUID even though migration 000054 reads `increments`
   (a dead hasTable-guarded no-op). Migration text lies; prod schema doesn't.
 - `services` (the catalog) names its display column `name`, NOT
@@ -296,6 +325,26 @@ by the real-DB ui-verify walkthrough (the step 4 PR 2b "Acquire anyway" 500).
   reminders fall back to EMAIL), never disable rows to change scheduling
   (kills the `original_message_type` mapping), and strip hardcoded fallback
   copy when retiring an SMS action (it sends even with templates deleted).
+
+## 6b. A protocol value nobody reads is not shipped
+
+Lawn/label data has to reach BOTH sources of truth plus `products_catalog`,
+pricing.csv, and the plan-matcher (AGENTS.md P1). Before shipping a new
+limit, hold, target, or substitution, grep for the production reader in
+the path that ENFORCES it: a value living only in a note string, display
+text, or an unconsumed response key is a contradiction, not a change.
+A November large-patch nitrogen target that `v13RateOptions`
+(`waveguard-plan-engine.js:662`) never read would have left the plan
+calculating 3.1 lb per 1,000 while the same note told the technician
+2.1 lb (#6233, closed unmerged). `sodSwap` went up as an unconsumed
+response marker while completion rebuilt substitutions from
+`plan.mixCalculator.items[].substitution`, which would have attributed
+the substitute off-protocol and logged the default as skipped — review
+caught it and the merged change added `sodSwapSubstitutions` (#6231). A
+Dylox surface-feeder cap that lived only in display text let `checkLimits`
+count 2 of 3 applications and allow a third past the label limit (#6228).
+A migration that records a limit the runtime does not read is the same
+finding (#6243).
 
 ## 7. Verification before "done"
 
