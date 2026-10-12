@@ -1014,7 +1014,7 @@ describe('buildLawnExpectations', () => {
         'services/lawn-diagnostic-report.js',
         // GATE_LAWN_SPOT_TARGET: the lawn sheet's spot target lists come from the engine's own target vocabulary (TARGET_CLASS_BY_NAME), so no target name exists outside it.
         'services/lawn-spot-target.js',
-        // P14: the v6 copy writer (GATE_LAWN_REPORT_COPY_V6, dark) offers APPROVED rows' keyed sentences for selection.
+        // P14: the v6 copy writer offers APPROVED rows' keyed sentences for selection.
         'services/service-report/lawn-copy-v6.js',
         'services/service-report/lawn-expectations.js',
         // P13: reuses judgeProgress / row resolution; itself read only by report-data (server-internal) and its replay script.

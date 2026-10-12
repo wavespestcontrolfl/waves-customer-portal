@@ -1,5 +1,5 @@
 /**
- * Lawn report v6 copy (lawn report rebuild P14, GATE_LAWN_REPORT_COPY_V6).
+ * Lawn report v6 copy (lawn report rebuild P14).
  *
  * FIXED SENTENCES, no model (owner ruling 2026-10-02, #5604 Codex r1: word
  * checks cannot stop a model claiming a feed on an insect-only visit). Every

@@ -1,10 +1,10 @@
-// GATE_LAWN_REPORT_COPY_V6 (lawn report rebuild P14) through the real report
+// The lawn v6 copy (lawn report rebuild P14, live with GATE_LAWN_REPORT_LEAD) through the real report
 // builder (buildReportV1Data) and the reconcile pass. Fixed sentences, no
 // model (owner 2026-10-02); the shared dispatcher is mocked so no production
 // LLM API is called by the report's other lanes. Synthetic data only.
 //
-// Pins: gate off (or lead gate off) = no write, no key, the same payload and
-// PDF signature as before; gate on = the fields freeze at the first render
+// Pins: lead gate off = no write, no key, the same payload and
+// PDF signature as before; lead gate on = the fields freeze at the first render
 // (first writer wins per assessment) and reach the customer only through
 // reportV2.lead (the carrier never leaves the process); a later render replays
 // byte for byte whatever the facts now say; a degraded read creates no freeze.
@@ -167,8 +167,8 @@ const WEEK = { assessmentId: 'la-cur', serviceDate: '2026-09-30', rainInches: 1,
 const NARRATIVE_LANE = 'lawn_visit_narratives';
 const narrativeCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === NARRATIVE_LANE);
 
-describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
-  const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD', 'LAWN_REPORT_V2_NARRATIVE'];
+describe('the lawn v6 copy on the report payload', () => {
+  const ENV = ['GATE_LAWN_REPORT_LEAD', 'LAWN_REPORT_V2_NARRATIVE'];
   const saved = {};
   beforeEach(() => {
     ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
@@ -185,26 +185,17 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     const { knex, log } = withRecords({ ...fixtures(), ...patch }, recs, hooks);
     return buildReportV1Data(svc, 'token-p14', knex, {}).then((data) => ({ data, log }));
   };
-  const live = () => { process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
+  const live = () => { process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
   // The hand-off is non-enumerable (a clone would drop it): reconcile a shallow copy, as the route does.
   const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
 
-  test('gate off: no write, no key, and the payload is what it was', async () => {
+  test('lead off: no write, no key, and the payload is what it was', async () => {
     const recs = records();
     const { data, log } = await render(recs);
     expect(log.updates).toHaveLength(0);
     expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
     expect(data.reportV2.copyV6).toBeUndefined();
     expect(JSON.stringify(reconciled(data))).not.toMatch(/copyV6|lawnCopyV6/);
-  });
-
-  test('the v6 gate alone (lead gate off) is inert: byte-identical payload, no write', async () => {
-    const base = (await render(records())).data;
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    const recs = records();
-    const { data, log } = await render(recs);
-    expect(log.updates).toHaveLength(0);
-    expect(JSON.parse(JSON.stringify(data))).toEqual(JSON.parse(JSON.stringify(base)));
   });
 
   test('while v6 is live the old narrative overlay does not run, even with LAWN_REPORT_V2_NARRATIVE set, and no model is asked for lead copy', async () => {
@@ -635,21 +626,14 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     });
   });
 
-  test('the PDF cache signature moves with the gate only while it is live (gate off is the signature it was)', async () => {
+  test('the PDF cache signature moves with the lead only while it is live (lead off is the signature it was)', async () => {
     const sig = async () => {
       const knex = makeKnex({ ...fixtures(), service_records: [] });
       return (await resolveCanonicalLawnRender({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' }, knex)).signature;
     };
     const off = await sig();
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    expect(await sig()).toBe(off); // lead gate off: inert
     process.env.GATE_LAWN_REPORT_LEAD = 'true';
-    delete process.env.GATE_LAWN_REPORT_COPY_V6;
-    const leadOnlySig = await sig();
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
-    const both = await sig();
-    expect(leadOnlySig).not.toBe(off);
-    expect(both).not.toBe(leadOnlySig);
+    expect(await sig()).not.toBe(off);
   });
 
   test('a non-live render (PDF) prints "What to expect" without the by-next-visit sentences; the live view keeps them', async () => {
@@ -668,7 +652,6 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
   });
 
   test('the PDF key does not depend on the customer\'s bookings (the visit sentences never reach a PDF)', async () => {
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
     process.env.GATE_LAWN_REPORT_LEAD = 'true';
     const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
     const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
@@ -682,7 +665,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
 // query, nothing on the payload but reportV2.lead.techParagraph, and the PDF key
 // follows the frozen text.
 describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
-  const ENV = ['GATE_LAWN_TECH_PARAGRAPH', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_REPORT_COPY_V6'];
+  const ENV = ['GATE_LAWN_TECH_PARAGRAPH', 'GATE_LAWN_REPORT_LEAD'];
   const saved = {};
   // A fixed-sentence entry (v2, owner 2026-10-06): the text must be the render of its slots.
   const SLOTS = { observed: [{ condition: 'chinch_bugs', place: 'front_lawn' }], maybe: [], products: ['Arena 50 WDG'] };
@@ -717,8 +700,8 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
     expect(JSON.parse(JSON.stringify(reconciled(frozen.data)))).toEqual(JSON.parse(JSON.stringify(reconciled(bare.data))));
   });
 
-  test('a failed service_products read flags the build for the paragraph step, with the copy-v6 gate off, and changes no payload key (Codex r4)', async () => {
-    live(); // GATE_LAWN_REPORT_COPY_V6 stays off
+  test('a failed service_products read flags the build for the paragraph step, and changes no payload key (Codex r4)', async () => {
+    live();
     const { knex } = withRecords({ ...fixtures(), service_products: FAIL }, recordsWith(null));
     const data = await buildReportV1Data(service(recordsWith(null)['svc-cur'].structured_notes), 'token-tp', knex, {});
     expect(data.lawnAssessment.productsReadFailed).toBe(true);
@@ -737,7 +720,9 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
     expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'techParagraph')).toBe(false);
     expect(JSON.stringify(out).split(TEXT).length - 1).toBe(1);
     expect(techCalls()).toHaveLength(0);
-    expect(log.updates).toHaveLength(0);
+    // The only write is the v6 copy's own first-render freeze; the paragraph is read, never written.
+    expect(log.updates).toHaveLength(1);
+    expect(JSON.stringify(log.updates[0])).toContain('lawn_report_v6_fixed_1');
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(false);
   });
 
@@ -852,10 +837,10 @@ describe('the Visit Summary PDF key follows the loaded row, whatever the gate sa
 });
 
 // Codex r5: the Visit Summary's "At the next visit" sentence needs a booking at THIS property. With
-// copy v6 off, snapshot.nextVisit is customer-wide, so the build hands the gate the property-scoped
+// the lead (and so the v6 copy) off, snapshot.nextVisit is customer-wide, so the build hands the gate the property-scoped
 // answer instead (programVisitOut.nextVisitBooked), for any gate state.
-describe('programVisitOut.nextVisitBooked is property-scoped with copy v6 off', () => {
-  const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+describe('programVisitOut.nextVisitBooked is property-scoped with the lead (v6 copy) off', () => {
+  const ENV = ['GATE_LAWN_REPORT_LEAD'];
   const saved = {};
   const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
   const HOME_B = { service_address_line1: '9 Other Test Road', service_address_city: 'Sarasota', service_address_zip: '34231' };

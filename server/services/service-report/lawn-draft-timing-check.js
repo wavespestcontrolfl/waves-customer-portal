@@ -2,7 +2,7 @@
  * Lawn technician-draft result-timing check (owner 2026-10-03, the "draft
  * gap" after P15 #5667).
  *
- * While GATE_LAWN_REPORT_COPY_V6 is live, lawn model copy states no result
+ * While the lawn v6 copy (live with the report lead) is on, lawn model copy states no result
  * timing: the report's "What to expect" carries it in owner-approved words.
  * The pattern screen (report-writer-rules lawnResultTimingViolation) cannot
  * read meaning, so it exempts watering / mowing clauses, which the writer
@@ -78,11 +78,11 @@ function sentencesOf(text) {
     .filter(Boolean);
 }
 
-/** LAWN_DRAFT_TIMING_CHECK: on unless off / false / 0, and only under the v6 gate. */
+/** LAWN_DRAFT_TIMING_CHECK: on unless off / false / 0, and only while the report lead (the v6 copy) is live. */
 function lawnDraftTimingCheckLive() {
   const raw = String(process.env.LAWN_DRAFT_TIMING_CHECK || '').trim().toLowerCase();
   if (raw === 'off' || raw === 'false' || raw === '0') return false;
-  return featureGates.lawnReportCopyV6Live();
+  return featureGates.lawnReportLeadLive();
 }
 
 /**

@@ -123,7 +123,7 @@ function summarySentence(list, main, support, noTiming) {
     ? ', with a surfactant added so the treatment coats the foliage evenly.'
     : '.';
   if (main.some((p) => p.kind === 'systemic')) {
-    // noTiming (lawn under GATE_LAWN_REPORT_COPY_V6): result timing reaches
+    // noTiming (lawn with the v6 copy live): result timing reaches
     // the customer only as an owner-approved "What to expect" sentence.
     out += noTiming
       ? ' The systemic products are absorbed by the plants and keep working after the visit.'
