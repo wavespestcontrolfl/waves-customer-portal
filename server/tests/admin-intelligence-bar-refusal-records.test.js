@@ -174,7 +174,7 @@ describe('circuit breaker accounting on /query', () => {
 describe('refusal gap rows on /query (platform mode)', () => {
   beforeEach(() => { process.env.GATE_IB_PLATFORM = 'true'; });
 
-  test('a request that ends on a coded refusal, with no discovery, writes one blocked row: tool + code, no request text', async () => {
+  test('a request that ends on an unknown-tool refusal, with no discovery, writes one missing_capability row from the tool name, no request text', async () => {
     mockMessagesCreate
       .mockResolvedValueOnce({ content: [toolUse('no_such_tool', { note: SYNTHETIC_ASK })] })
       .mockResolvedValueOnce({ content: [text('Which customer do you mean?')] });
@@ -184,21 +184,22 @@ describe('refusal gap rows on /query (platform mode)', () => {
     });
     expect(mockGapRows).toHaveLength(1);
     expect(mockGapRows[0]).toMatchObject({
-      source: 'intelligence-bar', kind: 'blocked', closest_tool: 'no_such_tool', status: 'new',
+      source: 'intelligence-bar', kind: 'missing_capability', closest_tool: 'no_such_tool', status: 'new',
+      summary: 'Asked for a tool the bar does not have: no_such_tool',
     });
-    expect(mockGapRows[0].summary).toContain('capability_unimplemented');
     const stored = JSON.stringify(mockGapRows);
     for (const fragment of ['Pat', 'Placeholder', 'Example Lane', '555-0100', 'Friday']) expect(stored).not.toContain(fragment);
   });
 
-  test('the same refusal on two requests, asked in different words, carries one fingerprint', async () => {
-    for (const ask of ['Do the first thing', 'Please do a second, different thing']) {
+  test('the same unknown tool, with a decline-worded and a differently worded reply, is one kind and one fingerprint', async () => {
+    for (const [ask, reply] of [['Do the first thing', "There is no tool in this bar that does that."], ['Please do a second, different thing', 'Tell me which one.']]) {
       mockMessagesCreate
         .mockResolvedValueOnce({ content: [toolUse('no_such_tool')] })
-        .mockResolvedValueOnce({ content: [text('Tell me which one.')] });
+        .mockResolvedValueOnce({ content: [text(reply)] });
       await withServer(async (baseUrl) => { await postQuery(baseUrl, { prompt: ask, context: 'customers' }); });
     }
     expect(mockGapRows).toHaveLength(2);
+    expect(mockGapRows.map((row) => row.kind)).toEqual(['missing_capability', 'missing_capability']);
     expect(mockGapRows[0].fingerprint).toBe(mockGapRows[1].fingerprint);
     // The table's upsert owns the count: the merge bumps occurrences.
     expect(mockGapMerges).toHaveLength(2);
@@ -234,13 +235,13 @@ describe('refusal gap rows on /query (platform mode)', () => {
     expect(JSON.stringify(mockGapRows)).not.toContain('Placeholder');
   });
 
-  test('the step limit with a final report still counts as running out of steps', async () => {
+  test('the step limit with a final report is a finished request: no exhaustion row, and the unknown-tool refusal is the one row', async () => {
     mockMessagesCreate.mockImplementation(async (request) => (request.tool_choice?.type === 'none'
       ? { content: [text('Found the call. The address change is still left.')] }
       : { content: [toolUse('no_such_tool')] }));
     await withServer(async (baseUrl) => { await postQuery(baseUrl, { prompt: 'anything', context: 'customers' }); });
     expect(mockGapRows).toHaveLength(1);
-    expect(mockGapRows[0].summary).toMatch(/used all its steps/);
+    expect(mockGapRows[0]).toMatchObject({ kind: 'missing_capability', closest_tool: 'no_such_tool' });
   });
 
   test('AGENT_GAP_REPORTS=off records nothing', async () => {

@@ -23,6 +23,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { addETDaysAtWallClock } = require('../utils/datetime-et');
 const policy = require('./intelligence-bar/action-policy.json');
+const { isPolicyRefusal } = require('./intelligence-bar/outcomes');
 
 // The table's CHECK allows 'missing_capability', 'tool_failure' and 'blocked'
 // (no migration needed). 'blocked' is a request that ended on a tool's coded
@@ -413,11 +414,14 @@ async function setGapStatus(gapId, status) {
 // by-design code, an unknown business code, a fault and a plain error record
 // nothing. Reads only; the result's text is classified and never kept.
 function recordableRefusalCode(result) {
-  if (!result || typeof result !== 'object' || result.outcome_unknown === true || result.error === 'circuit_open') return null;
+  // Only a policy refusal (the shared predicate: a coded refusal or a
+  // refused/refusal marker). An uncoded failure is a fault, whatever its text
+  // says, and is never a gap.
+  if (!isPolicyRefusal(result)) return null;
   const code = typeof result.code === 'string' ? result.code.trim() : '';
   if (BY_DESIGN_REFUSAL_CODES.has(code)) return null;
   if (RECORDED_REFUSAL_CODES.has(code)) return code;
-  const text = [result.error, result.refused].find((value) => typeof value === 'string') || '';
+  const text = [result.error, result.refused].filter((value) => typeof value === 'string').join(' ');
   if (!OTHER_SCREEN_RE.test(text)) return null;
   return CODE_RE.test(code) ? code : OTHER_SCREEN_CODE;
 }
@@ -459,11 +463,11 @@ function searchAttempt(search) {
  */
 function createGapCollector({ source, isRegisteredTool = () => false, recordBlocked = source === 'intelligence-bar' }) {
   const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
-  // The tool round the request ended on: its coded refusals, the tools that
-  // proposed or committed a write in it, and whether any call in it failed.
+  // The tool round the request ended on: its coded refusals and the tools that
+  // proposed or committed a write in it.
   // Earlier rounds are forgotten, so a refusal the model recovered from is
   // never a gap.
-  let tail = { round: null, refusals: new Map(), wroteTools: new Set(), failed: false };
+  let tail = { round: null, refusals: new Map(), wroteTools: new Set() };
   let lastTool = null;
   const unknownTools = new Set();
   const refusedCases = new Map(); // registered tool -> its own unsupported-case message
@@ -484,9 +488,8 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
 
   function trackTail(name, result, failed, meta = {}) {
     lastTool = cleanTool(name) || lastTool;
-    if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set(), failed: false };
+    if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set() };
     if (meta.wrote === true) tail.wroteTools.add(name);
-    if (failed) tail.failed = true;
     const code = failed ? recordableRefusalCode(result) : null;
     if (code) tail.refusals.set(`${name}|${code}`, { tool: name, code });
   }
@@ -509,49 +512,43 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     }
   }
 
+  // The one classification of a server-observed capability_unimplemented
+  // refusal: a missing_capability row from the tool name (and the tool's own
+  // case message), never from the reply's wording.
+  function capabilitySignal(name) {
+    if (refusedCases.has(name)) {
+      return { source, kind: 'missing_capability', summary: `${name}: ${refusedCases.get(name)}`, closestTool: name,
+        attempted: 'The tool exists but does not support this case' };
+    }
+    return { source, kind: 'missing_capability', summary: `Asked for a tool the bar does not have: ${name}`, closestTool: name };
+  }
+
   function pendingSignals() {
     const signals = searches.map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
     }));
-    for (const name of unknownTools) {
-      signals.push({ source, kind: 'missing_capability', summary: `Asked for a tool the bar does not have: ${name}`, closestTool: name });
-    }
-    for (const [name, message] of refusedCases) {
-      signals.push({ source, kind: 'missing_capability', summary: `${name}: ${message}`, closestTool: name,
-        attempted: 'The tool exists but does not support this case' });
-    }
+    for (const name of [...unknownTools, ...refusedCases.keys()]) signals.push(capabilitySignal(name));
     return signals;
   }
 
-  // Exhaustion is decided from what the last tool round did, not from the round
-  // number alone (the forced tool-less final round also runs for a request that
-  // finished on its last allowed step). Rule: the request used every step AND
-  // either never got a final answer (the model still wanted a tool in the
-  // tool-less round), or its last tool round was still failing with no write
-  // proposed or committed. A last round of only successful calls, or one that
-  // wrote, counts as finished: the forced report was just its summary.
-  function exhausted({ stepLimitReached, noReply }) {
-    if (stepLimitReached !== true) return false;
-    return noReply === true || (tail.failed && tail.wroteTools.size === 0);
-  }
-
   // Signals for a request that stopped without doing what was asked, whatever
-  // the reply said: the tool loop ran out, or the last tool round ended on a
-  // recordable refusal. A refusal is dropped only when its own tool also wrote
-  // in that round; an unrelated refusal in the same parallel round is kept. A
-  // refusal the prose path already records (an unknown or case-limited tool)
-  // is left to it.
-  function blockedSignals({ declined, stepLimitReached, noReply }) {
+  // the reply said.
+  //  - Out of steps AND no final answer (the model still wanted a tool in the
+  //    tool-less round): one tool_loop_exhausted row, replacing any other.
+  //    With a final answer the request finished, even on its last step.
+  //  - Otherwise each recordable refusal in the last tool round whose own tool
+  //    did not write in that round (an unrelated refusal in a parallel round is
+  //    kept): a blocked row on tool + code. A capability_unimplemented refusal
+  //    is always the missing_capability row instead (capabilitySignal), so the
+  //    reply's wording never changes its kind or fingerprint.
+  function blockedSignals({ stepLimitReached, noReply }) {
     if (!recordBlocked) return [];
-    // Running out of steps is the one signal for the request: the refusal it
-    // was stuck on is named by lastTool, and stays out of its own row.
-    if (exhausted({ stepLimitReached, noReply })) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
+    if (stepLimitReached === true && noReply === true) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
     const signals = [];
     for (const { tool, code } of tail.refusals.values()) {
       if (tail.wroteTools.has(tool)) continue;
-      const proseCovers = declined && code === 'capability_unimplemented' && (unknownTools.has(tool) || refusedCases.has(tool));
-      if (!proseCovers) signals.push(blockedSignal({ source, tool, code }));
+      signals.push(code === 'capability_unimplemented' ? capabilitySignal(tool) : blockedSignal({ source, tool, code }));
     }
     return signals;
   }
@@ -576,7 +573,7 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     try {
       if (!gapReportsEnabled()) return;
       const declined = DECLINE_RE.test(String(reply || ''));
-      const blocked = blockedSignals({ declined, stepLimitReached, noReply });
+      const blocked = blockedSignals({ stepLimitReached, noReply });
       // Out of steps is ONE record: when the exhaustion row is written, a prose
       // decline in the same reply would add a second row with its own
       // fingerprint. The tech bar writes no exhaustion row, so its prose
