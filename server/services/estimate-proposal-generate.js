@@ -180,14 +180,22 @@ const FAMILY_RESPONSIBILITIES = {
   other: [],
 };
 
-// An explicit $0 in ANY sold-net alias is comped scope, never an unpriced
-// row: manualFinalOneTime, priceAfterDiscount, amountAfterDiscount and
-// totalAfterDiscount are each read as the accepted net by the resolvers
-// below, so a zero in any of them must fail the draft the same way (codex
-// #6113 r24), not drop the promised work.
+// An explicit $0 in the sold net is comped scope, never an unpriced row.
+// The net is the FIRST applicable alias in the resolvers' own order
+// (manualFinalOneTime, then priceAfterDiscount, amountAfterDiscount,
+// totalAfterDiscount): a positive accepted override beside a stale
+// lower-priority zero is priced work (codex #6113 r24 / r28), and a zero in
+// the first applicable alias must fail the draft, not drop the work.
 const NET_ONE_TIME_ALIASES = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
 function explicitZeroNet(row = {}) {
-  return NET_ONE_TIME_ALIASES.some((key) => row[key] === 0 || row[key] === '0');
+  const key = NET_ONE_TIME_ALIASES.find((k) => row[k] !== null && row[k] !== undefined && row[k] !== '');
+  return key !== undefined && (row[key] === 0 || row[key] === '0');
+}
+// A raw engine row is recurring evidence when it is not explicitly one-time
+// and carries an annual cadence or an annual amount; such a row is never
+// one-time work, whatever its net aliases say (codex #6113 r28).
+function rawRowHasRecurringEvidence(line = {}) {
+  return !rowIsExplicitlyOneTime(line) && (rowHasAnnualCadence(line) || recurringLineAnnualAmount(line) > 0);
 }
 
 function num(value) {
@@ -927,19 +935,19 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     // estimateOneTimeItemsFromData): a row a program already includes must
     // never bill again as corrective work (codex 1A-ii r4b).
     if (line.onProg === true || line.includedOnProgram === true) return false;
-    // An EXPLICIT accepted zero stays in so the comped guard below can
-    // fail the draft instead of silently dropping promised scope
-    // (codex 1A-ii r4).
-    if (explicitZeroNet(line)) return true;
     if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
     // Explicit one-time cadence wins outright; otherwise only the
     // explicitly ANNUAL cadence fields count as recurring evidence — a
     // package `visits` count on a priced row (german-roach cleanout, flea)
     // must not exclude the charge from corrective work (codex 1A-ii r18).
-    const noRecurringEvidence = rowIsExplicitlyOneTime(line)
-      || (!rowHasAnnualCadence(line) && !(recurringLineAnnualAmount(line) > 0));
-    return noRecurringEvidence
-      && num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
+    // A recurring row is never one-time work, even with a $0 net alias
+    // (codex #6113 r28).
+    if (rawRowHasRecurringEvidence(line)) return false;
+    // An EXPLICIT accepted zero stays in so the comped guard below can
+    // fail the draft instead of silently dropping promised scope
+    // (codex 1A-ii r4).
+    if (explicitZeroNet(line)) return true;
+    return num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
   });
   const work = [];
   const comped = [];
@@ -1209,6 +1217,7 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
 
 module.exports = {
   explicitZeroNet,
+  rawRowHasRecurringEvidence,
   deriveProposalDraft,
   derivePrograms,
   deriveCorrectiveWork,

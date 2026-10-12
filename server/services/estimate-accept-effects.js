@@ -252,7 +252,7 @@ function canonicalOneTimeLines(estimate, data) {
 // are found with the converter's own item reader over the same containers.
 function unrepresentableRow(data, converter, { hasTotal }) {
   if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return null;
-  const { explicitZeroNet } = require('./estimate-proposal-generate');
+  const { explicitZeroNet, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
   const docs = [data, ...oneTimeContainers(data).filter((c) => c !== data).map((c) => ({ result: c }))];
   const rowName = (item) => String(item.displayName || item.label || item.display?.name || item.name || item.service || 'a one-time row').trim();
   for (const doc of docs) {
@@ -268,6 +268,9 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   // no aggregate to pool against the gross line would over-invoice.
   for (const container of oneTimeContainers(data)) {
     for (const line of Array.isArray(container.lineItems) ? container.lineItems : []) {
+      // Same gate as the extractor: a program row or a recurring row is not
+      // one-time work, whatever its net aliases say (codex #6113 r28).
+      if (line.onProg === true || line.includedOnProgram === true || rawRowHasRecurringEvidence(line)) continue;
       if (explicitZeroNet(line)) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
       const amount = rawLineAmount(line);
       if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
@@ -782,8 +785,15 @@ const POST_COMMIT_STEPS = {
 
 const sameTarget = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
+// A membership-email target that drifted is the sender's own veto (the
+// address on file changed after the card): the receipt says it was
+// suppressed, never "complete it by hand" (codex #6113 r28).
 function skippedStepWarning(ctx, step) {
   if (!Array.isArray(ctx.warnings)) return;
+  if (step.step === 'membership_email') {
+    ctx.warnings.push(membershipEmailWarning(null, 'recipient_changed'));
+    return;
+  }
   ctx.warnings.push(`${STEP_LABELS[step.step] || `The ${step.step} step did not run`}${SKIPPED_STEP_SUFFIX}`);
 }
 
