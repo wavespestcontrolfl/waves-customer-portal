@@ -24,10 +24,43 @@ const logger = require('./logger');
 const { addETDaysAtWallClock } = require('../utils/datetime-et');
 const policy = require('./intelligence-bar/action-policy.json');
 
-// The table's CHECK also allows 'tool_failure' and 'blocked'; nothing
-// produces them. Broken tools are already tracked per call in
-// tool_health_events (the Tool Health dashboard).
-const KINDS = new Set(['missing_capability']);
+// The table's CHECK allows 'missing_capability', 'tool_failure' and 'blocked'
+// (no migration needed). 'blocked' is a request that ended on a tool's coded
+// refusal or ran out of steps; broken tools stay out ('tool_failure' is not
+// produced): those are tracked per call in tool_health_events (the Tool Health
+// dashboard).
+const KINDS = new Set(['missing_capability', 'blocked']);
+const BLOCKED_KIND = 'blocked';
+const LOOP_EXHAUSTED_CODE = 'tool_loop_exhausted';
+const CODE_RE = /^[a-z][a-z0-9_]{1,47}$/;
+// Refusal codes that become a gap row: the bar lacks a capability, could not
+// establish who or what the ask is about, or must be sent to another workflow.
+// Anything else with a code (not found, invalid input, a gate that is off) is
+// a normal answer and records nothing, unless its text names another screen.
+const RECORDED_REFUSAL_CODES = new Set([
+  'capability_unimplemented', 'capability_not_loaded', 'dependency_unresolved',
+  'target_clarification_required', 'customer_scope_required', 'requires_existing_owner_workflow',
+]);
+// By design: the bar working as intended. Never recorded, so they never become
+// `new` build work for the gap launcher (it claims every `new` bar row).
+const BY_DESIGN_REFUSAL_CODES = new Set([
+  'permission_denied', 'approval_required', 'invalid_input', 'owner_direct_bulk_limit',
+  'write_access_required', 'execution_interrupted', 'verify_failed',
+]);
+// A tool's own refusal that sends the operator to another screen. Only used to
+// classify; the text itself is never stored (it can hold customer data).
+const OTHER_SCREEN_RE = /\b(?:use|on|from|in|via|at) (?:the )?[\w' -]{0,40}?\b(?:screen|page|queue)\b/i;
+const OTHER_SCREEN_CODE = 'other_screen';
+const REFUSAL_NOTES = {
+  capability_unimplemented: 'no tool supports this case',
+  capability_not_loaded: 'the tool was used before it was discovered',
+  dependency_unresolved: 'an earlier write had no recorded outcome',
+  target_clarification_required: 'the target customer or record could not be established',
+  customer_scope_required: 'the tool needs a customer scope the request did not give',
+  requires_existing_owner_workflow: 'this belongs in an existing owner workflow',
+  [OTHER_SCREEN_CODE]: 'the tool sends the operator to another screen',
+  [LOOP_EXHAUSTED_CODE]: 'the tool loop ran out of steps',
+};
 // The owner's triage lifecycle (migration CHECK). Closed statuses stay out of
 // the default list; a recurrence reopens `fixed` (and rings the bell again).
 const GAP_STATUSES = Object.freeze(['new', 'building', 'fixed', 'by_design', 'dismissed']);
@@ -117,17 +150,24 @@ function wordKeyOf(summary) {
 // The closest tool is only the search's best guess, which varies between
 // requests for the same ask, so it stays out of the key (and is enriched on
 // merge instead).
-function fingerprintFor({ source, kind, summary }) {
-  const key = `${source}|${kind}|${wordKeyOf(summary)}`;
+function fingerprintFor({ source, kind, summary, tool, code }) {
+  // A blocked row is keyed on what stopped the request (tool + code), never on
+  // prose, so the same refusal in different words stays one row.
+  const key = kind === BLOCKED_KIND
+    ? `${source}|${kind}|${tool || ''}|${code}`
+    : `${source}|${kind}|${wordKeyOf(summary)}`;
   return crypto.createHash('sha256').update(key).digest('hex');
 }
 
 // Pure: a cleaned, fingerprinted row for one signal, or null if it carries
-// nothing recordable.
-function prepareGapRow({ source, kind, summary, attempted, closestTool, domain } = {}) {
+// nothing recordable. A `blocked` signal needs a refusal `code`; the code is
+// part of its fingerprint and its summary, and is the only machine text kept.
+function prepareGapRow({ source, kind, summary, attempted, closestTool, domain, code } = {}) {
   if (!KINDS.has(kind)) return null;
   const cleanSummary = cleanText(summary);
   if (!cleanSummary) return null;
+  const blockedCode = kind === BLOCKED_KIND ? String(code || '') : '';
+  if (kind === BLOCKED_KIND && !CODE_RE.test(blockedCode)) return null;
   const tool = cleanTool(closestTool);
   const src = String(source || 'unknown').slice(0, 32);
   return {
@@ -137,7 +177,7 @@ function prepareGapRow({ source, kind, summary, attempted, closestTool, domain }
     summary: cleanSummary,
     attempted: cleanText(attempted),
     closest_tool: tool,
-    fingerprint: fingerprintFor({ source: src, kind, summary: cleanSummary }),
+    fingerprint: fingerprintFor({ source: src, kind, summary: cleanSummary, tool: code === LOOP_EXHAUSTED_CODE ? '' : tool, code: blockedCode }),
   };
 }
 
@@ -369,6 +409,38 @@ async function setGapStatus(gapId, status) {
   return row || null;
 }
 
+// The refusal code worth a gap row for one failed tool result, or null: a
+// by-design code, an unknown business code, a fault and a plain error record
+// nothing. Reads only; the result's text is classified and never kept.
+function recordableRefusalCode(result) {
+  if (!result || typeof result !== 'object' || result.outcome_unknown === true || result.error === 'circuit_open') return null;
+  const code = typeof result.code === 'string' ? result.code.trim() : '';
+  if (BY_DESIGN_REFUSAL_CODES.has(code)) return null;
+  if (RECORDED_REFUSAL_CODES.has(code)) return code;
+  const text = [result.error, result.refused].find((value) => typeof value === 'string') || '';
+  if (!OTHER_SCREEN_RE.test(text)) return null;
+  return CODE_RE.test(code) ? code : OTHER_SCREEN_CODE;
+}
+
+// Fixed text only: the tool name and code, never the tool's input or message.
+function blockedSignal({ source, tool, code, lastTool }) {
+  const note = REFUSAL_NOTES[code] || 'the tool declined this case';
+  const exhausted = code === LOOP_EXHAUSTED_CODE;
+  return {
+    source,
+    kind: BLOCKED_KIND,
+    code,
+    closestTool: exhausted ? lastTool : tool,
+    domain: exhausted ? null : policy[tool]?.domain,
+    summary: exhausted
+      ? 'The bar used all its steps and could not finish the request'
+      : `The request ended on a refusal from ${tool} (${code}): ${note}`,
+    attempted: exhausted
+      ? `Tool loop exhausted${lastTool ? `; last tool ${lastTool}` : ''}. No request text is kept`
+      : `Refusal code ${code} from ${tool}. No request text is kept`,
+  };
+}
+
 function searchAttempt(search) {
   if (!search.surfaced.size) return 'Searched the bar; no matching tool';
   return search.relatedToolRan
@@ -385,8 +457,13 @@ function searchAttempt(search) {
  * capability (issuing one) exists — so a declined request records every
  * search it made, each noting whether a related tool ran.
  */
-function createGapCollector({ source, isRegisteredTool = () => false }) {
+function createGapCollector({ source, isRegisteredTool = () => false, recordBlocked = source === 'intelligence-bar' }) {
   const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
+  // The tool round the request ended on: its coded refusals, and whether a
+  // write was proposed or committed in it. Earlier rounds are forgotten, so a
+  // refusal the model recovered from is never a gap.
+  let tail = { round: null, refusals: new Map(), wrote: false };
+  let lastTool = null;
   const unknownTools = new Set();
   const refusedCases = new Map(); // registered tool -> its own unsupported-case message
   let toolBroke = false; // a genuine tool failure this request (Tool Health's, not a gap)
@@ -404,7 +481,18 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
     });
   }
 
-  function toolResult(name, result, failed) {
+  function trackTail(name, result, failed, meta = {}) {
+    lastTool = cleanTool(name) || lastTool;
+    if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wrote: false };
+    if (meta.wrote === true) tail.wrote = true;
+    const code = failed ? recordableRefusalCode(result) : null;
+    if (code) tail.refusals.set(`${name}|${code}`, { tool: name, code });
+  }
+
+  function toolResult(name, result, failed, meta) {
+    // A capability search is a tool round too: the model moving on to it
+    // after a refusal means the refusal was not where the request ended.
+    if (recordBlocked) trackTail(name, result, failed, meta);
     if (name === DISCOVERY_TOOL_NAME) return;
     if (!failed) {
       for (const search of searches) if (search.surfaced.has(name)) search.relatedToolRan = true;
@@ -434,25 +522,49 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
     return signals;
   }
 
+  // Signals for a request that stopped without doing what was asked, whatever
+  // the reply said: the tool loop ran out, or the last tool round ended on a
+  // recordable refusal with no write proposed or committed in it. A refusal the
+  // prose path already records (an unknown or case-limited tool) is left to it.
+  function blockedSignals({ declined, stepLimitReached }) {
+    if (!recordBlocked) return [];
+    // Running out of steps is the one signal for the request: the refusal it
+    // was stuck on is named by lastTool, and stays out of its own row.
+    if (stepLimitReached === true) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
+    if (tail.wrote) return [];
+    const signals = [];
+    for (const { tool, code } of tail.refusals.values()) {
+      const proseCovers = declined && code === 'capability_unimplemented' && (unknownTools.has(tool) || refusedCases.has(tool));
+      if (!proseCovers) signals.push(blockedSignal({ source, tool, code }));
+    }
+    return signals;
+  }
+
   // `ask` (the caller's own request text) is the tech-bar's fallback signal:
   // that context has no discover_capabilities search, so a decline with
   // nothing collected would otherwise vanish. Admin platform requests keep
   // their existing behaviour — they always searched first, so an empty
   // `signals` there already means nothing worth recording.
-  async function flush({ reply, ask } = {}) {
+  function declinedSignals({ reply, ask }) {
+    const signals = pendingSignals();
+    if (signals.length) return signals;
+    // A decline after a tool broke is an outage talking, not a missing
+    // feature — the failure is already in tool_health_events.
+    if (toolBroke || !BAR_DECLINE_RE.test(String(reply || ''))) return [];
+    const asked = cleanText(ask);
+    return asked ? [{ source, kind: 'missing_capability', summary: asked,
+      attempted: 'The bar declined; no capability search ran' }] : [];
+  }
+
+  async function flush({ reply, ask, stepLimitReached } = {}) {
     try {
-      if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
-      const signals = pendingSignals();
-      if (!signals.length) {
-        // A decline after a tool broke is an outage talking, not a missing
-        // feature — the failure is already in tool_health_events.
-        if (toolBroke || !BAR_DECLINE_RE.test(String(reply || ''))) return;
-        const asked = cleanText(ask);
-        if (asked) await writeGapRows([{ source, kind: 'missing_capability', summary: asked,
-          attempted: 'The bar declined; no capability search ran' }]);
-        return;
-      }
-      await writeGapRows(signals);
+      if (!gapReportsEnabled()) return;
+      const declined = DECLINE_RE.test(String(reply || ''));
+      const signals = [
+        ...blockedSignals({ declined, stepLimitReached }),
+        ...(declined ? declinedSignals({ reply, ask }) : []),
+      ];
+      if (signals.length) await writeGapRows(signals);
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
     }
@@ -471,5 +583,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
+  _private: { prepareGapRow, recordableRefusalCode, RECORDED_REFUSAL_CODES, BY_DESIGN_REFUSAL_CODES, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
 };
