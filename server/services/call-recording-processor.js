@@ -1379,8 +1379,12 @@ async function standingSpamCallbacks(trx, parent, exceptCallId) {
   // settled inbound voicemail (a replaced recording, a pass in flight) has no
   // standing verdict, whatever its other callbacks say.
   if (!isVoicemailParent(parent) || !isSettledParent(parent)) return [];
-  // Gate off: no settlement stands (a correction then reopens everything).
-  if (!isEnabled('callbackSpamClosesParent')) return [];
+  // Not gated: a sibling's standing spam verdict stays visible through a
+  // rollback. Hiding it made a correction of callback B clear the stamp and
+  // reopen the cards while the promise A dismissed stayed dismissed (B's
+  // correction cannot reopen A's), and A, still spam, was never corrected
+  // (codex #6271 r48). The gate blocks NEW settlements (closeParentOnCallbackSpam,
+  // callbackReachedSolicitor); what already stands is retired by its own correction.
   const rows = await trx('call_log')
     .where('direction', 'like', 'outbound%')
     .where({ source: 'admin-callback', processing_status: 'spam' })
