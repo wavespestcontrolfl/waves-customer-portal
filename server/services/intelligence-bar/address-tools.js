@@ -64,10 +64,15 @@ function givenParts(input) {
   // comma segment, or unit-first; "Bldg 2 Apt 4" stays whole), then taken
   // out before the locality parse, which would file "Apt 4" under the city.
   const rawUnit = unitAnywhereOnLine(text);
+  // Each comma segment that is a whole part of the unit ("Bldg 2", "Apt 4") goes.
+  const unitWords = ` ${rawUnit.toLowerCase()} `;
   const withoutUnit = (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
     .map(segment => splitStreetLineUnit(segment).street || segment)
-    .filter(segment => segment.toLowerCase() !== rawUnit.toLowerCase());
-  const parsed = parseRawAddress(withoutUnit.join(', '));
+    .filter(segment => !unitWords.includes(` ${segment.toLowerCase()} `));
+  // With the city or ZIP passed separately the text is a street line: the
+  // locality parser would file a trailing direction ("17th St W") as a city.
+  const streetOnly = Boolean(cleanText(input.city) || cleanText(input.zip));
+  const parsed = streetOnly ? { line1: withoutUnit[0] || '' } : parseRawAddress(withoutUnit.join(', '));
   const street = cleanText(parsed.line1) || withoutUnit[0] || text;
   const parsedCity = cleanText(parsed.city);
   const stateInCity = !parsed.state && TRAILING_STATE.test(parsedCity);
@@ -120,7 +125,9 @@ function noteFor(status, changed, given, result) {
   }
   const usable = status === STATUSES.VALIDATED_ACCEPT || status === STATUSES.CORRECTED;
   const parts = [];
-  if (usable) parts.push('Save Google\'s normalized spelling, city and ZIP, not the input.');
+  const opaqueCorrection = status === STATUSES.CORRECTED && !changed.some(c => c.input);
+  if (opaqueCorrection) parts.push('Google replaced part of this address but the replaced part cannot be shown here (it may be the unit). Do not save yet: read the normalized address and the unit back to the operator and ask if both are right.');
+  else if (usable) parts.push('Save Google\'s normalized spelling, city and ZIP, not the input.');
   else if (status === STATUSES.OUT_OF_SERVICE_AREA) parts.push('Tell the operator it is outside the service area, and save nothing until they decide.');
   else parts.push('Do not save this address yet. Show the operator what Google returned and what is missing or unconfirmed, and ask.');
   if (changed.length) parts.push('Google differs from the input: show the operator both versions and ask before saving (the operator\'s own words, or a call transcript, may be the one that is wrong). If the operator insists their spelling is right, run this check again with their exact words.');
@@ -148,11 +155,64 @@ function shape(result, given) {
   };
 }
 
+// ── Evidence that an address was checked (Codex r2 P1 on #6297) ──────────
+// A prompt rule alone lets the model skip check_address or guess a ZIP. The
+// route keeps one ledger per request: every finished check records the
+// address as given and, when Google answered, as normalized. An address
+// write whose street and ZIP are not in the ledger is refused with
+// address_check_required, so the model must check first and then save what
+// was checked. A write with no ZIP matches on the street alone.
+const WRITE_ADDRESS_FIELDS = {
+  add_customer_property: input => input,
+  create_customer: input => input,
+  correct_invoice_address: input => input,
+  update_customer: input => input.updates,
+  update_lead_contact: input => ({ address_line1: input.address, zip: input.zip }),
+};
+const streetKey = line => compareKey(normalizeStreetLine(splitStreetLineUnit(cleanText(line)).street || cleanText(line)));
+const zipKey = zip => cleanText(String(zip ?? '')).slice(0, 5);
+
+// The street and ZIP an address-writing call would save, or null when the
+// call does not touch a street address.
+function writtenAddress(toolName, input) {
+  const fields = WRITE_ADDRESS_FIELDS[toolName]?.(input || {});
+  const line = cleanText(fields?.address_line1);
+  return line ? { street: streetKey(line), zip: zipKey(fields.zip) } : null;
+}
+
+const ADDRESS_CHECK_REQUIRED = Object.freeze({
+  error: 'This address has not been checked. Run check_address on it first, then save the address that check returned (or the exact address you checked, if the operator confirms it).',
+  code: 'address_check_required',
+});
+
+function createAddressCheckLedger() {
+  const checked = [];
+  return {
+    // Called with every tool result; only a finished check_address records.
+    record(toolName, input, result) {
+      if (toolName !== CHECK_ADDRESS_TOOL_NAME || !result?.status || result.status === 'invalid_input') return;
+      const given = givenParts({ ...input, address: cleanText(input?.address) });
+      checked.push({ street: streetKey(given.street), zip: given.zip });
+      if (result.normalized?.address_line1) checked.push({ street: streetKey(result.normalized.address_line1), zip: zipKey(result.normalized.zip) });
+    },
+    // null when the call may proceed; the refusal result otherwise.
+    writeRefusal(toolName, input) {
+      const written = writtenAddress(toolName, input);
+      if (!written) return null;
+      const covered = checked.some(c => c.street === written.street && (!written.zip || c.zip === written.zip));
+      return covered ? null : { ...ADDRESS_CHECK_REQUIRED };
+    },
+  };
+}
+
 async function executeAddressTool(toolName, input) {
   if (toolName !== CHECK_ADDRESS_TOOL_NAME) return { error: `Unknown tool: ${toolName}` };
   const address = cleanText(input?.address);
   if (address.length < 3) {
     return { status: 'invalid_input', note: 'check_address needs the street address as heard. Ask the operator for it.' };
+  }
+  if (cleanText(input.state) && !normalizeState(cleanText(input.state))) {
+    return { status: 'invalid_input', note: `"${cleanText(input.state).slice(0, 30)}" is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.` };
   }
   const given = givenParts({ ...input, address });
   const result = await validateAddress({
@@ -163,4 +223,7 @@ async function executeAddressTool(toolName, input) {
   return shape(result, given);
 }
 
-module.exports = { ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME, CHECK_TIMEOUT_MS };
+module.exports = {
+  ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME, CHECK_TIMEOUT_MS,
+  createAddressCheckLedger, writtenAddress, WRITE_ADDRESS_FIELDS,
+};

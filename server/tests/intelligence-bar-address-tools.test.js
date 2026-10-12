@@ -211,3 +211,70 @@ test('a unit in its own comma segment is kept when the city is passed separately
   expect(out.unit).toBe('Apt 4');
   expect(out.changed).toEqual([]);
 });
+
+// Codex r2 on #6297: evidence, not a prompt rule, links a check to a write.
+describe('address check ledger', () => {
+  const { createAddressCheckLedger, writtenAddress } = require('../services/intelligence-bar/address-tools');
+  const checked = async (ledger, input, result = google()) => {
+    validateAddress.mockResolvedValue(result);
+    ledger.record('check_address', input, await run(input));
+  };
+
+  test('an unchecked address write is refused; a non-address write is not', () => {
+    const ledger = createAddressCheckLedger();
+    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 Example Way', zip: '34236' })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('update_customer', { updates: { notes: 'x' } })).toBeNull();
+    expect(ledger.writeRefusal('query_customers', { search: '100 Example Way' })).toBeNull();
+  });
+
+  test('the normalized address passes after a check; a guessed ZIP on the given street does not', async () => {
+    const ledger = createAddressCheckLedger();
+    await checked(ledger, { address: '100 example wy' }, google({ status: 'corrected' }));
+    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 Example Way', zip: '34236' })).toBeNull();
+    expect(ledger.writeRefusal('create_customer', { address_line1: '100 Example Way Apt 4', zip: '34236' })).toBeNull();
+    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 example wy', zip: '34999' })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('add_customer_property', { address_line1: '200 Other Rd', zip: '34236' })).toMatchObject({ code: 'address_check_required' });
+  });
+
+  test('when Google could not check, only the exact address the operator gave passes', async () => {
+    const ledger = createAddressCheckLedger();
+    await checked(ledger, { address: '100 Example Way', zip: '34236' }, { status: 'api_unavailable', ...UNVERIFIED });
+    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34236' } })).toBeNull();
+    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34237' } })).toMatchObject({ code: 'address_check_required' });
+  });
+
+  test('each address-writing tool is read through its own fields', () => {
+    expect(writtenAddress('update_lead_contact', { address: '100 Example Way', zip: '34236' })).toEqual({ street: expect.any(String), zip: '34236' });
+    expect(writtenAddress('update_lead_contact', { first_name: 'Pat' })).toBeNull();
+    expect(writtenAddress('correct_invoice_address', { address_line1: '100 Example Way' })).toMatchObject({ zip: '' });
+  });
+});
+
+describe('check_address round 2 cases', () => {
+  test('a compound unit in two comma segments is removed whole', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way, Bldg 2, Apt 4, Sarasota, FL 34236' });
+    expect(out.unit).toBe('Bldg 2 Apt 4');
+    expect(out.changed).toEqual([]);
+  });
+  test('a floor is kept as the unit', async () => {
+    validateAddress.mockResolvedValue(google());
+    expect((await run({ address: '100 Example Way Floor 2' })).unit).toBe('Floor 2');
+  });
+  test('a trailing direction stays in the street when the city is passed separately', async () => {
+    validateAddress.mockResolvedValue(google({ normalized: { street_line_1: '100 17th Street West', city: 'Bradenton', state: 'FL', postal_code: '34205' } }));
+    const out = await run({ address: '100 17th St W', city: 'Bradenton', zip: '34205' });
+    expect(out.changed).toEqual([]);
+  });
+  test('an unrecognized state is refused, not defaulted to FL', async () => {
+    const out = await run({ address: '100 Example Way', state: 'Flordia' });
+    expect(out.status).toBe('invalid_input');
+    expect(validateAddress).not.toHaveBeenCalled();
+  });
+  test('a corrected result with no visible difference asks before saving', async () => {
+    validateAddress.mockResolvedValue(google({ status: 'corrected', hasReplaced: true }));
+    const out = await run({ address: '100 Example Way Apt 4, Sarasota, FL 34236' });
+    expect(out.note).toMatch(/Do not save yet/);
+    expect(out.note).not.toMatch(/^Save Google/);
+  });
+});
