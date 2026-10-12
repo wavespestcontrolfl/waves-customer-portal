@@ -293,6 +293,10 @@ function oneTimeLineEffects(estimate, converter) {
   const data = parseData(estimate.estimate_data);
   const canonical = canonicalOneTimeLines(estimate, data);
   if (canonical.refusal) return canonical;
+  const disagreeing = oneTimeAggregateConflict(estimate);
+  if (disagreeing) {
+    return { lines: [], refusal: { statusCode: 409, code: 'one_time_total_conflict', totals: disagreeing, message: `This estimate carries more than one accepted one-time total (${disagreeing.map(money).join(' and ')}), so the bar cannot say what to invoice. Accept it from the estimate page.` } };
+  }
   const dropped = unrepresentableRow(data, converter, { hasTotal: oneTimeAggregateTotal(estimate) != null });
   if (dropped) return { lines: [], refusal: unrepresentableRefusal(dropped) };
   const fee = membershipFeeLine(data);
@@ -322,15 +326,27 @@ function pooledDiscountLine(estimate, lines) {
 // An explicit zero is authoritative: the mapper lets a positive item be
 // discounted to an aggregate of exactly $0, and the customer accepted $0.
 // The first field that holds a number decides; null only when none does.
-function oneTimeAggregateTotal(estimate) {
+function oneTimeAggregateCandidates(estimate) {
   const data = parseData(estimate.estimate_data);
-  const candidates = [estimate.onetime_total, ...oneTimeContainers(data).map((c) => c.oneTime?.total)];
-  for (const value of candidates) {
+  const out = [];
+  for (const value of [estimate.onetime_total, ...oneTimeContainers(data).map((c) => c.oneTime?.total)]) {
     if (value == null || value === '') continue;
     const n = Number(value);
-    if (Number.isFinite(n)) return n > 0 ? round2(n) : 0;
+    if (Number.isFinite(n)) out.push(n > 0 ? round2(n) : 0);
   }
-  return null;
+  return out;
+}
+function oneTimeAggregateTotal(estimate) {
+  const candidates = oneTimeAggregateCandidates(estimate);
+  return candidates.length ? candidates[0] : null;
+}
+// Two persisted accepted totals that disagree (the row, result.oneTime.total,
+// engineResult.oneTime.total): the card must not pick the first and invoice
+// it while another accepted total stands (codex #6113 r32). Returns the
+// distinct totals, ascending, or null when every aggregate agrees.
+function oneTimeAggregateConflict(estimate) {
+  const distinct = [...new Set(oneTimeAggregateCandidates(estimate).map(cents))].sort((a, b) => a - b).map((c) => c / 100);
+  return distinct.length > 1 ? distinct : null;
 }
 
 // A carded accept refuses when the estimate carries a positive one-time
@@ -852,6 +868,7 @@ module.exports = {
   conversionEffect,
   oneTimeLineEffects,
   oneTimeAggregateTotal,
+  oneTimeAggregateConflict,
   unitemizedOneTimeRefusal,
   STEP_LABELS,
   readEmailInputs,

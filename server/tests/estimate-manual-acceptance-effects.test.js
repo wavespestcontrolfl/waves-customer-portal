@@ -551,6 +551,54 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts or scope/) });
   });
+  test('round 32: a mapped item and its raw twin that sell a different scope (one Kitchen visit vs three Whole-home visits, same price) refuse', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: {
+            oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300, visits: 1, detail: 'Kitchen' }] },
+            lineItems: [{ service: 'bed_bug', label: 'Bed Bug Treatment', price: 300, visits: 3, detail: 'Whole home', billingCadence: 'one_time' }],
+          },
+        }),
+      },
+    });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts or scope/) });
+  });
+  test('round 32: a mapped sold net (amountAfterDiscount 80) is honored when its raw twin keeps only the same gross price', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: {
+            oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 100, amountAfterDiscount: 80 }] },
+            lineItems: [{ service: 'german_roach', label: 'German Roach Cleanout', price: 100, billingCadence: 'one_time' }],
+          },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['German Roach Cleanout', 80]]);
+  });
+  test('round 32: two persisted accepted one-time totals that disagree (result 300, engineResult 350) refuse, never first-wins', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { total: 300, items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 300 }] } },
+          engineResult: { oneTime: { total: 350 } },
+        }),
+      },
+    });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_total_conflict', statusCode: 409, message: expect.stringMatching(/\$300\.00 and \$350\.00/) });
+    expect(Effects.oneTimeAggregateConflict({ onetime_total: null, estimate_data: JSON.stringify({ result: { oneTime: { total: 300 } }, engineResult: { oneTime: { total: 350 } } }) })).toEqual([300, 350]);
+    expect(Effects.oneTimeAggregateConflict({ onetime_total: '300.00', estimate_data: JSON.stringify({ result: { oneTime: { total: '300' } } }) })).toBeNull();
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

@@ -930,13 +930,47 @@ const soldScopeSignature = (row) => JSON.stringify([packageVisits(row.visits, ro
 // mapped gross, an explicit taxable flag on either row wins, and mirrors
 // whose amounts disagree with no accepted net fail the draft. Returns the
 // verdict ('comped' | 'conflicted') or the merged amount/taxable.
+// Explicit sold-net aliases (manualFinalOneTime aside, which outranks all).
+const MAPPED_SOLD_NET_ALIASES = MAPPED_NET_ALIASES.slice(1);
+const RAW_SOLD_NET_ALIASES = RAW_NET_ALIASES.slice(1);
+const grossOf = (row) => num(row.price ?? row.amount ?? row.total);
+// With neither manual net present: the resolved amounts agree, or exactly
+// one side carries an explicit sold-net alias while the other keeps only the
+// SAME gross (one engine run persists the mapped shape net and the raw shape
+// gross, codex #6113 r32) and that net is honored. Anything else is a
+// conflict (null).
+function twinNetAgreement(item, mappedAmount, twin) {
+  const twinAmount = rawResolvedAmount(twin);
+  if (roundCents(twinAmount) === roundCents(mappedAmount)) return { amount: mappedAmount };
+  const itemNet = firstApplicableAlias(item, MAPPED_SOLD_NET_ALIASES) !== undefined;
+  const twinNet = firstApplicableAlias(twin, RAW_SOLD_NET_ALIASES) !== undefined;
+  const grossesAgree = grossOf(item) != null && roundCents(grossOf(item)) === roundCents(grossOf(twin));
+  if (itemNet && !twinNet && grossesAgree) return { amount: mappedAmount };
+  if (!itemNet && twinNet && grossesAgree) return { amount: twinAmount };
+  return null;
+}
+// A mapped item and its raw twin must sell the same scope where both state
+// one: a differing package visit count or detail is a conflict, not a
+// silent pick of the mapped row (codex #6113 r32). One side silent = the
+// work line's twin fallback, as before.
+function twinScopeConflicts(item, twin) {
+  const visits = [packageVisits(item.visits, item.visitsPerYear), packageVisits(twin.visits, twin.visitsPerYear)];
+  const detail = [scopeIncludes(item)[0], scopeIncludes(twin)[0]];
+  return (visits[0] != null && visits[1] != null && visits[0] !== visits[1])
+    || (detail[0] != null && detail[1] != null && detail[0] !== detail[1]);
+}
 function mergeMappedTwin(item, mappedAmount, twin) {
   if (explicitZeroNetRaw(twin)) return { verdict: 'comped' };
+  if (twinScopeConflicts(item, twin)) return { verdict: 'conflicted' };
   const twinManual = num(twin.manualFinalOneTime);
   const itemManual = num(item.manualFinalOneTime);
   if (twinManual != null && itemManual != null && roundCents(twinManual) !== roundCents(itemManual)) return { verdict: 'conflicted' };
-  if (twinManual == null && itemManual == null && roundCents(rawResolvedAmount(twin)) !== roundCents(mappedAmount)) return { verdict: 'conflicted' };
-  const amount = twinManual != null && itemManual == null ? twinManual : mappedAmount;
+  let amount = twinManual != null && itemManual == null ? twinManual : mappedAmount;
+  if (twinManual == null && itemManual == null) {
+    const agreed = twinNetAgreement(item, mappedAmount, twin);
+    if (!agreed) return { verdict: 'conflicted' };
+    amount = agreed.amount;
+  }
   const explicitTaxable = (item.taxable === true || item.taxable === false) ? item.taxable
     : ((twin.taxable === true || twin.taxable === false) ? twin.taxable : undefined);
   return { amount, explicitTaxable };
