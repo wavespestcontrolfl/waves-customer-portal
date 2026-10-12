@@ -1541,6 +1541,65 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     expect(result.error).toMatch(/This visit needs a price/);
     expect(db.transaction).not.toHaveBeenCalled();
   });
+
+  describe('a close or colloquial service name resolves to ONE catalog service', () => {
+    const SLAB = {
+      id: 'svc-slab', name: 'Slab Pre-Treat Termite Service', short_name: 'Slab Pre-Treat', service_key: 'termite_slab_pretreat',
+      base_price: '500.00', price_range_min: '300.00', category: 'termite',
+    };
+    const TERMITE_PRETREAT = {
+      id: 'svc-tpt', name: 'Termite Pretreatment Service', short_name: 'Pre-Treat', service_key: 'termite_pretreatment',
+      base_price: '600.00', price_range_min: '350.00', category: 'termite',
+    };
+    const QUARTERLY_PEST = {
+      id: 'svc-qp', name: 'Quarterly Pest Control Service', short_name: null, service_key: 'pest_quarterly', base_price: '120.00', category: 'pest', billing_type: 'recurring',
+    };
+    const rows = [SLAB, TERMITE_PRETREAT, ONE_TIME_PEST, QUARTERLY_PEST];
+
+    test('"a pre-slab termite treatment" with a stated price books the slab service at that price, stored under the catalog name', async () => {
+      const insertChain = wirePriced({ rows });
+      const result = await book({ service_type: 'a pre-slab termite treatment', price: 125, _booking_price: 125, _booking_service_id: 'svc-slab' });
+      expect(result).toMatchObject({ success: true, price: 125 });
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
+        service_type: 'Slab Pre-Treat Termite Service', service_id: 'svc-slab', estimated_price: 125, primary_line_price: 125, create_invoice_on_complete: true,
+      });
+    });
+
+    test('the proposal prices the resolved service, names it for the card, and shows the catalog price beside the stated one', async () => {
+      wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog(rows), catalog(rows)] });
+      const proposal = await ibBookingProposal('cust-1', 'a pre-slab termite treatment', 125);
+      expect(proposal).toMatchObject({
+        price: 125, source: 'stated', catalogPrice: 300, serviceId: 'svc-slab', serviceName: 'Slab Pre-Treat Termite Service', bookedServiceType: 'Slab Pre-Treat Termite Service',
+      });
+    });
+
+    test('an exact name is untouched: the booked service type stays as given', async () => {
+      wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog(rows)] });
+      const proposal = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', undefined);
+      expect(proposal).toMatchObject({ serviceId: 'svc-otp', bookedServiceType: 'One-Time Pest Control Service' });
+    });
+
+    test('several close services are listed for the user to choose from, and nothing is booked', async () => {
+      wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog(rows)] });
+      const result = await book({ service_type: 'pest control service', price: 90 });
+      expect(result.error).toMatch(/names several catalog services \(.*One-Time Pest Control Service.*Quarterly Pest Control Service.*\)/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('a retired-for-sale service named loosely is still refused for a customer not on that plan', async () => {
+      const RETIRED = {
+        id: 'svc-qts', name: 'Quarterly Tree & Shrub Care Service', short_name: null, service_key: 'tree_shrub_quarterly', base_price: '90.00', category: 'tree_shrub', billing_type: 'recurring',
+      };
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
+        services: [catalog([RETIRED, ...rows]), catalog([RETIRED])],
+        scheduled_services: [chain()],
+      });
+      const result = await book({ service_type: 'quarterly tree and shrub care', price: 90, _booking_price: 90, _booking_service_id: 'svc-qts' });
+      expect(result.error).toMatch(/Quarterly Tree & Shrub Care Service is retired for new sales/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('reschedule_appointment', () => {

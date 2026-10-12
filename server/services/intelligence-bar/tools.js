@@ -19,6 +19,7 @@ const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
 const { MAX_RESULTS: MAX_NAME_MATCHES, isNameLikeSearch, rankNameMatches } = require('./name-match');
+const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -321,7 +322,8 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+service_type is a catalog name, but the words the user says also work ("pre-slab termite treatment"): one close catalog service books as that service, and when several are close the tool lists them, so ask the user which and propose again with the exact name. A service that is not in the catalog cannot be booked.
+price: the visit price in dollars when the user states one; it rides the resolved catalog service, quote-required services included. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -3056,10 +3058,29 @@ function resolveBookingCatalogRow(services, serviceType) {
   return { row: null };
 }
 
+// The exact resolver above first; only when it finds nothing, a close or
+// colloquial name ("a pre-slab termite treatment") resolves to ONE catalog
+// service, or to several (returned as `ambiguous`, so the bar asks the owner
+// which). A close match is marked on the row it returns (closeMatch) so the
+// caller books the exact catalog name. Free visit types stay exact-only.
+function resolveBookingCatalogRowWithClose(services, serviceType) {
+  const exact = resolveBookingCatalogRow(services, serviceType);
+  if (exact.row || exact.ambiguous || isAlwaysFreeServiceType(serviceType)) return exact;
+  const close = resolveCloseCatalogService(services, serviceType);
+  if (close.candidates) return { ambiguous: close.candidates };
+  return close.row ? { row: { ...close.row, closeMatch: true } } : exact;
+}
+
+// The service_type to store and show: the catalog name when the operator's
+// wording was only a close match, else the wording as given.
+function bookedServiceTypeFor(booking, serviceType) {
+  return booking?.catalogRow?.closeMatch ? booking.catalogRow.name : serviceType;
+}
+
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
   const services = await conn('services').where({ is_active: true })
     .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
-  const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
+  const match = resolveBookingCatalogRowWithClose(Array.isArray(services) ? services : [], serviceType);
   if (match.ambiguous) {
     const names = match.ambiguous.map((r) => r.name).join(', ');
     return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
@@ -3316,7 +3337,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   let catalogPrice = null;
   if (booking.source === 'stated') {
     try {
-      const catalog = await ibBookingPricing({ customer, serviceType });
+      const catalog = await ibBookingPricing({ customer, serviceType: bookedServiceTypeFor(booking, serviceType) });
       if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
     } catch (err) {
       logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
@@ -3328,6 +3349,9 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
     catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
+    // What the visit is booked as: the exact catalog name when the operator's
+    // words were a close match (the route pins it into the call).
+    bookedServiceType: bookedServiceTypeFor(booking, serviceType),
     // The reason exactly as the insert will save it (trimmed, capped), so
     // the card shows the saved words; null when none was given.
     customerRequest: request?.text || null,
@@ -3447,7 +3471,9 @@ function ibBookingWindowRefusal(timeWindow) {
 }
 
 async function createAppointment(input, actionContext = {}) {
-  const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
+  const { customer_id, scheduled_date, technician_name, time_window, notes } = input;
+  // Reassigned once the catalog resolves a close name to its exact one.
+  let { service_type } = input;
 
   const dateStr = validScheduleDate(scheduled_date);
   if (!dateStr) {
@@ -3480,14 +3506,6 @@ async function createAppointment(input, actionContext = {}) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
-  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
-  // already on that plan — the shared admin write gate (codex r13 on #4786).
-  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
-    customerId: customer_id, serviceTypes: [service_type],
-  });
-  if (notHeldRetired.length) {
-    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
-  }
   // Same live-customer bar as update_customer (GH r9 P1): a profile
   // merged/soft-deleted while the card was pending must not receive a new
   // appointment after its records were repointed.
@@ -3501,6 +3519,17 @@ async function createAppointment(input, actionContext = {}) {
   // (never proposed through a card) may only book unpriced.
   const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
   if (booking.error) return { error: booking.error };
+  // A close or colloquial name books as the exact catalog name it resolved to.
+  service_type = bookedServiceTypeFor(booking, service_type);
+  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
+  // already on that plan — the shared admin write gate (codex r13 on #4786).
+  // Asked on the resolved name, so a close name cannot slip past it.
+  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
+    customerId: customer_id, serviceTypes: [service_type],
+  });
+  if (notHeldRetired.length) {
+    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
+  }
   const approvedPrice = input._booking_price === undefined ? null : input._booking_price;
   const approvedServiceId = input._booking_service_id === undefined
     ? (booking.catalogRow?.id || null) : input._booking_service_id;
