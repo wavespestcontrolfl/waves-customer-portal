@@ -492,6 +492,15 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
 // The classes behind buildWhatToExpect's lines, in the same priority order
 // and cap. The report writer (GATE_REPORT_WRITER_RULES) turns the longest
 // stated window among them into a reach-out date.
+// The classes whose line states a window. Alpine on a roach job keeps its
+// non-repellent line but with no timeframe, so it gives no window either.
+function expectationWindowClasses({ products = [] } = {}) {
+  const list = Array.isArray(products) ? products : [];
+  const nonRepellents = list.filter((p) => classifyProductExpectation(p) === 'non_repellent');
+  const noWindow = nonRepellents.length > 0 && nonRepellents.every(noLabelRoachTimeframe);
+  return whatToExpectClasses({ products: list }).filter((cls) => !(cls === 'non_repellent' && noWindow));
+}
+
 function whatToExpectClasses({ products = [] } = {}) {
   const classes = new Set((products || []).map(classifyProductExpectation).filter(Boolean));
   return EXPECTATION_PRIORITY.filter((cls) => classes.has(cls)).slice(0, 3);
@@ -569,6 +578,7 @@ module.exports = {
   buildWhatToExpect,
   whatToExpectClasses,
   buildPestExpectations,
+  expectationWindowClasses,
   igrLabelDuration,
   toExpectationProduct,
   isExteriorApplicationArea,

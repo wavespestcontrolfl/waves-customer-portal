@@ -11,7 +11,7 @@
  * (nextSameServiceAppointment) and never enters this text (Codex #5500).
  */
 const {
-  buildWhatToExpect, igrLabelDuration, toExpectationProduct, whatToExpectClasses,
+  buildWhatToExpect, expectationWindowClasses, igrLabelDuration, toExpectationProduct,
 } = require('./pest-report-expectations');
 const { findReportProductCopyEntry, labeledPestCountText } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
@@ -81,7 +81,7 @@ function expectationProducts(applications) {
 function writerExpectations({ line = null, findingsType = null, applications = [] } = {}) {
   const products = line === 'pest' ? expectationProducts(applications) : [];
   const pestLines = products.length ? (buildWhatToExpect({ products, plain: true })?.lines || []) : [];
-  const classes = products.length ? whatToExpectClasses({ products }) : [];
+  const classes = products.length ? expectationWindowClasses({ products }) : [];
   const recorded = Array.isArray(applications) ? applications : [];
   const serviceLines = (SERVICE_EXPECTATIONS[findingsType] || SERVICE_EXPECTATIONS[line] || [])
     .filter((text) => !LINE_REQUIRES.has(text) || LINE_REQUIRES.get(text)(recorded))
@@ -183,7 +183,12 @@ function buildWriterRecords({
   }
   return {
     sections,
-    allowedPhrases: groundedTimeframePhrases([...expectations.lines, ...(labelDuration ? [labelDuration] : [])]),
+    // A label duration's words pass in WHAT TO EXPECT only: in WHAT'S NEXT
+    // they would read as a time to contact us.
+    allowedPhrases: [
+      ...groundedTimeframePhrases(expectations.lines),
+      ...groundedTimeframePhrases(labelDuration ? [labelDuration] : []).map((phrase) => ({ phrase, sections: ['WHAT TO EXPECT'] })),
+    ],
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
     // How many marked promises reached the writer (the generate route's
     // promise-only grounding check).

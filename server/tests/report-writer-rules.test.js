@@ -700,7 +700,11 @@ describe('product facts for the pest writer', () => {
     expect(text).toContain('insect growth regulator, crack and crevice, Kitchen: mainly used for roaches.');
     expect(text).toContain('LABEL DURATION (the growth regulator recorded today): Its label gives up to 4 months of continuous protection.');
     expect(text).toContain('never a time to contact us');
-    expect(records.allowedPhrases).toContain('up to 4 months');
+    expect(records.allowedPhrases).toContainEqual({ phrase: 'up to 4 months', sections: ['WHAT TO EXPECT'] });
+    // Never a contact time: the same words in WHAT'S NEXT, or with no title, are refused (Codex r1).
+    expect(screen("WHAT'S NEXT\nContact us in up to 4 months.", records)).toBe('timeframe');
+    expect(screen('Contact us in up to 4 months.', records)).toBe('timeframe');
+    expect(OWNER_RULES).toContain('a LABEL DURATION supplied under PRODUCT FACTS may be said once, in WHAT TO EXPECT only');
     const expectations = records.sections.find((section) => section.startsWith('EXPECTATIONS'));
     expect(expectations).not.toContain('4 months');
     const report = (line) => `WHAT TO EXPECT\n${line}`;
@@ -714,7 +718,7 @@ describe('product facts for the pest writer', () => {
       app('Tekko Pro IGR', 'insect growth regulator', 'crack_and_crevice', 'Kitchen', ['roaches']),
     ]);
     expect(block(two)).not.toContain('LABEL DURATION');
-    expect(two.allowedPhrases).not.toContain('up to 4 months');
+    expect(JSON.stringify(two.allowedPhrases)).not.toContain('4 months');
   });
 
   test('no reviewed product, or a lawn visit: no block', () => {
@@ -732,6 +736,22 @@ describe('product facts for the pest writer', () => {
       expect(line([alpine(['ants', 'roaches'])], plain)).toContain('couple of weeks');
       expect(line([alpine(['roaches']), { name: 'Taurus SC', method: 'spot_treatment', applicationArea: 'Garage', targets: ['roaches'] }], plain)).toContain('couple of weeks');
     }
+  });
+
+  test('Alpine on a roach job gives no reach-out date: no line states a window (Codex r1)', () => {
+    const records = (applications) => buildWriterRecords({ serviceYmd: '2026-10-12', line: 'pest', serviceKind: 're_service', applications });
+    const alpine = (targets) => app('Alpine WSG', 'insect-control application', 'crack_and_crevice', 'Kitchen', targets);
+    expect(records([alpine(['roaches'])]).allowedDates).toEqual([]);
+    expect(records([alpine(['roaches'])]).sections.join('\n')).not.toContain('REACH-OUT DATE');
+    expect(records([alpine(['ants'])]).allowedDates).toHaveLength(2);
+    // The roach gel beside it still states its own window.
+    expect(records([alpine(['roaches']), app('Advion Evolution Cockroach Gel Bait', 'bait application', 'bait_placement', 'Kitchen', ['roaches'])]).allowedDates).toHaveLength(2);
+  });
+
+  test('reassurance verdicts are refused by the screen (Codex r1)', () => {
+    expect(screen('WHAT TO EXPECT\nYour home is protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYou are all set.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nThe growth regulator gives continuous protection.')).toBeNull();
   });
 
   test('the customer card still gets the Gentrol duration', () => {
