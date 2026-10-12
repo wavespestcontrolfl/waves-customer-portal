@@ -79,7 +79,7 @@ const { outsideWritePins } = require('../services/intelligence-bar/outside-write
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
-const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
+const { isToolFailure, recordToolOutcome, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
@@ -119,6 +119,11 @@ function finalRoundMessages(messages) {
   const last = messages[messages.length - 1];
   if (!last || last.role !== 'user' || !Array.isArray(last.content)) return messages;
   return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text: FINAL_ROUND_NOTE }] }];
+}
+// What the gap collector needs beside a tool result: the round, and whether
+// this call proposed a card or committed an owner-direct write.
+function gapToolMeta(round, proposedCard, result) {
+  return { round, wrote: proposedCard === true || result?.executed === true };
 }
 // Model arguments that only pick WHICH task customer an operation targets.
 // They are excluded from an operation's clarification identity so a retry
@@ -3637,8 +3642,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
     // Tool-use loop
     let lastToolResponse = null;
+    let stepLimitReached = false; // the final, tool-less round ran: the request used every step
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const finalRound = round === MAX_TOOL_ROUNDS - 1;
+      stepLimitReached = finalRound;
       const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
@@ -3860,12 +3867,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
+            // Breaker: faults only. A coded refusal is a decision, not an outage;
+            // `failed` below is unchanged (activity line, ledger, model view).
+            recordToolOutcome(adminToolBreaker, result);
             if (isToolFailure(result)) {
               failed = true;
               errorMessage = result.error || result.message || 'tool returned error';
-              adminToolBreaker.recordFailure();
-            } else {
-              adminToolBreaker.recordSuccess();
             }
           } catch (err) {
             logger.error(`[intelligence-bar] Tool ${toolUse.name} threw:`, err);
@@ -3900,7 +3907,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             : errorMessage,
           ...(failed && toolHealthFailureCode(result) ? { metadata: { code: toolHealthFailureCode(result) } } : {}),
         });
-        gapCollector?.toolResult(toolUse.name, result, failed);
+        gapCollector?.toolResult(toolUse.name, result, failed, gapToolMeta(round, proposedCard, result));
 
         results.push({
           type: 'tool_result',
@@ -3938,6 +3945,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     }
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
+    const noReply = !finalResponse; // no terminal answer: the loop ended on a tool call
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
@@ -3949,7 +3957,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // discover_capabilities loop there to gather signals from); the admin
     // platform collector already searches first, so passing it there too is
     // inert on every request that already gathered a signal.
-    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined });
+    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool

@@ -98,6 +98,141 @@ function detectContactDictationSignals(transcript) {
   return { email, address, name, any: email || address || name };
 }
 
+// ── Collapsed-spelling trigger ───────────────────────────────────────────────
+// The diarized primary transcript sometimes collapses a spoken spelling ("Serov,
+// S-E-R-O-V") into the plain word ("Serov, Serov"), so every letter-run regex above
+// returns false and the spelling-preserving second pass never runs. These signals are
+// what the collapse leaves behind. Cheap and pure; the caller pays for a second pass
+// only when one fires.
+
+// (a) A name token said twice in a row across punctuation ("Serov, Serov" / "Serov. Serov"),
+// with an optional speaker label between ("Caller: Serov. Agent: Serov.").
+const REPEATED_TOKEN_RE = /\b([A-Z][\p{L}'’-]+)\s*[,.;:?!]+(?:\s*(?:Caller|Agent|Customer|Speaker \d+)\s*:)?\s*\1\b/gu;
+// Words that repeat in ordinary speech and are never the name being spelled: fillers, answers,
+// weekdays, months, US states and the cities of the service area ("Monday. Monday.",
+// "Florida. Florida.").
+const REPEAT_VOCABULARY = new Set([
+  'ok', 'hi', 'uh', 'um', 'oh', 'so', 'we', 'me', 'my', 'he', 'it', 'is', 'am', 'to', 'do', 'go', 'on', 'or',
+  'okay', 'yes', 'yeah', 'yep', 'no', 'nope', 'sure', 'right', 'thanks', 'thank', 'sorry', 'hello', 'perfect', 'great', 'good',
+  'alright', 'again', 'what', 'well', 'please', 'exactly', 'correct', 'wonderful', 'awesome', 'bye', 'goodbye', 'morning', 'afternoon',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'today', 'tomorrow', 'tonight',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+  'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota',
+  'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'hampshire', 'jersey', 'mexico', 'york', 'carolina', 'dakota', 'ohio',
+  'oklahoma', 'oregon', 'pennsylvania', 'rhode', 'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'wisconsin', 'wyoming',
+  'sarasota', 'bradenton', 'venice', 'parrish', 'palmetto', 'nokomis', 'osprey', 'englewood', 'north', 'port', 'charlotte', 'punta', 'gorda',
+  'ellenton', 'longboat', 'siesta', 'lakewood', 'ranch', 'tampa', 'naples', 'miami', 'orlando', 'manatee', 'north port', 'myakka', 'bayshore',
+]);
+// A name is being given or asked for within this many characters before the repeat.
+const REPEAT_CONTEXT_WINDOW = 80;
+// A bare "name" is a person's name unless a qualifier says it names a thing ("service name").
+const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|(?<!\b(?:service|product|company|street|business|brand|trade|file|user|domain|city|pest|chemical)\s+)name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am)\b/i;
+// (b) A phrase that announces a spelling. It counts only when no letter run follows within
+// ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
+// The letter forms are case sensitive on purpose ("that's S", not "that's a"). Where the words
+// around the letter already say a spelling is coming ("that's an", "with a", "as in", "like in")
+// an uppercase A or I counts too (not "I like in", which is ordinary speech); the bare-letter
+// class excludes them so "I spoke with a tech" and a stray "A" do not fire.
+const ANNOUNCE_WINDOW = 60;
+const SPELLING_ANNOUNCE_RES = [
+  new RegExp(NAME_SPELLING_WORD_RE.source, 'gi'),
+  new RegExp([
+    String.raw`\b[Tt]hat'?s\s+(?:an?\s+)?[B-HJ-Z]\b(?![\p{L}'’])`,
+    String.raw`\b[Tt]hat'?s\s+an?\s+[AI]\b(?![\p{L}'’])`,
+    String.raw`\b[Ww]ith\s+an?\s+[A-Z]\b(?![\p{L}'’])`,
+    String.raw`\b(?:[A-Z]\s+as|[A-HJ-Z]\s+like)\s+in\b`,
+  ].join('|'), 'gu'),
+];
+const LETTER_RUN_AFTER_RE = new RegExp(`${NAME_SPELLING_LETTERS_RE.source}|${NAME_SPELLING_PHONETIC_RE.source}`, 'i');
+
+// The look-behind for name context: the repeated token's own turn, plus the turn right before it
+// when that turn is a question ("Agent: Can I get your last name?" / "Caller: Serov, Serov."). A
+// question or answer from further back ("Agent: What's your name? Caller: John. Agent: Sentricon?
+// Sentricon.") is never context for this one.
+const SPEAKER_LABEL_RE = /\b(?:Agent|Caller|Customer|Tech(?:nician)?|Staff|Speaker \d+)\s*:/gi;
+function sameTurnBefore(text, index) {
+  const window = text.slice(Math.max(0, index - REPEAT_CONTEXT_WINDOW), index);
+  const labels = [...window.matchAll(SPEAKER_LABEL_RE)];
+  if (!labels.length) return window;
+  const last = labels[labels.length - 1];
+  const own = window.slice(last.index + last[0].length);
+  const prev = labels.length > 1 ? labels[labels.length - 2] : null;
+  const before = window.slice(prev ? prev.index + prev[0].length : 0, last.index);
+  return /\?/.test(before) ? `${before} ${own}` : own;
+}
+
+// A repeated capitalized token counts when it is not everyday vocabulary AND a name is being given
+// or asked for just before it (or it is the extracted first or last name itself).
+function repeatedNameToken(text, extracted = null) {
+  const extractedNames = [extracted?.first_name, extracted?.last_name].map(nameKey).filter(Boolean);
+  for (const m of text.matchAll(REPEATED_TOKEN_RE)) {
+    const token = m[1].toLowerCase();
+    if (REPEAT_VOCABULARY.has(token)) continue;
+    if (extractedNames.includes(nameKey(token))) return true;
+    if (NAME_CONTEXT_RE.test(sameTurnBefore(text, m.index))) return true;
+  }
+  return false;
+}
+
+// A single-letter announcement ("with a C") is ordinary speech when a word follows the letter
+// ("with a C corporation", codex #6290 r5). It counts only when the letter ends the thought
+// (punctuation, end of text, "and" / "then", "as in" / "like in") or a name is being given in
+// the same turn. The spelling words (first pattern) need no such check.
+const LETTER_ENDS_THOUGHT_RE = /^\s*(?:[,.;:!?)-]|$|and\b|then\b|as\s+in\b|like\s+in\b)/i;
+function announcedWithoutLetters(text) {
+  SPELLING_ANNOUNCE_RES.forEach((re) => { re.lastIndex = 0; });
+  const [wordRe, letterRe] = SPELLING_ANNOUNCE_RES;
+  for (const m of text.matchAll(wordRe)) {
+    const end = m.index + m[0].length;
+    if (!LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) return true;
+  }
+  for (const m of text.matchAll(letterRe)) {
+    const end = m.index + m[0].length;
+    if (LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) continue;
+    if (LETTER_ENDS_THOUGHT_RE.test(text.slice(end, end + 12)) || NAME_CONTEXT_RE.test(sameTurnBefore(text, m.index))) return true;
+  }
+  return false;
+}
+
+// Plain edit distance (insert, delete, substitute), early-out above `limit`.
+function editDistance(a, b, limit = 2) {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// (c) The extracted last name is the stored last name misspelled by one or two letters,
+// same first letter (two-letter names included: "Lu" against "Li"). A short name (4 letters or fewer) tolerates one letter only, so "Lee"
+// against "Lam" is not a near miss.
+function lastNameNearMiss(extracted, knownCustomer) {
+  const got = nameKey(extracted?.last_name);
+  const had = nameKey(knownCustomer?.last_name);
+  if (got.length < 2 || had.length < 2 || got === had || got[0] !== had[0]) return false;
+  const limit = Math.min(got.length, had.length) <= 4 ? 1 : 2;
+  return editDistance(got, had, limit) <= limit;
+}
+
+/**
+ * Which collapse signals the call leaves behind. `repeated` and `announced` read the primary
+ * transcript alone (so they can gate the second transcription pass, which runs before the
+ * extraction exists); `nearMiss` also needs the extraction and the stored customer.
+ */
+function spellingCollapseSignals(transcript, { extracted = null, knownCustomer = null } = {}) {
+  const t = String(transcript || '');
+  const repeated = repeatedNameToken(t, extracted);
+  const announced = announcedWithoutLetters(t);
+  const nearMiss = lastNameNearMiss(extracted, knownCustomer);
+  return { repeated, announced, nearMiss, any: repeated || announced || nearMiss };
+}
+
 // ── Second-pass transcription prompt ─────────────────────────────────────────
 // Applied ONLY on promptable STT models (gpt-4o-transcribe). Deliberately
 // example-free: concrete streets/emails in a biasing prompt can seed values
@@ -560,6 +695,7 @@ function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
 
 module.exports = {
   detectContactDictationSignals,
+  spellingCollapseSignals,
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   nameSpellingDifferences,
