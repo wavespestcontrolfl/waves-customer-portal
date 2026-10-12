@@ -85,18 +85,16 @@ const CALL_JUDGE_V3 = {
   },
 };
 
-// v4 (10-12): appointment_agreed asks the same production rules plus the four V2-only
+// v4 (10-12): appointment_agreed asks the same production rules plus three V2-only
 // confirmation rules v3 lacked, so the auditor, the typed judge and production grade a
-// bare time, a missing AM/PM, a staff hedge and a caller-proposed time the same way.
+// missing AM/PM, a staff hedge and a caller-proposed time the same way. (The fourth, bare
+// time with no day, needs the call's clock, which no judge is given.) Asked only for an
+// answer the V2 extractor wrote (call-self-audit baselineFromV2); v3 still grades V1's.
 // Only the appointment_agreed wording changes; v3 stays registered for rows answered under it.
-// v4 also takes `call_started_et` (the call's Eastern date and clock time): the bare-time rule
-// confirms only an hour still ahead of the call, which no judge can tell from the transcript
-// alone (Codex #6294 r1).
 const CALL_JUDGE_V4 = {
   ...CALL_JUDGE,
   id: 'call_judge.v4',
   version: 4,
-  stateShape: [...CALL_JUDGE.stateShape, 'call_started_et'],
   questions: {
     ...CALL_JUDGE.questions,
     appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V4_APPOINTMENT_CONTRACT}`),

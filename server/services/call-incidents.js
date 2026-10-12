@@ -294,10 +294,8 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
       'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',
       dbi.raw(`${EVIDENCE_KEY_SQL} as evidence_key`),
       'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at',
-      // What the audit's input is rendered from (auditUserContent / auditPromptFor): the call's
-      // start and which extractor wrote the stored answer. Without them the replay's hash never
-      // matches the audit's.
-      'c.created_at', 'c.metadata', 'c.duration_seconds', 'c.recording_duration_seconds',
+      // What the audit's prompt is chosen from (auditPromptFor): which extractor wrote the stored
+      // answer. Without them the replay's hash never matches the audit's.
       'c.ai_extraction', 'c.ai_extraction_enriched', 'c.v2_extraction_status'
     );
 

@@ -51,8 +51,11 @@ ${RESCHEDULE_RULE}`;
   // v2OnlyRules false = the contract for an answer the V1 extractor wrote: the V1 prompt never
   // carried the four rules below, so grading it by them reports drift that is not there.
   if (!v2OnlyRules) return shared;
+  // The bare-time rule (bareTimeNoDayRule) is NOT here: it confirms only an hour still ahead of
+  // the call, and no judge is given the call's clock. Giving it to them means binding the call's
+  // start into every audit input, review subject and replay (Codex #6294 r1, r2, r4); until that
+  // is built, a bare-time booking is the one V2-only shape the audit can still report as drift.
   return `${shared}
-${bareTimeNoDayRule(callDateText)}
 ${MISSING_AMPM_RULE}
 ${STAFF_HEDGE_RULE}
 ${CALLER_PROPOSED_TIME_RULE}`;

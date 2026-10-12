@@ -90,19 +90,8 @@ function compactDirection(direction) {
 // first 5,000 characters of the transcript. One builder, so the audit and
 // any later second reading render exactly the same text.
 const AUDIT_TRANSCRIPT_CHARS = 5000;
-// When the call started, as an Eastern date and clock time ("2026-10-09 3:49 PM"), or 'unknown'.
-// The appointment rules resolve "today" and judge a bare hour against it, so every judge is
-// told it (Codex #6294 r1).
-function callStartedET(call) {
-  // callStartedAt, not created_at: a row inserted by a post-call fallback path carries the call's
-  // END there (utils/call-timeline.js), and production's extractor is given the start.
-  const at = require('../utils/call-timeline').callStartedAt(call);
-  if (!at) return 'unknown';
-  const { etDateString, formatETTime } = require('../utils/datetime-et');
-  return `${etDateString(at)} ${formatETTime(at)}`;
-}
 function auditUserContent(call) {
-  return `${callDirectionBlock(call.direction)}Call started (Eastern Time): ${callStartedET(call)}\n\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
+  return `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
 }
 
 // Identity of the COMPLETE input one audit ran on (system prompt + rendered
@@ -114,23 +103,18 @@ function auditInputHash(call) {
   return require('crypto').createHash('sha256').update(`${auditPromptFor(call)}\n\u0000\n${auditUserContent(call)}`).digest('hex').slice(0, 24);
 }
 
-// Which extractor wrote the stored appointment answer. The processor's own rule decides it
-// (adoptV2PrimaryFields, "v2-wins in BOTH directions"): in V2-primary mode a valid V2 extraction
-// with a DECISIVE scheduling status overwrites V1's answer, whether or not routing later approved
-// a booking. Decisive = 'confirmed' with a parseable start, or any other status except
-// 'ambiguous' (which leaves V1's answer alone). So V2 wrote the answer only when all of these
-// hold; in every other case V1's contract grades it (Codex #6294 r2, r3):
-//   - V2-primary mode is on (the processor's switch, read the same way);
-//   - the V2 extraction is valid and has the V2 shape;
-//   - its status is decisive;
-//   - the stored answer is the one that adoption writes (a row processed in another mode fails this).
-function v2PrimaryMode() {
-  return process.env.CALL_EXTRACTION_V2_ENABLED === 'true'
-    && (process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true' || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true')
-    && process.env.CALL_EXTRACTION_V2_PRIMARY !== 'false';
-}
+// Which extractor wrote the stored appointment answer. The processor stamps it at processing
+// time: `v2_primary_adopted: true` on the stored extraction means adoptV2PrimaryFields ran for
+// this call (V2-primary mode was on and the V2 extraction was valid). Adoption is "v2-wins in
+// BOTH directions" for a DECISIVE scheduling status: 'confirmed' with a parseable start, or any
+// other status except 'ambiguous' (which leaves V1's answer alone). So V2 wrote the answer only
+// when the stamp is there, the status is decisive and the stored answer is the one adoption
+// writes; in every other case (a row from before the stamp, a shadow-mode run) V1's contract
+// grades it (Codex #6294 r2, r3, r4). Never the live environment: the sample spans deploys.
 function baselineFromV2(call) {
-  if (!v2PrimaryMode() || !call || call.v2_extraction_status !== 'valid') return false;
+  if (!call || call.v2_extraction_status !== 'valid') return false;
+  const stored = safeParse(call.ai_extraction);
+  if (stored.v2_primary_adopted !== true) return false;
   const v2 = safeParse(call.ai_extraction_enriched);
   if (!require('../utils/extraction-compat').isV2Extraction(v2)) return false;
   const sched = v2.scheduling || {};
@@ -138,7 +122,7 @@ function baselineFromV2(call) {
   if (!status || status === 'ambiguous') return false;
   const confirmed = status === 'confirmed';
   if (confirmed && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(sched.confirmed_start_at || '').trim())) return false;
-  return confirmed === (safeParse(call.ai_extraction).appointment_confirmed === true);
+  return confirmed === (stored.appointment_confirmed === true);
 }
 function auditPromptFor(call) {
   return baselineFromV2(call) ? AUDIT_PROMPT : AUDIT_PROMPT_V1;
@@ -445,8 +429,6 @@ async function askAndRecord(call, { packageId, baselines, only = null, storedSib
       duration_seconds: call.duration_seconds ?? null,
       transcript: callTranscriptSpan(call.transcription),
     };
-    // Only a package whose state shape asks for it (call_judge.v4) is given the call's start.
-    if (packageFor(packageId).stateShape.includes('call_started_et')) state.call_started_et = callStartedET(call);
     const legs = await Promise.all(providers.map(async (provider) => {
       try {
         const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
@@ -530,9 +512,7 @@ async function runSelfAudit(depsIn = {}) {
     .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition',
       // Jev shadow: the call's length is part of call_judge's state; the v2
       // extraction carries two dark call gates' own decisions (gateCheckBaselines).
-      'duration_seconds', 'ai_extraction_enriched', 'v2_extraction_status',
-      // callStartedAt: a post-call fallback row's created_at is the call's end.
-      'metadata', 'recording_duration_seconds');
+      'duration_seconds', 'ai_extraction_enriched', 'v2_extraction_status');
   const [inboundRows, outboundRows] = await Promise.all([
     sampleDirection(INBOUND_DIRECTION_SQL),
     sampleDirection(OUTBOUND_DIRECTION_SQL),

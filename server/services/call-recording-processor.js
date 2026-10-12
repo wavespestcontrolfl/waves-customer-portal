@@ -11063,7 +11063,10 @@ const CallRecordingProcessor = {
         etWallClock: v2IsoToEtWallClock,
         callerPhone: contactPhone,
       });
-      extracted = adoption.merged;
+      // Stamped on the stored extraction: V2-primary adoption ran for this call, so its decisive
+      // answers are V2's. The nightly self-audit reads it to grade by the right extractor's rules
+      // (call-self-audit baselineFromV2); the live environment cannot tell it for an older row.
+      extracted = { ...adoption.merged, v2_primary_adopted: true };
       if (adoption.adoptedFields.length) {
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         logger.info(`[call-proc] V2-primary adopted ${adoption.adoptedFields.length} field(s) for ${maskSid(callSid)}: ${adoption.adoptedFields.join(', ')}`);

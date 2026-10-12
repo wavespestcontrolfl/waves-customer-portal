@@ -26,17 +26,11 @@ const judgeAsks = () => asksFor('call_judge.v4');
 const judgeRecords = () => recordsFor('call_judge.v4');
 const judgeTally = ({ gateChecks, ...rest }) => rest;
 
-// The processor's V2-primary mode (production's setting): a valid V2 extraction writes the stored answers.
-process.env.CALL_EXTRACTION_V2_ENABLED = 'true';
-process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING = 'true';
-delete process.env.CALL_TRIAGE_ENFORCE_V2_GATES;
-delete process.env.CALL_EXTRACTION_V2_PRIMARY;
-
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
   transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(8),
-  ai_extraction: JSON.stringify({ is_lead: true }), disposition: null,
-  // A valid V2 extraction whose appointment answer is the stored one: the V2 extractor wrote the
+  ai_extraction: JSON.stringify({ is_lead: true, v2_primary_adopted: true }), disposition: null,
+  // The adoption stamp plus a valid V2 extraction with a decisive status: the V2 extractor wrote the
   // baseline, so the call is graded by the V2 contract (call_judge.v4).
   v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling: { status: 'none' } }), ...over,
 });
@@ -209,16 +203,14 @@ describe('Jev shadow', () => {
 
   test('gate on: asks call_judge.v4 with the transcript and direction, records both baselines and the transcript digest', async () => {
     typedDecisionsLive.mockReturnValue(true);
-    const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false }) });
+    const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false, v2_primary_adopted: true }) });
     mockDb({ calls: [prodCall] });
     const res = await runSelfAudit({ createMessage: async () => VERDICT });
 
     expect(judgeAsks()).toHaveLength(1);
     const [packageId, state] = judgeAsks()[0];
     expect(packageId).toBe('call_judge.v4');
-    // v4 is also told when the call started (Eastern date and clock): the bare-time rule needs it.
-    expect(Object.keys(state).sort()).toEqual(['call_direction', 'call_started_et', 'duration_seconds', 'transcript']);
-    expect(state.call_started_et).toMatch(/^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2} (AM|PM)$/);
+    expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
     expect(state.duration_seconds).toBe(88);
     expect(state.call_direction).toMatch(/^INBOUND/);
     expect(state.transcript).toBe(prodCall.transcription.slice(0, 5000));
@@ -239,7 +231,7 @@ describe('Jev shadow', () => {
 
   test('a failed deep audit still asks Jev, recorded against production only', async () => {
     typedDecisionsLive.mockReturnValue(true);
-    mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true }) })] });
+    mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true, v2_primary_adopted: true }) })] });
     const res = await runSelfAudit({ createMessage: async () => { throw new Error('deep judge down'); } });
     expect(judgeAsks()).toHaveLength(1);
     const args = judgeRecords()[0][0];
@@ -649,25 +641,7 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   });
 });
 
-describe('the auditor is told when the call started', () => {
-  const { auditUserContent, auditInputHash } = require('../services/call-self-audit');
-  const base = { direction: 'inbound', transcription: 'Agent: Waves. Caller: hi.' };
-  test('an Eastern date and clock line sits between the direction and the transcript', () => {
-    const text = auditUserContent({ ...base, created_at: '2026-10-09T19:49:00Z' });
-    expect(text).toContain('Call started (Eastern Time): 2026-10-09 3:49 PM\n\nTranscript:\nAgent: Waves.');
-    expect(auditUserContent(base)).toContain('Call started (Eastern Time): unknown');
-    expect(auditUserContent({ ...base, created_at: 'not a date' })).toContain('Call started (Eastern Time): unknown');
-  });
-  test('a row a post-call fallback path inserted: the call\'s length is backed out of created_at', () => {
-    const text = auditUserContent({ ...base, created_at: '2026-10-10T04:05:00Z', duration_seconds: 600, metadata: { source: 'twilio_recording_status_recovered' } });
-    expect(text).toContain('Call started (Eastern Time): 2026-10-09 11:55 PM');
-  });
-  test('the start time is part of the audited input', () => {
-    expect(auditInputHash({ ...base, created_at: '2026-10-09T19:49:00Z' })).not.toBe(auditInputHash({ ...base, created_at: '2026-10-09T23:49:00Z' }));
-  });
-});
-
-// Codex #6294 r2, r3: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
+// Codex #6294 r2, r3, r4: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
 describe('the contract follows the extractor that wrote the stored answer', () => {
   const { baselineFromV2, auditPromptFor, auditInputHash, AUDIT_PROMPT, AUDIT_PROMPT_V1 } = require('../services/call-self-audit');
   const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE } = require('../services/prompts/appointment-confirmed-rules');
@@ -675,9 +649,10 @@ describe('the contract follows the extractor that wrote the stored answer', () =
   const confirmedV2 = v2With({ status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' });
   const noneV2 = v2With({ status: 'none' });
   const row = (over = {}) => ({ direction: 'inbound', transcription: 'Agent: Waves. Caller: hi.', created_at: '2026-10-09T19:49:00Z', ...over });
-  const valid = (enriched, stored) => row({ v2_extraction_status: 'valid', ai_extraction_enriched: enriched, ai_extraction: JSON.stringify(stored) });
+  // `stored` as the processor saves it after V2-primary adoption ran (the stamp).
+  const valid = (enriched, stored) => row({ v2_extraction_status: 'valid', ai_extraction_enriched: enriched, ai_extraction: JSON.stringify({ v2_primary_adopted: true, ...stored }) });
 
-  test('V2 wrote it: primary mode, a valid V2 extraction with a decisive status, and the stored answer adoption writes', () => {
+  test('V2 wrote it: the adoption stamp, a valid V2 extraction with a decisive status, and the stored answer adoption writes', () => {
     expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true }))).toBe(true);
     expect(baselineFromV2(valid(noneV2, {}))).toBe(true);
     expect(baselineFromV2(valid(v2With({ status: 'requested' }), { appointment_confirmed: false }))).toBe(true);
@@ -698,21 +673,27 @@ describe('the contract follows the extractor that wrote the stored answer', () =
     expect(baselineFromV2(valid(v2With({ status: 'confirmed', confirmed_start_at: null }), { appointment_confirmed: true }))).toBe(false);
     expect(baselineFromV2(valid(v2With({ status: 'confirmed' }), { appointment_confirmed: false }))).toBe(false);
   });
-  test('V1 wrote it: V2 ran in shadow (primary mode off), even when the two answers are equal (r3)', () => {
-    for (const [key, value] of [['CALL_EXTRACTION_V2_PRIMARY', 'false'], ['CALL_EXTRACTION_V2_ENABLED', 'false'], ['CALL_EXTRACTION_V2_DRIVES_ROUTING', 'false']]) {
-      const before = process.env[key];
-      process.env[key] = value;
-      try {
-        expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true }))).toBe(false);
-        expect(baselineFromV2(valid(noneV2, {}))).toBe(false);
-      } finally { process.env[key] = before; }
-    }
+  test('V1 wrote it: no adoption stamp (a shadow-mode run, or a row from before the stamp), even when the two answers are equal (r3, r4)', () => {
+    expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true, v2_primary_adopted: undefined }))).toBe(false);
+    expect(baselineFromV2(valid(noneV2, { v2_primary_adopted: false }))).toBe(false);
+    expect(baselineFromV2(valid(noneV2, { v2_primary_adopted: 'true' }))).toBe(false);
+  });
+  test('the processor stamps the stored extraction where V2-primary adoption runs, and the audit never reads the live mode', () => {
+    const fs = require('fs');
+    const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = processor.indexOf('const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {');
+    expect(at).toBeGreaterThan(0);
+    expect(processor.slice(at - 200, at)).toContain('if (callExtractionV2PrimaryEnabled() && v2Result?.status === \'valid\' && isV2Extraction(v2Result.extraction)) {');
+    expect(processor.slice(at, at + 900)).toContain('extracted = { ...adoption.merged, v2_primary_adopted: true };');
+    const audit = fs.readFileSync(require.resolve('../services/call-self-audit'), 'utf8');
+    expect(audit).not.toContain('process.env.CALL_EXTRACTION_V2');
   });
   test('the V1 prompt keeps the shared rules and carries none of the V2-only ones; the hash follows the prompt', () => {
     expect(AUDIT_PROMPT_V1).toContain(EXISTING_APPOINTMENT_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(CALLER_PROPOSED_TIME_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(STAFF_HEDGE_RULE);
     const v1 = row({ ai_extraction: '{}' });
+    expect(AUDIT_PROMPT).toContain(CALLER_PROPOSED_TIME_RULE);
     const v2 = valid(noneV2, {});
     expect(auditPromptFor(v1)).toBe(AUDIT_PROMPT_V1);
     expect(auditPromptFor(v2)).toBe(AUDIT_PROMPT);
@@ -745,23 +726,27 @@ describe('AUDIT_PROMPT appointment definition', () => {
     expect(PACKAGES['call_judge.v4'].questions.appointment_agreed.instructions)
       .toContain(auditAppointmentContract('the date the call took place'));
   });
-  test('v4 snapshot is the audit contract with all four V2-only rules; v3 stays frozen without them', () => {
+  test('v4 snapshot is the audit contract with the three clock-free V2-only rules; v3 stays frozen without them', () => {
     const fs = require('fs');
     const path = require('path');
     const dir = path.join(__dirname, '..', 'services', 'typed-decisions');
     const v3 = fs.readFileSync(path.join(dir, 'call-judge-v3-appointment-contract.txt'), 'utf8');
     const v4 = fs.readFileSync(path.join(dir, 'call-judge-v4-appointment-contract.txt'), 'utf8');
     expect(v4).toBe(auditAppointmentContract('the date the call took place'));
-    for (const heading of ['BARE TIME WITH NO DAY', 'A MISSING AM/PM IS NEVER A REASON TO HOLD A SETTLED HOUR', 'STAFF HEDGES DO NOT UNCONFIRM A NEW BOOKING', 'CALLER-PROPOSED TIME THAT STAFF ACCEPTED']) {
+    for (const heading of ['A MISSING AM/PM IS NEVER A REASON TO HOLD A SETTLED HOUR', 'STAFF HEDGES DO NOT UNCONFIRM A NEW BOOKING', 'CALLER-PROPOSED TIME THAT STAFF ACCEPTED']) {
       expect(v4).toContain(heading);
       expect(v3).not.toContain(heading);
     }
+    // The bare-time rule needs the call's clock, which no judge is given: it is in neither.
+    expect(v4).not.toContain('BARE TIME WITH NO DAY');
+    expect(v3).not.toContain('BARE TIME WITH NO DAY');
+    expect(PACKAGES['call_judge.v4'].stateShape).toEqual(PACKAGES['call_judge.v3'].stateShape);
     expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions).toContain(v3);
     expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions).not.toContain('CALLER-PROPOSED TIME');
     expect(PACKAGES['call_judge.v4'].questions.appointment_agreed.instructions).toContain(v4);
   });
-  test('the audit prompt carries the four V2-only rules', () => {
-    expect(AUDIT_PROMPT).toContain(bareTimeNoDayRule('the date the call took place'));
+  test('the audit prompt carries the three clock-free V2-only rules, and not the bare-time rule', () => {
+    expect(AUDIT_PROMPT).not.toContain(bareTimeNoDayRule('the date the call took place'));
     for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(AUDIT_PROMPT).toContain(rule);
   });
   test('the extractor renders the shared rules, not its own copy', () => {
