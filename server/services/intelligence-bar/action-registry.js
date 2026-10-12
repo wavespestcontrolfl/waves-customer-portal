@@ -68,6 +68,7 @@ const MODULES = [
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
+  ['address-tools', 'ADDRESS_TOOLS', 'executeAddressTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -199,6 +200,9 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   // Tap-to-answer buttons for a "which value?" question (choice-tools.js):
   // display only, reads and writes nothing.
   'offer_choices',
+  // Google address check (address-tools.js): run before any address write so a
+  // dictated street gets Google's spelling and ZIP, never a guessed one.
+  'check_address',
 ]);
 
 function initialTools(context, scope) {

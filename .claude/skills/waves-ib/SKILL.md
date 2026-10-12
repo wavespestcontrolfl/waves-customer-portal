@@ -68,7 +68,8 @@ primary, lead contact/status, stock read/adjust, products, estimate detail,
 open slots, and `offer_choices` (`choice-tools.js`: tap-to-answer buttons for
 a "which value?" question, returned as `choices` (plain strings) on `/query`;
 display only, a tap sends exactly the button text as ordinary operator text
-and never confirms a write). The platform list loads all of them; the legacy list loads the
+and never confirms a write), and `check_address` (`address-tools.js`: Google
+address check, read only; run before any address write so no ZIP is guessed). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
 their UI-confirm card.
 Tech portal is isolated — no base tools, strictly read-only, lower
