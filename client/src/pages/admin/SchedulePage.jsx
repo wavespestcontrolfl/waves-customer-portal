@@ -184,6 +184,7 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
+import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-next-visit-note";
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
@@ -18582,9 +18583,9 @@ export function CompletionPanel({
           };
         });
       }
-      if (nextVisitNote) {
-        body.nextVisitAdjustmentNote = nextVisitNote;
-      }
+      // The note is stored on the NEXT visit's staff note by the server; the
+      // card's visit id rides with it so the note lands on the visit shown.
+      Object.assign(body, nextVisitNoteFields({ nextVisitNote, nextVisit }));
       // The invoice fields of the body: the Fast Complete sheets build theirs
       // with the same helper (lib/completion-invoice-fields.js).
       Object.assign(body, completionInvoiceFields(service));
@@ -21914,6 +21915,7 @@ export function CompletionPanel({
                     type="text"
                     value={nextVisitNote}
                     onChange={(e) => setNextVisitNote(e.target.value)}
+                    maxLength={NEXT_VISIT_NOTE_MAX}
                     placeholder="Note about next visit adjustment…"
                     style={{ ...mInput, marginTop: 10 }}
                   />
@@ -24196,6 +24198,7 @@ export function CompletionPanel({
                   type="text"
                   value={nextVisitNote}
                   onChange={(e) => setNextVisitNote(e.target.value)}
+                  maxLength={NEXT_VISIT_NOTE_MAX}
                   placeholder="Note about next visit adjustment..."
                   style={{ ...inputStyle, marginTop: 8, marginBottom: 0 }}
                 />
