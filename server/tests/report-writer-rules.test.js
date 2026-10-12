@@ -687,6 +687,10 @@ describe('product facts for the pest writer', () => {
     expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants; labeled for 25+ pests.');
     expect(text).toContain('mainly used for spiders and crawling insects; tagged today for ants; labeled for 75+ pests.');
     expect(text).not.toMatch(/taurus|talak|lesco|adjuvant/i);
+    // The count is a stated exception to the no-amounts rule, and it passes the screen (Codex r5).
+    expect(OWNER_RULES).toContain('The one figure the report may give is a PRODUCT FACTS "labeled for" count of pests');
+    expect(PEST_WRITER_ADAPTER).toContain('(a PRODUCT FACTS "labeled for" count is not one)');
+    expect(screen('WHAT WE DID AND WHY\nYou asked about spiders: the same treatment is labeled for 25+ pests.')).toBeNull();
   });
 
   test('a roach visit: each entry carries its own tags; the label duration stays on the card, never with the writer', () => {
@@ -744,17 +748,10 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT TO EXPECT\nYour home is protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYou are all set.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nThe growth regulator gives continuous protection.')).toBeNull();
-    // The plan filler the adapter bans is refused too (Codex r3).
-    expect(screen("WHAT'S NEXT\nThis quarterly pest control service remains part of your recurring plan.")).toBe('owner_phrase');
-    expect(screen('WHAT WE FOUND\nThis was your recurring service.')).toBe('owner_phrase');
-    expect(screen('WHAT WE FOUND\nWe walked the exterior as part of our quarterly program.')).toBe('owner_phrase');
-    expect(screen('WHAT WE DID AND WHY\nWe completed the outside part of your quarterly service.')).toBeNull();
-    // Any sentence that puts "recurring" before the plan, with words between (Codex r4).
-    expect(screen("WHAT'S NEXT\nToday's work continues your recurring pest program.")).toBe('owner_phrase');
-    expect(screen("WHAT'S NEXT\nThis is a recurring quarterly pest control visit.")).toBe('owner_phrase');
-    expect(screen("WHAT'S NEXT\nYour plan remains in place.")).toBe('owner_phrase');
-    // A recurring pest is a finding, not plan talk.
-    expect(screen('WHAT WE FOUND\nGhost ants are a recurring sight on the front door frame.')).toBeNull();
+    // Plan talk is neither banned nor screened: a word screen for it kept
+    // catching recurring pest findings (Codex r3 to r5).
+    expect(screen('WHAT WE FOUND\nRecurring ant activity was noted during this visit.')).toBeNull();
+    expect(PEST_WRITER_ADAPTER).not.toMatch(/part of a plan/);
   });
 
   test('the customer card still gets the Gentrol duration', () => {
