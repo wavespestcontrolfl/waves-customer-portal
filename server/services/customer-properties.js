@@ -1028,7 +1028,15 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
 // are legal (street only, or missing city / ZIP), so a missing component is a
 // wildcard and only a present, different one rules the address out: the
 // removal check fails closed on anything that could be this address.
-function addressCanNameProperty(address, target) {
+function addressCanNameProperty(rawAddress, rawTarget) {
+  // Unit-first lines ("Unit 4, 100 Beach Rd") are a supported legacy form
+  // (estimate-property-linkage parseEstimateAddress splits it the same way):
+  // the unit moves to line 2 on both sides before anything is compared.
+  const unitFirst = (record) => {
+    const lead = String(record.address_line1 || '').match(/^((?:unit|apt|apartment|suite|ste|#)\.?\s*[\w-]+)\s*,?\s+(\d.*)$/i);
+    return lead ? { ...record, address_line1: lead[2].trim(), address_line2: record.address_line2 || lead[1].trim() } : record;
+  };
+  const [address, target] = [unitFirst(rawAddress), unitFirst(rawTarget)];
   // The property SCOPE street (estimate-property-linkage normalizedStampedStreet):
   // suffixes AND directionals canonical ("Dr E" == "Drive East"), unit stripped.
   const scopeStreet = line => canonicalizeScopeAddress(stripTrailingUnit(line)).replace(/[^a-z0-9]/g, '');
@@ -1101,14 +1109,32 @@ async function propertyRemovalDependents(conn, customerId, target) {
   const openVisitIds = new Set(openVisits.map(visit => visit.id));
   const openGroups = groups.filter(group => group.property_id === target.id
     || children.some(child => child.visit_id === group.id && !openVisitIds.has(child.id) && visitNamesProperty(child)));
-  // A prepaid annual plan sold on an estimate that names this property seeds
-  // its future coverage visits here (annual-prepay-renewals termiteRenewalScope
-  // walks a renewal back to its first term's estimate), even while no visit
-  // is open. Only a cancelled or refunded term is settled; a renewed first
-  // term still carries the estimate its successors read.
-  const prepaidTerms = targetEstimateIds.size ? await conn('annual_prepay_terms').where({ customer_id: customerId })
-    .whereIn('source_estimate_id', [...targetEstimateIds]).whereNotIn('status', ['cancelled', 'canceled', 'refunded']).select('id') : [];
-  return { visits: openVisits.length + openGroups.length, estimates: openEstimates.length, prepaidTerms: prepaidTerms.length };
+  const prepaidTerms = await livePrepaidTermsOnEstimates(conn, customerId, targetEstimateIds, today);
+  return { visits: openVisits.length + openGroups.length, estimates: openEstimates.length, prepaidTerms };
+}
+
+// A prepaid annual plan sold on an estimate that names a property seeds its
+// future coverage visits there, even while no visit is open. A renewal carries
+// no estimate of its own: annual-prepay-renewals termiteRenewalScope walks it
+// back to its first term's estimate, so each LIVE term is walked the same way.
+// Live = not cancelled or refunded, and inside its term (through term_end plus
+// the 30-day renewal grace window); an ended term with no live successor is
+// history and blocks nothing.
+async function livePrepaidTermsOnEstimates(conn, customerId, estimateIds, today) {
+  if (!estimateIds.size) return 0;
+  const terms = await conn('annual_prepay_terms').where({ customer_id: customerId }).orderBy('id')
+    .select('id', 'status', 'source_estimate_id', 'renewed_from_term_id',
+      conn.raw('(term_end IS NULL OR term_end >= (?::date - 30)) as in_term', [today]));
+  const byId = new Map(terms.map(term => [term.id, term]));
+  const namesEstimate = (term) => {
+    const seen = new Set();
+    for (let current = term; current && !seen.has(current.id); current = byId.get(current.renewed_from_term_id)) {
+      seen.add(current.id);
+      if (current.source_estimate_id && estimateIds.has(current.source_estimate_id)) return true;
+    }
+    return false;
+  };
+  return terms.filter(term => term.in_term && !['cancelled', 'canceled', 'refunded'].includes(term.status) && namesEstimate(term)).length;
 }
 
 function assertNoRemovalDependents({ visits, estimates, prepaidTerms }) {

@@ -160,6 +160,15 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     const [term] = await db('annual_prepay_terms').insert({ customer_id: customerA, source_estimate_id: estimate, status: 'active',
       term_start: date, term_end: date }).returning('id');
     await blocked();
+    // A term that ended long ago with no live successor is history: no block.
+    await db('annual_prepay_terms').where({ id: term.id }).update({ term_start: '2020-01-06', term_end: '2021-01-05' });
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });
+    // Its live renewal carries no estimate of its own and still reads this one: blocks.
+    const [renewal] = await db('annual_prepay_terms').insert({ customer_id: customerA, renewed_from_term_id: term.id, status: 'payment_pending',
+      term_start: date, term_end: date }).returning('id');
+    await db('annual_prepay_terms').where({ id: term.id }).update({ status: 'renewed' });
+    await blocked();
+    await db('annual_prepay_terms').where({ id: renewal.id }).update({ status: 'cancelled' });
     await db('annual_prepay_terms').where({ id: term.id }).update({ status: 'cancelled' });
     await db('estimates').where({ id: estimate }).update({ status: 'declined', property_id: saved.propertyId });
     await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
