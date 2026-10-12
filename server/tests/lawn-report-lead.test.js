@@ -1,6 +1,6 @@
-// Lawn report LEAD derivation (lawn report rebuild P7, GATE_LAWN_REPORT_LEAD).
+// Lawn report LEAD derivation (lawn report rebuild P7).
 // deriveLawnLead is a pure read of the finished reportV2; applyLawnReportReconciliation
-// derives it at the reconcile tail only while the gate is live, only for lawn.
+// derives it at the reconcile tail, only for lawn.
 // Synthetic payloads only.
 
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
@@ -9,7 +9,6 @@ const { deriveLawnLead, leadWords } = require('../services/service-report/lawn-r
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { buildWateringBanner } = require('../services/service-report/report-data');
 const { aftercareCustomerTask, normalizeLawnAftercare } = require('../services/service-report/lawn-aftercare');
-const featureGates = require('../config/feature-gates');
 
 const HOLD_BANNER = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'] };
 
@@ -386,49 +385,26 @@ describe('applyLawnReportReconciliation lead tail', () => {
       },
     },
   });
-  const withGate = (value, fn) => {
-    const previous = process.env.GATE_LAWN_REPORT_LEAD;
-    if (value === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = value;
-    try { return fn(); } finally {
-      if (previous === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = previous;
-    }
-  };
-
-  test('lawnReportLeadLive reads the env at call time', () => {
-    expect(withGate(undefined, () => featureGates.lawnReportLeadLive())).toBeFalsy();
-    expect(withGate('true', () => featureGates.lawnReportLeadLive())).toBe(true);
-    expect(withGate('false', () => featureGates.lawnReportLeadLive())).toBeFalsy();
-  });
-
-  test('gate off: no lead key, and the payload is exactly what the reconcile pass alone produces', () => {
-    const off = withGate(undefined, () => applyLawnReportReconciliation(payload(), dynamic()));
-    expect(Object.prototype.hasOwnProperty.call(off.reportV2, 'lead')).toBe(false);
-    const on = withGate('true', () => applyLawnReportReconciliation(payload(), dynamic()));
-    const { lead, ...rest } = on.reportV2;
-    expect(lead).toBeTruthy();
-    expect({ ...on, reportV2: rest }).toEqual(off);
-  });
-
-  test('tree & shrub (and any non-lawn line) never gets a lead, gate on', () => {
+  test('tree & shrub (and any non-lawn line) never gets a lead', () => {
     for (const line of ['tree_shrub', 'pest', null]) {
-      const data = withGate('true', () => applyLawnReportReconciliation(payload(line), dynamic()));
+      const data = applyLawnReportReconciliation(payload(line), dynamic());
       expect(Object.prototype.hasOwnProperty.call(data.reportV2, 'lead')).toBe(false);
     }
   });
 
   test('derived even when reconcileLawnReport returns nothing, and with no reportV2 it is a no-op', () => {
     // A lawn line with a reportV2 but a snapshot-less payload derives no lead.
-    const bare = withGate('true', () => applyLawnReportReconciliation({ serviceLine: 'lawn', reportV2: { insights: [] } }, null));
+    const bare = applyLawnReportReconciliation({ serviceLine: 'lawn', reportV2: { insights: [] } }, null);
     expect(Object.prototype.hasOwnProperty.call(bare.reportV2, 'lead')).toBe(false);
-    const noV2 = withGate('true', () => applyLawnReportReconciliation({ serviceLine: 'lawn' }, null));
+    const noV2 = applyLawnReportReconciliation({ serviceLine: 'lawn' }, null);
     expect(noV2).toEqual({ serviceLine: 'lawn' });
-    expect(withGate('true', () => applyLawnReportReconciliation(null, null))).toBeNull();
+    expect(applyLawnReportReconciliation(null, null)).toBeNull();
   });
 
   test('the lead is derived from the reconciled strings, not the pre-reconcile ones', () => {
     const before = deriveLawnLead({ ...payload().reportV2, followUp: { reason: 'inspect thinning edge areas for chinch bug or drought stress' } });
     expect(before.why).toMatch(/localized drought/);
-    const data = withGate('true', () => applyLawnReportReconciliation(payload(), dynamic()));
+    const data = applyLawnReportReconciliation(payload(), dynamic());
     const { lead, snapshot, followUp } = data.reportV2;
     expect(snapshot.scoreExplanation).not.toMatch(/localized drought/);
     expect(lead.why).toBe(snapshot.scoreExplanation);
@@ -445,7 +421,7 @@ describe('applyLawnReportReconciliation lead tail', () => {
         deriveLawnLead: () => { throw new Error('boom'); },
       }));
       const { applyLawnReportReconciliation: apply } = require('../services/service-report/report-consistency');
-      out = withGate('true', () => apply(payload(), dynamic()));
+      out = apply(payload(), dynamic());
     });
     jest.dontMock('../services/service-report/lawn-report-lead');
     expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'lead')).toBe(false);

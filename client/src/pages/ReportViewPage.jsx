@@ -1089,7 +1089,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'neutral',
-      // A lawn report with the lead block (GATE_LAWN_REPORT_LEAD) prints the
+      // A lawn report with the lead block prints the
       // snapshot headline right below as its own heading — not here too.
       result: v2Snapshot.peaceOfMind
         || (data.reportV2?.lead ? null : v2Snapshot.statusHeadline)
@@ -9821,7 +9821,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </LawnPrintContext.Provider>
         )}
 
-        {/* The lawn lead (GATE_LAWN_REPORT_LEAD) is the report's above-the-fold
+        {/* The lawn lead is the report's above-the-fold
             summary, so it sits right under the status and watering banner, not
             down in the lawn section (which then drops its hero). */}
         {isLawnReport && data.reportV2?.lead && (

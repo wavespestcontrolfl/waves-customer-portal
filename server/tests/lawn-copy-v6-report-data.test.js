@@ -1,10 +1,9 @@
-// The lawn v6 copy (lawn report rebuild P14, live with GATE_LAWN_REPORT_LEAD) through the real report
+// The lawn v6 copy (lawn report rebuild P14) through the real report
 // builder (buildReportV1Data) and the reconcile pass. Fixed sentences, no
 // model (owner 2026-10-02); the shared dispatcher is mocked so no production
 // LLM API is called by the report's other lanes. Synthetic data only.
 //
-// Pins: lead gate off = no write, no key, the same payload and
-// PDF signature as before; lead gate on = the fields freeze at the first render
+// Pins: the fields freeze at the first render
 // (first writer wins per assessment) and reach the customer only through
 // reportV2.lead (the carrier never leaves the process); a later render replays
 // byte for byte whatever the facts now say; a degraded read creates no freeze.
@@ -168,7 +167,7 @@ const NARRATIVE_LANE = 'lawn_visit_narratives';
 const narrativeCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === NARRATIVE_LANE);
 
 describe('the lawn v6 copy on the report payload', () => {
-  const ENV = ['GATE_LAWN_REPORT_LEAD', 'LAWN_REPORT_V2_NARRATIVE'];
+  const ENV = ['LAWN_REPORT_V2_NARRATIVE'];
   const saved = {};
   beforeEach(() => {
     ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
@@ -185,28 +184,16 @@ describe('the lawn v6 copy on the report payload', () => {
     const { knex, log } = withRecords({ ...fixtures(), ...patch }, recs, hooks);
     return buildReportV1Data(svc, 'token-p14', knex, {}).then((data) => ({ data, log }));
   };
-  const live = () => { process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
   // The hand-off is non-enumerable (a clone would drop it): reconcile a shallow copy, as the route does.
   const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
 
-  test('lead off: no write, no key, and the payload is what it was', async () => {
-    const recs = records();
-    const { data, log } = await render(recs);
-    expect(log.updates).toHaveLength(0);
-    expect(recs['svc-cur'].structured_notes.lawnCopyV6).toBeUndefined();
-    expect(data.reportV2.copyV6).toBeUndefined();
-    expect(JSON.stringify(reconciled(data))).not.toMatch(/copyV6|lawnCopyV6/);
-  });
-
   test('while v6 is live the old narrative overlay does not run, even with LAWN_REPORT_V2_NARRATIVE set, and no model is asked for lead copy', async () => {
     process.env.LAWN_REPORT_V2_NARRATIVE = 'true';
-    live();
     await render(records());
     expect(narrativeCalls()).toHaveLength(0);
   });
 
   test('gate on: the first render freezes the fixed sentences once and the lead carries them; the carrier never leaves the payload', async () => {
-    live();
     const recs = records();
     const { data, log } = await render(recs);
     expect(log.updates).toHaveLength(1);
@@ -230,7 +217,6 @@ describe('the lawn v6 copy on the report payload', () => {
   });
 
   test('a later render replays byte for byte, whatever the visit facts now say', async () => {
-    live();
     const recs = records();
     const first = (await render(recs)).data;
     const edited = { service_products: [{ id: 'sp-2', service_record_id: 'svc-cur', product_name: 'Test Fertilizer C', product_category: 'fertilizer', created_at: '2026-09-30T19:00:00Z' }] };
@@ -239,7 +225,6 @@ describe('the lawn v6 copy on the report payload', () => {
   });
 
   test('a frozen headline replaces the live status line, so a later assessment correction cannot reach the lead fallback or the PDF', async () => {
-    live();
     const recs = records();
     await render(recs);
     // The record froze an older headline (the assessment was corrected since).
@@ -255,14 +240,12 @@ describe('the lawn v6 copy on the report payload', () => {
   });
 
   test('a failed freeze serves the copy and marks the render uncacheable', async () => {
-    live();
     const { data } = await render(records(), {}, undefined, { failUpdate: true });
     expect(data.reportV2.copyV6.headline).toBe(data.reportV2.snapshot.statusHeadline);
     expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
   });
 
   test('a degraded read (a failed service_products read) creates no freeze and ships the lead\'s own copy; recovery freezes', async () => {
-    live();
     const recs = records();
     const { data, log } = await render(recs, { service_products: FAIL });
     expect(log.updates).toHaveLength(0);
@@ -281,7 +264,6 @@ describe('the lawn v6 copy on the report payload', () => {
   });
 
   test('a frozen entry still replays when a later read fails (the treatment check never hides stored copy)', async () => {
-    live();
     const recs = records();
     const first = (await render(recs)).data;
     const { data } = await render(recs, { service_products: FAIL }, service(recs['svc-cur'].structured_notes));
@@ -302,7 +284,6 @@ describe('the lawn v6 copy on the report payload', () => {
     const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
     const HOME_B = { service_address_line1: '200 Sample Oak Ln', service_address_city: 'Sarasota', service_address_zip: '34232' };
     const gapFor = async (nextStamp, extraRows = [], patch = {}) => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -342,7 +323,6 @@ describe('the lawn v6 copy on the report payload', () => {
     });
 
     test('no booking at this home: the gap is this visit\'s own plan cadence', async () => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -369,7 +349,6 @@ describe('the lawn v6 copy on the report payload', () => {
       });
 
       test('a booking at another home is never shown; the later booking at this home is', async () => {
-        live();
         const later = { id: 'ss-later', customer_id: CUSTOMER, scheduled_date: '2027-02-12', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
         const { data } = await render(records(), visitRows(HOME_B, [later]));
         expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' });
@@ -377,19 +356,16 @@ describe('the lawn v6 copy on the report payload', () => {
       });
 
       test('only another home has a booking and the plan names no cadence: no next visit is shown', async () => {
-        live();
         const { data } = await render(records(), visitRows(HOME_B));
         expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
       test('a next booking whose property cannot be placed: nothing is shown, never a guess', async () => {
-        live();
         const { data } = await render(records(), visitRows({}));
         expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
       test('this report\'s visit has no property evidence: the customer-wide booking counts only on a proven single-premises account', async () => {
-        live();
         const rows = {
           scheduled_services: [
             { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program' },
@@ -431,7 +407,6 @@ describe('the lawn v6 copy on the report payload', () => {
       const svcAtPrimary = () => ({ ...service(records()['svc-cur'].structured_notes), address_line1: '100 Test Palm Way', city: 'Bradenton', zip: '34201' });
 
       test('rows with no property_id, stamp or estimate link count at the primary property: the earlier one is the next visit, not a year-out linked one', async () => {
-        live();
         const { data } = await render(records(), nullPropertyRows(), svcAtPrimary());
         expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' });
         expect(data.reportV2.snapshot.nextVisit.label).toMatch(/November 2/);
@@ -451,19 +426,16 @@ describe('the lawn v6 copy on the report payload', () => {
       const svcAtDrive = () => ({ ...service(records()['svc-cur'].structured_notes), address_line1: '4610 61st Drive East', city: 'Bradenton', zip: '34203' });
 
       test('estimate-linked rows (one-line "Dr E, ... USA" address) are this property: the next visit is the earlier one', async () => {
-        live();
         const { data } = await render(records(), estimateLinked('4610 61st Dr E, Bradenton, FL 34203, USA'), svcAtDrive());
         expect(data.reportV2.snapshot.nextVisit.label).toBe('Monday, November 2');
       });
 
       test('estimate-linked rows for a different house in the same zip stay excluded', async () => {
-        live();
         const { data } = await render(records(), estimateLinked('4612 61st Dr E, Bradenton, FL 34203, USA'), svcAtDrive());
         expect(data.reportV2.snapshot.nextVisit.label).toBe('Sunday, August 29, 2027');
       });
 
       test('a far-off date names its year, so it can never read as a past date', async () => {
-        live();
         const { data } = await render(records(), { scheduled_services: [
           { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
           { id: 'ss-far', customer_id: CUSTOMER, scheduled_date: '2027-08-29', status: 'pending', service_type: 'Lawn Care Treatment Program', ...HOME_A },
@@ -472,13 +444,11 @@ describe('the lawn v6 copy on the report payload', () => {
       });
 
       test('a date in this calendar year keeps the short label', async () => {
-        live();
         const { data } = await render(records(), nullPropertyRows(), svcAtPrimary());
         expect(data.reportV2.snapshot.nextVisit.label).toBe('Monday, November 2');
       });
 
       test('two lawn jobs on one day: the one at this home is shown whichever order they come back in', async () => {
-        live();
         const here = { id: 'ss-b', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
         const unplaced = { id: 'ss-a', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program' };
         const cur = { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
@@ -489,7 +459,6 @@ describe('the lawn v6 copy on the report payload', () => {
       });
 
       test('a completed report\'s FROZEN address is its property, whatever the linked visit resolves to now', async () => {
-        live();
         const svc = {
           ...service(records()['svc-cur'].structured_notes),
           service_data: JSON.stringify({ reportIdentitySnapshot: { version: 1, address: { line1: '100 Test Palm Way', line2: null, city: 'Bradenton', state: 'FL', zip: '34201' } } }),
@@ -504,15 +473,9 @@ describe('the lawn v6 copy on the report payload', () => {
         }, svc);
         expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
       });
-
-      test('gate off: the customer-wide lookup, as before (the other home\'s date still shows)', async () => {
-        const { data } = await render(records(), visitRows(HOME_B));
-        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/January 15/);
-      });
     });
 
     test('a cadence estimate already in the past shows no next visit and times nothing', async () => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -535,7 +498,6 @@ describe('the lawn v6 copy on the report payload', () => {
     });
 
     test('a FAILED property lookup is a degraded read (no freeze), never read as "another home"', async () => {
-      live();
       const v6 = require('../services/service-report/lawn-copy-v6');
       const spy = jest.spyOn(v6, 'resolveLawnCopyV6ForRender').mockResolvedValue({ copy: null, unfrozen: true });
       try {
@@ -555,7 +517,6 @@ describe('the lawn v6 copy on the report payload', () => {
   });
 
   test('a failed next-visit read (the gap that picks the by-next-visit sentence) is a degraded read: no freeze', async () => {
-    live();
     const recs = records();
     // Only the v6 copy's next-visit scan fails; every other scheduled_services read answers.
     const { knex: base } = withRecords(fixtures(), recs);
@@ -576,25 +537,21 @@ describe('the lawn v6 copy on the report payload', () => {
 
   describe('an emailed (pinned) PDF waits for frozen copy: lawnCopyV6Unfrozen', () => {
     test('a healthy render that froze carries no flag', async () => {
-      live();
       const { data } = await render(records());
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBeUndefined();
     });
 
     test('a failed read (retryable) sets it', async () => {
-      live();
       const { data } = await render(records(), { service_products: FAIL });
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
     test('a failed freeze write (copy served, not saved) sets it', async () => {
-      live();
       const { data } = await render(records(), {}, undefined, { failUpdate: true });
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
     test('a failed treatment-catalog check (the guard\'s own lookup, not in readFailures) still holds the email: no freeze, flag set', async () => {
-      live();
       const recs = records();
       const products = [{ id: 'sp-9', service_record_id: 'svc-cur', product_name: 'Test Herbicide B', product_id: 'pc-1', created_at: '2026-09-30T18:00:00Z' }];
       const { knex: base } = withRecords({ ...fixtures(), service_products: products, products_catalog: [{ id: 'pc-1', name: 'Test Herbicide B' }] }, recs);
@@ -614,26 +571,11 @@ describe('the lawn v6 copy on the report payload', () => {
       expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBe(true);
     });
 
-    test('gate off never sets it', async () => {
-      const { data } = await render(records(), { service_products: FAIL });
-      expect(data.lawnAssessment.lawnCopyV6Unfrozen).toBeUndefined();
-    });
-
     test('the pinned delivery path defers with a retryable error on it', () => {
       const queueSource = require('fs').readFileSync(require('path').join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
       expect(queueSource).toMatch(/lawnCopyV6Unfrozen && isDeliveryPin/);
       expect(queueSource).toMatch(/lawn_copy_v6_unfrozen/);
     });
-  });
-
-  test('the PDF cache signature moves with the lead only while it is live (lead off is the signature it was)', async () => {
-    const sig = async () => {
-      const knex = makeKnex({ ...fixtures(), service_records: [] });
-      return (await resolveCanonicalLawnRender({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' }, knex)).signature;
-    };
-    const off = await sig();
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
-    expect(await sig()).not.toBe(off);
   });
 
   test('a non-live render (PDF) prints "What to expect" without the by-next-visit sentences; the live view keeps them', async () => {
@@ -652,7 +594,6 @@ describe('the lawn v6 copy on the report payload', () => {
   });
 
   test('the PDF key does not depend on the customer\'s bookings (the visit sentences never reach a PDF)', async () => {
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
     const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
     const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
     const visit = (date) => ({ id: `ss-${date}`, customer_id: CUSTOMER, scheduled_date: date, status: 'confirmed', service_type: 'Lawn Care Treatment Program' });
@@ -665,7 +606,7 @@ describe('the lawn v6 copy on the report payload', () => {
 // query, nothing on the payload but reportV2.lead.techParagraph, and the PDF key
 // follows the frozen text.
 describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
-  const ENV = ['GATE_LAWN_TECH_PARAGRAPH', 'GATE_LAWN_REPORT_LEAD'];
+  const ENV = ['GATE_LAWN_TECH_PARAGRAPH'];
   const saved = {};
   // A fixed-sentence entry (v2, owner 2026-10-06): the text must be the render of its slots.
   const SLOTS = { observed: [{ condition: 'chinch_bugs', place: 'front_lawn' }], maybe: [], products: ['Arena 50 WDG'] };
@@ -688,11 +629,10 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
     return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-tp', knex, {}).then((data) => ({ data, log }));
   };
   const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
-  const live = () => { process.env.GATE_LAWN_TECH_PARAGRAPH = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
+  const live = () => { process.env.GATE_LAWN_TECH_PARAGRAPH = 'true'; };
   const techCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === 'lawn_tech_paragraph');
 
   test('gate off: a frozen paragraph is invisible: same payload, no carrier, no key', async () => {
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
     const bare = await render(recordsWith(null));
     const frozen = await render(recordsWith(TEXT));
     expect(frozen.data.reportV2.techParagraph).toBeUndefined();
@@ -836,11 +776,10 @@ describe('the Visit Summary PDF key follows the loaded row, whatever the gate sa
   });
 });
 
-// Codex r5: the Visit Summary's "At the next visit" sentence needs a booking at THIS property. With
-// the lead (and so the v6 copy) off, snapshot.nextVisit is customer-wide, so the build hands the gate the property-scoped
-// answer instead (programVisitOut.nextVisitBooked), for any gate state.
-describe('programVisitOut.nextVisitBooked is property-scoped with the lead (v6 copy) off', () => {
-  const ENV = ['GATE_LAWN_REPORT_LEAD'];
+// Codex r5: the Visit Summary's "At the next visit" sentence needs a booking at THIS property, so the
+// build hands the gate the property-scoped answer (programVisitOut.nextVisitBooked).
+describe('programVisitOut.nextVisitBooked is property-scoped', () => {
+  const ENV = [];
   const saved = {};
   const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
   const HOME_B = { service_address_line1: '9 Other Test Road', service_address_city: 'Sarasota', service_address_zip: '34231' };
@@ -862,12 +801,12 @@ describe('programVisitOut.nextVisitBooked is property-scoped with the lead (v6 c
     return { data, out: options.programVisitOut };
   };
 
-  test('a booking only at property B: customer-wide snapshot shows it, property A is told "no next visit"', async () => {
+  test('a booking only at property B: property A is told "no next visit" and the line does not show it', async () => {
     const { data, out } = await build([
       visit('ss-cur', '2026-09-30', 'completed', HOME_A),
       visit('ss-next', '2027-01-15', 'confirmed', HOME_B),
     ]);
-    expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' }); // the legacy customer-wide label
+    expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
     expect(out.nextVisitBooked).toBe(false);
   });
 

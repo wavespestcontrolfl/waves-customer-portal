@@ -145,7 +145,7 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
   });
 });
 
-describe('ReportViewPage — lawn lead (GATE_LAWN_REPORT_LEAD)', () => {
+describe('ReportViewPage — lawn lead', () => {
   const lead = {
     headline: 'Stable, with thin areas to watch',
     why: 'The score is mainly pulled down by turf coverage.',
