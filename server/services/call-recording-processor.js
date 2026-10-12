@@ -8298,17 +8298,22 @@ function lateContactPassMeta({ provenanceMetadata, gate }) {
 }
 
 // Written through the same token-fenced, quarantine-preserving metadata write as the main
-// transcript. A composite relay call has no structured form, so only the metadata is written
-// there. Returns false when the fence says a peer owns the call.
-async function persistLateContactPass({ call, procToken, result, provenanceMetadata, gate, relay }) {
+// transcript. The second stream is merged INTO whatever transcript_structured the accepted
+// transcript already has (primary segments, a fallback's, or none): it never replaces them. A
+// composite relay call has no structured form, so only the metadata is written there. Returns
+// false when the fence says a peer owns the call.
+async function persistLateContactPass({ call, procToken, provenanceMetadata, gate, relay }) {
   if (!gate?.late && !(gate?.panCount > 0)) return true;
   const meta = lateContactPassMeta({ provenanceMetadata, gate });
   if (provenanceMetadata) Object.assign(provenanceMetadata, meta);
-  const patch = {
-    transcription_metadata: transcriptionMetadataWrite({ ...(provenanceMetadata || {}), ...meta }),
-    updated_at: new Date(),
-  };
-  if (gate.late && !relay) patch.transcript_structured = structuredTranscriptJson(result, gate.late.text);
+  const metaWrite = transcriptionMetadataWrite({ ...(provenanceMetadata || {}), ...meta });
+  const patch = { transcription_metadata: metaWrite, updated_at: new Date() };
+  if (gate.late && !relay) {
+    patch.transcript_structured = db.raw(
+      "COALESCE(transcript_structured, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({ contact_pass_transcript: gate.late.text })],
+    );
+  }
   const rows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update(patch);
   return Number(rows) > 0;
 }
@@ -10277,8 +10282,6 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
-    // The primary provider result (provider, model, diarized segments), kept for the late contact pass's audit write.
-    let primaryTranscriptResult = null;
     // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
     // near-silence) is discarded here so the Twilio-builtin fallback below can
     // supply a real transcript; the terminal rejection only fires if the
@@ -10410,7 +10413,6 @@ const CallRecordingProcessor = {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone, quarantine: true });
       stageTimings.transcription_ms = Date.now() - transcribeStartedAt;
       transcription = result.transcription;
-      primaryTranscriptResult = result;
       recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
       // PAN redaction guard (card-on-file spec Phase 0): a card number
@@ -11865,7 +11867,7 @@ const CallRecordingProcessor = {
       if (transcription) {
         const gate = await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid });
         if (gate.lateContactPass) contactPassTranscript = gate.lateContactPass;
-        if (!(await persistLateContactPass({ call, procToken, result: primaryTranscriptResult || {}, provenanceMetadata: transcriptionProvenance?.metadata, gate, relay: Boolean(recordedSegmentText) }))) {
+        if (!(await persistLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate, relay: Boolean(recordedSegmentText) }))) {
           logger.warn(`[call-proc] late contact pass write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
         }
         if (gate.run) {

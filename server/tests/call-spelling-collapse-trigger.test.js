@@ -238,45 +238,47 @@ describe('contactDecoderGate', () => {
 });
 
 describe('persistLateContactPass (token-fenced audit write)', () => {
-  const result = { provider: 'openai', model: 'gpt-4o-transcribe-diarize', structuredSegments: [{ speaker: 'A', text: 'hi' }] };
   const gate = { late: { text: 'Caller: Serov, S-E-R-O-V.', model: 'gpt-4o-transcribe', chars: 25 }, panCount: 0 };
   const call = { id: 'call-1' };
+  const metaOf = (patch) => JSON.parse(patch.transcription_metadata.bindings[patch.transcription_metadata.bindings.length - 1]);
 
-  test('writes transcript_structured with contact_pass_transcript and the model / size metadata, fenced to the claim', async () => {
+  test('merges contact_pass_transcript INTO the accepted transcript\'s structured data and writes model / size metadata, fenced to the claim', async () => {
     const meta = { transcript_chars: 99, pan_count: 0 };
-    expect(await persistLateContactPass({ call, procToken: 'tok-1', result, provenanceMetadata: meta, gate, relay: false })).toBe(true);
+    expect(await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: meta, gate, relay: false })).toBe(true);
     expect(db.__builder.where).toHaveBeenCalledWith({ id: 'call-1' });
     expect(db.__builder.where).toHaveBeenCalledWith('processing_token', 'tok-1');
     const patch = db.__builder.update.mock.calls[0][0];
-    expect(JSON.parse(patch.transcript_structured)).toEqual({
-      provider: 'openai',
-      model: 'gpt-4o-transcribe-diarize',
-      segments: result.structuredSegments,
-      contact_pass_transcript: gate.late.text,
-    });
-    const written = JSON.parse(patch.transcription_metadata.bindings[patch.transcription_metadata.bindings.length - 1]);
-    expect(written).toMatchObject({ transcript_chars: 99, contact_pass_model: 'gpt-4o-transcribe', contact_pass_chars: 25 });
+    // A merge (||) onto the existing value: a fallback's segments, or none, are never replaced.
+    expect(patch.transcript_structured.sql).toMatch(/COALESCE\(transcript_structured, '\{\}'::jsonb\) \|\| \?::jsonb/);
+    expect(JSON.parse(patch.transcript_structured.bindings[0])).toEqual({ contact_pass_transcript: gate.late.text });
+    expect(metaOf(patch)).toMatchObject({ transcript_chars: 99, contact_pass_model: 'gpt-4o-transcribe', contact_pass_chars: 25 });
     expect(meta.contact_pass_model).toBe('gpt-4o-transcribe'); // in-memory provenance kept in step
   });
 
+  test('works with no provenance at all (a fallback transcript): still a merge, never a replace', async () => {
+    await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: null, gate, relay: false });
+    const patch = db.__builder.update.mock.calls[0][0];
+    expect(patch.transcript_structured.sql).toContain('||');
+    expect(metaOf(patch)).toMatchObject({ contact_pass_model: 'gpt-4o-transcribe' });
+  });
+
   test('a relay composite keeps no structured form: metadata only', async () => {
-    await persistLateContactPass({ call, procToken: 'tok-1', result, provenanceMetadata: {}, gate, relay: true });
+    await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: {}, gate, relay: true });
     expect(db.__builder.update.mock.calls[0][0]).not.toHaveProperty('transcript_structured');
   });
 
   test('a pass that heard a card number stamps pan_detected and pan_count, and no transcript', async () => {
-    await persistLateContactPass({ call, procToken: 'tok-1', result, provenanceMetadata: { pan_count: 1 }, gate: { late: null, panCount: 2 }, relay: false });
+    await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: { pan_count: 1 }, gate: { late: null, panCount: 2 }, relay: false });
     const patch = db.__builder.update.mock.calls[0][0];
     expect(patch).not.toHaveProperty('transcript_structured');
-    const written = JSON.parse(patch.transcription_metadata.bindings[patch.transcription_metadata.bindings.length - 1]);
-    expect(written).toMatchObject({ pan_detected: true, pan_count: 2 });
+    expect(metaOf(patch)).toMatchObject({ pan_detected: true, pan_count: 2 });
   });
 
   test('a lost claim reports false; nothing to persist writes nothing', async () => {
     db.__builder.update.mockResolvedValueOnce(0);
-    expect(await persistLateContactPass({ call, procToken: 'tok-1', result, provenanceMetadata: {}, gate, relay: false })).toBe(false);
+    expect(await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: {}, gate, relay: false })).toBe(false);
     db.__builder.update.mockClear();
-    expect(await persistLateContactPass({ call, procToken: 'tok-1', result, provenanceMetadata: {}, gate: { late: null, panCount: 0 }, relay: false })).toBe(true);
+    expect(await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: {}, gate: { late: null, panCount: 0 }, relay: false })).toBe(true);
     expect(db.__builder.update).not.toHaveBeenCalled();
   });
 });
