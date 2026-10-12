@@ -192,7 +192,7 @@ describe('schema 1.28.0, normalizer, flat view, prompt, replay watch list', () =
   });
 
   test('prompt v30 carries the rule and allows both flags on a shared line that cannot get texts (codex r10 P1)', () => {
-    expect(PROMPT_VERSION).toBe('v30');
+    expect(PROMPT_VERSION).toBe('v31');
     const prompt = buildExtractionPrompt('', '', '');
     expect(prompt).toMatch(/- ani_cannot_text: set true whenever the caller says the line they are calling from cannot receive text messages/);
     expect(prompt).toMatch(/WITH or WITHOUT naming another number to text/);

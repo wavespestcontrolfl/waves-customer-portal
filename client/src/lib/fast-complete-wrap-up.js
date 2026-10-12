@@ -12,6 +12,7 @@ import {
   reviewScheduledForOf,
 } from './completion-review-timing';
 import { completionInvoicePrediction } from './completion-invoice-prediction';
+import { nextVisitNoteFields } from './completion-next-visit-note';
 
 export const REENTRY_MAX = 1440;
 export const ADJUSTED_RANGE_MESSAGE = 'Adjusted time on site must be 1–720 minutes.';
@@ -70,9 +71,9 @@ const payLinkPosted = ({ noPayLink, willInvoice, sendSms, includePayLink }) => (
 const reviewMarkerFields = ({ reviewMarker, willReview }) => (reviewMarker && willReview ? { wrapUpReviewAsk: true } : {});
 
 // The body fragment. Untouched it is the four customer-text flags the sheets always posted; every
-// other key appears only when the tech changed it. `adjusted` is the admin's typed minutes ('' for
+// other key appears only when the tech changed it (the next-visit note: lib/completion-next-visit-note.js). `adjusted` is the admin's typed minutes ('' for
 // anyone else): blank sends nothing (the server measures check-in to Complete), a number overrides.
-export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker }) {
+export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker, nextVisitNote, nextVisit }) {
   const timing = { willReview, reviewTiming, reviewCustomAt };
   return {
     sendCompletionSms: sendSms,
@@ -82,7 +83,35 @@ export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview,
     ...timingFields(timing, omitAutoTiming),
     ...completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }),
     ...reentryFields({ ext, int, seeds }),
+    ...nextVisitNoteFields({ nextVisitNote, nextVisit }),
   };
+}
+
+// The member the packet enrolls the review from: the first by window_start (a member with no start last), then by id
+// (visit-completion-packets.js enrollVisitCompletionReviewOnce). `rows` are the stop's schedule rows.
+export function firstMemberId(rows) {
+  const keyOf = (row) => `${row.windowStart ? 0 : 1}|${row.windowStart || ''}|${row.id}`;
+  return [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : 1))[0]?.id ?? null;
+}
+
+// The grouped stop's Wrap-up (owner 2026-10-12): the three things the packet reads for the whole stop. One text
+// goes if ANY item asks for it, one review ask goes only if EVERY item allows it, and its delay comes from the
+// FIRST member, so each of these must be the same on every item. The stop keeps no pay-link row, no time
+// correction and no re-entry steppers (the packet records those per service: they stay on the full form).
+const STOP_TIMING_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor'];
+export function stopWrapUpFields(fields) {
+  const { sendCompletionSms, requestReview, ...rest } = fields;
+  return { sendCompletionSms, requestReview, ...Object.fromEntries(STOP_TIMING_KEYS.filter((key) => key in rest).map((key) => [key, rest[key]])) };
+}
+
+// The stop's saved draft with those fields laid onto EVERY item body, identically. The timing keys the stop owns
+// are cleared first, so a choice changed back to Automatic leaves none behind. Pure: the draft in is not changed.
+export function overlayStopFields(draft, fields) {
+  const forms = Object.fromEntries(Object.entries(draft.forms || {}).map(([id, form]) => {
+    const kept = Object.fromEntries(Object.entries(form.body || {}).filter(([key]) => !STOP_TIMING_KEYS.includes(key)));
+    return [id, { ...form, body: { ...kept, ...fields } }];
+  }));
+  return { ...draft, forms };
 }
 
 // Submit-time guards, in the full form's order. Each returns the problem in words, or null.

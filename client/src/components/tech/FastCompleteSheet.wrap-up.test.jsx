@@ -138,7 +138,7 @@ async function send(request) {
   return request.bodies('/complete')[0];
 }
 const wrapUpHeading = () => screen.queryByRole('heading', { name: 'Wrap-up' });
-const WRAP_UP_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor', 'timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote'];
+const WRAP_UP_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor', 'timeOnSite', 'reentryExteriorMinutes', 'reentryInteriorMinutes', 'nextVisitAdjustmentNote', 'nextVisitId'];
 const expectToday = (body) => {
   expect(body).toMatchObject({ sendCompletionSms: true, includePayLink: true, requestReview: true });
   for (const key of [...WRAP_UP_KEYS, 'wrapUpReviewAsk']) expect(body).not.toHaveProperty(key);
@@ -182,13 +182,23 @@ describe('the recurring pest visit with the Wrap-up on', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /Include payment link in the text/ }));
     fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'customer_requested' } });
     expect(await screen.findByText('Thu, Nov 5')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Needs adjustment?' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Needs adjustment?' })).toBeTruthy();
     const body = await send(request);
     expect(body).toMatchObject({
       sendCompletionSms: true, includePayLink: false, requestReview: true, reviewTiming: 'customer_requested', reviewDelayMinutes: 0, reviewScheduledFor: null,
       timeOnSite: 40, reentryExteriorMinutes: 35,
     });
     expect(body).not.toHaveProperty('nextVisitAdjustmentNote');
+  });
+
+  test('a note typed under the next visit rides the body with the id of the visit shown', async () => {
+    const request = makeRequest({ nextVisit: { id: 'svc-2', date: '2026-11-05', serviceType: 'Quarterly Pest Control' } });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(await screen.findByRole('button', { name: 'Needs adjustment?' }));
+    fireEvent.change(screen.getByLabelText('Next visit adjustment note'), { target: { value: 'Gate code changed' } });
+    const body = await send(request);
+    expect(body).toMatchObject({ nextVisitAdjustmentNote: 'Gate code changed', nextVisitId: 'svc-2' });
   });
 
   test('picking another timing and back to Automatic posts no reviewTiming, as before', async () => {

@@ -12,11 +12,22 @@
 // rule as a live one.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { putVisitCompletionDraft } from '../lib/completion-resume-store';
+import { overlayStopFields } from '../lib/fast-complete-wrap-up';
+import { completionFailureOutcome } from './useFastCompleteSubmit';
 import {
   clearTerminalDrafts, comboDraftId, loadVisitCloseout, packetAfterSend, packetDisplayState, postVisitPacket, resolveSendFailure,
 } from '../lib/visit-closeout-packet';
 
 const PERSIST_ERROR = 'Could not save this on this device. Free some storage and try again.';
+
+// A saved form: the body that goes, and (only when the stop's Wrap-up changed it) the body the part handed over, so
+// the section can always be re-applied to the original.
+const formOf = (entry, rest = {}) => ({ body: entry.body, ...(entry.base !== entry.body ? { base: entry.base } : {}), ...rest });
+// The keys a confirm added to a body (the refusal's own flag), laid onto the handed-over body as well.
+function withAdded(base, before, after) {
+  const added = Object.fromEntries(Object.entries(after || {}).filter(([key]) => before && !(key in before)));
+  return Object.keys(added).length ? { ...base, ...added } : base;
+}
 
 // A revoked part's body may still sit in the draft store (its write is pending, or failed). A small synchronous marker,
 // kept apart from the store, says so: a load never trusts a stored body whose revocation has not landed, even after a
@@ -32,6 +43,7 @@ function writeRevoked(scope, visitId, ids) {
 }
 // A packet refusal that means the short screen cannot close this stop: the long form's.
 const REFUSAL_CODES = /^lawn_fast|visit_grouped|visit_members/;
+const sentToLongForm = (err) => REFUSAL_CODES.test(String(err.code || '')) || err.details?.reason === 'grouped_visit';
 
 export function useStopLoad(visitId, scope) {
   const [state, setState] = useState({ status: 'loading', detail: null, rows: [], draft: null, error: '' });
@@ -54,6 +66,9 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   const keyRef = useRef('');
   const restoredRef = useRef([]);
   const seeded = useRef(false);
+  // A send of this draft has begun and has not been finished or definitely refused: the stop is locked and the same draft
+  // is replayed. Saved with the draft, so a reload (or a closed sheet) keeps it.
+  const pendingRef = useRef(false);
   const lastSeq = useRef({});
   const writer = useRef({ running: false, dirty: false, waiters: [], compensating: false });
   const [, setVersion] = useState(0);
@@ -67,9 +82,10 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     const saved = draft.forms || {};
     noteRef.current = draft.note || '';
     keyRef.current = draft.key;
+    pendingRef.current = draft.pending === true;
     const revoked = readRevoked(scope, visitId);
     entries.current = Object.fromEntries(Object.entries(saved).filter(([id, form]) => form?.body && !revoked.includes(id))
-      .map(([id, form]) => [id, { body: form.body, seq: 0, noteAtSave: form.noteAtSave ?? noteRef.current }]));
+      .map(([id, form]) => [id, { body: form.body, base: form.base ?? form.body, seq: 0, noteAtSave: form.noteAtSave ?? noteRef.current }]));
     restoredRef.current = Object.keys(entries.current);
   }
 
@@ -82,9 +98,9 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     while (w.dirty) {
       w.dirty = false;
       const batch = w.waiters.splice(0);
-      const forms = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, { body: e.body, noteAtSave: e.noteAtSave }]));
+      const forms = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, formOf(e, { noteAtSave: e.noteAtSave })]));
       let ok = false;
-      try { ok = await putVisitCompletionDraft(draftId, { visitId, key: keyRef.current, note: noteRef.current, forms }, scope); } catch { ok = false; }
+      try { ok = await putVisitCompletionDraft(draftId, { visitId, key: keyRef.current, note: noteRef.current, forms, ...(pendingRef.current ? { pending: true } : {}) }, scope); } catch { ok = false; }
       if (ok) {
         w.compensating = false;
         setPersistError('');
@@ -122,7 +138,7 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   const apply = useCallback((id, body, seq) => {
     if (!(seq > (lastSeq.current[id] ?? 0))) return Promise.resolve();
     lastSeq.current[id] = seq;
-    if (body) entries.current[id] = { body, seq, noteAtSave: noteRef.current }; else revoke(id);
+    if (body) entries.current[id] = { body, base: body, seq, noteAtSave: noteRef.current }; else revoke(id);
     bump();
     return persist(() => { if (entries.current[id]?.seq === seq) delete entries.current[id]; })
       .then(() => { if (body) writeRevoked(scope, visitId, readRevoked(scope, visitId).filter((x) => x !== id)); })
@@ -145,26 +161,55 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   }, [persist, bump]);
 
   // A confirmed or reopened draft from a send: bodies follow it (a reopened form has none: it is not ready).
-  const replaceFrom = useCallback((next) => {
+  // `previous`: the draft the send carried before a confirm was added to it; the confirm joins the part's handed-over
+  // body too, so a later send built from that body keeps it.
+  const replaceFrom = useCallback((next, previous = null) => {
     for (const id of Object.keys(entries.current)) {
       const form = next.forms[id];
-      if (form?.body) entries.current[id] = { ...entries.current[id], body: form.body }; else delete entries.current[id];
+      if (form?.body) entries.current[id] = { ...entries.current[id], body: form.body, base: withAdded(entries.current[id].base, previous?.forms?.[id]?.body, form.body) }; else delete entries.current[id];
     }
     bump();
     persist().catch((err) => setPersistError(err.message));
   }, [persist, bump]);
 
+  // Writes the stop's draft as it must go (`next`'s bodies laid onto the map, or the map as it is) with the pending mark, and
+  // resolves only when a write holding exactly that has LANDED; on a failed write everything it changed is put back and it
+  // rejects, so nothing is sent and the stop stays editable. The same serialized writer as every part's save.
+  const stage = useCallback((next, pending) => {
+    const prior = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, e.body]));
+    const priorPending = pendingRef.current;
+    for (const [id, form] of Object.entries(next?.forms || {})) if (entries.current[id]) entries.current[id] = { ...entries.current[id], body: form.body };
+    pendingRef.current = pending;
+    bump();
+    return persist(() => {
+      for (const [id, body] of Object.entries(prior)) if (entries.current[id]) entries.current[id] = { ...entries.current[id], body };
+      pendingRef.current = priorPending;
+    });
+  }, [persist, bump]);
+
   const ready = (id) => !!entries.current[id] && entries.current[id].noteAtSave === noteRef.current;
   const stale = (id) => !!entries.current[id] && !ready(id);
   // The draft the packet request sends: ready parts only, from the map (never from the loaded draft).
-  const draftFor = (ids) => ({
-    visitId, key: keyRef.current, note: noteRef.current,
-    forms: Object.fromEntries(ids.filter(ready).map((id) => [id, { body: entries.current[id].body }])),
+  const draftFor = (ids, fromBase = false) => ({
+    visitId, key: keyRef.current, note: noteRef.current, ...(pendingRef.current ? { pending: true } : {}),
+    forms: Object.fromEntries(ids.filter(ready).map((id) => [id, fromBase ? { body: entries.current[id].base, base: entries.current[id].base } : formOf(entries.current[id])])),
   });
-  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, persistError, draftId };
+  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, stage, pending: pendingRef.current, persistError, draftId };
 }
 
-export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
+// A send the server may have recorded: the shared submit's own classification (hooks/useFastCompleteSubmit.js
+// completionFailureOutcome) calls it a "retry": no answer, a timeout (408, 425), a rate limit or lapsed login, any 5xx, an
+// attempt still running. A definite refusal (the correctable and terminal families, answered before any write) did not happen.
+// A re-read that finds no packet proves nothing here: the first request may still be running.
+const outcomeUnknown = (err, outcome) => outcome.kind === 'error' && !sentToLongForm(err) && completionFailureOutcome(err) === 'retry';
+
+// The stop's send, in three lines:
+//  1. A send posts the draft that is in the store, and nothing else.
+//  2. The Wrap-up's choices are written into that draft (a write that must land), built from the parts' own bodies, before the send.
+//  3. After a failure that may have committed, the stop is locked and the same draft is replayed until success or a definite refusal.
+// `stopFields()`: what the stop's Wrap-up asks of the bodies: null while the section is not shown (the saved bodies go as saved),
+// {} while it is shown at its defaults or withdrawn (the parts' own handed-over bodies go), else the choices to lay onto those.
+export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, stopFields }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [refusal, setRefusal] = useState('');
@@ -183,19 +228,27 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
     onSaved?.();
   };
 
+  // A definite refusal ends the hold (a confirm resend is the same attempt, and an unknown outcome keeps it). Run AFTER the
+  // outcome's own changes to the saved parts, so the one write that clears the mark also holds them; it resolves when that write
+  // has landed, so what the tech sees changes only once the store agrees.
+  const releaseHold = async (err, outcome) => {
+    if (outcome.kind !== 'resend' && !outcomeUnknown(err, outcome)) await readiness.stage(null, false).catch(() => {});
+  };
+
   // Applies what resolveSendFailure decided, exactly as the long form does. Returns the draft to send again, or null.
   const failed = async (err, candidate) => {
     const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope, draftId: readiness.draftId });
-    if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft); return outcome.draft; }
+    if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft, candidate); return outcome.draft; }
     if (outcome.kind === 'reopened') {
       readiness.replaceFrom(outcome.draft);
       const kind = outcome.draft.forms[ids.pest]?.body === null ? 'pest' : 'lawn';
       setFresh((f) => ({ ...f, [kind]: (f[kind] || 0) + 1 }));
-      setError(outcome.message);
     }
+    await releaseHold(err, outcome);
+    if (outcome.kind === 'reopened') setError(outcome.message);
     if (outcome.kind !== 'error') return null;
     setError(outcome.error);
-    if (REFUSAL_CODES.test(String(err.code || '')) || err.details?.reason === 'grouped_visit') setRefusal(err.message || outcome.error);
+    if (sentToLongForm(err)) setRefusal(err.message || outcome.error);
     if (outcome.found) {
       setResult(null);
       load.setDetail(outcome.found.detail);
@@ -206,18 +259,37 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
     return null;
   };
 
-  const submit = async (candidate = readiness.draftFor([ids.pest, ids.lawn])) => {
+  // The draft this send posts, written to the store first. A replay (the hold) posts the stored draft as it is. A first send
+  // lays the Wrap-up's choices onto the parts' handed-over bodies (never onto what an earlier send carried, so a choice put
+  // back to its default sends the original again), and the whole draft is written with the pending mark; the write must land.
+  const prepareDraft = async () => {
+    const both = [ids.pest, ids.lawn];
+    if (readiness.pending) return readiness.draftFor(both);
+    const fields = stopFields?.();
+    const shown = fields && Object.keys(readiness.draftFor(both).forms).length === 2;
+    const next = shown ? readiness.draftFor(both, true) : null;
+    await readiness.stage(next && Object.keys(fields).length ? overlayStopFields(next, fields) : next, true);
+    return readiness.draftFor(both);
+  };
+
+  const submit = async (given) => {
     if (submitting.current) return;
     submitting.current = true;
     setBusy(true);
     setError('');
     let again = null;
-    try { await send(candidate); } catch (err) { again = await failed(err, candidate); } finally {
+    try {
+      const candidate = given || await prepareDraft();
+      try { await send(candidate); } catch (err) { again = await failed(err, candidate); }
+    } catch (err) {
+      // The draft could not be saved on this device: nothing was sent, and the stop stays editable.
+      setError(err.message);
+    } finally {
       submitting.current = false;
       setBusy(false);
     }
     if (again) await submit(again);
   };
 
-  return { busy, error, refusal, setRefusal, result, display, started: !!packet, fresh, submit };
+  return { busy, error, refusal, setRefusal, result, display, started: !!packet, fresh, replaying: readiness.pending, submit };
 }
