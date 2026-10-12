@@ -152,7 +152,7 @@ describe('the gallons preview is held to the lawn (as /complete records it)', ()
 
   test('capped by the visit area (4 gal at 1 gal per 1,000 = 4,000 sq ft on a 1,900 sq ft lawn)', () => {
     const lawn = lawnCapOf(HELP, 1900);
-    expect(withGallonsArea(spot, { help: HELP, weedGallons: '', lawn })).toMatchObject({ spotArea: 1900, areaFromGallons: 4 });
+    expect(withGallonsArea(spot, { help: HELP, weedGallons: '', lawn })).toMatchObject({ spotArea: 1900, spotFigureArea: 4000, areaFromGallons: 4 });
     expect(withGallonsArea(weed, { help: HELP, weedGallons: '4', lawn })).toMatchObject({ spotArea: 1900, areaFromGallons: 4 });
   });
 
@@ -163,6 +163,7 @@ describe('the gallons preview is held to the lawn (as /complete records it)', ()
 
   test('a smaller figure and an unknown lawn show the figure itself (as before)', () => {
     expect(withGallonsArea({ ...spot, spotGallons: '1' }, { help: HELP, weedGallons: '', lawn: lawnCapOf(HELP, 1900) })).toMatchObject({ spotArea: 1000 });
+    expect(withGallonsArea({ ...spot, spotGallons: '1' }, { help: HELP, weedGallons: '', lawn: lawnCapOf(HELP, 1900) })).not.toHaveProperty('spotFigureArea');
     expect(withGallonsArea(spot, { help: HELP, weedGallons: '', lawn: lawnCapOf(HELP, null) })).toMatchObject({ spotArea: 4000, areaFromGallons: 4 });
     expect(withGallonsArea(spot, { help: HELP, weedGallons: '' })).toMatchObject({ spotArea: 4000 });
   });

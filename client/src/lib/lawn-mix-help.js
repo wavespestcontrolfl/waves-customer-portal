@@ -119,8 +119,10 @@ export function withGallonsArea(row, { help, weedGallons, lawn = null }) {
   const gallons = positive(row.weedGroup ? weedGallons : row.spotGallons);
   const derived = gallons ? gallonsToArea(gallons, mixEntryFor(help, row.productId)?.carrierGalPer1000, help?.tanks) : null;
   // A spot cannot be larger than the lawn: the area is held to the lawn's, as /complete records it (the gallons still go to the server).
-  const { area } = capGallonsArea(derived, lawn);
-  return area ? { ...row, spotArea: area, areaFromGallons: gallons } : row;
+  // The amount stays the one actually mixed: `spotFigureArea` is the UNCAPPED coverage of the gallons, which the sheet figures the amount
+  // from, while `spotArea` (shown and submitted) is the capped one. The server then recomputes the rate over the capped area.
+  const { area, capped, uncapped } = capGallonsArea(derived, lawn);
+  return area ? { ...row, spotArea: area, areaFromGallons: gallons, ...(capped ? { spotFigureArea: uncapped } : {}) } : row;
 }
 
 /** The /complete row's gallons field: only a row whose area came from gallons carries it. */

@@ -900,7 +900,8 @@ function figuringRate(row) {
 // A spot row under the spot rules is figured on the area the tech set for it (spotArea) and on
 // no other: the plan's own spot estimate figures nothing there.
 const figuringArea = (row, lawnSqft) => {
-  if (row.spotRule) return row.spotArea > 0 ? row.spotArea : null;
+  // A gallons row held to the lawn (lib/lawn-mix-help.js) is figured on what the gallons cover: the amount is what was mixed.
+  if (row.spotRule) return row.spotFigureArea > 0 ? row.spotFigureArea : (row.spotArea > 0 ? row.spotArea : null);
   return requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null);
 };
 
