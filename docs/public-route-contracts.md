@@ -2658,7 +2658,7 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
+until it fits (the lawn v6 copy is always live, so the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
@@ -2853,8 +2853,8 @@ and `Object.keys` never see it and the `/api/reports/:token/data` payload is wha
 it was (a test pins that). The block itself never reaches the payload; the only
 thing a customer sees of it is the sentences below. Pure, no read, no write, and
 a failure cannot break a render.
-`GATE_LAWN_REPORT_COPY_V6` (dark; gate off leaves the lawn payload, render and PDF
-unchanged, key for key, and makes no read or write) swaps the old
+The lawn v6 copy (always on; the `GATE_LAWN_REPORT_COPY_V6` and
+`GATE_LAWN_REPORT_LEAD` gates were removed after they held) swaps the old
 `LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
 (`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
 shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
@@ -2896,11 +2896,11 @@ retryable `lawn_copy_v6_unfrozen` error instead of sending it.
 The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
-key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
-under this gate, so a later assessment correction cannot make the PDF and the
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one,
+so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live.
+and its cache signature carries the constant `:lead=1:copyv6=1` stamp.
 The lawn PDF prints watering only from the reconciled `reportV2` (the `aftercare`
 and customer-action lines the web report prints too): with a lawn `reportV2` it
 prints no "Hold irrigation until ..." line from the raw product-advisory timer
@@ -2926,7 +2926,7 @@ of `whatToExpect` and the rest of the frozen copy stands. The by-next-visit
 sentences are LIVE-VIEW ONLY, like `snapshot.nextVisit` itself: a non-live render
 (PDF, static) prints `whatToExpect` without them (`stripLiveOnlyScheduleFields`),
 so a stored PDF never depends on the customer's bookings and its cache signature
-carries no booking state. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
+carries no booking state. The "Next visit" line reads the same property-scoped lookup. The v6 copy keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an
@@ -3265,7 +3265,7 @@ of these overall numbers, so they can still move when only the light did:
 - the portal's "N pts since first visit" and "+N pts improvement" overall deltas
   (`PortalPage.jsx`; the overall score includes color);
 - the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
-  bypassed whenever `GATE_LAWN_REPORT_COPY_V6` is live);
+  bypassed, since the lawn v6 copy is always live);
 - the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).

@@ -502,7 +502,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Water the front strip by hand.');
   });
 
-  it('prints the lawn lead "What to expect" sentences (GATE_LAWN_REPORT_COPY_V6) and nothing when the key is absent', () => {
+  it('prints the lawn lead "What to expect" sentences (lawn v6 copy) and nothing when the key is absent', () => {
     const expectLine = 'By your next visit, most treated weeds should be yellowing, browning or both.';
     const snapshot = { overallScore: 86, statusHeadline: 'Looking healthy' };
     const withKey = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy', whatToExpect: expectLine } } };

@@ -21,8 +21,8 @@ const { gatherVisitSummaryFacts } = require('../services/service-report/lawn-vis
 const reportFacts = require('../services/service-report/lawn-report-facts');
 const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
 
-const KEYS = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_COPY_V6'];
-const tiesPrerequisites = () => { process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true'; process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; };
+const KEYS = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2'];
+const tiesPrerequisites = () => { process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true'; };
 const TIE = { source: 'photo', kind: 'fungus', label: 'gray leaf spot', sure: true, product: 'fungicide' };
 const BLOCK = {
   v: 1,
@@ -122,11 +122,9 @@ describe('gate on', () => {
     expect(state.notes.lawnVisitSummary['77'].v).toBe(4);
   });
 
-  describe('the tie part needs the Visit Summary AND the v6 copy gates (lawnReportTiesLive)', () => {
+  describe('the tie part needs the Visit Summary gate (lawnReportTiesLive)', () => {
     test.each([
-      ['the Visit Summary dark', { GATE_LAWN_REPORT_COPY_V6: 'true' }],
-      ['the v6 copy dark', { GATE_LAWN_VISIT_SUMMARY_V2: 'true' }],
-      ['both dark', {}],
+      ['the Visit Summary dark', {}],
     ])('%s: no tie is read, the summary stays v3 where it is written, and the re-entry freeze still runs', async (_label, env) => {
       Object.assign(process.env, env);
       // The real freeze stores no tie block while the tie part is not live.
@@ -147,10 +145,8 @@ describe('gate on', () => {
       const set = (env) => { for (const key of KEYS) delete process.env[key]; Object.assign(process.env, env); };
       set({}); expect(gates.lawnReportTiesLive()).toBe(false);
       set({ GATE_LAWN_REPORT_FACTS: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
-      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_VISIT_SUMMARY_V2: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
-      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_REPORT_COPY_V6: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
-      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_VISIT_SUMMARY_V2: 'true', GATE_LAWN_REPORT_COPY_V6: 'true' }); expect(gates.lawnReportTiesLive()).toBe(true);
-      set({ GATE_LAWN_VISIT_SUMMARY_V2: 'true', GATE_LAWN_REPORT_COPY_V6: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
+      set({ GATE_LAWN_REPORT_FACTS: 'true', GATE_LAWN_VISIT_SUMMARY_V2: 'true' }); expect(gates.lawnReportTiesLive()).toBe(true);
+      set({ GATE_LAWN_VISIT_SUMMARY_V2: 'true' }); expect(gates.lawnReportTiesLive()).toBe(false);
     });
   });
 

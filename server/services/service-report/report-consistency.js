@@ -893,7 +893,7 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // non-enumerable hand-off (report-data.js); the fixes below rebuild
   // reportV2 by spread, which would drop it, so it is read first.
   const sinceLast = (data && data.reportV2 && data.reportV2.sinceLastCopy) || null;
-  // The v6 copy writer's fields (GATE_LAWN_REPORT_COPY_V6) ride the built report
+  // The v6 copy writer's fields ride the built report
   // as a non-enumerable hand-off (report-data.js); the fixes below rebuild
   // reportV2 by spread, which would drop it, so it is read first. They reach
   // the customer only through reportV2.lead, never as a payload key.

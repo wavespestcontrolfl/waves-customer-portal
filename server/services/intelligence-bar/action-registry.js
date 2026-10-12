@@ -167,11 +167,18 @@ function discover(input, scope) {
   if (failure) return { result: failure, definitions: [] };
   const terms = [...new Set(input.query.toLowerCase().match(/[a-z0-9]+/g) || [])]
     .filter(term => !DISCOVERY_STOPWORDS.has(term));
-  const ranked = [...actions.values()].filter(a => allowed(a, scope) && (!input.domain || a.domain === input.domain))
+  // The model's domain is a ranking hint, never a filter: booking lives under
+  // "customers", so a "schedule" search used to return every schedule tool
+  // and not the one that books (owner IB history 10-12). A matching tool in
+  // the named domain ranks one point higher and wins ties.
+  const inDomain = a => (input.domain && a.domain === input.domain ? 1 : 0);
+  const ranked = [...actions.values()].filter(a => allowed(a, scope))
     .map(a => {
       const words = new Set(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase().match(/[a-z0-9]+/g) || []);
       return { action: a, score: terms.reduce((n, word) => n + (words.has(word) ? 1 : 0), 0) };
-    }).filter(r => r.score > 0).sort((a, b) => b.score - a.score || a.action.id.localeCompare(b.action.id));
+    }).filter(r => r.score > 0)
+    .sort((a, b) => (b.score + inDomain(b.action)) - (a.score + inDomain(a.action))
+      || inDomain(b.action) - inDomain(a.action) || a.action.id.localeCompare(b.action.id));
   const selected = ranked.slice(0, 12).map(r => r.action);
   return {
     definitions: selected.filter(a => a.approval !== 'confirmed_endpoint').map(a => a.definition),
@@ -199,6 +206,12 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   // Tap-to-answer buttons for a "which value?" question (choice-tools.js):
   // display only, reads and writes nothing.
   'offer_choices',
+  // Owner IB history 10-12: on the dashboard the bar answered "no
+  // appointment-creation tool" (booking is filed under customers, and its
+  // schedule-domain search missed it), and a "fix the address from the last
+  // call" ask spent its rounds discovering the call log and the customer edit.
+  'create_appointment', 'reschedule_appointment', 'cancel_appointment',
+  'update_customer', 'get_call_log',
 ]);
 
 function initialTools(context, scope) {

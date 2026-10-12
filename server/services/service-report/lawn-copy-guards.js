@@ -5,7 +5,7 @@
  * checkLawnModelCopy on every model field and falls back to the deterministic
  * string on any failure. This PR wires nothing: the live narrative overlay
  * (lawn-report-narrative.js safeText / the rain-window regexes) keeps running
- * untouched until P14 replaces it behind GATE_LAWN_REPORT_COPY_V6.
+ * untouched until P14 replaced it (the v6 copy, lawn-copy-v6.js).
  *
  * The model owns prose only, and the timing rule is a CLOSED WORLD: model copy
  * contains no time language and no numbers of its own. Day and week windows

@@ -732,7 +732,7 @@ export default function ServiceReportDocument({ data, token }) {
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
-        // The lead's headline when it has one: under GATE_LAWN_REPORT_COPY_V6
+        // The lead's headline when it has one: with the v6 copy
         // that is the FROZEN headline the live report replays, which a later
         // assessment correction must not make the PDF contradict. Without the
         // v6 copy the lead headline is this same statusHeadline (or null).
@@ -1233,7 +1233,7 @@ export default function ServiceReportDocument({ data, token }) {
                 {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
               </Bullet>
             )}
-            {/* GATE_LAWN_REPORT_COPY_V6: the approved expectation sentences the web
+            {/* Lawn v6 copy: the approved expectation sentences the web
                 lead prints. Its headline is the Overall line above, and its
                 watching line names insights this list already prints in full. */}
             {v2Lead?.whatToExpect ? (
