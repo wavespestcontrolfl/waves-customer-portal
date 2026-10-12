@@ -1029,7 +1029,10 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
 // wildcard and only a present, different one rules the address out: the
 // removal check fails closed on anything that could be this address.
 function addressCanNameProperty(address, target) {
-  const [street, targetStreet] = [streetKey(address.address_line1), streetKey(target.address_line1)];
+  // The property SCOPE street (estimate-property-linkage normalizedStampedStreet):
+  // suffixes AND directionals canonical ("Dr E" == "Drive East"), unit stripped.
+  const scopeStreet = line => canonicalizeScopeAddress(stripTrailingUnit(line)).replace(/[^a-z0-9]/g, '');
+  const [street, targetStreet] = [scopeStreet(address.address_line1), scopeStreet(target.address_line1)];
   if (!street || !targetStreet) return false;
   const [zip, targetZip] = [normalizeZip(address.zip), normalizeZip(target.zip)];
   // An unparsed one-line address keeps its locality inside the street text.
@@ -1287,6 +1290,7 @@ module.exports = {
   editManualProperty,
   changePrimaryProperty,
   removeManualProperty,
+  addressCanNameProperty,
   sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,
