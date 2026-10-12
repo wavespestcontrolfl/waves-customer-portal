@@ -1019,21 +1019,25 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
     ] };
 }
 
-// True when an unlinked visit's own service address can name this property.
-// Partial stamps are legal (street only, or missing city / ZIP), so a missing
-// component is a wildcard and only a present, different one rules the visit
-// out: the removal check fails closed on anything that could be this address.
-function visitAddressNamesProperty(visit, target) {
-  const street = streetKey(visit.service_address_line1);
-  if (!street || street !== streetKey(target.address_line1)) return false;
+// True when a free-standing address (an unlinked visit's stamp, or an
+// estimate's parsed quoted address) can name this property. Partial addresses
+// are legal (street only, or missing city / ZIP), so a missing component is a
+// wildcard and only a present, different one rules the address out: the
+// removal check fails closed on anything that could be this address.
+function addressCanNameProperty(address, target) {
+  const [street, targetStreet] = [streetKey(address.address_line1), streetKey(target.address_line1)];
+  if (!street || !targetStreet) return false;
+  const [zip, targetZip] = [normalizeZip(address.zip), normalizeZip(target.zip)];
+  // An unparsed one-line address keeps its locality inside the street text.
+  const unparsed = !address.city && !zip && street.startsWith(targetStreet);
+  if (street !== targetStreet && !unparsed) return false;
   const unitOf = (line1, line2) => unitKey(line2) || streetEmbeddedUnitKey(line1);
   const differs = (a, b) => !!a && !!b && a !== b;
-  if (differs(unitOf(visit.service_address_line1, visit.service_address_line2), unitOf(target.address_line1, target.address_line2))) return false;
+  if (!unparsed && differs(unitOf(address.address_line1, address.address_line2), unitOf(target.address_line1, target.address_line2))) return false;
   // ZIP first, like addressKey: mailing-city aliases (Bradenton / Lakewood
   // Ranch) name one address, so cities are compared only without two ZIPs.
-  const [visitZip, targetZip] = [normalizeZip(visit.service_address_zip), normalizeZip(target.zip)];
-  if (visitZip && targetZip) return visitZip === targetZip;
-  return !differs(normStreet(visit.service_address_city), normStreet(target.city));
+  if (zip && targetZip) return zip === targetZip;
+  return !differs(normStreet(address.city), normStreet(target.city));
 }
 
 // Open rows that still depend on a saved property. Every estimate and every
@@ -1047,11 +1051,13 @@ async function propertyRemovalDependents(conn, customerId, target) {
   // so it is still an outstanding booking at this property.
   const settledVisitStatuses = require('./property-role-proposals').TERMINAL_VISIT_STATUSES.filter(status => status !== 'rescheduled');
   const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
-  const { estimateQuotesCustomerAddress, parseEstimateAddress } = require('./estimate-property-linkage');
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
   const estimates = await conn('estimates').where({ customer_id: customerId })
     .orderBy('id').select('id', 'status', 'archived_at', 'property_id', 'address');
-  const quotesTarget = estimate => estimate.property_id === target.id
-    || (!!parseEstimateAddress(estimate.address) && estimateQuotesCustomerAddress(estimate.address, target));
+  const quotesTarget = estimate => {
+    const quoted = estimate.property_id === target.id ? null : parseEstimateAddress(estimate.address);
+    return estimate.property_id === target.id || (!!quoted && addressCanNameProperty(quoted, target));
+  };
   const targetEstimateIds = new Set(estimates.filter(quotesTarget).map(estimate => estimate.id));
   const openEstimates = estimates.filter(estimate => targetEstimateIds.has(estimate.id)
     && !estimate.archived_at && !TERMINAL_ESTIMATE_STATUSES.includes(estimate.status));
@@ -1061,7 +1067,8 @@ async function propertyRemovalDependents(conn, customerId, target) {
     .orderBy('id')
     .select('id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
   const openVisits = visits.filter(visit => visit.property_id === target.id
-    || visitAddressNamesProperty(visit, target)
+    || addressCanNameProperty({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
+      city: visit.service_address_city, zip: visit.service_address_zip }, target)
     || (visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id)));
   return { visits: openVisits.length, estimates: openEstimates.length };
 }

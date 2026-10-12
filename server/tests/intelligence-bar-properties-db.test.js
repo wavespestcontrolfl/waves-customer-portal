@@ -140,7 +140,15 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await db('estimates').insert({ id: estimate, customer_id: customerA, property_id: saved.propertyId, status: 'draft',
       token: crypto.randomBytes(16).toString('hex'), customer_name: 'Fixture Alder', address: '2100 Example Grove, Sarasota, FL 34201' });
     await blocked();
-    await db('estimates').where({ id: estimate }).update({ status: 'declined' });
+    // An unlinked open estimate quoting the address under a mailing-city alias (same ZIP) blocks,
+    // and so does an open visit that points at the property only through that estimate.
+    await db('estimates').where({ id: estimate }).update({ property_id: null, address: '2100 Example Grove, Lakewood Ranch, FL 34201' });
+    await blocked();
+    await db('estimates').where({ id: estimate }).update({ status: 'accepted' });
+    await db('scheduled_services').where({ id: unstamped }).update({ status: 'pending', service_address_line1: null, service_address_zip: null, service_address_city: null, source_estimate_id: estimate });
+    await blocked();
+    await db('scheduled_services').where({ id: unstamped }).update({ status: 'cancelled' });
+    await db('estimates').where({ id: estimate }).update({ status: 'declined', property_id: saved.propertyId });
     await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
 
     // The multi-home status is never cleared by a removal; the card says it stays on.
