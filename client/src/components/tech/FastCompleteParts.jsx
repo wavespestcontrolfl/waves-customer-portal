@@ -842,23 +842,6 @@ export function useDictationSources(onDictationPending) {
   return { note, tip };
 }
 
-// One suggested tip, offered where the sheet has read the note (the report
-// step). One tap adds it; it is never picked for the tech.
-export function TipSuggestion({ library, tip, pressed, locked, onPick }) {
-  if (!tip) return null;
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title">Tip for the customer</h3>
-        <span className="tech-visit-muted">{pressed ? '1 picked' : 'Suggested from your note'}</span>
-      </div>
-      <div className="tech-visit-tip-list">
-        <TipOption tip={tip} library={library} pressed={pressed} locked={locked} onPick={onPick} />
-      </div>
-    </section>
-  );
-}
-
 // The tech's own line. With `mic`, the note's microphone sits beside it and
 // each dictated chunk joins what is already on the line.
 function OwnTipField({ customTip, onCustom, locked, mic }) {

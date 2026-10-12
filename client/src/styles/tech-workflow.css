@@ -192,6 +192,28 @@
 .tech-wrapup-hint { display: block; }
 .tech-wrapup-timing { display: grid; gap: 8px; margin-top: 8px; }
 .tech-wrapup-next { margin: 0; font-size: 16px; font-weight: 500; }
+/* One look for the Wrap-up on every sheet (owner 2026-10-12): the full Complete Service form's own, which the lawn
+   sheet already wears (the M tokens above .tech-lawn-sheet): ink #111111 on white, hairline #e5e5e5, grey labels,
+   48px inputs with a 12px radius, and 999px outline pills. Scoped to the section, so the rest of each sheet is unchanged. */
+.tech-wrapup {
+  --tech-card: #ffffff;
+  --tech-subtle: #f5f5f5;
+  --tech-border: #e5e5e5;
+  --tech-border-strong: #e5e5e5;
+  --tech-accent: #111111;
+  --tech-text: #111111;
+  --tech-muted: #737373;
+  --tech-faint: #a3a3a3;
+  color: #111111;
+  font-family: "Roboto", Arial, sans-serif;
+}
+.tech-wrapup .tech-visit-section-title { margin: 0 0 8px; color: #a3a3a3; font-size: 14px; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
+.tech-wrapup .tech-visit-muted { color: #737373; }
+.tech-wrapup .ui-control.tech-visit-control { min-height: 48px; padding: 0 16px; border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; color: #111111; font-size: 16px; font-weight: 400; }
+.tech-wrapup .ui-control.tech-visit-control:focus { border-color: #111111; --tw-ring-color: #111111; }
+.tech-wrapup select.ui-control.tech-visit-control { padding: 0 32px 0 16px; }
+.tech-wrapup .ui-action.tech-visit-action { min-height: 44px; border: 1px solid #111111; border-radius: 999px; background: transparent; color: #111111; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
+.tech-wrapup .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: #f5f5f5; }
 /* The Time on-site clock outside the lawn sheet (the Tree & Shrub Wrap-up); the lawn sheet's own, more specific rule wins there. */
 .tech-visit-on-site-time { margin: 0; font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 500; }
 .tech-visit-feedback[role='alert'] { color: var(--tech-error-text); }
