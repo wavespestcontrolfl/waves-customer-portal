@@ -20,6 +20,8 @@ import { Button, ActionFeedback } from '../ui';
 import FastCompleteSheet from './FastCompleteSheet';
 import FastCompleteLawnSheet from './FastCompleteLawnSheet';
 import { FastCompleteFrame, PartBusyContext, VisitNote } from './FastCompleteParts';
+import { StopWrapUpSection, useStopWrapUp } from './StopWrapUp';
+import { WrapUpClock } from './FastCompleteWrapUp';
 import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import { isFinishedState, isOfficeReviewState, operatorScope, paymentLine } from '../../lib/visit-closeout-packet';
 import '../../styles/tech-workflow.css';
@@ -45,8 +47,8 @@ function PartCard({ title, status, children }) {
   );
 }
 
-function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared, onFullForm }) {
-  const common = { service: part.service, request, operatorId, embedded: true, onPrepared, sharedNote: note, onFullForm, onClose: noop, onCompleted: noop };
+function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared, onFullForm, onWrapUpGate }) {
+  const common = { service: part.service, request, operatorId, embedded: true, onPrepared, sharedNote: note, onFullForm, onClose: noop, onCompleted: noop, onWrapUpGate };
   return kind === 'pest'
     ? <FastCompleteSheet {...common} voiceFillEnabled={part.voiceFillEnabled === true} />
     : <FastCompleteLawnSheet {...common} catalog={catalog} />;
@@ -93,7 +95,7 @@ function partStatus(readiness, id, label, changed) {
 
 // One part: its saved summary after a reload (until the tech edits it or the note changes), else the embedded sheet.
 function ComboPart({ kind, part, shared }) {
-  const { readiness, send, note, request, operatorId, catalog, onFullForm, changed, markChanged } = shared;
+  const { readiness, send, note, request, operatorId, catalog, onFullForm, changed, markChanged, wrapUpGates } = shared;
   const id = part.service.id;
   const label = LABELS[kind];
   const showSaved = readiness.ready(id) && readiness.restored.includes(id);
@@ -113,13 +115,13 @@ function ComboPart({ kind, part, shared }) {
           <Button className="tech-visit-action" onClick={() => { void readiness.drop(id); markChanged(kind, true); }}>Edit this part</Button>
         </div>
       ) : (
-        <PartSheet key={`${kind}-${send.fresh[kind] || 0}`} kind={kind} part={part} note={note} request={request} operatorId={operatorId} catalog={catalog} onPrepared={onPrepared} onFullForm={onFullForm} />
+        <PartSheet key={`${kind}-${send.fresh[kind] || 0}`} kind={kind} part={part} note={note} request={request} operatorId={operatorId} catalog={catalog} onPrepared={onPrepared} onFullForm={onFullForm} onWrapUpGate={wrapUpGates[kind]} />
       )}
     </PartCard>
   );
 }
 
-function ComboFooter({ error, state, lines, blocked, canComplete, onDone, onSubmit, onRetry }) {
+function ComboFooter({ error, state, lines, blocked, canComplete, checking, onDone, onSubmit, onRetry }) {
   const finished = isFinishedState(state);
   const resume = state === 'pending_resume';
   return (
@@ -131,7 +133,7 @@ function ComboFooter({ error, state, lines, blocked, canComplete, onDone, onSubm
         {finished ? (
           <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={onDone}>Done</Button>
         ) : (
-          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" loading={state === 'busy'} disabled={resume ? blocked : !canComplete} onClick={onSubmit}>
+          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" loading={state === 'busy' || checking} disabled={resume ? blocked : !canComplete} onClick={onSubmit}>
             {resume ? 'Resume closeout' : 'Complete stop'}
           </Button>
         )}
@@ -174,7 +176,10 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const ids = useMemo(() => ({ pest: pest.service.id, lawn: lawn.service.id }), [pest.service.id, lawn.service.id]);
   const load = useStopLoad(visitId, scope);
   const readiness = useStopReadiness({ visitId, scope, status: load.status, draft: load.draft });
-  const send = useStopSend({ visitId, scope, load, readiness, ids, onSaved });
+  // The stop-level Wrap-up's choices, read at send (set by useStopWrapUp below).
+  const fieldsRef = useRef(null);
+  const stopFields = useCallback(() => fieldsRef.current?.() ?? null, []);
+  const send = useStopSend({ visitId, scope, load, readiness, ids, onSaved, stopFields });
   const { anyPartBusy, report } = usePartsBusy();
   const [dictating, setDictating] = useState(false);
   const [changed, setChanged] = useState({});
@@ -184,6 +189,8 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const live = (load.detail?.members || []).filter((member) => member.requiresForm === true).map((member) => member.id).sort();
   const samePair = load.status === 'ready' && live.join() === [ids.pest, ids.lawn].sort().join();
   const finished = isFinishedState(send.display);
+  // The stop-level Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): open while the stop is this pair, loaded and not sent.
+  const stopWrapUp = useStopWrapUp({ pest, lawn, request, open: [samePair, !finished, !send.started].every(Boolean), report, fieldsRef });
   const blocked = send.busy || dictating || anyPartBusy;
   const canComplete = [[ids.pest, ids.lawn].every(readiness.ready), !readiness.persistError, !blocked, !send.refusal, samePair, !finished].every(Boolean);
 
@@ -200,7 +207,7 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
     onFullForm?.();
   };
   const partFullForm = useCallback(() => send.setRefusal('The server says this stop needs the long form.'), [send.setRefusal]);
-  const shared = { readiness, send, note: readiness.note, request, operatorId, catalog, onFullForm: partFullForm, changed, markChanged };
+  const shared = { readiness, send, note: readiness.note, request, operatorId, catalog, onFullForm: partFullForm, changed, markChanged, wrapUpGates: stopWrapUp.gates };
   const lines = PARTS.filter(({ kind }) => !readiness.ready(ids[kind])).map(({ kind, label }) => `${label} part: ${partStatus(readiness, ids[kind], label, changed[kind]).line}`);
   const error = leaveError || send.error || readiness.persistError;
 
@@ -213,8 +220,9 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
         {load.status === 'ready' && !samePair && <FullFormCard text="This stop changed since the schedule loaded. Use the long form." onFullForm={fullForm} disabled={blocked} />}
         {samePair && (
           <PartBusyContext.Provider value={report}>
-            <div {...(send.busy || finished || send.started ? INERT : {})}>
+            <div {...([send.busy, finished, send.started, stopWrapUp.wrapUp.checking].some(Boolean) ? INERT : {})}>
               {send.refusal && <FullFormCard text={send.refusal} onFullForm={fullForm} disabled={blocked} />}
+              <WrapUpClock wrapUp={stopWrapUp.wrapUp} since={stopWrapUp.since} />
               <VisitNote
                 note={readiness.note}
                 onChange={readiness.setNote}
@@ -226,12 +234,13 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
               />
               <ComboPart kind="pest" part={pest} shared={shared} />
               <ComboPart kind="lawn" part={lawn} shared={shared} />
+              <StopWrapUpSection stop={stopWrapUp} disabled={blocked} />
             </div>
           </PartBusyContext.Provider>
         )}
         {finished && <FinishedNote state={send.display} result={send.result} />}
       </div>
-      <ComboFooter error={error} state={send.display} lines={lines} blocked={blocked} canComplete={canComplete} onDone={onClose} onSubmit={() => send.submit()} onRetry={readiness.persistError ? readiness.retryPersist : null} />
+      <ComboFooter error={error} state={send.display} lines={lines} blocked={blocked} canComplete={canComplete} checking={stopWrapUp.wrapUp.checking} onDone={onClose} onSubmit={() => stopWrapUp.submit(send)} onRetry={readiness.persistError ? readiness.retryPersist : null} />
     </FastCompleteFrame>
   );
 }

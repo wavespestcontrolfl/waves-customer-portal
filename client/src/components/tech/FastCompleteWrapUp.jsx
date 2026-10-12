@@ -41,6 +41,8 @@ import '../../styles/tech-workflow.css';
 const REENTRY_STEPS = { exterior: 5, interior: 15 };
 const NEXT_VISIT_DATE = { weekday: 'short', month: 'short', day: 'numeric' };
 const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: true, reviewTiming: REVIEW_TIMING_DEFAULT, reviewCustomAt: '', adjusted: '' };
+// Has the tech changed anything since the section opened? (A value set back to its start counts as untouched.)
+const choiceTouched = (choice) => Object.keys(INITIAL_CHOICE).some((key) => choice[key] !== INITIAL_CHOICE[key]);
 
 // `gate` is the context's `wrapUp` (GATE_FAST_COMPLETE_WRAP_UP). Off, or a part of a grouped stop
 // (`submission.preparing`, or a `sharedNote`), the section is not `enabled`: nothing is read, drawn or
@@ -50,14 +52,15 @@ const INITIAL_CHOICE = { sendSms: true, includePayLink: true, requestReview: tru
 // the review ask (the sheets offer three choices, so they pass false). `omitAutoTiming`: the sheet
 // posted no `reviewTiming` before (the pest report flow), so the key stays absent while the timing is
 // Automatic. `noPayLink`: the sheet's text carries no pay link (a pest re-service), so the row is not
-// shown and `includePayLink` posts false. `reviewMarker`: a re-service sheet, whose review ask rides the body with
+// shown and `includePayLink` posts false. `noAdjustTime` and `noReentry` (the grouped stop): those rows are not shown and nothing is
+// read or posted for them. `touched` tells the stop whether to lay its choices onto the parts at all. `reviewMarker`: a re-service sheet, whose review ask rides the body with
 // `wrapUpReviewAsk: true` (the server refuses it once the gate is off). `onChecking(busy)`: the sheet that owns Close and the lock
 // hears when the submit-time check starts and ends.
-export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, reviewMarker, onChecking }) {
+export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, noAdjustTime, noReentry, reviewMarker, onChecking }) {
   const enabled = gate === true && !submission?.preparing && sharedNote == null;
   const requestRef = useRef(request);
   requestRef.current = request;
-  const isAdmin = enabled && getAdminUser()?.role === 'admin';
+  const isAdmin = enabled && !noAdjustTime && getAdminUser()?.role === 'admin';
   const [choice, setChoice] = useState(INITIAL_CHOICE);
   const [notice, setNotice] = useState('');
   const [checking, setChecking] = useState(false);
@@ -73,7 +76,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
   const billing = wrapUpBilling(service);
   const suppression = completionReviewSuppressionReason({ customerConcernInteraction: customerConcern });
   const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
-  const stepper = useReentrySteppers({ enabled, serviceId: service?.id, base, requestRef, applicationsRecorded });
+  const stepper = useReentrySteppers({ enabled: enabled && !noReentry, serviceId: service?.id, base, requestRef, applicationsRecorded });
   const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
   const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
   const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment }).text;
@@ -118,6 +121,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
     enabled,
     isAdmin,
     checking,
+    touched: choiceTouched(choice),
     // The body's customer-text part: the section's choices, or `fallback` while it is off.
     fields: (fallback) => (enabled ? wrapUpFields(latest.current) : fallback),
     // A stored attempt replays its body unchanged, so only a fresh submit is checked.

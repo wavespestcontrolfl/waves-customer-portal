@@ -567,7 +567,7 @@ function prepareFor(service, onPrepared) {
   return plain ? onPrepared : () => { throw new Error(PREPARE_REFUSAL); };
 }
 
-export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended, voiceFillEnabled, onPrepared, sharedNote, embedded }) {
+export default function FastCompleteSheet({ service, request: plainRequest, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended, voiceFillEnabled, onPrepared, sharedNote, embedded, onWrapUpGate }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
@@ -593,6 +593,8 @@ export default function FastCompleteSheet({ service, request: plainRequest, oper
     laneKey: routedLaneOf(service),
     typedType: routedTypedOf(service),
   });
+  // The stop's container learns from this read whether the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) is on; the part itself shows none.
+  useEffect(() => { onWrapUpGate?.(ctx.wrapUp === true); }, [onWrapUpGate, ctx.wrapUp]);
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
   const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow, invoiceFields: completionInvoiceFields(service), onPrepared: prepareFor(service, onPrepared) });

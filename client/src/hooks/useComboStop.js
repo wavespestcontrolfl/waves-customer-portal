@@ -12,6 +12,7 @@
 // rule as a live one.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { putVisitCompletionDraft } from '../lib/completion-resume-store';
+import { overlayStopFields } from '../lib/fast-complete-wrap-up';
 import {
   clearTerminalDrafts, comboDraftId, loadVisitCloseout, packetAfterSend, packetDisplayState, postVisitPacket, resolveSendFailure,
 } from '../lib/visit-closeout-packet';
@@ -164,7 +165,8 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, persistError, draftId };
 }
 
-export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
+// `stopFields()`: the stop-level Wrap-up's choices when the tech changed any, else null (the stop's own bodies go as saved).
+export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, stopFields }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [refusal, setRefusal] = useState('');
@@ -206,8 +208,20 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved }) {
     return null;
   };
 
-  const submit = async (candidate = readiness.draftFor([ids.pest, ids.lawn])) => {
+  // The draft this send carries. The Wrap-up's choices are laid onto both bodies here, once, in the saved map too
+  // (replaceFrom persists it), so the first send, a retry under the same key and a reload all carry the same bodies.
+  const stopCandidate = () => {
+    const base = readiness.draftFor([ids.pest, ids.lawn]);
+    const fields = stopFields?.();
+    if (!fields || Object.keys(base.forms).length < 2) return base;
+    const next = overlayStopFields(base, fields);
+    readiness.replaceFrom(next);
+    return next;
+  };
+
+  const submit = async (given) => {
     if (submitting.current) return;
+    const candidate = given || stopCandidate();
     submitting.current = true;
     setBusy(true);
     setError('');
