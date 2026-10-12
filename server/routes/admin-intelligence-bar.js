@@ -462,6 +462,33 @@ function buildUserMessageContent(prompt, images, pageData) {
 // markers don't accumulate across rounds past the API's 4-breakpoint limit.
 const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
 
+// A full-access login on the platform path is sent every allowed tool on every
+// page (ActionRegistry.initialTools), the same ~178 KB list each time. The
+// prompt cache hashes tools -> system -> messages cumulatively and the system
+// prompt differs per page, so with the only 1h breakpoint on the system block
+// that list was re-written to cache for each page. A breakpoint on the LAST
+// tool caches the tools prefix once, shared by every page; the system block
+// keeps its own breakpoint after it. Rules checked (Anthropic prompt caching):
+//   - at most 4 breakpoints per request: tools (1) + system (1) + the
+//     per-round message breakpoint (1) = 3;
+//   - a longer TTL may not follow a shorter one in prefix order: tools 1h,
+//     system 1h, messages 5 min is in order;
+//   - exactly one breakpoint on tools, always on the last tool of the array
+//     actually sent. This runs on every round and returns a new array, so a
+//     tool a discovery round appended can never leave a stale breakpoint in
+//     the middle, and the registry's cached definitions are never mutated.
+// cache_control is a legal key on a tool definition, and tool-definition.js
+// only drops underscore-prefixed keys, so it is added here, after that step.
+function withToolsCacheBreakpoint(tools, enabled) {
+  if (!enabled || !tools.length) return tools;
+  return [...tools.slice(0, -1), { ...tools[tools.length - 1], cache_control: { type: 'ephemeral', ttl: '1h' } }];
+}
+
+// True when this request carries the shared full-access tool list.
+function fullToolListLoaded(platformEnabled, actionScope) {
+  return platformEnabled === true && actionScope.fullAccess === true;
+}
+
 function withCacheBreakpoint(messages) {
   if (!messages.length) return messages;
   const last = messages[messages.length - 1];
@@ -3623,7 +3650,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // (rounds are seconds apart). Longer-TTL breakpoints must precede
         // shorter-TTL ones — system renders before messages, so this is safe.
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
-        tools,
+        tools: withToolsCacheBreakpoint(tools, fullToolListLoaded(platformEnabled, actionScope)),
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
         messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
@@ -5089,4 +5116,5 @@ module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((too
 // keeps that test tied to the route's own offered-tool list instead of a
 // re-implementation of it.
 module.exports.getToolsForContext = getToolsForContext;
+module.exports.withToolsCacheBreakpoint = withToolsCacheBreakpoint;
 module.exports.confirmationDisplayParams = confirmationDisplayParams;

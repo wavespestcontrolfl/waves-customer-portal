@@ -568,13 +568,42 @@ describe('discovery understands everyday phrasing', () => {
     expect(found.definitions.map(t => t.name)).toContain(id);
   });
 
-  test('stemming treats plural, -ing and -ed forms alike on both sides', () => {
+  test.each([
+    ['search emails', 'search_emails'],
+    ['search reviews', 'search_reviews'],
+    ['get call log', 'get_call_log'],
+    ['approve price', 'approve_price'],
+    ['get lead funnel', 'get_lead_funnel'],
+    ['query stock', 'query_stock'],
+  ])('an exact tool name "%s" returns %s on an unrelated page', (query, id) => {
+    for (const context of ['customers', 'revenue']) {
+      const found = registry.discover({ query }, { role: 'admin', context });
+      expect(found.result.capabilities.map(c => c.id)).toContain(id);
+      // An exact name outranks the incidental description matches.
+      expect(found.result.capabilities[0].id).toBe(id);
+    }
+  });
+
+  test.each([
+    ['move', 'moving', 'moved'],
+    ['book', 'booking', 'booked'],
+    ['change', 'changing', 'changed'],
+    ['send', 'sending', 'sends'],
+    ['push', 'pushing', 'pushed'],
+    ['note', 'notes', 'noted'],
+    ['schedule', 'scheduling', 'scheduled'],
+    ['appointment', 'appointments', 'appointment'],
+    ['invoice', 'invoices', 'invoiced'],
+    ['query', 'queries', 'query'],
+  ])('stemming gives %s, %s and %s one stem', (base, ing, ed) => {
     const { stem } = require('../services/intelligence-bar/discovery-vocabulary');
-    expect(stem('appointments')).toBe(stem('appointment'));
-    expect(stem('scheduling')).toBe(stem('scheduled'));
-    expect(stem('scheduled')).toBe(stem('schedule'));
-    expect(stem('invoices')).toBe(stem('invoice'));
-    expect(stem('queries')).toBe(stem('query'));
+    expect(stem(ing)).toBe(stem(base));
+    expect(stem(ed)).toBe(stem(base));
+  });
+
+  test('"moving her visit to Monday" finds the reschedule tool through the move synonym', () => {
+    const found = registry.discover({ query: 'moving her visit to Monday' }, scope);
+    expect(found.result.capabilities.map(c => c.id)).toContain('reschedule_appointment');
   });
 
   test('a synonym never makes an unsupported capability appear', () => {

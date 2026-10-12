@@ -60,7 +60,7 @@ const intelligenceRouter = require('../routes/admin-intelligence-bar');
 const registry = require('../services/intelligence-bar/action-registry');
 const { FULL_ACCESS_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 
-async function toolsSentFor(token, context) {
+async function requestToolsFor(token, context) {
   const app = express();
   app.use(express.json());
   app.use('/admin/intelligence-bar', intelligenceRouter);
@@ -76,10 +76,14 @@ async function toolsSentFor(token, context) {
     });
     const body = await res.json();
     expect({ status: res.status, error: body.error, stack: body.stack }).toEqual({ status: 200, error: undefined, stack: undefined });
-    return mockMessagesCreate.mock.calls[0][0].tools.map(t => t.name);
+    return mockMessagesCreate.mock.calls[0][0].tools;
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
+}
+
+async function toolsSentFor(token, context) {
+  return (await requestToolsFor(token, context)).map(t => t.name);
 }
 
 test('a full-access login is sent every allowed tool, the same list on every page, with no duplicates', async () => {
@@ -125,4 +129,49 @@ test('a discovery round on the full list loads nothing twice', async () => {
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+// The 178 KB shared list is cached once, not once per page: one 1h breakpoint
+// on the last tool (tools + system + messages = 3 breakpoints, 1h before 5 min).
+test('the owner request puts one 1h cache breakpoint on the last tool; another admin gets none', async () => {
+  const owner = await requestToolsFor('owner', 'dashboard');
+  const ownerCustomers = await requestToolsFor('owner', 'customers');
+  const marked = tools => tools.map((t, i) => (t.cache_control ? i : -1)).filter(i => i >= 0);
+  expect(marked(owner)).toEqual([owner.length - 1]);
+  expect(owner[owner.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  expect(marked(ownerCustomers)).toEqual([ownerCustomers.length - 1]);
+  // Same bytes on every page, so the prefix hash is the same.
+  expect(JSON.stringify(ownerCustomers)).toBe(JSON.stringify(owner));
+  const other = await requestToolsFor('otheradmin', 'dashboard');
+  expect(marked(other)).toEqual([]);
+  const request = mockMessagesCreate.mock.calls[0][0];
+  expect(request.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  // The registry's own definitions never carry the breakpoint.
+  expect(registry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true }).some(t => t.cache_control)).toBe(false);
+});
+
+describe('withToolsCacheBreakpoint', () => {
+  const { withToolsCacheBreakpoint } = intelligenceRouter;
+  const sample = () => [{ name: 'a', input_schema: {} }, { name: 'b', input_schema: {} }, { name: 'c', input_schema: {} }];
+
+  test('marks only the last tool and does not change its input', () => {
+    const input = sample();
+    const out = withToolsCacheBreakpoint(input, true);
+    expect(out.map(t => t.cache_control)).toEqual([undefined, undefined, { type: 'ephemeral', ttl: '1h' }]);
+    expect(out).not.toBe(input);
+    expect(input).toEqual(sample());
+  });
+
+  test('disabled returns the same array, and an empty list stays empty', () => {
+    const input = sample();
+    expect(withToolsCacheBreakpoint(input, false)).toBe(input);
+    expect(withToolsCacheBreakpoint([], true)).toEqual([]);
+  });
+
+  test('a tool appended after a first call carries the only breakpoint', () => {
+    const first = withToolsCacheBreakpoint(sample(), true);
+    const next = withToolsCacheBreakpoint([...sample(), { name: 'd', input_schema: {} }], true);
+    expect(first[2].cache_control).toBeTruthy();
+    expect(next.filter(t => t.cache_control).map(t => t.name)).toEqual(['d']);
+  });
 });

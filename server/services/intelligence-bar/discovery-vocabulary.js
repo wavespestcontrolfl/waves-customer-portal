@@ -17,19 +17,30 @@
  *     an unsupported capability look supported.
  */
 
+// Plural forms: queries -> query, boxes -> box, moves -> move.
+function singular(word) {
+  if (word.length > 4 && word.endsWith('ies')) return `${word.slice(0, -3)}y`;
+  if (/(ss|us|is)$/.test(word)) return word;
+  if (/(ch|sh|x|z|ss)es$/.test(word)) return word.slice(0, -2);
+  return word.endsWith('s') ? word.slice(0, -1) : word;
+}
+
+// One stem for the base, -ing and -ed forms of a verb: move, moving and moved
+// all land on "move"; schedule, scheduling and scheduled on "schedul". A base
+// word loses a trailing e only when it has five or more letters; an inflected
+// form whose stem is left with three letters or fewer gets the e back (mov ->
+// move, not -> note), so a short verb cannot split in two or collide with
+// "not". The stems are never shown to anyone, they only have to agree.
 function stem(word) {
   if (word.length <= 3 || /\d/.test(word)) return word;
-  let s = word;
-  if (s.length > 4 && s.endsWith('ies')) s = `${s.slice(0, -3)}y`;
-  else if (/(ss|us|is)$/.test(s)) s = word;
-  else if (/(ch|sh|x|z|ss)es$/.test(s)) s = s.slice(0, -2);
-  else if (s.endsWith('s')) s = s.slice(0, -1);
-  if (s.length > 5 && /(ing|ed)$/.test(s)) {
-    s = s.replace(/(ing|ed)$/, '');
-    if (/([^aeioul])\1$/.test(s)) s = s.slice(0, -1);
+  const s = singular(word);
+  const ending = /(ing|ed)$/.exec(s);
+  if (ending && s.length > (ending[1] === 'ing' ? 5 : 4)) {
+    const base = s.slice(0, -ending[1].length);
+    if (/([^aeioul])\1$/.test(base)) return base.slice(0, -1);
+    return base.length <= 3 ? `${base}e` : base;
   }
-  if (s.length > 4 && s.endsWith('e')) s = s.slice(0, -1);
-  return s;
+  return s.length > 4 && s.endsWith('e') ? s.slice(0, -1) : s;
 }
 
 // everyday word(s) -> words used by tool ids and descriptions.

@@ -17,7 +17,7 @@ const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
-const { expandTerms, stemmedWordSet, words } = require('./discovery-vocabulary');
+const { expandTerms, stem, stemmedWordSet, words } = require('./discovery-vocabulary');
 
 const MODULES = [
   ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
@@ -163,11 +163,31 @@ function validateInput(name, input, scope) {
   return null;
 }
 
-// Stemmed words of a tool's id, domain and description; computed once per tool.
+// Stemmed words of a tool's id, domain and description, and of its id alone;
+// computed once per tool.
 const ACTION_WORDS = new Map();
-function actionWordSet(a) {
-  if (!ACTION_WORDS.has(a.id)) ACTION_WORDS.set(a.id, stemmedWordSet(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`));
+function actionWordSets(a) {
+  if (!ACTION_WORDS.has(a.id)) {
+    const idText = a.id.replace(/_/g, ' ');
+    ACTION_WORDS.set(a.id, { all: stemmedWordSet(`${idText} ${a.domain} ${a.definition.description}`), id: stemmedWordSet(idText) });
+  }
   return ACTION_WORDS.get(a.id);
+}
+
+// The tool's own name is the strongest signal: a term found in the id counts
+// three times a term found only in the description or domain, and a tool whose
+// id words are ALL in the query ("search emails" -> search_emails) gets a
+// bonus that outranks any pile of incidental description matches. Without it,
+// stemming made many descriptions tie and the alphabetical cutoff dropped the
+// exact tool from the 12 returned. Zero stays zero: no description or name
+// match, no result.
+const ID_WORD_SCORE = 3;
+const WHOLE_NAME_BONUS = 10;
+function scoreAction(a, terms, queryStems) {
+  const { all, id } = actionWordSets(a);
+  const base = terms.reduce((n, word) => n + (id.has(word) ? ID_WORD_SCORE : all.has(word) ? 1 : 0), 0);
+  if (base === 0) return 0;
+  return base + ([...id].every(word => queryStems.has(word)) ? WHOLE_NAME_BONUS : 0);
 }
 
 function discover(input, scope) {
@@ -176,17 +196,18 @@ function discover(input, scope) {
   // Stopwords are dropped from the raw query first; the rest are stemmed and
   // widened by the everyday-word table (discovery-vocabulary.js). A query with
   // no meaningful term stays empty, so no synonym can invent a match.
-  const terms = [...expandTerms([...new Set(words(input.query))].filter(term => !DISCOVERY_STOPWORDS.has(term)))];
+  const raw = [...new Set(words(input.query))];
+  const terms = [...expandTerms(raw.filter(term => !DISCOVERY_STOPWORDS.has(term)))];
+  // Every query word, stopwords included, so "search emails" covers the name
+  // search_emails even though "search" carries no meaning of its own.
+  const queryStems = new Set([...terms, ...raw.map(stem)]);
   // The model's domain is a ranking hint, never a filter: booking lives under
   // "customers", so a "schedule" search used to return every schedule tool
   // and not the one that books (owner IB history 10-12). A matching tool in
   // the named domain ranks one point higher and wins ties.
   const inDomain = a => (input.domain && a.domain === input.domain ? 1 : 0);
   const ranked = [...actions.values()].filter(a => allowed(a, scope))
-    .map(a => {
-      const actionWords = actionWordSet(a);
-      return { action: a, score: terms.reduce((n, word) => n + (actionWords.has(word) ? 1 : 0), 0) };
-    }).filter(r => r.score > 0)
+    .map(a => ({ action: a, score: scoreAction(a, terms, queryStems) })).filter(r => r.score > 0)
     .sort((a, b) => (b.score + inDomain(b.action)) - (a.score + inDomain(a.action))
       || inDomain(b.action) - inDomain(a.action) || a.action.id.localeCompare(b.action.id));
   const selected = ranked.slice(0, 12).map(r => r.action);
