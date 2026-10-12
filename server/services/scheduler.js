@@ -1389,7 +1389,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY MON 4:05AM ET — Manatee permit sync (public ACA CSV reports →
+  // WEEKLY MON 7:25AM ET — Manatee permit sync (public ACA CSV reports →
   // pool_permit_records + construction_permit_records). Pool report =
   // closed-permit backstop for the pool-facts lookup (the live GIS layer
   // drops permits when they close and the assessment roll lags a finished
@@ -1402,6 +1402,11 @@ function initScheduledJobs() {
   // (2026-10-05: killed at 4:14 AM, so the week had no permit data): both
   // steps upsert by permit number and the detail step skips permits it
   // already read, so a second run on the same morning is harmless.
+  // 7:25 AM, not the first slot of 4:05 AM: the county report server does
+  // not answer in that hour (form requests hung on every 4:05 run from
+  // 2026-08-17; on 2026-10-12 both reports came back as a web page). The
+  // same requests from this service at 7:16 AM (2026-09-28) took 172 s
+  // with no retry. The detail step is one request every 2 s or more.
   // =========================================================================
   const runPermitSyncTick = async () => {
     // ONE lease for the whole sequence (codex #5673 P1): with separate
@@ -1438,7 +1443,7 @@ function initScheduledJobs() {
       if (failures.length) throw new Error(failures.join(' | '));
     }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   };
-  cron.schedule('5 4 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
+  cron.schedule('25 7 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
   registerDeployKillRetry('permit-sync', runPermitSyncTick);
 
   // =========================================================================

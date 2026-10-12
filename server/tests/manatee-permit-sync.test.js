@@ -206,6 +206,28 @@ describe('syncPoolPermits fetch + upsert', () => {
       .mockResolvedValueOnce(acaResponse({ text: '<html>login</html>' }));
     await expect(syncPoolPermits()).rejects.toThrow(/not CSV/);
   });
+
+  test('the non-CSV error says what the page was: its title, one short line', async () => {
+    process.env.GATE_PERMIT_SYNC = 'true';
+    useSingleWindowSync();
+    db.mockImplementation(() => builder(1));
+    db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
+    const page = (body) => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
+        .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
+        .mockResolvedValueOnce(acaResponse({ text: body, contentType: 'text/html; charset=utf-8' }));
+      return syncPoolPermits();
+    };
+    await expect(page('<html><head><title>\n Report  Server\tBusy </title></head><body>x</body></html>'))
+      .rejects.toThrow('report output is not CSV (text/html; charset=utf-8): "Report Server Busy"');
+    // No title: the first words, without script text or tags, cut at 80.
+    await expect(page(`<html><script>var a = "<b>";</script><body><h1>An "error" occurred</h1>${'word '.repeat(40)}</body></html>`))
+      .rejects.toThrow(/not CSV \(text\/html; charset=utf-8\): "An error occurred (word ){12}wo\.\.\."/);
+    // An empty body adds nothing.
+    await expect(page('')).rejects.toThrow(/not CSV \(text\/html; charset=utf-8\)$/);
+  });
 });
 
 // A request ACA accepts and never answers: rejects only when the caller's

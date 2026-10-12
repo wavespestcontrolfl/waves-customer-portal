@@ -110,6 +110,25 @@ function hiddenValue(html, name) {
   return m ? m[1] : '';
 }
 
+/**
+ * What a page ACA sent in place of the CSV says: its <title>, else its first
+ * words, as one short line. The 2026-10-12 run got text/html for both
+ * reports and job_health could not say whether that was a login page, an
+ * error page or a "report server busy" page. The reports are public county
+ * pages, so the line carries no customer data.
+ */
+function pageSummary(html) {
+  const raw = String(html || '');
+  const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const words = (title && title[1].trim() ? title[1] : raw.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' '))
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[^\x20-\x7E]+/g, ' ')
+    .replace(/["\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return words.length > 80 ? `${words.slice(0, 80)}...` : words;
+}
+
 /** A request failure worth a fresh-session retry (vs. a report/schema break). */
 class TransientAcaError extends Error {}
 
@@ -194,7 +213,10 @@ async function fetchAcaReportCsvOnce({ reportId, dateFromField, dateToField }, f
   }
   const { res: report, text } = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer, step: 'report download' });
   const ctype = String(report.headers.get('content-type') || '');
-  if (!/csv/i.test(ctype)) throw new Error(`report output is not CSV (${ctype || 'no content-type'})`);
+  if (!/csv/i.test(ctype)) {
+    const said = pageSummary(text);
+    throw new Error(`report output is not CSV (${ctype || 'no content-type'})${said ? `: "${said}"` : ''}`);
+  }
   return text;
 }
 
