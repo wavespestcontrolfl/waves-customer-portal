@@ -167,18 +167,32 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
  * other call's rows on the line. Two staff releasing the same line from cards on different calls took
  * those row locks in opposite orders (A then B, B then A) and could deadlock.
  * Lock order for every line release: 1) the per-call triage lock (lockTriageCall), 2) this phone-wide
- * transaction advisory lock, one per distinct line the call holds, in sorted E.164 order, 3) hold rows,
+ * transaction advisory lock, one per line being released, in sorted E.164 order, 3) hold rows,
  * visit rows. Whoever holds a line's lock is the only releaser of that line, so row locks never cross.
- * Call INSIDE the transaction, before any hold row is written. Returns the call's newest line (or null).
+ * Call INSIDE the transaction, before any hold row is written.
  */
-async function lockNoTextLinesForCall(conn, callLogId) {
-  if (!callLogId) return null;
-  const rows = await conn(TABLE).where({ source_call_log_id: callLogId }).orderBy('held_at', 'desc').select('phone_e164');
-  const keys = (rows || []).map((r) => holdPhoneKey(r.phone_e164)).filter(Boolean);
-  for (const key of [...new Set(keys)].sort()) {
+async function lockNoTextLines(conn, phoneKeys) {
+  for (const key of [...new Set(phoneKeys || [])].sort()) {
     await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${NO_TEXT_LINE_LOCK_PREFIX}${key}`]);
   }
-  return keys[0] || null;
+}
+
+/**
+ * The lines a call has a hold row on, newest first, one entry per line: [{ key, active }] (active = a row
+ * with cleared_at NULL). A plain read; the caller takes the phone locks next and the writes are idempotent.
+ */
+async function callLineRows(conn, callLogId) {
+  if (!callLogId) return [];
+  const rows = await conn(TABLE).where({ source_call_log_id: callLogId }).orderBy('held_at', 'desc').select('phone_e164', 'cleared_at');
+  const byKey = new Map();
+  for (const row of rows || []) {
+    const key = holdPhoneKey(row.phone_e164);
+    if (!key) continue;
+    const seen = byKey.get(key);
+    if (!seen) byKey.set(key, { key, active: row.cleared_at == null });
+    else if (row.cleared_at == null) seen.active = true;
+  }
+  return [...byKey.values()];
 }
 
 /**
@@ -263,12 +277,14 @@ async function ensureDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * here: that verified the replacement, not this number (round 7 P1). A
  * customer phone edit clears nothing either.
  */
-async function clearDisclaimedNumberHoldsForCall({ callLogId, clearedBy = null, reason, conn = db }) {
+async function clearDisclaimedNumberHoldsForCall({ callLogId, clearedBy = null, reason, phoneKeys = null, conn = db }) {
   if (!callLogId) return 0;
   const now = new Date();
+  // phoneKeys: release only these lines of the call (the held-lines panel's selected line); null = every line.
   return conn(TABLE)
     .where({ source_call_log_id: callLogId })
     .whereNull('cleared_at')
+    .modify((q) => { if (phoneKeys) q.whereIn('phone_e164', phoneKeys); })
     .update({
       cleared_at: now,
       cleared_by: clearedBy ? String(clearedBy).slice(0, 100) : null,
@@ -409,7 +425,8 @@ module.exports = {
   ensureDisclaimedNumberHold,
   clearDisclaimedNumberHoldsForCall,
   clearNoTextHoldsForPhone,
-  lockNoTextLinesForCall,
+  lockNoTextLines,
+  callLineRows,
   NO_TEXT_LINE_LOCK_PREFIX,
   NO_TEXT_MARK_SQL,
   OWNERSHIP_DISCLAIMER_CARD_SQL,

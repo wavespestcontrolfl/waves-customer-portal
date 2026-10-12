@@ -778,6 +778,103 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
   });
 });
 
+// A call can hold several lines (#6292 codex r1 P1). The held-lines panel names the line it releases; the
+// inbox card names none and releases every line the call holds.
+describe('line_e164: release the selected line, across calls', () => {
+  const X = '+19415551234';
+  const Y = '+19415557777';
+  const base = { status: 'resolved', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory' };
+  const text = (id, callId, over = {}) => ({ id, call_log_id: callId, reason_code: 'text_number_differs', payload: { no_text_hold: true }, ...base, ...over });
+  const hold = (id, phone, callId, heldAt) => ({ id, phone_e164: phone, source_call_log_id: callId, customer_id: null, held_at: heldAt, cleared_at: null });
+
+  // call-1 holds X (older) and Y (newer); call-2 holds X; call-3 holds Y. Each call has its release card.
+  function multiLine(over = {}) {
+    const fx = fixture({
+      triage_items: [text(CARD_ID, CALL_ID), text('card-2', 'call-2'), text('card-3', 'call-3')],
+      disclaimed_number_holds: [
+        hold('c1x', X, CALL_ID, '2030-01-01T10:00:00Z'), hold('c1y', Y, CALL_ID, '2030-01-02T10:00:00Z'),
+        hold('c2x', X, 'call-2', '2030-01-03T10:00:00Z'), hold('c3y', Y, 'call-3', '2030-01-04T10:00:00Z'),
+      ],
+      ...over,
+    });
+    const inner = fx.conn;
+    const events = [];
+    const conn = (table) => inner(table);
+    conn.transaction = async (fn) => fn(conn);
+    conn.schema = inner.schema;
+    // clearNoTextHoldsForPhone is one raw UPDATE; the fake db needs to apply it to the in-memory rows.
+    conn.raw = (sql, bindings) => {
+      if (sql === 'SELECT pg_advisory_xact_lock(hashtext(?))') { events.push(`lock:${bindings[0]}`); return {}; }
+      if (/UPDATE disclaimed_number_holds/.test(sql)) {
+        const [, , key, except] = bindings;
+        const hit = fx.tables.disclaimed_number_holds.filter((h) => h.phone_e164 === key && h.cleared_at == null && h.source_call_log_id !== except
+          && fx.tables.triage_items.some((t) => t.call_log_id === h.source_call_log_id && t.reason_code === 'text_number_differs'));
+        hit.forEach((h) => { h.cleared_at = new Date(); events.push(`clear:${h.id}`); });
+        return { rows: hit.map((h) => ({ source_call_log_id: h.source_call_log_id })) };
+      }
+      return inner.raw(sql, bindings);
+    };
+    wireDb(db, { conn });
+    return { ...fx, events };
+  }
+  const active = (tables) => tables.disclaimed_number_holds.filter((h) => h.cleared_at == null).map((h) => h.id).sort();
+  const release = async (body, id = CARD_ID) => {
+    let out;
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${id}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true, ...body });
+      out = { status: res.status, json: await res.json() };
+    });
+    return out;
+  };
+
+  test('selecting the OLDER line X clears X on this call and on the other call, and leaves Y alone everywhere', async () => {
+    const fx = multiLine();
+    const out = await release({ line_e164: X });
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [X] });
+    expect(active(fx.tables)).toEqual(['c1y', 'c3y']); // Y on call-1 and call-3 untouched
+    expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${X}`]);
+  });
+
+  test('a differently formatted line number selects the same line', async () => {
+    const fx = multiLine();
+    expect((await release({ line_e164: '(941) 555-7777' })).status).toBe(200);
+    expect(active(fx.tables)).toEqual(['c1x', 'c2x']);
+  });
+
+  test('a line this call does not actively hold is a 409 NO_TEXT_LINE_NOT_HELD and clears nothing (closed card)', async () => {
+    const fx = multiLine();
+    const out = await release({ line_e164: '+19415550000' });
+    expect(out.status).toBe(409);
+    expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+    expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+    expect(fx.events).toEqual([]);
+    // a line the call held but someone already released is not "held" either
+    fx.tables.disclaimed_number_holds.find((h) => h.id === 'c1x').cleared_at = new Date();
+    expect((await release({ line_e164: X })).json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+    expect((await release({ line_e164: 'not a number' })).status).toBe(409);
+  });
+
+  test('an open card with a line this call does not hold is refused the same way', async () => {
+    const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status: 'open' }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    const out = await release({ line_e164: '+19415550000' });
+    expect(out.status).toBe(409);
+    expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+    expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+  });
+
+  test.each([['closed', 'resolved'], ['open', 'open']])('the inbox card (no line_e164) on a two-line call releases BOTH lines on every call, each under its own lock, sorted (%s card)', async (_n, status) => {
+    const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    const out = await release({});
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [Y, X] });
+    expect(active(fx.tables)).toEqual([]);
+    expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${X}`, `lock:no_text_line:${Y}`]);
+    // both locks are taken before the first propagation write
+    expect(fx.events.findIndex((e) => e.startsWith('clear:'))).toBeGreaterThan(fx.events.lastIndexOf(`lock:no_text_line:${Y}`));
+  });
+});
+
 describe('GET /admin/triage/held-lines', () => {
   const row = { hold_id: 'h1', phone_e164: '+19415551234', held_at: '2030-01-01T10:00:00.000Z', source_call_log_id: CALL_ID, card_id: CARD_ID, card_status: 'resolved', card_updated_at: '2030-01-02T10:00:00.000Z', blocked_by_ownership_card: false };
 

@@ -121,7 +121,11 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   and closed-card paths): the per-call `lockTriageCall`, then a phone-wide
   `pg_advisory_xact_lock(hashtext('no_text_line:' || E.164))` for each line the call holds (sorted), and only then
   the hold rows and visit rows. Two staff releasing one shared line from cards on different calls now queue on the
-  phone lock instead of taking row locks in opposite orders.
+  phone lock instead of taking row locks in opposite orders. **Which lines:** a call can hold several lines. The
+  panel sends `line_e164` with the request: only that line is released, on the call and on every other call that holds
+  it, and a line the call does not actively hold is a 409 `NO_TEXT_LINE_NOT_HELD`. The inbox card sends no line and
+  releases EVERY line the call holds (each under its own phone lock, sorted), never "the newest"; for the usual
+  one-line call that is the same single line. The reply lists `lines_released`.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner

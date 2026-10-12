@@ -657,6 +657,7 @@ export function groupHeldLines(lines) {
 export function heldLineItem(line) {
   return {
     held: true,
+    line_e164: line.phone_e164, // the line the operator picked: the server releases this one, not "the newest"
     id: line.card_id,
     status: line.card_status,
     updated_at: line.card_updated_at,
@@ -969,6 +970,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
       .then(() => {
         setActioning(null);
         setDismissFor(null);
+        if (heldOpen && item.reason_code === "text_number_differs") loadHeld();
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -1033,6 +1035,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
       .then((res) => {
         setActioning(null);
         if (onDone) onDone(res);
+        // The open Held lines panel shows this card's state and the line's hold: refresh it too.
+        if (heldOpen && item.reason_code === "text_number_differs") loadHeld();
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -1068,7 +1072,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
-      body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true }),
+      body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true, ...(item.line_e164 ? { line_e164: item.line_e164 } : {}) }),
     })
       .then((res) => {
         setActioning(null);
@@ -1079,7 +1083,13 @@ export default function TriageInboxTabV2({ isAdmin }) {
       })
       .catch((err) => {
         setActioning(null);
-        if (err?.status === 409) { load(mode, status, autoOnly); if (heldOpen) loadHeld(); setError("This card changed since it loaded — review the refreshed card first."); return; }
+        if (err?.status === 409) {
+          load(mode, status, autoOnly);
+          if (heldOpen) loadHeld();
+          // NO_TEXT_LINE_NOT_HELD: someone released that line first; the server's own sentence says so.
+          setError(err.code === "NO_TEXT_LINE_NOT_HELD" && err.message ? err.message : "This card changed since it loaded — review the refreshed card first.");
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };

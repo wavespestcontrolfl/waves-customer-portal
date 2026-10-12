@@ -127,7 +127,7 @@ describe('clearNoTextHoldsForPhone', () => {
   });
 });
 
-describe('lockNoTextLinesForCall', () => {
+describe('lockNoTextLines / callLineRows', () => {
   const LOCK = 'SELECT pg_advisory_xact_lock(hashtext(?))';
   function lockConn(rows, log) {
     const conn = (table) => {
@@ -142,30 +142,45 @@ describe('lockNoTextLinesForCall', () => {
     return conn;
   }
 
-  test('takes the phone-wide advisory lock on the E.164 before any hold row is written, and returns the newest line', async () => {
+  test('takes the phone-wide advisory lock on the E.164 before any hold row is written', async () => {
     const log = [];
-    const conn = lockConn([{ phone_e164: '(941) 555-1234' }], log);
-    const own = await Holds.lockNoTextLinesForCall(conn, 7);
-    expect(own).toBe('+19415551234');
-    await Holds.clearNoTextHoldsForPhone({ phoneE164: own, exceptCallLogId: 7, reason: 'verified_same_number', conn: { raw: conn.raw } });
+    const conn = lockConn([{ phone_e164: '(941) 555-1234', cleared_at: null }], log);
+    const [line] = await Holds.callLineRows(conn, 7);
+    expect(line).toEqual({ key: '+19415551234', active: true });
+    await Holds.lockNoTextLines(conn, [line.key]);
+    await Holds.clearNoTextHoldsForPhone({ phoneE164: line.key, exceptCallLogId: 7, reason: 'verified_same_number', conn: { raw: conn.raw } });
     const kinds = log.map((l) => (l[0] === 'raw' ? (l[1] === LOCK ? 'lock' : 'hold-update') : l[0]));
     expect(kinds).toEqual(['select', 'lock', 'hold-update']);
     expect(log[1][2]).toEqual(['no_text_line:+19415551234']);
     expect(log[2][1]).toContain('UPDATE disclaimed_number_holds');
   });
 
-  test('a call that holds several lines locks each once, in sorted order, so two releases never take them crosswise', async () => {
+  test('several lines lock once each, in sorted order, so two releases never take them crosswise', async () => {
     const log = [];
     const conn = lockConn([{ phone_e164: '+19415559999' }, { phone_e164: '+19415550001' }, { phone_e164: '+19415559999' }, { phone_e164: 'relay' }], log);
-    const own = await Holds.lockNoTextLinesForCall(conn, 7);
-    expect(own).toBe('+19415559999'); // newest held_at first
+    const lines = await Holds.callLineRows(conn, 7);
+    expect(lines.map((l) => l.key)).toEqual(['+19415559999', '+19415550001']); // newest first, de-duplicated, non-dialable dropped
+    await Holds.lockNoTextLines(conn, lines.map((l) => l.key));
     expect(log.filter((l) => l[0] === 'raw').map((l) => l[2][0])).toEqual(['no_text_line:+19415550001', 'no_text_line:+19415559999']);
   });
 
-  test('no hold row or no call: no lock, no line', async () => {
+  test('a line is active when any of its rows is uncleared; no call or no rows gives nothing to lock', async () => {
     const log = [];
-    expect(await Holds.lockNoTextLinesForCall(lockConn([], log), 7)).toBeNull();
-    expect(await Holds.lockNoTextLinesForCall(lockConn([{ phone_e164: 'x' }], log), null)).toBeNull();
+    const lines = await Holds.callLineRows(lockConn([{ phone_e164: '+19415550001', cleared_at: new Date() }, { phone_e164: '+19415550002', cleared_at: new Date() }, { phone_e164: '+19415550002', cleared_at: null }], log), 7);
+    expect(lines).toEqual([{ key: '+19415550001', active: false }, { key: '+19415550002', active: true }]);
+    expect(await Holds.callLineRows(lockConn([], log), null)).toEqual([]);
+    await Holds.lockNoTextLines(lockConn([], log), []);
     expect(log.filter((l) => l[0] === 'raw')).toEqual([]);
+  });
+
+  test('clearDisclaimedNumberHoldsForCall can be limited to the selected lines', async () => {
+    const calls = [];
+    const q = { where() { return q; }, whereNull() { return q; }, modify(fn) { fn(q); return q; }, whereIn(c, v) { calls.push([c, v]); return q; }, update: async () => 1 };
+    const conn = () => q;
+    await Holds.clearDisclaimedNumberHoldsForCall({ callLogId: 7, reason: 'r', phoneKeys: ['+19415550001'], conn });
+    expect(calls).toEqual([['phone_e164', ['+19415550001']]]);
+    calls.length = 0;
+    await Holds.clearDisclaimedNumberHoldsForCall({ callLogId: 7, reason: 'r', conn });
+    expect(calls).toEqual([]);
   });
 });

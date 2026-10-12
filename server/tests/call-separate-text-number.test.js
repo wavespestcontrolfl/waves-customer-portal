@@ -335,12 +335,14 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
     expect(triage).toContain('.whereRaw(OWNERSHIP_DISCLAIMER_CARD_SQL)');
     const rel = triage.slice(triage.indexOf('async function releaseNoTextHold('), triage.indexOf('async function releaseClosedNoTextHold('));
-    expect(rel).toContain('if (release && ownPhone) {');
+    expect(rel).toContain('if (release) {');
+    const lines = triage.slice(triage.indexOf('async function releaseNoTextLines('), triage.indexOf('async function releaseNoTextHold('));
     // the phone-wide lock is taken before the first hold row is cleared
-    expect(rel.indexOf('lockNoTextLinesForCall')).toBeLessThan(rel.indexOf('clearCallbackNumberHold(trx, item.call_log_id'));
-    expect(rel).toContain('Holds.clearNoTextHoldsForPhone({');
-    expect(rel).toContain('exceptCallLogId: item.call_log_id');
-    expect(rel).toMatch(/for \(const otherCallLogId of otherCalls\) \{\s*await clearCallbackNumberHold\(trx, otherCallLogId, \{ clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT\.VERIFIED_SAME_NUMBER \}\);/);
+    expect(lines.indexOf('Holds.lockNoTextLines(')).toBeGreaterThan(-1);
+    expect(lines.indexOf('Holds.lockNoTextLines(')).toBeLessThan(lines.indexOf('clearCallbackNumberHold(trx, callLogId'));
+    expect(lines).toContain('Holds.clearNoTextHoldsForPhone({');
+    expect(lines).toContain('exceptCallLogId: callLogId');
+    expect(lines).toMatch(/for \(const otherCallLogId of otherCalls\) \{\s*await clearCallbackNumberHold\(trx, otherCallLogId, \{ clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: \[key\] \}\);/);
   });
 
   test('arming the no-text hold also marks a callback_number_needed card an earlier pass left open (no stale unmarked card can release it)', () => {

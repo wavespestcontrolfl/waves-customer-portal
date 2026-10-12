@@ -160,7 +160,7 @@ async function disclaimedCardOpen(trx, callLogId) {
   return !!open;
 }
 
-async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, noTextHold = false } = {}) {
+async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, noTextHold = false, phoneKeys = null } = {}) {
   if (!Object.values(CALLBACK_CARD_VERDICT).includes(requestedVerdict)) {
     // Explicit by construction: a new caller must say which meaning it is.
     throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${requestedVerdict}`);
@@ -180,7 +180,7 @@ async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numbe
     });
   const numbers = numberVerdict === CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER
     ? await require('../services/disclaimed-number-holds').clearDisclaimedNumberHoldsForCall({
-      callLogId, clearedBy, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
+      callLogId, clearedBy, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, phoneKeys, conn: trx,
     })
     : 0;
   return { visits, numbers, numberVerdict };
@@ -212,36 +212,64 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 //   RESOLVE with lineCanGetTexts ("Line can get texts", its own button and confirm) closes the card and
 //     releases the hold, unless a plain disclaimed callback_number_needed card is open (its own Resolve).
 // LOCK ORDER (every line release, this path and releaseClosedNoTextHold): per-call lockTriageCall (taken by
-// the caller) -> phone-wide pg_advisory_xact_lock(hashtext('no_text_line:' || E.164)) -> hold rows -> visit rows.
-// Returns the reply for the route, or `prior` when nothing ran.
-async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineCanGetTexts) {
-  if (item.reason_code !== 'text_number_differs' || !item.call_log_id || nextStatus !== 'resolved') return prior;
+// the caller) -> phone-wide pg_advisory_xact_lock(hashtext('no_text_line:' || E.164)), one per line being
+// released, sorted -> hold rows -> visit rows.
+// WHICH LINES: a call can hold several lines. The held-lines panel names one (`line_e164`): only that line
+// is released, on this call and on every other call that holds it; a line this call does not actively hold
+// is a 409 (NO_TEXT_LINE_NOT_HELD) and nothing changes. The inbox card names none: it releases EVERY line
+// the call holds (each under its own phone lock), never "the newest" by guess; for the usual one-line call
+// that is the same single line as before.
+function lineNotHeldError() {
+  const err = new Error('That line is no longer held by this call. Reload the held lines and review the latest.');
+  err.statusCode = 409;
+  err.code = 'NO_TEXT_LINE_NOT_HELD';
+  return err;
+}
+
+// The office verified the LINE, not one call: a shared office or relay number holds one row per call that
+// said it cannot get texts, and the send boundary blocks on any of them. Lift every no-text hold on each
+// released line (never a plain disclaimed-number hold: its own card releases it) and the visit-level holds
+// of the calls that placed them, touching only that line on those calls (codex #6112 r7 P2).
+async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
   const Holds = require('../services/disclaimed-number-holds');
-  const ownershipCardOpen = lineCanGetTexts === true && await disclaimedCardOpen(trx, item.call_log_id);
-  const release = lineCanGetTexts === true && !ownershipCardOpen;
-  // Lock order (both release paths; the caller already holds lockTriageCall for this call): 1) the
-  // per-call triage lock, 2) the phone-wide no_text_line advisory lock below, 3) hold and visit rows.
-  // No hold row is read-for-update or written before step 2, so two releases of one shared line
-  // serialize on the phone lock instead of crossing row locks (A->B / B->A deadlock, #6112 r15).
-  const ownPhone = release ? await Holds.lockNoTextLinesForCall(trx, item.call_log_id) : null;
-  const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-    clearedBy: assignedTo,
-    numberVerdict: release ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
+  const VERIFIED = CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER;
+  const rows = await Holds.callLineRows(trx, callLogId);
+  let lines = rows.map((r) => r.key);
+  if (lineE164 != null) {
+    const key = Holds.holdPhoneKey(lineE164);
+    if (!key || !rows.some((r) => r.key === key && r.active)) throw lineNotHeldError();
+    lines = [key];
+  }
+  // Lock order step 2: no hold row is read-for-update or written before the phone locks, so two releases
+  // of one shared line serialize on the phone lock instead of crossing row locks (A->B / B->A, #6112 r15).
+  await Holds.lockNoTextLines(trx, lines);
+  const cleared = await clearCallbackNumberHold(trx, callLogId, {
+    clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: lineE164 != null ? lines : null,
   });
-  if (release && ownPhone) {
-    // The office verified the LINE, not one call: a shared office or relay number holds one row per
-    // call that said it cannot get texts, and the send boundary blocks on any of them. Lift every
-    // no-text hold on this number (never a plain disclaimed-number hold: its own card releases it)
-    // and the visit-level holds of the calls that placed them (codex #6112 r7 P2).
-    const otherCalls = await Holds.clearNoTextHoldsForPhone({
-      phoneE164: ownPhone, exceptCallLogId: item.call_log_id, clearedBy: assignedTo, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
-    });
+  for (const key of lines) {
+    const otherCalls = await Holds.clearNoTextHoldsForPhone({ phoneE164: key, exceptCallLogId: callLogId, clearedBy: assignedTo, reason: VERIFIED, conn: trx });
     for (const otherCallLogId of otherCalls) {
-      await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER });
+      await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: [key] });
     }
     cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
   }
+  return { cleared, lines };
+}
+
+// Returns the reply for the route, or `prior` when nothing ran.
+async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineCanGetTexts, lineE164 = null) {
+  if (item.reason_code !== 'text_number_differs' || !item.call_log_id || nextStatus !== 'resolved') return prior;
+  const ownershipCardOpen = lineCanGetTexts === true && await disclaimedCardOpen(trx, item.call_log_id);
+  const release = lineCanGetTexts === true && !ownershipCardOpen;
+  let cleared;
+  let lines = null;
+  if (release) {
+    ({ cleared, lines } = await releaseNoTextLines(trx, item.call_log_id, assignedTo, lineE164));
+  } else {
+    cleared = await clearCallbackNumberHold(trx, item.call_log_id, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER });
+  }
   const reply = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
+  if (lines) reply.lines_released = lines;
   if (ownershipCardOpen) {
     // The office asked for the release and did not get it: say exactly why, so the inbox never
     // reports "texts will resume" over a line that is still held (codex #6112 r10 P2).
@@ -254,7 +282,7 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
 // "Line can get texts" on a card that is ALREADY closed (Resolve and Dismiss both close it and leave the
 // hold in place): the same explicit, version-checked release, so staff who learn later that the line can
 // get texts are not stranded. Returns null when the card is not a closed text_number_differs card.
-async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo }) {
+async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo, lineE164 = null }) {
   const item = await db('triage_items').where({ id }).first();
   if (!item || item.reason_code !== 'text_number_differs' || !item.call_log_id || OPEN_STATES.includes(item.status)) return null;
   return db.transaction(async (trx) => {
@@ -268,7 +296,7 @@ async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo }) {
     const newest = await trx('triage_items').where({ call_log_id: item.call_log_id, reason_code: 'text_number_differs' })
       .orderBy('created_at', 'desc').first('id');
     if (!newest || String(newest.id) !== String(id)) return { outcome: 'stale_version' };
-    const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true);
+    const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true, lineE164);
     return { outcome: 'ok', callbackNumber: reply, status: item.status };
   });
 }
@@ -586,7 +614,7 @@ const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending vis
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
-async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition, lineCanGetTexts = false }) {
+async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition, lineCanGetTexts = false, lineE164 = null }) {
   const item = await conn('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
@@ -756,7 +784,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }
-    callbackNumber = await releaseNoTextHold(trx, item, nextStatus, assignedTo, callbackNumber, lineCanGetTexts);
+    callbackNumber = await releaseNoTextHold(trx, item, nextStatus, assignedTo, callbackNumber, lineCanGetTexts, lineE164);
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
       // underlying call_commitments row and its outbox_messages row must
@@ -900,14 +928,17 @@ async function transition(req, res, nextStatus) {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
+  // The held-lines panel names the line it is releasing; the inbox card names none (see releaseNoTextHold).
+  const lineE164 = typeof req.body?.line_e164 === 'string' && req.body.line_e164.trim() ? req.body.line_e164.trim().slice(0, 40) : null;
   if (nextStatus === 'resolved' && req.body?.line_can_get_texts === true) {
-    const closed = await releaseClosedNoTextHold({ id, expectedUpdatedAt: req.body?.expected_updated_at || null, assignedTo: req.technicianId });
+    const closed = await releaseClosedNoTextHold({ id, expectedUpdatedAt: req.body?.expected_updated_at || null, assignedTo: req.technicianId, lineE164 });
     if (closed) return sendTransitionResult(res, closed, id, closed.status);
   }
   const result = await transitionCore({
     id, nextStatus, note, assignedTo: req.technicianId,
     expectedUpdatedAt: req.body?.expected_updated_at || null,
     lineCanGetTexts: req.body?.line_can_get_texts === true,
+    lineE164,
   });
   return sendTransitionResult(res, result, id, nextStatus);
 }

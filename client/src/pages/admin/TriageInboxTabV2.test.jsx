@@ -1035,7 +1035,7 @@ describe('held lines panel', () => {
     expect(await screen.findByText(/Texts to \+19415550100 will resume/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /texts will resume/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn-old/resolve', {
-      method: 'PUT', body: JSON.stringify({ expected_updated_at: line.card_updated_at, line_can_get_texts: true }),
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: line.card_updated_at, line_can_get_texts: true, line_e164: line.phone_e164 }),
     }));
     expect(await screen.findByText('No held lines.')).toBeInTheDocument();
   });
@@ -1053,6 +1053,56 @@ describe('held lines panel', () => {
     await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length).toBe(2));
     expect(screen.getByText(/the line stays blocked for texts/)).toBeInTheDocument();
     expect(screen.getAllByTestId('held-line')).toHaveLength(1);
+  });
+
+  it('with two lines on one call, each row releases ITS line (line_e164), not the call\'s newest', async () => {
+    const other = { ...line, hold_id: 'h9', phone_e164: '+19415557777', held_at: '2026-10-03T15:00:00.000Z' };
+    wire({ lines: [other, line] });
+    render(<TriageInboxTabV2 />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    const rows = await screen.findAllByTestId('held-line');
+    expect(rows).toHaveLength(2);
+    const older = rows.find((r) => r.textContent.includes('+19415550100'));
+    fireEvent.click(within(older).getByRole('button', { name: /line can get texts/i }));
+    expect(await screen.findByText(/Texts to \+19415550100 will resume/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn-old/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: line.card_updated_at, line_can_get_texts: true, line_e164: '+19415550100' }),
+    }));
+  });
+
+  it('a line someone else already released shows the server\'s message and reloads the panel', async () => {
+    wire({ lines: [line] });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url === '/admin/triage/tn-old/resolve') throw Object.assign(new Error('That line is no longer held by this call. Reload the held lines and review the latest.'), { status: 409, code: 'NO_TEXT_LINE_NOT_HELD' });
+      return base(url, opts);
+    });
+    render(<TriageInboxTabV2 />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    fireEvent.click(within(await screen.findByTestId('held-line')).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    expect(await screen.findByText(/That line is no longer held by this call/)).toBeInTheDocument();
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length).toBe(2));
+  });
+
+  it('releasing from the normal inbox card (Line can get texts, or Phones are updated) refreshes an open panel', async () => {
+    const card = { ...ordinary, id: 'tn', first_name: 'Relay', last_name: 'Caller', feedback_verdict: null, reason_code: 'text_number_differs',
+      payload: JSON.stringify({ flag: 'text_number_differs', ani_phone: '+19415550100' }) };
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) return { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      if (url === '/admin/triage/held-lines') return { lines: [line] };
+      return { ok: true, callback_number: { disclaimed_number_hold: 'cleared', number_holds_cleared: 1 } };
+    });
+    render(<TriageInboxTabV2 />);
+    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
+    await screen.findByTestId('held-line');
+    const heldLoads = () => adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length;
+    expect(heldLoads()).toBe(1);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(heldLoads()).toBe(2));
   });
 
   it('prefers a call whose release is not blocked as the row\'s card', async () => {
