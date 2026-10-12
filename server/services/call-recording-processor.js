@@ -17714,6 +17714,10 @@ const CallRecordingProcessor = {
         extracted.preferred_date_time = v2WallClock;
       }
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
+      // Stamped for the nightly self-audit (call-self-audit baselineFromV2): this approved V2
+      // extraction wrote the appointment answer, also when V2-primary adoption is switched off
+      // (CALL_EXTRACTION_V2_PRIMARY=false with enforce routing on; codex #6294 r6).
+      extracted.v2_appointment_written = true;
       // flatView.matched_service is the coarse category→legacy map ("Termite
       // Inspection" for every termite call). Overwriting V1's specific label
       // with it downgraded e.g. a pre-slab soil-treatment booking to a plain

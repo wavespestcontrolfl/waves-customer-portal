@@ -114,11 +114,15 @@ function auditInputHash(call) {
 function baselineFromV2(call) {
   if (!call || call.v2_extraction_status !== 'valid') return false;
   const stored = safeParse(call.ai_extraction);
-  if (stored.v2_primary_adopted !== true) return false;
   const v2 = safeParse(call.ai_extraction_enriched);
   if (!require('../utils/extraction-compat').isV2Extraction(v2)) return false;
   const sched = v2.scheduling || {};
   const status = typeof sched.status === 'string' ? sched.status.trim() : '';
+  // A second stamp, `v2_appointment_written: true`: an APPROVED V2 extraction wrote the answer
+  // outright (the processor's approved-booking block copies the flat view's value, whatever the
+  // status), also while V2-primary adoption is switched off.
+  if (stored.v2_appointment_written === true) return (status === 'confirmed') === (stored.appointment_confirmed === true);
+  if (stored.v2_primary_adopted !== true) return false;
   if (!status || status === 'ambiguous') return false;
   const confirmed = status === 'confirmed';
   if (confirmed && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(sched.confirmed_start_at || '').trim())) return false;

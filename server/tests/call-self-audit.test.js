@@ -678,6 +678,18 @@ describe('the contract follows the extractor that wrote the stored answer', () =
     expect(baselineFromV2(valid(noneV2, { v2_primary_adopted: false }))).toBe(false);
     expect(baselineFromV2(valid(noneV2, { v2_primary_adopted: 'true' }))).toBe(false);
   });
+  test('an approved V2 booking stamps the answer too, with V2-primary adoption off (r6)', () => {
+    const approved = (enriched, stored) => valid(enriched, { v2_primary_adopted: undefined, v2_appointment_written: true, ...stored });
+    expect(baselineFromV2(approved(confirmedV2, { appointment_confirmed: true }))).toBe(true);
+    expect(baselineFromV2(approved(confirmedV2, { appointment_confirmed: false }))).toBe(false);
+    expect(baselineFromV2(approved(v2With({ status: 'ambiguous' }), { appointment_confirmed: false }))).toBe(true);
+    expect(baselineFromV2({ ...approved(confirmedV2, { appointment_confirmed: true }), v2_extraction_status: 'parse_failed' })).toBe(false);
+    const processor = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = processor.indexOf('extracted.appointment_confirmed = v2Flat.appointment_confirmed;');
+    expect(at).toBeGreaterThan(0);
+    expect(processor.slice(at - 400, at)).toContain('if (v2ApprovedExtraction) {');
+    expect(processor.slice(at, at + 500)).toContain('extracted.v2_appointment_written = true;');
+  });
   test('the processor stamps the stored extraction where V2-primary adoption runs, and the audit never reads the live mode', () => {
     const fs = require('fs');
     const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
