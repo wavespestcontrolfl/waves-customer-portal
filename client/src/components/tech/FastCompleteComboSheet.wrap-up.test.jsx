@@ -261,7 +261,7 @@ describe('a retry and a reload replay what was first sent', () => {
 // accepted; only an attempt whose outcome is unknown replays unchanged, and the section is held while it does.
 describe('a new attempt after a rejection follows the screen', () => {
   const refused = () => Object.assign(new Error('The server refused this closeout.'), { status: 422 });
-  const review = () => screen.getByRole('checkbox', { name: 'Send review request' });
+  const review = () => screen.getByRole('checkbox', { name: 'Send review request', hidden: true });
   const originals = () => ({ 'svc-pest': BODIES.pest, 'svc-lawn': BODIES.lawn });
   const keyOf = (call) => post.mock.calls[call][1].headers['Idempotency-Key'];
 
@@ -445,6 +445,128 @@ describe('the retry rule', () => {
     await screen.findByText(/Stop recorded/);
     expect(request.mock.calls.filter(([p]) => p.startsWith('/admin/reviews/send-time-preview')).length).toBe(readsBefore);
     expect(post.mock.calls[1][1].body).toBe(post.mock.calls[0][1].body);
+  });
+});
+
+// A replay pending locks the WHOLE stop like a send in flight; only Complete stop (which replays the stored draft unchanged) and Close stay.
+// The hold ends on success or a definite refusal, and it survives closing and reopening the sheet.
+describe('the stop is locked while a replay is pending', () => {
+  const timeout = () => Object.assign(new Error('Gateway timeout'), { status: 504 });
+  const note = () => screen.getByLabelText('Tell me about the visit', { selector: 'textarea' });
+  const keyOf = (call) => post.mock.calls[call][1].headers['Idempotency-Key'];
+
+  it('the shared note, both parts, Full form and Details are locked; Complete stop and Close are not', async () => {
+    post.mockRejectedValueOnce(timeout());
+    mount({ onViewDetails: vi.fn() });
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/Gateway timeout/);
+    await waitFor(() => expect(note().disabled).toBe(true));
+    expect(document.querySelector('[inert]').contains(screen.getByTestId('pest-part'))).toBe(true);
+    expect(document.querySelector('[inert]').contains(screen.getByTestId('lawn-part'))).toBe(true);
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Details' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
+    expect(completeStop()).toBeEnabled();
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(post.mock.calls[1][1].body).toBe(post.mock.calls[0][1].body);
+    expect(post.mock.calls[1][1].headers['Idempotency-Key']).toBe(keyOf(0));
+  });
+
+  it('a definite refusal on the replay ends the hold', async () => {
+    post.mockRejectedValueOnce(timeout());
+    post.mockRejectedValueOnce(Object.assign(new Error('The server refused this closeout.'), { status: 422 }));
+    mount();
+    await prepareBoth();
+    click('Complete stop');
+    await screen.findByText(/Gateway timeout/);
+    await waitFor(() => expect(note().disabled).toBe(true));
+    click('Complete stop');
+    await screen.findByText(/The server refused/);
+    await waitFor(() => expect(note().disabled).toBe(false));
+    expect(document.querySelector('[inert]')).toBeNull();
+    // The store no longer says a send is pending.
+    await waitFor(async () => expect((await store.getVisitCompletionDraft('combo:visit', 'op-1')).pending).toBeUndefined());
+  });
+
+  it('closing and reopening the sheet during the hold restores the same draft, still locked, and replays it unchanged', async () => {
+    post.mockRejectedValueOnce(timeout());
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/Gateway timeout/);
+    const first = post.mock.calls[0][1];
+    cleanup();
+    mount();
+    await screen.findAllByText('Saved earlier on this device. Edit it to change anything.');
+    await waitFor(() => expect(note().disabled).toBe(true));
+    for (const edit of screen.getAllByRole('button', { name: 'Edit this part', hidden: true })) expect(edit.disabled).toBe(true);
+    expect(wrapUpSection()).toBeNull();
+    await waitFor(() => expect(completeStop()).toBeEnabled());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(post.mock.calls[1][1].body).toBe(first.body);
+    expect(post.mock.calls[1][1].headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key']);
+  });
+});
+
+// The draft is written before it is posted, and the write must land.
+describe('the draft is written before it is sent', () => {
+  it('the POST waits for the store write of the exact draft', async () => {
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    const real = store.putVisitCompletionDraft;
+    let release;
+    vi.spyOn(store, 'putVisitCompletionDraft').mockImplementationOnce((...args) => new Promise((resolve) => { release = () => resolve(real(...args)); }));
+    click('Complete stop');
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(post).not.toHaveBeenCalled();
+    await act(async () => { release(); });
+    await screen.findByText(/Stop recorded/);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(postedBodies()['svc-pest'].requestReview).toBe(false);
+  });
+
+  it('a write that fails sends nothing, says so, and leaves the stop editable (then it sends)', async () => {
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    vi.spyOn(store, 'putVisitCompletionDraft').mockResolvedValueOnce(false);
+    click('Complete stop');
+    await screen.findByText(/Could not save this on this device/);
+    expect(post).not.toHaveBeenCalled();
+    expect(screen.getByRole('checkbox', { name: 'Send review request' }).matches(':disabled')).toBe(false);
+    expect(document.querySelector('[inert]')).toBeNull();
+    await waitFor(() => expect(completeStop()).toBeEnabled());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(postedBodies()['svc-lawn'].requestReview).toBe(false);
+  });
+
+  it('a reload while the request is in flight restores exactly what was posted, locked, and replays it', async () => {
+    post.mockImplementationOnce(() => new Promise(() => {}));
+    mount();
+    await prepareBoth();
+    fireEvent.change(await screen.findByLabelText('Review request timing'), { target: { value: 'tomorrow_8' } });
+    click('Complete stop');
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    const first = post.mock.calls[0][1];
+    cleanup();
+    const stored = await store.getVisitCompletionDraft('combo:visit', 'op-1');
+    expect(stored.pending).toBe(true);
+    expect(Object.fromEntries(Object.entries(stored.forms).map(([id, form]) => [id, form.body]))).toEqual(postedBodies());
+    mount();
+    await screen.findAllByText('Saved earlier on this device. Edit it to change anything.');
+    await waitFor(() => expect(completeStop()).toBeEnabled());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(post.mock.calls[1][1].body).toBe(first.body);
+    expect(post.mock.calls[1][1].headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key']);
   });
 });
 
