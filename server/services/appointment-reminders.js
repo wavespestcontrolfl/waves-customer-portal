@@ -2220,7 +2220,7 @@ async function renderConfirmationBody({ scheduledServiceId, customerId, firstNam
   );
 }
 
-async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
+async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false, contactPin = null }) {
   if (apptTime.getTime() <= Date.now()) {
     // Deferred path (codex #3609 r22 P2): the time this sender read can have
     // elapsed while a silent grouped move (keepPendingConfirmation) already
@@ -2332,6 +2332,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Self-serve reschedule deep link — one mint shared by the SMS clause
       // and the email CTA. Best-effort: a null link renders clean copy.
       const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+      // A visit booked from a program card: re-check its pinned recipient key against the rows THIS send loaded, right
+      // before it. The card check in sendConfirmation read its own snapshot; a phone or setting change after that read
+      // must not reach the send below, which uses `prefs` and `customer` as loaded here.
+      if (contactPin && await loadedRecipientsBlockConfirmation(record, scheduledServiceId, contactPin, { prefs, customer })) return false;
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the pre-check
@@ -2450,15 +2454,38 @@ const STRANDED_CONFIRMATION_FILTER = { cancelled: false, confirmation_sent: fals
 // no pin (every other booking path) is not touched. An unreadable recipient state sends nothing now; the row stays
 // unsent and the next run checks again. A failed close or audit write changes nothing: the next run reaches the same
 // mismatch and skips again, so the send never goes to the new recipients.
-async function contactPinBlocksConfirmation(record, scheduledServiceId) {
-  const { CONTACT_PIN_ACTION, currentContactKey } = require('./booking-contact-state');
+async function readContactPin(scheduledServiceId) {
+  const { CONTACT_PIN_ACTION } = require('./booking-contact-state');
   const pin = await db('activity_log')
     .where({ action: CONTACT_PIN_ACTION })
     .whereRaw("metadata->>'scheduled_service_id' = ?", [String(scheduledServiceId)])
     .first('metadata');
-  if (!pin) return false;
+  if (!pin) return null;
   const meta = typeof pin.metadata === 'string' ? JSON.parse(pin.metadata) : (pin.metadata || {});
-  if (typeof meta.contact_key !== 'string') return false;
+  return typeof meta.contact_key === 'string' ? meta : null;
+}
+
+// Close the held confirmation unsent and audit it. The audit goes first: a close that then fails is retried (and
+// re-audited) by the next run, never lost. A failed write changes nothing: the send still does not happen.
+async function closeDriftedConfirmation(record, scheduledServiceId, reason) {
+  try {
+    await db('activity_log').insert({
+      customer_id: record.customer_id,
+      action: 'confirmation_suppressed_contact_drift',
+      description: `Visit ${scheduledServiceId}: the customer's phone, email or notification settings changed after the program card was approved, so the booking confirmation was not sent (${reason}). Check the recipient, then send the confirmation by hand.`,
+      metadata: JSON.stringify({ scheduled_service_id: scheduledServiceId, reason }),
+    });
+    await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId, confirmation_sent: false })
+      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+  } catch (err) {
+    logger.error(`[appt-remind] could not close or audit the held confirmation for ${scheduledServiceId}: ${err.message}`);
+  }
+}
+
+async function contactPinBlocksConfirmation(record, scheduledServiceId, knownPin) {
+  const { currentContactKey } = require('./booking-contact-state');
+  const meta = knownPin === undefined ? await readContactPin(scheduledServiceId) : knownPin;
+  if (!meta) return false;
   // The key was pinned for the property the visit is stamped with (null = the customer row).
   const live = await currentContactKey(record.customer_id, { propertyId: meta.property_id || null });
   if (live === meta.contact_key) return false;
@@ -2467,18 +2494,23 @@ async function contactPinBlocksConfirmation(record, scheduledServiceId) {
     return true;
   }
   logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} not sent: phone, email or notification settings changed after the card`);
-  try {
-    // Audit first: a close that then fails is retried (and re-audited) by the next run, never lost.
-    await db('activity_log').insert({
-      customer_id: record.customer_id,
-      action: 'confirmation_suppressed_contact_drift',
-      description: `Visit ${scheduledServiceId}: the customer's phone, email or notification settings changed after the program card was approved, so the booking confirmation was not sent. Check the recipient, then send the confirmation by hand.`,
-    });
-    await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId, confirmation_sent: false })
-      .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
-  } catch (err) {
-    logger.error(`[appt-remind] could not close or audit the held confirmation for ${scheduledServiceId}: ${err.message}`);
+  await closeDriftedConfirmation(record, scheduledServiceId, 'recipient_changed');
+  return true;
+}
+
+// The send-time check on the rows deliverConfirmation itself loaded (its prefs and customer row), run immediately before
+// the send: the text leg then goes to the recipients checked here, not to a second read taken after the check. Mismatch
+// closes and audits the row as recipient_changed; an unreadable state holds it unsent for the next run.
+async function loadedRecipientsBlockConfirmation(record, scheduledServiceId, contactPin, { prefs, customer }) {
+  const { confirmationKeyFromLoaded } = require('./booking-contact-state');
+  const live = await confirmationKeyFromLoaded(record.customer_id, { prefs, textCustomer: customer, propertyId: contactPin.property_id || null });
+  if (live === contactPin.contact_key) return false;
+  if (live === null) {
+    logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} held at the send: the recipients could not be verified`);
+    return true;
   }
+  logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} not sent: recipient_changed between the card check and the send`);
+  await closeDriftedConfirmation(record, scheduledServiceId, 'recipient_changed');
   return true;
 }
 
@@ -3036,13 +3068,15 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] sendConfirmation: skipping cancelled appointment ${scheduledServiceId}`);
         return false;
       }
-      if (await contactPinBlocksConfirmation(record, scheduledServiceId)) return false;
+      const contactPin = await readContactPin(scheduledServiceId);
+      if (await contactPinBlocksConfirmation(record, scheduledServiceId, contactPin)) return false;
       return await deliverConfirmation(record, {
         scheduledServiceId,
         customerId: record.customer_id,
         apptTime: new Date(record.appointment_time),
         serviceLabel: record.service_type,
         recheckBeforeSend: true,
+        contactPin,
       });
     } catch (err) {
       logger.error(`[appt-remind] sendConfirmation failed: ${err.message}`);

@@ -1140,7 +1140,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'COMMERCIAL_CHANGED', 'LEDGER_CHANGED', 'CATALOG_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'COMMERCIAL_CHANGED', 'LEDGER_CHANGED', 'CATALOG_CHANGED', 'INVALID_BOOKING_PROPERTY'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }

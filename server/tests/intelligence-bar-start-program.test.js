@@ -1688,6 +1688,16 @@ describe('commit', () => {
     expect(nonMarkerWrites()).toEqual([]);
   });
 
+  test('a property that can no longer be booked (INVALID_BOOKING_PROPERTY) is a preview_changed refusal that abandons the open row (round 18)', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 422, json: { error: 'Choose an active customer address with a street, city, state and ZIP code.', code: 'INVALID_BOOKING_PROPERTY' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'INVALID_BOOKING_PROPERTY', preview_changed: true, nothing_changed: true });
+    expect(result.outcome_unknown).toBeUndefined();
+    expect(nonMarkerWrites()).toEqual([]);
+    expect(writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'update').map((w) => w.data.phase)).toEqual(['abandoned']);
+  });
+
   test('the handler finds a new overlap under its lock: refused, nothing booked, preview_changed', async () => {
     const version = await approvedVersion();
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Another visit now overlaps the first visit. Nothing was booked.', code: 'OVERLAP_CHANGED' } });

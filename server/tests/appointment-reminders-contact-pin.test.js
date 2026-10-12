@@ -14,7 +14,7 @@ const db = require('../models/db');
 const Contact = require('../services/booking-contact-state');
 const AppointmentReminders = require('../services/appointment-reminders');
 
-let pinRow; let reminder; let touched; let inserts; let updates; let failCloseWrites;
+let pinRow; let reminder; let touched; let inserts; let updates; let failCloseWrites; let customerRow;
 
 function builder(table) {
   touched.push(table);
@@ -24,6 +24,7 @@ function builder(table) {
     first: jest.fn(async () => {
       if (table === 'activity_log') return pinRow;
       if (table === 'appointment_reminders') return reminder;
+      if (table === 'customers' && customerRow) return customerRow;
       return null;
     }),
     insert: jest.fn(async (row) => {
@@ -43,7 +44,7 @@ function builder(table) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  touched = []; inserts = []; updates = []; failCloseWrites = false;
+  touched = []; inserts = []; updates = []; failCloseWrites = false; customerRow = null;
   reminder = {
     id: 'rem-1', scheduled_service_id: 'visit-1', customer_id: 'cust-1', cancelled: false, confirmation_sent: false,
     windows_preclosed: false, appointment_time: new Date(Date.now() + 5 * 86400000).toISOString(), service_type: 'Lawn Care',
@@ -118,5 +119,68 @@ describe('sendConfirmation re-checks the card recipient key (round 10)', () => {
     expect(deliveryStarted()).toBe(false);
     const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
     expect(src).toContain('await AppointmentReminders.sendConfirmation(r.scheduled_service_id)');
+  });
+});
+
+// Round 18: the card check in sendConfirmation reads one snapshot and deliverConfirmation loads its own prefs and customer
+// row afterwards. The pinned key is checked again, against the rows deliverConfirmation loaded, right before the send.
+describe('the send-time check runs on the rows the send loaded (round 18)', () => {
+  beforeEach(() => {
+    customerRow = { id: 'cust-1', first_name: 'Dana', last_name: 'Example', phone: '9415550134', email: 'dana@example.com' };
+  });
+
+  test('a phone change between the card check and the send: nothing is sent, the row is closed and audited as recipient_changed', async () => {
+    jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+    const loaded = jest.spyOn(Contact, 'confirmationKeyFromLoaded').mockResolvedValue('key-after-phone-change');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    expect(await AppointmentReminders.sendConfirmation('visit-1')).toBe(false);
+    // It was compared against the very rows the send loaded: the customer row and the prefs this call read.
+    expect(loaded).toHaveBeenCalledWith('cust-1', expect.objectContaining({ textCustomer: customerRow, prefs: expect.objectContaining({ raw: expect.any(Object) }), propertyId: null }));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(inserts).toEqual([expect.objectContaining({ table: 'activity_log', row: expect.objectContaining({
+      action: 'confirmation_suppressed_contact_drift', description: expect.stringContaining('recipient_changed'),
+      metadata: expect.stringContaining('"reason":"recipient_changed"'),
+    }) })]);
+    expect(updates).toEqual([expect.objectContaining({ table: 'appointment_reminders', patch: expect.objectContaining({ confirmation_sent: true }) })]);
+  });
+
+  test('an unreadable state at the send holds the row unsent; a matching key goes on without an audit', async () => {
+    jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+    const loaded = jest.spyOn(Contact, 'confirmationKeyFromLoaded').mockResolvedValue(null);
+    expect(await AppointmentReminders.sendConfirmation('visit-1')).toBe(false);
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+    loaded.mockResolvedValue('key-a');
+    await AppointmentReminders.sendConfirmation('visit-1');
+    expect(loaded).toHaveBeenCalledTimes(2);
+    expect(inserts.filter((i) => i.row.action === 'confirmation_suppressed_contact_drift')).toEqual([]);
+  });
+
+  test('the property id the pin stored scopes the loaded-rows check, and an unpinned visit never runs it', async () => {
+    pinRow = { metadata: { scheduled_service_id: 'visit-1', contact_key: 'key-a', property_id: 'prop-2' } };
+    jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+    const loaded = jest.spyOn(Contact, 'confirmationKeyFromLoaded').mockResolvedValue('key-a');
+    await AppointmentReminders.sendConfirmation('visit-1');
+    expect(loaded).toHaveBeenCalledWith('cust-1', expect.objectContaining({ propertyId: 'prop-2' }));
+    loaded.mockClear();
+    pinRow = undefined;
+    await AppointmentReminders.sendConfirmation('visit-1');
+    expect(loaded).not.toHaveBeenCalled();
+  });
+
+  test('the key from loaded rows hashes the same recipients as the card key', async () => {
+    const AppointmentEmail = require('../services/appointment-email')._private;
+    const Customer = require('../services/customer-contact');
+    jest.spyOn(AppointmentEmail, 'loadCustomer').mockResolvedValue({ id: 'cust-1' });
+    jest.spyOn(AppointmentEmail, 'resolveRecipients').mockResolvedValue([{ email: 'Dana@Example.com' }]);
+    jest.spyOn(Customer, 'getAppointmentContacts').mockReturnValue([{ phone: '(941) 555-0134' }]);
+    const prefs = { unavailable: false, raw: {}, confirmationChannel: 'sms', appointmentConfirmation: true, smsEnabled: true, emailEnabled: true };
+    const key = await Contact.confirmationKeyFromLoaded('cust-1', { prefs, textCustomer: customerRow });
+    expect(key).toBe(Contact.confirmationKey({ textTo: ['9415550134'], emailTo: ['dana@example.com'], toggles: { channel: 'sms', confirmation: true, sms: true, email: true } }));
+    // A changed phone changes the key; unreadable prefs or a missing customer give null.
+    Customer.getAppointmentContacts.mockReturnValue([{ phone: '9415550199' }]);
+    expect(await Contact.confirmationKeyFromLoaded('cust-1', { prefs, textCustomer: customerRow })).not.toBe(key);
+    expect(await Contact.confirmationKeyFromLoaded('cust-1', { prefs: { ...prefs, unavailable: true }, textCustomer: customerRow })).toBeNull();
+    expect(await Contact.confirmationKeyFromLoaded('cust-1', { prefs, textCustomer: null })).toBeNull();
   });
 });

@@ -242,6 +242,18 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     expect(await codeOf(run({ approvedServiceAnchor: { propertyId: 'prop-1', address: '9 Other Rd' } }))).toBe('ADDRESS_CHANGED');
     expect(await codeOf(run({ approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' } }))).toBeNull();
   });
+  test('ADDRESS_CHANGED when the pinned property was deactivated after the card (round 18)', async () => {
+    const req = { approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' } };
+    const withProperty = (property) => (table) => {
+      const b = fakeTrx()(table);
+      if (table === 'customer_properties') b.first = async () => property;
+      return b;
+    };
+    const place = { address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' };
+    await expect(runApprovedBookingRails(withProperty({ ...place, active: true }), { ...baseCtx(req) })).resolves.toBeUndefined();
+    expect(await codeOf(runApprovedBookingRails(withProperty({ ...place, active: false }), { ...baseCtx(req) }))).toBe('ADDRESS_CHANGED');
+    expect(await codeOf(runApprovedBookingRails(withProperty(undefined), { ...baseCtx(req) }))).toBe('ADDRESS_CHANGED');
+  });
   test('OVERLAP_CHANGED (any series date; an approved fact passes)', async () => {
     const ctx = baseCtx({ approvedOverlapFacts: ['visit-1|2099-04-07'] });
     ctx.probeOverlap = jest.fn(async (_t, date) => (date === '2099-04-07' ? [{ id: 'visit-1' }] : []));

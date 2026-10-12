@@ -197,15 +197,19 @@ const RAILS = [
     read: async (trx, ctx) => {
       const anchorId = await ctx.resolveAnchorPropertyId(trx);
       const place = anchorId
-        ? await trx('customer_properties').where({ id: anchorId }).first(ADDRESS_COLS)
+        ? await trx('customer_properties').where({ id: anchorId }).first([...ADDRESS_COLS, 'active'])
         : await trx('customers').where({ id: ctx.customerId }).first(ADDRESS_COLS);
-      return { propertyId: anchorId || null, address: require('../intelligence-bar/start-program').serviceAnchorAddress(place) };
+      // A property deactivated after the card was shown keeps its address but can no longer be booked
+      // (bookingPropertyStamp refuses it); compare `active` here so it is the normal ADDRESS_CHANGED refusal.
+      const active = anchorId ? (!!place && place.active !== false) : true;
+      return { propertyId: anchorId || null, address: require('../intelligence-bar/start-program').serviceAnchorAddress(place), active };
     },
     approved: (ctx) => ({
       propertyId: ctx.req.approvedServiceAnchor.propertyId || null,
       address: ctx.req.approvedServiceAnchor.address,
     }),
-    matches: (read, approved) => (!approved.propertyId || String(read.propertyId || '') === String(approved.propertyId))
+    matches: (read, approved) => read.active !== false
+      && (!approved.propertyId || String(read.propertyId || '') === String(approved.propertyId))
       && read.address === approved.address,
   },
   {

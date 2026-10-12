@@ -10843,8 +10843,20 @@ async function createScheduleBooking({
       status(code) { this.statusCode = code; return this; },
       json(json) { resolve({ status: this.statusCode, json }); return this; },
     };
-    scheduleCreateHandler(req, res, reject).catch(reject);
+    scheduleCreateHandler(req, res, (err) => settleBookingError(err, resolve, reject)).catch(reject);
   });
+}
+
+// An operational error that carries `statusCode` but no `status` (bookingPropertyStamp's INVALID_BOOKING_PROPERTY 422)
+// is a refusal the transaction rolled back, not an unknown outcome: resolve it as the reply the Schedule screen would
+// have refused with. Anything else rejects.
+function settleBookingError(err, resolve, reject) {
+  const status = Number(err?.statusCode);
+  if (err?.isOperational && !err.status && status >= 400 && status < 500) {
+    resolve({ status, json: { error: err.message, code: err.code } });
+    return;
+  }
+  reject(err);
 }
 
 // GET /api/admin/schedule/list — paginated list view with filters

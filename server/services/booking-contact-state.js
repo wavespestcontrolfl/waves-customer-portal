@@ -106,6 +106,28 @@ async function currentContactKey(customerId, { propertyId = null, kind = 'confir
   return kind === 'welcome' ? welcomeKey(state) : confirmationKey(state);
 }
 
+// The confirmation key from rows the CALLER already loaded (the deferred sender's own prefs and customer row), so the send
+// it guards goes to exactly the recipients hashed here. The text leg is built from those rows (the sender's SMS attempt is
+// handed the same rows); only the email leg is read now, through the email sender's own loaders. null = could not be read.
+async function confirmationKeyFromLoaded(customerId, { prefs, textCustomer, propertyId = null, conn = null } = {}) {
+  try {
+    if (!prefs || prefs.unavailable || !textCustomer) return null;
+    const AppointmentEmail = require('./appointment-email')._private;
+    const { getAppointmentContacts } = require('./customer-contact');
+    const handle = conn || require('../models/db');
+    const emailCustomer = await AppointmentEmail.loadCustomer(customerId, handle);
+    if (!emailCustomer) return null;
+    const emailRecipients = await AppointmentEmail.resolveRecipients(emailCustomer, { propertyId, conn: handle });
+    return confirmationKey({
+      textTo: uniqueSorted(getAppointmentContacts(textCustomer, prefs.raw).map((c) => digits10(c.phone))),
+      emailTo: uniqueSorted(emailRecipients.map((r) => String(r.email || '').trim().toLowerCase())),
+      toggles: toggleSet(prefs),
+    });
+  } catch {
+    return null;
+  }
+}
+
 // Why no leg is open: the first switched-off channel the customer's chosen channel needs, else nobody to reach.
 function noConfirmationReason(t) {
   if (t.channel !== 'email' && !t.sms) return 'texts are off';
@@ -150,4 +172,4 @@ function contactCardLines(state, { sendTexts, welcome, welcomeEmailCovered = fal
 // send that happens later (the recovery sweep included) cannot reach recipients the card did not show.
 const CONTACT_PIN_ACTION = 'booking_contact_pin';
 
-module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, contactCardLines, confirmationLegs, maskPhone, maskEmail };
+module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, confirmationKeyFromLoaded, contactCardLines, confirmationLegs, maskPhone, maskEmail };

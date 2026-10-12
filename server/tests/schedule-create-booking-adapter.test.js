@@ -524,6 +524,28 @@ describe('createScheduleBooking runs the POST / handler', () => {
       // row (no city here -> the lakewood_ranch default).
       expect(inserts[0]).toMatchObject({ property_id: PROP, service_address_line1: '1 Example St', service_address_city: 'Sarasota', zone: 'sarasota' });
     });
+
+    test('a property that can no longer be booked (bookingPropertyStamp: operational 422 with statusCode and no status) is a refusal, not an unknown outcome (round 18)', async () => {
+      const PROP = '00000000-0000-4000-8000-00000000a001';
+      // The locked re-read finds the property without a ZIP code (or inactive): the stamp throws INVALID_BOOKING_PROPERTY.
+      const propertyRow = { id: PROP, customer_id: 'cust-1', active: true, address_line1: '1 Example St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '' };
+      const baseTrx = db.transaction.getMockImplementation();
+      db.transaction.mockImplementation(async (cb) => baseTrx(async (trx) => {
+        const wrapped = jest.fn((table) => (table === 'customer_properties' ? chain(propertyRow) : trx(table)));
+        Object.assign(wrapped, trx);
+        return cb(wrapped);
+      }));
+      const result = await createScheduleBooking({ body: { ...oneOff, propertyId: PROP }, actor });
+      expect(result.status).toBe(422);
+      expect(result.json.code).toBe('INVALID_BOOKING_PROPERTY');
+      expect(inserts).toEqual([]);
+    });
+
+    test('an error with neither status nor an operational 4xx still rejects (round 18)', async () => {
+      const src = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+      expect(src).toContain('settleBookingError(err, resolve, reject)');
+      expect(src).toMatch(/if \(err\?\.isOperational && !err\.status && status >= 400 && status < 500\)/);
+    });
   });
 
   describe('child overlaps (approvedOverlapFacts set)', () => {

@@ -94,4 +94,41 @@ async function lockCustomerRowsForEstimate(trx, estimate) {
   for (const id of ids) await trx('customers').where({ id }).forKeyShare().first('id');
 }
 
-module.exports = { lockCustomerEstimates, lockCustomerEstimatesForEstimate, lockCustomerRowsForEstimate };
+/**
+ * Lock for an UNLINKED estimate insert that carries only contact data (an engine draft for a call, where the phone may be
+ * shared and the profile match ambiguous). The open-estimate reader counts an unlinked row as a customer's when the
+ * accept's phone match lands on that customer, so every customer the phone or email could match is locked, together with
+ * a known customerId and the prospective owner the accept resolves to. An ownerless contact whose owner lookup fails
+ * throws (503): nothing is known to lock, and the insert must not go unfenced. The candidate reads run on the caller's
+ * transaction and their failures propagate. Same leaf rule as lockCustomerEstimates: take it right before the insert.
+ */
+async function contactCandidateIds(trx, { phone, email }) {
+  const ids = [];
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length >= 7) {
+    const rows = await trx('customers').whereNull('deleted_at')
+      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`]).select('id');
+    ids.push(...rows.map((r) => r.id));
+  }
+  const mail = String(email || '').trim().toLowerCase();
+  if (mail) {
+    const rows = await trx('customers').whereNull('deleted_at').whereRaw('lower(email) = ?', [mail]).select('id');
+    ids.push(...rows.map((r) => r.id));
+  }
+  return ids;
+}
+
+async function lockCustomerEstimatesForContact(trx, { customerId = null, phone = null, email = null } = {}) {
+  const ids = [customerId, ...(await contactCandidateIds(trx, { phone, email }))].filter(Boolean).map(String);
+  if (phone) {
+    const { resolveProspectiveAcceptCustomer } = require('../services/recurring-card-on-file');
+    const { customerId: ownerId, lookupFailed } = await resolveProspectiveAcceptCustomer({ customer_phone: phone }, trx, { authoritative: true });
+    if (ownerId) ids.push(String(ownerId));
+    if (lookupFailed && !ids.length) {
+      throw Object.assign(new Error('Could not verify the estimate owner, so the draft was not created.'), { code: 'ESTIMATE_OWNER_UNVERIFIED', statusCode: 503 });
+    }
+  }
+  await lockCustomersThenEstimates(trx, ids);
+}
+
+module.exports = { lockCustomerEstimates, lockCustomerEstimatesForEstimate, lockCustomerRowsForEstimate, lockCustomerEstimatesForContact };

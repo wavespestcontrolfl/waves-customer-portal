@@ -1381,7 +1381,14 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     }
 
     // Serialize with the booking's open-estimate check (utils/customer-estimate-lock.js).
-    await require('../../utils/customer-estimate-lock').lockCustomerEstimates(trx, (context?.customer?.id && !context?.customerPhoneAmbiguous) ? context.customer.id : null);
+    // An ambiguous or failed profile match leaves the draft unlinked, and the open-estimate reader still counts an
+    // unlinked row for whichever customer the accept's phone match lands on. Lock the contact's candidate customers
+    // (and the prospective owner) instead of nothing; an ownerless contact whose owner lookup fails aborts the draft.
+    await require('../../utils/customer-estimate-lock').lockCustomerEstimatesForContact(trx, {
+      customerId: context?.customer?.id || null,
+      phone: customerPhone,
+      email: context?.lead?.email || context?.customer?.email || null,
+    });
     const [estimate] = await trx('estimates').insert({
       // Engine drafts are priced by generateEstimate only (AGENTS.md
       // estimator-engine authority): the explicit SERVER stamp the send gate

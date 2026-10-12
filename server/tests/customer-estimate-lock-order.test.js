@@ -210,7 +210,7 @@ describe('customer estimate lock order (customer row, then estimate row, then th
   });
 
   test('the lock module exports only the lock functions', () => {
-    expect(Object.keys(require('../utils/customer-estimate-lock')).sort()).toEqual(['lockCustomerEstimates', 'lockCustomerEstimatesForEstimate', 'lockCustomerRowsForEstimate']);
+    expect(Object.keys(require('../utils/customer-estimate-lock')).sort()).toEqual(['lockCustomerEstimates', 'lockCustomerEstimatesForContact', 'lockCustomerEstimatesForEstimate', 'lockCustomerRowsForEstimate']);
   });
 
   test('every reopen site that may hold a null customer_id locks the prospective owner too (round 5)', () => {
@@ -246,7 +246,7 @@ describe('customer row first, then the estimate advisory lock (round 12)', () =>
     ['email lead draft', '../services/email/email-actions', 'lockCustomerEstimates(trx, prospectiveOwnerId)'],
     ['estimate tools (recognized)', '../services/intelligence-bar/estimate-tools', 'lockCustomerEstimates(trx, recognizedCustomerId)'],
     ['estimate tools (account pricing)', '../services/intelligence-bar/estimate-tools', 'lockCustomerEstimates(trx, accountPricing.customerId || null)'],
-    ['estimator draft builder', '../services/estimator-engine/draft-builder', 'lockCustomerEstimates(trx,'],
+    ['estimator draft builder', '../services/estimator-engine/draft-builder', 'lockCustomerEstimatesForContact(trx,'],
     ['booking predraft', '../services/estimator-engine/booking-predraft', 'lockCustomerEstimates(trx, customer.id)'],
     ['click estimate mint', '../services/service-report/click-estimate-mint', 'lockCustomerEstimates(trx, freshCustomer.id)'],
     ['cancellation restart', '../services/cancellation-resolution/restart', 'lockCustomerEstimates(trx, fresh.id)'],
