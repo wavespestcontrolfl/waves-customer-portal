@@ -596,6 +596,24 @@ describe('FamilyEvidence — family account suggestions', () => {
   });
 });
 
+// 2026-10-10 call audit: the same card also suggests the caller's OWN account (no named holder).
+describe('FamilyEvidence — the caller\'s own account', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  it('shows the caller, the suggested account and the reason, with no Named row', () => {
+    render(<FamilyEvidence payload={{
+      flag: 'family_account_candidates', caller_name: 'Robin Example', caller_phone: '+19415550101',
+      account_holder_name: null, match_basis: 'caller_full_name',
+      holder_candidates: [{ id: A, name: 'Robin Example', city: 'Sampleton', address_matches: false }],
+      customer_ids: [A], reason: 'An account carries this caller\'s exact name under another phone number.',
+    }} />);
+    expect(screen.getByText(/Robin Example · calling from \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText('Robin Example · Sampleton')).toBeInTheDocument();
+    expect(screen.queryByText('Named')).not.toBeInTheDocument();
+    expect(screen.getByText(/exact name under another phone number/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{
