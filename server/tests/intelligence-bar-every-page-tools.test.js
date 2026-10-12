@@ -19,7 +19,7 @@ const { getToolsForContext } = require('../routes/admin-intelligence-bar');
 const { UI_GATED_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 
 const CORE = [
-  'add_customer_property', 'set_primary_property', 'update_customer_property',
+  'add_customer_property', 'set_primary_property', 'update_customer_property', 'remove_customer_property',
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
@@ -29,7 +29,7 @@ const CORE = [
 ];
 // Property writes run only through the registry (executePropertyTool refuses
 // unless GATE_IB_PLATFORM), so the legacy list cannot offer them.
-const REGISTRY_ONLY = new Set(['add_customer_property', 'set_primary_property', 'update_customer_property']);
+const REGISTRY_ONLY = new Set(['add_customer_property', 'set_primary_property', 'update_customer_property', 'remove_customer_property']);
 const LEGACY_CORE = CORE.filter(name => !REGISTRY_ONLY.has(name));
 const names = tools => tools.map(t => t.name);
 

@@ -4582,7 +4582,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           return reply(409, result);
         }
         if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
-        if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
+        if (['add_customer_property', 'update_customer_property', 'set_primary_property', 'remove_customer_property'].includes(action.tool_name)) {
           execParams._verified_property_version = livePreview._version;
         }
         if (action.tool_name === 'save_customer_estimate') execParams._verified_estimate_version = livePreview._version;
