@@ -63,14 +63,23 @@ describe('the payer writers\' in-flight fence sees a standalone invoice with a l
     expect(before - cutoff).toBeLessThan(10 * 60 * 1000 + 5000);
   });
 
-  test('the scheduled-service and payer scopes reach the standalone invoices too', async () => {
+  test('an invoice that rides a visit is left to the effective-owner rules (a visit pinned self-pay keeps its owner, so its claim does not block)', async () => {
     const { database, queries } = fakeDatabase();
-    await packetInvoiceSendInFlight({ scheduledServiceId: 'visit-1' }, database);
-    expect(standaloneQuery(queries).calls).toEqual(expect.arrayContaining([['where', [{ scheduled_service_id: 'visit-1' }]]]));
-    const second = fakeDatabase();
-    await packetInvoiceSendInFlight({ payerId: 'payer-1' }, second.database);
-    const wheres = standaloneQuery(second.queries).calls.filter(([m]) => m === 'where');
-    expect(wheres.some(([, a]) => typeof a[0] === 'function')).toBe(true);
+    await packetInvoiceSendInFlight({ customerId: 'cust-1' }, database);
+    const calls = standaloneQuery(queries).calls;
+    expect(calls).toEqual(expect.arrayContaining([['whereNull', ['scheduled_service_id']]]));
+    expect(calls.some(([m]) => m === 'whereNotExists')).toBe(true);
+    // The visit-linked rules judge it, and only they: the standalone claim query never runs for a visit scope.
+    const scoped = fakeDatabase({ standaloneRow: { id: 'inv-1' } });
+    await expect(packetInvoiceSendInFlight({ scheduledServiceId: 'visit-1' }, scoped.database)).resolves.toBe(false);
+    expect(standaloneQuery(scoped.queries)).toBeUndefined();
+    expect(linkedInvoiceChargeInFlight).toHaveBeenCalledWith(scoped.database, { customerId: null, scheduledServiceId: 'visit-1', payerId: null }, { pending: null });
+  });
+
+  test('the payer scope reaches the standalone invoices of that payer\'s customers', async () => {
+    const { database, queries } = fakeDatabase();
+    await packetInvoiceSendInFlight({ payerId: 'payer-1' }, database);
+    expect(standaloneQuery(queries).calls.some(([m, a]) => m === 'whereIn' && a[0] === 'customer_id')).toBe(true);
   });
 
   test('with no claim in flight the answer is the visit-linked fence\'s, as before', async () => {

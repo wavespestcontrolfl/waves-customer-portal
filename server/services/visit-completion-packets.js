@@ -1035,20 +1035,23 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   // Intelligence Bar's claim judges who owes the invoice and holds the customer row only until the claim commits, so from
   // then until the delivery finalizes the claim row itself is the fence. A stale claim (10 minutes without a write) is not
   // in flight, so a stuck row never blocks a Bill-To change for good.
+  const linkedFence = () => require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId }, { pending });
+  // A visit-scoped change reaches no invoice that rides no visit, so only the visit-linked rules apply to it.
+  if (scheduledServiceId) return linkedFence();
   const standalone = database('invoices').whereNull('payer_id').whereNull('visit_completion_packet_id')
     .where({ status: 'sending' }).where('updated_at', '>', new Date(Date.now() - 10 * 60 * 1000))
-    .whereNotExists(database('annual_prepay_terms as renewal').whereRaw('renewal.prepay_invoice_id = invoices.id'));
+    .whereNotExists(database('annual_prepay_terms as renewal').whereRaw('renewal.prepay_invoice_id = invoices.id'))
+    // An invoice that rides a visit (a direct link, or a record link whose record names a visit) is judged below by the
+    // effective-owner rules, which count it only when this Bill-To change would move its owner: a visit pinned self-pay,
+    // or one with its own payer, keeps the same owner, so its live send claim is no reason to defer the change.
+    .whereNull('scheduled_service_id')
+    .whereNotExists(database('service_records as rec').whereRaw('rec.id = invoices.service_record_id').whereNotNull('rec.scheduled_service_id'));
   if (customerId) standalone.where({ customer_id: customerId });
-  if (scheduledServiceId) standalone.where({ scheduled_service_id: scheduledServiceId });
-  if (payerId) {
-    standalone.where((q) => q
-      .whereIn('customer_id', database('customers').where({ payer_id: payerId }).select('id'))
-      .orWhereIn('scheduled_service_id', database('scheduled_services').where({ payer_id: payerId }).select('id')));
-  }
+  if (payerId) standalone.whereIn('customer_id', database('customers').where({ payer_id: payerId }).select('id'));
   if (await standalone.first('id')) return true;
   // Invoices with no packet that ride a visit (a service-record or direct visit link) are the
   // same window: the shared Bill-To transition would hand a debt to AP under a send or charge.
-  return require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId }, { pending });
+  return linkedFence();
 }
 
 /**
