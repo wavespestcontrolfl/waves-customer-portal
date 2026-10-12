@@ -8255,7 +8255,7 @@ async function quarantineLatePanPass(call, panCount) {
 // That pass runs now, on a fresh download, unless CONTACT_DICTATION_ENABLED=false. A pass that
 // hears a card number is quarantined and nothing is decoded. Fail-open: any failure leaves the
 // decoder off. `late` carries what the caller must persist; `panCount` means the recording is gone.
-async function contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid }) {
+async function contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, contactPassAttempted = false, extracted, callSid }) {
   const off = { run: false, lateContactPass: null, late: null, panCount: 0 };
   if (contactPassTranscript) return { ...off, run: true };
   if (detectContactDictationSignals(transcription).any) return { ...off, run: true };
@@ -8266,6 +8266,9 @@ async function contactDecoderGate({ call, contactPhone, transcription, contactPa
     // Either extracted name is context for the repeated-name signal; only the stored-last-name
     // near miss needs a last name (and the customer lookup behind it).
     if (!extracted?.first_name && !extracted?.last_name) return off;
+    // The wrapper already bought (and may have lost) the pass for the transcript-only signals; only the
+    // near miss, which needs the extraction, is new here. It also needs a last name.
+    if (contactPassAttempted && !extracted.last_name) return off;
     let known = null;
     if (extracted.last_name) {
       known = call.customer_id
@@ -8273,7 +8276,7 @@ async function contactDecoderGate({ call, contactPhone, transcription, contactPa
         : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
     }
     const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known, call });
-    if (!trigger) return off;
+    if (!trigger || (contactPassAttempted && !trigger.includes('nearMiss'))) return off;
     logCollapseTrigger(trigger, callSid, 'decoder');
     const late = await lateContactPass(call);
     if (late?.pan) return { ...off, panCount: await quarantineLatePanPass(call, late.panCount) };
@@ -8356,6 +8359,9 @@ async function transcribeRecording(mp3Url, opts = {}) {
       // dictation signals — the caller knows an email was dictated.
       && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass', { call: opts.call }))
     ) {
+      // Recorded BEFORE the paid call: a pass that returns nothing or throws still counts as tried, so
+      // the late decoder gate never repeats it for the same signal.
+      result.contactPassAttempted = true;
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
         model: contactModel,
@@ -10301,6 +10307,8 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // The wrapper already tried the second pass (it may have returned nothing).
+    let contactPassAttempted = false;
     // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
     // near-silence) is discarded here so the Twilio-builtin fallback below can
     // supply a real transcript; the terminal rejection only fires if the
@@ -10434,6 +10442,7 @@ const CallRecordingProcessor = {
       transcription = result.transcription;
       recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
+      contactPassAttempted = result.contactPassAttempted === true;
       // PAN redaction guard (card-on-file spec Phase 0): a card number
       // blurted on the recorded line must become a non-event — scrubbed
       // BEFORE the plausibility gate, BEFORE persistence, and therefore
@@ -11887,7 +11896,7 @@ const CallRecordingProcessor = {
     // processing-failure path instead of marking the call processed with the late transcript
     // neither saved nor decoded.
     const decoderGate = transcription
-      ? await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid })
+      ? await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, contactPassAttempted, extracted, callSid })
       : null;
     if (decoderGate?.lateContactPass) contactPassTranscript = decoderGate.lateContactPass;
     const lost = decoderGate

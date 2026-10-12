@@ -65,7 +65,10 @@ describe('spellingCollapseSignals', () => {
   test.each([
     ['a repeated name token', 'Caller: My last name is Serov, Serov.'],
     ['a repeat across a full stop', 'Caller: It is Tarnow. Tarnow.'],
-    ['a repeat across a speaker label', 'Agent: What is your last name?\nCaller: Marlowe.\nAgent: Marlowe? Marlowe.'],
+    ['a repeat across a speaker label, name context in the same turn', 'Caller: My last name is Marlowe.\nAgent: Marlowe.'],
+    ['an answer and the agent\'s read-back right after the name question', 'Agent: What is your last name?\nCaller: Marlowe.\nAgent: Marlowe.'],
+    ['the answer collapsed right after the question', 'Agent: Can I get your last name?\nCaller: Serov, Serov.'],
+    ['a same-turn name statement', 'Caller: My last name is Serov. Serov.'],
     ['a two-letter name with context', 'Caller: My last name is Lu, Lu.'],
     ['a repeat after "this is"', 'Caller: Hi, this is Okafor. Okafor.'],
     ['spelled, no letters after', 'Caller: Yes, it is spelled the usual way, nothing odd about it at all.'],
@@ -85,6 +88,7 @@ describe('spellingCollapseSignals', () => {
     ['"OK. OK."', 'Caller: OK. OK. Sounds good, see you then.'],
     ['a bare two-letter repeat without context', 'Caller: Lu. Lu. That works for the garage.'],
     ['"Hi, I" is not name context', 'Caller: Hi, I need Sentricon.\nAgent: Sentricon. Sentricon.'],
+    ['name context only in the OTHER speaker\'s turn', "Agent: What's your name?\nCaller: John.\nAgent: Sentricon? Sentricon."],
     ['a weekday repeated', 'Caller: It is Monday. Monday. Can you come then?'],
     ['a state repeated', 'Caller: We are in Florida. Florida.'],
     ['a month repeated near "name"', 'Caller: My name is on the account, it is October. October.'],
@@ -256,6 +260,35 @@ describe('contactDecoderGate', () => {
     expect(contactPassTrigger(COLLAPSED, { call: { direction: 'outbound-api' } })).toBeNull();
     expect(contactPassTrigger(COLLAPSED, { call: { direction: 'inbound' } })).toBe('collapse:repeated');
     expect(contactPassTrigger('Caller: my email is jay at gmail dot com', { call: { direction: 'outbound-api' } })).toBe('signals');
+  });
+
+  test('the wrapper already tried (and got nothing): the late gate repeats it only for a near miss', async () => {
+    process.env[GATE] = 'true';
+    const repeatOnly = { ...base(), transcription: 'Caller: My last name is Serov, Serov.', contactPassAttempted: true, extracted: { first_name: 'Ann', last_name: 'Serov' } };
+    expect(await contactDecoderGate(repeatOnly)).toEqual(OFF);
+    expect(global.fetch).not.toHaveBeenCalled();
+    // Without the flag the same transcript does buy the pass (the baseline this guards).
+    global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: Serov, S-E-R-O-V.'));
+    expect(await contactDecoderGate({ ...repeatOnly, contactPassAttempted: false })).toMatchObject({ run: true });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    // A near miss is new information after the extraction: it still runs.
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: Serov, S-E-R-O-V.'));
+    const near = { ...repeatOnly, transcription: 'Caller: hello there', extracted: { last_name: 'Serof' } };
+    expect(await contactDecoderGate(near)).toMatchObject({ run: true });
+    // The wrapper tried and the extraction has no last name: nothing left to add.
+    global.fetch.mockClear();
+    expect(await contactDecoderGate({ ...repeatOnly, extracted: { first_name: 'Ann' } })).toEqual(OFF);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('the wrapper marks the pass attempted before the paid call', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const mark = src.indexOf('result.contactPassAttempted = true;');
+    const paid = src.indexOf('const second = await transcribeWithOpenAI(bufferRef.buffer', mark);
+    expect(mark).toBeGreaterThan(-1);
+    expect(paid).toBeGreaterThan(mark);
+    expect(src).toContain('contactPassAttempted = result.contactPassAttempted === true;');
   });
 
   test('kill switch: CONTACT_DICTATION_ENABLED=false means no download, no paid pass, no lookup', async () => {

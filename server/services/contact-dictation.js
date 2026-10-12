@@ -145,6 +145,22 @@ const SPELLING_ANNOUNCE_RES = [
 ];
 const LETTER_RUN_AFTER_RE = new RegExp(`${NAME_SPELLING_LETTERS_RE.source}|${NAME_SPELLING_PHONETIC_RE.source}`, 'i');
 
+// The look-behind for name context: the repeated token's own turn, plus the turn right before it
+// when that turn is a question ("Agent: Can I get your last name?" / "Caller: Serov, Serov."). A
+// question or answer from further back ("Agent: What's your name? Caller: John. Agent: Sentricon?
+// Sentricon.") is never context for this one.
+const SPEAKER_LABEL_RE = /\b(?:Agent|Caller|Customer|Tech(?:nician)?|Staff|Speaker \d+)\s*:/gi;
+function sameTurnBefore(text, index) {
+  const window = text.slice(Math.max(0, index - REPEAT_CONTEXT_WINDOW), index);
+  const labels = [...window.matchAll(SPEAKER_LABEL_RE)];
+  if (!labels.length) return window;
+  const last = labels[labels.length - 1];
+  const own = window.slice(last.index + last[0].length);
+  const prev = labels.length > 1 ? labels[labels.length - 2] : null;
+  const before = window.slice(prev ? prev.index + prev[0].length : 0, last.index);
+  return /\?/.test(before) ? `${before} ${own}` : own;
+}
+
 // A repeated capitalized token counts when it is not everyday vocabulary AND a name is being given
 // or asked for just before it (or it is the extracted first or last name itself).
 function repeatedNameToken(text, extracted = null) {
@@ -153,7 +169,7 @@ function repeatedNameToken(text, extracted = null) {
     const token = m[1].toLowerCase();
     if (REPEAT_VOCABULARY.has(token)) continue;
     if (extractedNames.includes(nameKey(token))) return true;
-    if (NAME_CONTEXT_RE.test(text.slice(Math.max(0, m.index - REPEAT_CONTEXT_WINDOW), m.index))) return true;
+    if (NAME_CONTEXT_RE.test(sameTurnBefore(text, m.index))) return true;
   }
   return false;
 }
