@@ -67,9 +67,8 @@ beforeEach(() => {
   report();
   gatherTechParagraphInputs.mockResolvedValue(FIXTURE);
   delete process.env.GATE_LAWN_TECH_PARAGRAPH;
-  delete process.env.GATE_LAWN_REPORT_LEAD;
 });
-afterAll(() => { delete process.env.GATE_LAWN_TECH_PARAGRAPH; delete process.env.GATE_LAWN_REPORT_LEAD; });
+afterAll(() => { delete process.env.GATE_LAWN_TECH_PARAGRAPH; });
 
 test('gate off: no read, no model call, no extra key in the result or the record', async () => {
   const { knex, state } = fakeKnex({});
@@ -81,15 +80,8 @@ test('gate off: no read, no model call, no extra key in the result or the record
   expect(state.notes).not.toHaveProperty('lawnTechParagraph');
 });
 
-test('the paragraph gate needs the lead gate too: tech gate alone does nothing', async () => {
-  process.env.GATE_LAWN_TECH_PARAGRAPH = 'true';
-  const { knex } = fakeKnex({});
-  await run(knex);
-  expect(dispatchWithFallback).not.toHaveBeenCalled();
-});
-
 describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_LAWN_TECH_PARAGRAPH = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; });
+  beforeEach(() => { process.env.GATE_LAWN_TECH_PARAGRAPH = 'true'; });
 
   test('one call, frozen under lawnTechParagraph[assessment], beside (never inside) lawnReportV2', async () => {
     modelAnswers(CHINCH);

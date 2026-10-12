@@ -22,15 +22,14 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // permanently caching every such report as deterministic fallback — the bump
 // re-arms those cache keys so they regenerate on next read).
 const PROMPT_VERSION = 'treatment_narrative_v5';
-// Lawn while the report lead is live (P15; the v6 copy rides the lead): the
-// paragraph states no result timing, which reaches the customer only as the
-// owner-approved "What to expect" sentences (owner rulings 2026-10-01 / 10-02).
-// Its own version so pest and tree & shrub rows are untouched, and lead off
-// reads v5 as before.
+// Lawn (P15; the v6 copy): the paragraph states no result timing, which reaches
+// the customer only as the owner-approved "What to expect" sentences (owner
+// rulings 2026-10-01 / 10-02). Its own version so pest and tree & shrub rows are
+// untouched and keep v5.
 const LAWN_NO_TIMING_PROMPT_VERSION = 'treatment_narrative_v6_lawn_no_timing';
 
 function lawnNoTiming(serviceLine) {
-  return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportLeadLive();
+  return serviceLine === 'lawn';
 }
 
 function promptVersionFor(serviceLine) {
@@ -310,9 +309,7 @@ async function treatmentNarrativePdfSignature(serviceRecordId, knex = db, { serv
       // A caller with no line falls back to every version a render could read.
       .whereIn('prompt_version', serviceLine
         ? [promptVersionFor(serviceLine)]
-        : (require('../../config/feature-gates').lawnReportLeadLive()
-          ? [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION]
-          : [PROMPT_VERSION]))
+        : [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION])
       .orderBy('generated_at', 'desc')
       .first('status', 'generated_at');
     // Sentinel, not '': a cached pre-narrative PDF must MISS so the render
