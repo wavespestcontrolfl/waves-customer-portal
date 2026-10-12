@@ -2139,8 +2139,13 @@ function whereParentStillSettledVoicemail(q, t, parentId) {
       .forShare();
   });
 }
-async function callbackReachedSolicitor(conn, commitment, { after, phone }) {
-  if (!require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
+// `correction`: the rejudge of a dismissal that already stands reads a
+// sibling's settled spam proof through a gate rollback, so the dismissal is
+// re-pointed at it instead of reopened while the cards and stamp still rest
+// on that sibling (codex #6271 r49; standingSpamCallbacks' twin). The gate
+// blocks only NEW settlements.
+async function callbackReachedSolicitor(conn, commitment, { after, phone, correction = false }) {
+  if (!correction && !require("../config/feature-gates").isEnabled("callbackSpamClosesParent")) return null;
   if (!phone || commitment.kind !== "callback" || commitment.party !== "waves") return null;
   // Both link arms imply an index: relatedCommitmentId its own, relatedCallId
   // the admin-callback + spam partial index (20261010270000). The promise's
@@ -2278,7 +2283,7 @@ async function rejudgeCallbackSpamDismissals(conn, callLogId, fromCallbackCallId
   let reopened = 0;
   for (const commitment of rows) {
     const after = await evidenceBoundary(conn, commitment, call);
-    const proof = after ? await callbackReachedSolicitor(conn, commitment, { after, phone: contactPhoneOf(call) }) : null;
+    const proof = after ? await callbackReachedSolicitor(conn, commitment, { after, phone: contactPhoneOf(call), correction: true }) : null;
     const target = callbackSpamDismissalsQ(conn, callLogId, fromCallbackCallId).where({ id: commitment.id, human_state: commitment.human_state })
       .whereRaw("date_trunc('milliseconds', updated_at) = ?", [commitment.updated_at]);
     if (proof) {
