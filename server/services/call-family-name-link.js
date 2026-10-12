@@ -29,7 +29,8 @@
  *      customers with the caller's first name who have a visit on the calendar within
  *      RECENT_DAYS days of the call, either side.
  *   3. caller_first_name_city_recent: the caller gave no last name; customers with that
- *      first name in the stated city whose record was created within RECENT_DAYS days
+ *      first name in the city stated on the call (never one address validation filled in)
+ *      whose record was created within RECENT_DAYS days
  *      before the call.
  * Replayed on 60 days of stored calls each basis found exactly one account every time it
  * fired (about five cards in all). A basis that finds more than MAX_OWN_CANDIDATES accounts
@@ -49,6 +50,7 @@ const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // Roles the model may give the person the family caller names. A named person the model
 // tagged as an arranger, tenant, buyer, lender and so on is someone else, never the holder.
@@ -180,8 +182,9 @@ const ownCandidate = (m) => ({ id: String(m.id), name: displayName(m), city: m.c
 // customer can still sit at a lead stage and the visit is the evidence) who have a visit on the
 // calendar within RECENT_DAYS days of the call.
 function findByFirstNameAndRecentVisit(conn, first, callAt, limit) {
-  const from = new Date(callAt.getTime() - RECENT_DAYS * 86400000);
-  const to = new Date(callAt.getTime() + RECENT_DAYS * 86400000);
+  // scheduled_date is an Eastern calendar date: count the days in ET, from the call's ET day.
+  const from = etDateString(addETDays(callAt, -RECENT_DAYS));
+  const to = etDateString(addETDays(callAt, RECENT_DAYS));
   return conn('customers as cu')
     .where('cu.active', true)
     .whereNull('cu.deleted_at')
@@ -190,7 +193,7 @@ function findByFirstNameAndRecentVisit(conn, first, callAt, limit) {
       this.select(conn.raw('1')).from('scheduled_services as s')
         .whereRaw('s.customer_id = cu.id')
         .whereIn('s.status', OWN_VISIT_STATUSES)
-        .whereRaw('s.scheduled_date BETWEEN ?::date AND ?::date', [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)]);
+        .whereRaw('s.scheduled_date BETWEEN ?::date AND ?::date', [from, to]);
     })
     .orderBy('cu.created_at', 'asc').orderBy('cu.id', 'asc').limit(limit)
     .select('cu.id', 'cu.first_name', 'cu.last_name', 'cu.city');
@@ -216,7 +219,7 @@ function findByFirstNameCityRecent(conn, first, city, callAt, limit) {
  * The account the CALLER looks like (see the module comment): { basis, candidates, more_accounts }
  * or null. Read-only. The customer this very call created for the caller is never its own match.
  */
-async function matchCallerOwnAccounts({ call, extracted, v2CanonicalExtraction, isOutbound = false, conn = db }) {
+async function matchCallerOwnAccounts({ call, extracted, v2CanonicalExtraction, statedAddress, isOutbound = false, conn = db }) {
   if (isOutbound || extracted.is_voicemail) return null;
   const first = normName(extracted.first_name);
   if (!first) return null;
@@ -242,7 +245,9 @@ async function matchCallerOwnAccounts({ call, extracted, v2CanonicalExtraction, 
     const byVisit = firstNameBasis('caller_first_name_recent_visit', await findByFirstNameAndRecentVisit(conn, first, callAt, limit));
     if (byVisit) return byVisit;
   }
-  const city = normName(extracted.city);
+  // The city as SPOKEN on the call (statedAddress, frozen before address validation): the merged
+  // record's city can be one Google filled in or corrected, which nobody said.
+  const city = normName(statedAddress && statedAddress.city);
   if (dated && !last && city) {
     return firstNameBasis('caller_first_name_city_recent', await findByFirstNameCityRecent(conn, first, city, callAt, limit));
   }

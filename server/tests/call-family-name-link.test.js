@@ -309,6 +309,17 @@ const SKIP = !process.env.DATABASE_URL;
       expect(out).toMatchObject({ basis: 'caller_first_name_recent_visit', candidates: [{ id: String(account), name: 'Robin Otherwise' }] });
     });
 
+    // Codex r1: the window is counted in Eastern calendar days from the call's ET day.
+    test('basis 2 counts the window in Eastern days: a 9 PM ET call is still that ET day', async () => {
+      const lateEt = '2026-10-10T01:00:00Z'; // Oct 9, 9 PM ET
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      const at = (callLogId) => own(callLogId, { call: { id: callLogId, from_phone: '+19415550101', customer_id: null, created_at: lateEt } });
+      await visit(account, { scheduled_date: '2026-10-24' }); // 15 ET days after Oct 9
+      expect(await matchCallerOwnAccounts(at(await call()))).toBeNull();
+      await visit(account, { scheduled_date: '2026-09-25' }); // exactly 14 ET days before
+      expect((await matchCallerOwnAccounts(at(await call()))).basis).toBe('caller_first_name_recent_visit');
+    });
+
     test('basis 2 does not fire: a new-lead call, a visit outside the window, a cancelled visit, or too many first-name matches', async () => {
       const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
       await visit(account, { scheduled_date: day(RECENT_DAYS + 3) });
@@ -325,11 +336,12 @@ const SKIP = !process.env.DATABASE_URL;
     test('basis 3: a first name only, the stated city, and a record created in the last two weeks', async () => {
       const recent = new Date(Date.parse(CALL_AT) - 86400000);
       const account = await customer({ first_name: 'Robin', last_name: 'E', city: 'Sampleton', created_at: recent });
-      const firstOnly = (over = {}) => ({ extracted: { first_name: 'Robin', city: ' sampleton ', is_voicemail: false, ...over }, v2CanonicalExtraction: { caller: {}, call_nature: 'new_lead', meta: {} } });
+      const firstOnly = ({ city = ' sampleton ' } = {}) => ({ extracted: { first_name: 'Robin', city: 'Sampleton', is_voicemail: false }, statedAddress: { city }, v2CanonicalExtraction: { caller: {}, call_nature: 'new_lead', meta: {} } });
       const out = await matchCallerOwnAccounts(own(await call(), firstOnly()));
       expect(out).toMatchObject({ basis: 'caller_first_name_city_recent', candidates: [{ id: String(account), name: 'Robin E', city: 'Sampleton' }] });
       // Another city, no city, an older record, a record created after the call, or a record with no last name: nothing.
       expect(await matchCallerOwnAccounts(own(await call(), firstOnly({ city: 'Elsewhere' })))).toBeNull();
+      // No city was SAID: the merged record's city (address validation may have filled it) is not used.
       expect(await matchCallerOwnAccounts(own(await call(), firstOnly({ city: null })))).toBeNull();
       await trx('customers').where({ id: account }).update({ created_at: new Date(Date.parse(CALL_AT) - (RECENT_DAYS + 2) * 86400000) });
       expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
