@@ -552,6 +552,9 @@ describe('the draft is written before it is sent', () => {
     mount();
     await prepareBoth();
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    // "Complete stop" is ready from the map, before the parts' own writes land: wait for them, so the one failing
+    // write is the stop's and not a part's (which would leave that part not ready).
+    await waitFor(async () => expect(Object.keys((await store.getVisitCompletionDraft('combo:visit', 'op-1'))?.forms || {})).toHaveLength(2));
     vi.spyOn(store, 'putVisitCompletionDraft').mockResolvedValueOnce(false);
     click('Complete stop');
     await screen.findByText(/Could not save this on this device/);
