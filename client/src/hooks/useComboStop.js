@@ -228,22 +228,24 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
     onSaved?.();
   };
 
-  // A definite refusal ends the hold (a confirm resend is the same attempt, and an unknown outcome keeps it).
-  const releaseHold = (err, outcome) => {
-    if (outcome.kind !== 'resend' && !outcomeUnknown(err, outcome)) readiness.stage(null, false).catch(() => {});
+  // A definite refusal ends the hold (a confirm resend is the same attempt, and an unknown outcome keeps it). Run AFTER the
+  // outcome's own changes to the saved parts, so the one write that clears the mark also holds them; it resolves when that write
+  // has landed, so what the tech sees changes only once the store agrees.
+  const releaseHold = async (err, outcome) => {
+    if (outcome.kind !== 'resend' && !outcomeUnknown(err, outcome)) await readiness.stage(null, false).catch(() => {});
   };
 
   // Applies what resolveSendFailure decided, exactly as the long form does. Returns the draft to send again, or null.
   const failed = async (err, candidate) => {
     const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope, draftId: readiness.draftId });
-    releaseHold(err, outcome);
     if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft, candidate); return outcome.draft; }
     if (outcome.kind === 'reopened') {
       readiness.replaceFrom(outcome.draft);
       const kind = outcome.draft.forms[ids.pest]?.body === null ? 'pest' : 'lawn';
       setFresh((f) => ({ ...f, [kind]: (f[kind] || 0) + 1 }));
-      setError(outcome.message);
     }
+    await releaseHold(err, outcome);
+    if (outcome.kind === 'reopened') setError(outcome.message);
     if (outcome.kind !== 'error') return null;
     setError(outcome.error);
     if (sentToLongForm(err)) setRefusal(err.message || outcome.error);
