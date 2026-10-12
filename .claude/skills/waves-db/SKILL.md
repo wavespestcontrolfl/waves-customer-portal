@@ -251,8 +251,8 @@ stored row "replay".
   `deleted_at IS NULL` AND `pipeline_stage IN (active_customer, won,
   at_risk)` — `modify(whereLiveCustomer)` from
   `server/services/customer-stages.js`, which is the exported predicate.
-  (`whereRealCustomer` is a route-local copy in `admin-dashboard.js:152`
-  — not importable, don't reach for it.) A scope that checks `active`
+  (`whereRealCustomer` is a route-local copy inside `admin-dashboard.js`
+  — not exported, don't reach for it.) A scope that checks `active`
   alone counts leads as customers, so it must never NAME a lead row as an
   account (#6274). The inverse is just as real: because the booking path
   does not promote the stage, a booked customer can still sit at
@@ -272,8 +272,8 @@ stored row "replay".
   `whereLiveCustomer`, `duplicatePairEligibility`, and
   `seriesNextOccurrencesUnbillable` — the wrapper that walks the cadence and
   assembles the inputs, not the lower-level `seriesExtensionUnbillable`
-  that expects them pre-derived (`admin-schedule.js:6178`; reaching past the
-  wrapper invites the very re-derivation this rule prevents) — rather than
+  that expects them pre-derived (both in `admin-schedule.js`; reaching past
+  the wrapper invites the very re-derivation this rule prevents) — rather than
   re-deriving one inline. The tell
   is a local check that consults FEWER conditions than the canonical one:
   score alone instead of name/address conflict before archiving a
@@ -357,7 +357,7 @@ limit, hold, target, or substitution, grep for the production reader in
 the path that ENFORCES it: a value living only in a note string, display
 text, or an unconsumed response key is a contradiction, not a change.
 A November large-patch nitrogen target that `v13RateOptions`
-(`waveguard-plan-engine.js:662`) never read would have left the plan
+(`waveguard-plan-engine.js`) never read would have left the plan
 calculating 3.1 lb per 1,000 while the same note told the technician
 2.1 lb (#6233, closed unmerged). `sodSwap` went up as an unconsumed
 response marker while completion rebuilt substitutions from
