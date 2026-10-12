@@ -762,6 +762,11 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT TO EXPECT\nYour home has been protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYour home was protected today.')).toBe('owner_phrase');
     expect(screen('WHAT WE DID AND WHY\nThe bait was protected from rain by the station cover.')).toBeNull();
+    // Any verdict, whatever the verb: the word is refused unless it describes a thing ("a protected spot") or names what from (Codex r9).
+    expect(screen('WHAT TO EXPECT\nThe treatment leaves your home protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYour home feels protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nThe treatment has your home protected.')).toBe('owner_phrase');
+    expect(screen('WHAT WE DID AND WHY\nWe placed bait in the protected stations along the fence.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are in a protected area along the fence.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are protected from rain by their covers.')).toBeNull();
