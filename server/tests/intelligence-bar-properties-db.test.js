@@ -122,6 +122,12 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await db('scheduled_services').insert({ id: unstamped, ...visit, status: 'pending', service_address_line1: '2100 Example Grove',
       service_address_city: 'Sarasota', service_address_state: 'FL', service_address_zip: '34201' });
     await blocked();
+    // A partial stamp (street only) can still name this property: blocks.
+    await db('scheduled_services').where({ id: unstamped }).update({ service_address_city: null, service_address_zip: null });
+    await blocked();
+    // A different ZIP on the same street name is another address: no block from this row.
+    await db('scheduled_services').where({ id: unstamped }).update({ service_address_zip: '34239' });
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });
     await db('scheduled_services').where({ id: unstamped }).update({ status: 'cancelled' });
     // A completed root of an ongoing recurring series still blocks.
     await db('scheduled_services').insert({ id: root, ...visit, status: 'completed', property_id: saved.propertyId, is_recurring: true, recurring_ongoing: true });
@@ -133,6 +139,13 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await blocked();
     await db('estimates').where({ id: estimate }).update({ status: 'declined' });
     await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
+
+    // The multi-home status is never cleared by a removal; the card says it stays on.
+    const active = await db('customer_properties').where({ customer_id: customerA, active: true }).count('id as count').first();
+    await db('customers').where({ id: customerA }).update({ has_multi_home: true });
+    const multi = await service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId);
+    expect(multi.effects.some(line => line.includes('multi-home status'))).toBe(Number(active.count) - 1 < 2);
+    await db('customers').where({ id: customerA }).update({ has_multi_home: beforeCustomer.has_multi_home });
 
     const proposed = await propose('remove_customer_property', input, say);
     const card = proposed.body.pendingActions[0];

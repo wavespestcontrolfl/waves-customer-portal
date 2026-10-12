@@ -952,7 +952,7 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
         before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
         effects: 'Updates only this saved property’s label, relationship or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
     } else if (TARGET_PREVIEWS[kind]) {
-      preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer) };
+      preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer, properties) };
     } else throw propertyActionError('Unknown property operation');
   }
   preview._version = require('crypto').createHash('sha256').update(JSON.stringify([
@@ -1019,28 +1019,32 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
     ] };
 }
 
-// Removal is a deactivation (active=false), never a row delete: visit history,
-// reports and estimates keep their property link. It is refused, fail-closed,
-// while anything open still depends on the row: the primary, the account
-// address, an open, reschedule-requested or ongoing-recurring visit, or an open estimate. Unstamped
-// visits and estimates count when their own address names this property.
-async function previewPropertyRemoval(conn, customerId, target, _primary, customer) {
-  if (target.is_primary) {
-    throw propertyActionError('This is the primary property. Make another saved property primary before removing it.', 409, 'primary_property');
-  }
-  if (customer.address_line1 && addressKey(customer) === addressKey(target)) {
-    throw propertyActionError('This property is the account address. Change the account address before removing it.', 409, 'account_address');
-  }
+// True when an unlinked visit's own service address can name this property.
+// Partial stamps are legal (street only, or missing city / ZIP), so a missing
+// component is a wildcard and only a present, different one rules the visit
+// out: the removal check fails closed on anything that could be this address.
+function visitAddressNamesProperty(visit, target) {
+  const street = streetKey(visit.service_address_line1);
+  if (!street || street !== streetKey(target.address_line1)) return false;
+  const unitOf = (line1, line2) => unitKey(line2) || streetEmbeddedUnitKey(line1);
+  const differs = (a, b) => !!a && !!b && a !== b;
+  return !differs(unitOf(visit.service_address_line1, visit.service_address_line2), unitOf(target.address_line1, target.address_line2))
+    && !differs(normStreet(visit.service_address_city), normStreet(target.city))
+    && !differs(normalizeZip(visit.service_address_zip), normalizeZip(target.zip));
+}
+
+// Open rows that still depend on a saved property. Every estimate and every
+// unsettled visit of the customer is read, and a row depends on the property
+// when ANY of its pointers names it: the property link, its own address, or
+// (a visit) its source estimate. A row linked to another property but
+// carrying this address still counts.
+async function propertyRemovalDependents(conn, customerId, target) {
   // 'rescheduled' is NOT settled here: a customer reschedule request parks
   // the visit in that status with no replacement visit yet (routes/schedule.js),
   // so it is still an outstanding booking at this property.
   const settledVisitStatuses = require('./property-role-proposals').TERMINAL_VISIT_STATUSES.filter(status => status !== 'rescheduled');
   const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
   const { estimateQuotesCustomerAddress, parseEstimateAddress } = require('./estimate-property-linkage');
-  // Every estimate and every unsettled visit of the customer is read, and a
-  // row depends on this property when ANY of its pointers names it: the
-  // property link, its own address, or (a visit) its source estimate. A row
-  // linked to another property but carrying this address still blocks.
   const estimates = await conn('estimates').where({ customer_id: customerId })
     .orderBy('id').select('id', 'status', 'archived_at', 'property_id', 'address');
   const quotesTarget = estimate => estimate.property_id === target.id
@@ -1053,22 +1057,41 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
       .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
     .orderBy('id')
     .select('id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
-  const targetKey = addressKey(target);
   const openVisits = visits.filter(visit => visit.property_id === target.id
-    || (visit.service_address_line1 && addressKey({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
-      city: visit.service_address_city, zip: visit.service_address_zip }) === targetKey)
+    || visitAddressNamesProperty(visit, target)
     || (visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id)));
-  if (openVisits.length || openEstimates.length) {
-    const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
-    const parts = [openVisits.length && count(openVisits.length, 'open or recurring visit'), openEstimates.length && count(openEstimates.length, 'open estimate')].filter(Boolean);
-    throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it.`, 409, 'property_in_use');
+  return { visits: openVisits.length, estimates: openEstimates.length };
+}
+
+function assertNoRemovalDependents({ visits, estimates }) {
+  if (!visits && !estimates) return;
+  const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+  const parts = [visits && count(visits, 'open or recurring visit'), estimates && count(estimates, 'open estimate')].filter(Boolean);
+  throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it.`, 409, 'property_in_use');
+}
+
+// Removal is a deactivation (active=false), never a row delete: visit history,
+// reports and estimates keep their property link. It is refused, fail-closed,
+// while anything open still depends on the row: the primary, the account
+// address, an open, reschedule-requested or ongoing-recurring visit, or an open estimate.
+async function previewPropertyRemoval(conn, customerId, target, _primary, customer, properties = []) {
+  if (target.is_primary) {
+    throw propertyActionError('This is the primary property. Make another saved property primary before removing it.', 409, 'primary_property');
   }
+  if (customer.address_line1 && addressKey(customer) === addressKey(target)) {
+    throw propertyActionError('This property is the account address. Change the account address before removing it.', 409, 'account_address');
+  }
+  assertNoRemovalDependents(await propertyRemovalDependents(conn, customerId, target));
+  // has_multi_home is fill-forward only (refreshHasMultiHome) and staff also
+  // hand-set it, so a removal never clears it: the card says it stays on.
+  const lastSecondHome = customer.has_multi_home === true && properties.filter(p => p.active && p.id !== target.id).length < 2;
   return { removed_property: { id: target.id, address: propertyAddressLabel(target), label: target.label || null },
     effects: [
       'Removes this saved property from the customer. It no longer shows on the customer record or in the customer portal, and it cannot be chosen for a booking or an estimate.',
       'Completed visits, service reports, closed estimates, invoices and receipts keep this address.',
       'The address stays on file as removed: a later call or the Add property action does not save it again.',
       'The primary property and the account address are unchanged. Sends no messages.',
+      ...(lastSecondHome ? ['The multi-home status on this customer stays ON. It controls the multi-home discount; turn it off on the customer record if this customer no longer has a second home.'] : []),
     ] };
 }
 
@@ -1137,6 +1160,12 @@ async function removeManualProperty(customerId, propertyId, options = {}) {
     const removed = await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true, is_primary: false })
       .update({ active: false, updated_at: trx.fn.now() });
     if (removed !== 1) throw propertyActionError('The property changed. Request a fresh preview.', 409, 'preview_changed');
+    // Re-check on a fresh statement snapshot: a booking or estimate that read
+    // this property as active before the update and committed its reference
+    // while it ran is invisible to the preview above. A late reference rolls
+    // the removal back (same doctrine as migration 20260829000050).
+    const target = await trx('customer_properties').where({ id: propertyId, customer_id: customerId }).first();
+    assertNoRemovalDependents(await propertyRemovalDependents(trx, customerId, target));
     return propertyId;
   });
 }
