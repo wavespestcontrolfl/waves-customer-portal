@@ -44,7 +44,7 @@ postgres('held lines SQL against PostgreSQL', () => {
       UNIQUE (phone_e164, source_call_log_id))`);
     await database.raw(`CREATE TEMP TABLE triage_items (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), call_log_id uuid, reason_code text, status text, payload jsonb,
-      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())`);
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz)`);
     await database.raw('CREATE TEMP TABLE call_log (id uuid PRIMARY KEY, created_at timestamptz DEFAULT now(), customer_id uuid)');
     await database.raw('CREATE TEMP TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text)');
     Holds = require('../services/disclaimed-number-holds');
@@ -148,15 +148,60 @@ postgres('held lines SQL against PostgreSQL', () => {
     });
 
     test('international lines that share the last ten digits do not bind (+44 vs +55, and +44 vs NANP)', async () => {
-      const callId = randomUUID();
       const UK = '+442025550123';
-      await insertHold(callId, UK, T('2030-02-01T10:00:02Z'));
-      await insertCard(callId, T('2030-02-01T10:00:00Z'), { status: 'resolved', ani: '+552025550123' });
+      const bound = async (ani) => {
+        const callId = randomUUID(); // one call each: two unstamped cards on one call would compete
+        await insertHold(callId, UK, T('2030-02-01T10:00:02Z'));
+        const id = await insertCard(callId, T('2030-02-01T10:00:00Z'), { status: 'resolved', ani });
+        const ids = (await listed()).map((l) => l.card_id);
+        await database.raw('TRUNCATE disclaimed_number_holds, triage_items');
+        return ids.includes(id);
+      };
+      expect(await bound('+552025550123')).toBe(false);
+      expect(await bound('(202) 555-0123')).toBe(false); // NANP: +12025550123
+      expect(await bound('+44 202 555 0123')).toBe(true);
+    });
+
+    test('two unstamped cards that fit one arming are ambiguous: neither binds, nothing is listed or cleared, the backfill reports and skips them', async () => {
+      const { backfill } = require('../../scripts/backfill-no-text-card-bindings');
+      const callId = randomUUID();
+      await insertHold(callId, X, T('2030-02-01T10:00:04Z'));
+      const a = await insertCard(callId, T('2030-02-01T10:00:00Z'), { status: 'resolved' });
+      const b = await insertCard(callId, T('2030-02-01T10:02:00Z'), { status: 'resolved' });
       expect(await listed()).toEqual([]);
-      await insertCard(callId, T('2030-02-01T10:00:01Z'), { status: 'resolved', ani: '(202) 555-0123' }); // NANP: +12025550123
+      expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: randomUUID(), clearedBy: 't', reason: 'verified_same_number', conn: database })).toEqual([]);
+      const dry = await backfill(database, { apply: false });
+      expect(dry.rows).toEqual([]);
+      expect(dry.ambiguous.map((r) => r.card_id).sort()).toEqual([a, b].sort());
+      const applied = await backfill(database, { apply: true });
+      expect(applied.rows).toEqual([]);
+      expect(await bindings(a)).toBeUndefined();
+      expect(await bindings(b)).toBeUndefined();
       expect(await listed()).toEqual([]);
-      const ok = await insertCard(callId, T('2030-02-01T10:00:01Z'), { status: 'resolved', ani: '+44 202 555 0123' });
-      expect((await listed()).map((l) => l.card_id)).toEqual([ok]);
+    });
+
+    test('a card closed BEFORE the hold was armed again cannot own that arming, even inside the window', async () => {
+      const callId = randomUUID();
+      const card = await insertCard(callId, T('2030-02-01T10:00:00Z'), { status: 'resolved' });
+      await database('triage_items').where({ id: card }).update({ resolved_at: T('2030-02-01T10:01:00Z') });
+      await insertHold(callId, X, T('2030-02-01T10:03:00Z')); // ownership-only re-arm after the card closed
+      expect(await listed()).toEqual([]);
+      expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: randomUUID(), clearedBy: 't', reason: 'verified_same_number', conn: database })).toEqual([]);
+      // the same hold armed before the card closed does bind
+      await database('disclaimed_number_holds').update({ held_at: T('2030-02-01T10:00:30Z') });
+      expect((await listed()).map((l) => l.card_id)).toEqual([card]);
+    });
+
+    test('the SQL phone key equals holdPhoneKey for every fixture (NANP, 1+10, unprefixed 11-15, +44, +55, garbage)', async () => {
+      const fixtures = ['9415551234', '19415551234', '+19415551234', '(941) 555-1234', '941-555-1234', '+1 (941) 555-1234',
+        '29415551234', '442025550123', '4420255501234', '442025550123456', '4420255501234567', '+442025550123', '+44 202 555 0123',
+        '  +44 2025550123  ', '+552025550123', '+55 11 91234 5678', '+4420255501', '+442025550', '+1234567', '+123456789012345',
+        '+1234567890123456', '12345', 'garbage', 'abc9415551234', '', '+', ' ', null];
+      for (const value of fixtures) {
+        const sql = Holds.holdPhoneKeySql('v.x');
+        const row = (await database.raw(`SELECT ${sql} AS k FROM (SELECT ?::text AS x) v`, [value])).rows[0];
+        expect({ value, key: row.k }).toEqual({ value, key: Holds.holdPhoneKey(value) });
+      }
     });
 
     test('a NANP number in any common format binds to its +1 hold', async () => {

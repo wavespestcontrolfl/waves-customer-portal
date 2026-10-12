@@ -219,11 +219,19 @@ describe('card <-> hold binding SQL', () => {
     expect(sql).toContain("= h.phone_e164");
   });
 
-  test('the SQL phone identity follows utils/phone.js: NANP collapses to +1 + ten digits, other countries keep every digit', () => {
-    const sql = Holds.canonicalPhoneSql('x');
+  test('an unstamped card binds only when no other unstamped card fits the same arming, and not after it closed', () => {
+    const sql = Holds.NO_TEXT_CARD_FOR_HOLD_SQL;
+    expect(sql).toContain('NOT EXISTS (SELECT 1 FROM triage_items t2 WHERE t2.id <> t.id');
+    expect(sql).toContain('h.held_at <= t.resolved_at');
+    expect(sql).toContain('h.held_at <= t2.resolved_at');
+  });
+
+  test('the legacy phone match is the hold writer rule (toE164 + isLikelyE164), not a second identity rule', () => {
+    const sql = Holds.holdPhoneKeySql('x');
+    expect(sql).toContain("BETWEEN 10 AND 15");
     expect(sql).toContain("'+1' || right(regexp_replace(x, '\\D', '', 'g'), 10)");
-    expect(sql).toContain("ELSE '+' || regexp_replace(x, '\\D', '', 'g')");
-    expect(sql).toContain("~ '^1\\d{10}$'");
+    expect(Holds.NO_TEXT_CARD_FOR_HOLD_SQL).toContain(Holds.holdPhoneKeySql("t.payload->>'ani_phone'"));
+    expect(Holds).not.toHaveProperty('canonicalPhoneSql');
   });
 
   test('the line-blocked check looks at every active hold on the line, not only calls with a no-text card', async () => {

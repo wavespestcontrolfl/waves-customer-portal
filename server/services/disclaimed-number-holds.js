@@ -205,24 +205,43 @@ async function callLineRows(conn, callLogId) {
 // refresh keeps it (refreshedCardPayload). The card is built BEFORE the hold row gets held_at = now(), so no
 // created_at comparison can bind them. A hold released and re-armed has a new held_at, so an older closed card
 // stops binding to it.
-// A card with no list predates this (filed by #6112): it binds only to a hold of the same call armed within
-// LEGACY_BINDING_WINDOW of the card's created_at, on the same canonical line, never as a wildcard.
-// scripts/backfill-no-text-card-bindings.js stamps those cards with exactly that rule.
+// A card with no list predates this (filed by #6112). It binds to a hold only when the match is UNAMBIGUOUS:
+// the hold is of the same call, on the card's line by the hold writer's own rule (holdPhoneKeySql), armed within
+// LEGACY_BINDING_WINDOW of the card's created_at and not after the card closed, and no other unstamped card of
+// that call fits the same arming. Anything less stays unbound: it binds to nothing and releases nothing.
+// A hold row keeps only its LATEST held_at (a re-arm overwrites it), so armings cannot be counted from the row.
+// Two facts survive and rule out a later re-arm: a card cannot belong to an arming that happened after the card
+// closed (resolved_at), and two cards cannot both own one arming. scripts/backfill-no-text-card-bindings.js stamps
+// the unambiguous cards with exactly this rule and lists the ambiguous ones.
 const LEGACY_BINDING_WINDOW = "interval '5 minutes'";
 
-// The repo's phone identity rule (utils/phone.js phoneIdentityKey) in SQL, rendered as the E.164 string a hold
-// row stores: a NANP number (1 + 10 digits, or a bare 10 digits) is +1 plus its last ten; any other country code
-// keeps its full digits, so +44... and +55... can never share a suffix.
-const canonicalPhoneSql = (expr) => `(CASE
-    WHEN ${expr} IS NULL OR regexp_replace(${expr}, '\\D', '', 'g') = '' THEN NULL
-    WHEN regexp_replace(${expr}, '\\D', '', 'g') ~ '^1\\d{10}$'
-      OR (${expr} !~ '^\\s*\\+' AND regexp_replace(${expr}, '\\D', '', 'g') ~ '^\\d{10}$')
+// utils/phone.js holdPhoneKey (toE164 accepted only when isLikelyE164) in SQL, so a legacy card's ani_phone and a
+// hold row's phone_e164 compare under the SAME rule the hold writer used. A '+' number keeps its country code and
+// needs 10..15 digits; any other input is read as NANP and becomes +1 plus its last ten digits when it has at
+// least ten digits; everything else is NULL (not a dialable number, so it can never match a hold). Pinned to the JS
+// function over a fixture list by server/tests/no-text-held-lines-postgres.test.js.
+const holdPhoneKeySql = (expr) => `(CASE
+    WHEN ${expr} IS NULL THEN NULL
+    WHEN ${expr} ~ '^\\s*\\+' THEN
+      CASE WHEN length(regexp_replace(${expr}, '\\D', '', 'g')) BETWEEN 10 AND 15
+           THEN '+' || regexp_replace(${expr}, '\\D', '', 'g') END
+    WHEN length(regexp_replace(${expr}, '\\D', '', 'g')) >= 10
       THEN '+1' || right(regexp_replace(${expr}, '\\D', '', 'g'), 10)
-    ELSE '+' || regexp_replace(${expr}, '\\D', '', 'g') END)`;
+    END)`;
 
-const LEGACY_CARD_FOR_HOLD_SQL = `t.payload->'hold_bindings' IS NULL
-  AND h.held_at BETWEEN t.created_at - ${LEGACY_BINDING_WINDOW} AND t.created_at + ${LEGACY_BINDING_WINDOW}
-  AND ${canonicalPhoneSql("t.payload->>'ani_phone'")} = h.phone_e164`;
+// Could unstamped card `c` have been filed for the arming of hold `h`? Time only (same call, window, not closed
+// before the arming): the base of both the binding and the ambiguity check.
+const legacyCardFitsArmingSql = (c, h) => `${c}.payload->'hold_bindings' IS NULL AND ${c}.reason_code = 'text_number_differs'
+  AND ${c}.call_log_id = ${h}.source_call_log_id
+  AND ${h}.held_at BETWEEN ${c}.created_at - ${LEGACY_BINDING_WINDOW} AND ${c}.created_at + ${LEGACY_BINDING_WINDOW}
+  AND (${c}.resolved_at IS NULL OR ${h}.held_at <= ${c}.resolved_at)`;
+
+// Card `t` (unstamped) is bound to hold `h`: it fits the arming, is on the hold's line, and is the only card that fits.
+const legacyCardBoundSql = (t, h) => `${legacyCardFitsArmingSql(t, h)}
+  AND ${holdPhoneKeySql(`${t}.payload->>'ani_phone'`)} = ${h}.phone_e164
+  AND NOT EXISTS (SELECT 1 FROM triage_items t2 WHERE t2.id <> ${t}.id AND ${legacyCardFitsArmingSql('t2', h)})`;
+
+const LEGACY_CARD_FOR_HOLD_SQL = legacyCardBoundSql('t', 'h');
 
 const NO_TEXT_CARD_FOR_HOLD_SQL = `t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs'
   AND (CASE WHEN t.payload->'hold_bindings' IS NULL THEN (${LEGACY_CARD_FOR_HOLD_SQL})
@@ -542,7 +561,9 @@ module.exports = {
   stampOpenNoTextCards,
   boundCardsForActiveHolds,
   refreshedCardPayload,
-  canonicalPhoneSql,
+  holdPhoneKeySql,
+  legacyCardFitsArmingSql,
+  legacyCardBoundSql,
   LEGACY_CARD_FOR_HOLD_SQL,
   LEGACY_BINDING_WINDOW,
   NO_TEXT_CARD_FOR_HOLD_SQL,

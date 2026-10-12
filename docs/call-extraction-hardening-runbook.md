@@ -146,16 +146,22 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   version check: a card is superseded when a newer card is bound to the same line. The list has one row per line (the
   newest hold, with `calls_on_line` and `line_since`) and the 500 cap applies to lines; its blocked flag is the whole
   line's (`lineOwnershipBlockSql`, the same predicate as the release check).
-  **Legacy cards** (filed before the bindings, no `hold_bindings`): they bind only to a hold of the same call armed
-  within 5 minutes of the card's `created_at` on the same canonical line (the repo's `phoneIdentityKey` rule in SQL:
-  NANP collapses to `+1` plus ten digits, any other country code keeps every digit, so `+44...` and `+55...` never
-  match). Never a wildcard. To make them exact, the owner runs the one-time backfill (dry run is the default; do not
-  skip the dry run):
-  `node scripts/backfill-no-text-card-bindings.js` lists the cards it would stamp and how many stay unbound;
-  `node scripts/backfill-no-text-card-bindings.js --apply` writes the bindings in one transaction. It stamps each legacy
-  card with the holds of its own call, on the same line, armed within 5 minutes of it; it is idempotent and skips
-  stamped cards. The Postgres suite `no-text-held-lines-postgres.test.js` pins all of this with the processor's real
-  order (card first, hold after).
+  **Legacy cards** (filed before the bindings, no `hold_bindings`): a legacy card binds only when the match is
+  unambiguous. The hold is of the same call, on the card's line, armed within 5 minutes of the card's `created_at`
+  and not after the card closed (`resolved_at`), and no other unstamped card of that call fits the same arming.
+  A card that fails any of these binds to nothing: it is not listed and releases nothing. The line match is the hold
+  writer's own rule (`holdPhoneKey`: `toE164`, accepted only when `isLikelyE164`), in SQL as `holdPhoneKeySql`; a
+  `+` number keeps its country code and needs 10 to 15 digits, any other input with at least ten digits is
+  `+1` plus its last ten, so `+44...` and `+55...` never match and an unprefixed 11 to 15 digit value matches the
+  hold the writer stored. The Postgres suite runs the SQL and `holdPhoneKey` over one fixture list and asserts they
+  agree. Limit: a hold row keeps only its latest `held_at`, so earlier armings of one (call, line) cannot be counted;
+  the close time and the one-card-per-arming check are what rule out a later re-arm. To make legacy cards exact, the
+  owner runs the one-time backfill (dry run is the default; do not skip the dry run):
+  `node scripts/backfill-no-text-card-bindings.js` lists the cards it would stamp, the cards it reports as
+  `unbound: ambiguous`, and how many stay unbound; `node scripts/backfill-no-text-card-bindings.js --apply` writes
+  the bindings in one transaction. It stamps each unambiguous legacy card with the hold of its own call and line
+  armed within 5 minutes of it, skips ambiguous ones, is idempotent and skips stamped cards. The Postgres suite
+  `no-text-held-lines-postgres.test.js` pins all of this with the processor's real order (card first, hold after).
 
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
