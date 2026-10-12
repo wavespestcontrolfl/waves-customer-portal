@@ -126,7 +126,8 @@ const REPEAT_VOCABULARY = new Set([
 ]);
 // A name is being given or asked for within this many characters before the repeat.
 const REPEAT_CONTEXT_WINDOW = 80;
-const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am)\b/i;
+// A bare "name" is a person's name unless a qualifier says it names a thing ("service name").
+const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|(?<!\b(?:service|product|company|street|business|brand|trade|file|user|domain|city|pest|chemical)\s+)name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am)\b/i;
 // (b) A phrase that announces a spelling. It counts only when no letter run follows within
 // ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
 // The letter forms are case sensitive on purpose ("that's S", not "that's a"). Where the words

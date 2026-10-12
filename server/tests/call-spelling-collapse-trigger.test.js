@@ -68,6 +68,7 @@ describe('spellingCollapseSignals', () => {
     ['a repeat across a speaker label, name context in the same turn', 'Caller: My last name is Marlowe.\nAgent: Marlowe.'],
     ['an answer and the agent\'s read-back right after the name question', 'Agent: What is your last name?\nCaller: Marlowe.\nAgent: Marlowe.'],
     ['the answer collapsed right after the question', 'Agent: Can I get your last name?\nCaller: Serov, Serov.'],
+    ['an answer to "your name"', 'Agent: What is your name?\nCaller: Serov. Serov.'],
     ['a same-turn name statement', 'Caller: My last name is Serov. Serov.'],
     ['a two-letter name with context', 'Caller: My last name is Lu, Lu.'],
     ['a repeat after "this is"', 'Caller: Hi, this is Okafor. Okafor.'],
@@ -91,6 +92,8 @@ describe('spellingCollapseSignals', () => {
     ['a bare two-letter repeat without context', 'Caller: Lu. Lu. That works for the garage.'],
     ['"Hi, I" is not name context', 'Caller: Hi, I need Sentricon.\nAgent: Sentricon. Sentricon.'],
     ['name context only in the OTHER speaker\'s turn', "Agent: What's your name?\nCaller: John.\nAgent: Sentricon? Sentricon."],
+    ['a "service name" question is not name context', 'Agent: What is the service name?\nCaller: Sentricon. Sentricon.'],
+    ['a "business name" question is not name context', 'Agent: Business name?\nCaller: Acme. Acme.'],
     ['a weekday repeated', 'Caller: It is Monday. Monday. Can you come then?'],
     ['a state repeated', 'Caller: We are in Florida. Florida.'],
     ['a month repeated near "name"', 'Caller: My name is on the account, it is October. October.'],
@@ -284,6 +287,37 @@ describe('contactDecoderGate', () => {
     global.fetch.mockClear();
     expect(await contactDecoderGate({ ...repeatOnly, extracted: { first_name: 'Ann' } })).toEqual(OFF);
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('a short CDN read inside the propagation window is not transcribed (same check as the primary download)', async () => {
+    process.env[GATE] = 'true';
+    global.fetch.mockResolvedValueOnce(audio); // 8 bytes for a 600 s recording
+    const input = base();
+    input.call.created_at = new Date();
+    input.call.recording_duration_seconds = 600;
+    expect(await contactDecoderGate(input)).toEqual(OFF);
+    expect(global.fetch).toHaveBeenCalledTimes(1); // the download only: no paid transcription
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recording not ready'));
+  });
+
+  test('an old recording is outside the window: no length check, the pass runs', async () => {
+    process.env[GATE] = 'true';
+    global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: Serov, S-E-R-O-V.'));
+    const input = base();
+    input.call.created_at = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+    input.call.recording_duration_seconds = 600;
+    expect(await contactDecoderGate(input)).toMatchObject({ run: true });
+  });
+
+  test('a discarded primary transcript resets the attempted flag with it', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const rejected = src.indexOf('primaryTranscriptRejected = true;');
+    const cleared = src.indexOf('contactPassTranscript = null;', rejected);
+    const reset = src.indexOf('contactPassAttempted = false;', cleared);
+    const next = src.indexOf('if (transcription) {', cleared);
+    expect(rejected).toBeGreaterThan(-1);
+    expect(reset).toBeGreaterThan(cleared);
+    expect(reset).toBeLessThan(next);
   });
 
   test('the wrapper marks the pass attempted before the paid call', () => {
