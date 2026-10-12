@@ -508,6 +508,35 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Wasp Nest Removal', 150]]);
   });
+  test('round 30: two legitimate same-identity rows in the fuller source both survive beside a single mirror in the other (Kitchen and Garage, not Kitchen twice)', async () => {
+    const kitchen = { service: 'bed_bug', label: 'Bed Bug Treatment', price: 300, detail: 'Kitchen', billingCadence: 'one_time' };
+    const garage = { service: 'bed_bug', label: 'Bed Bug Treatment', price: 300, detail: 'Garage', billingCadence: 'one_time' };
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { lineItems: [{ ...kitchen }] },
+          engineResult: { lineItems: [kitchen, garage] },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.amount, e.includes])).toEqual([[300, ['Kitchen']], [300, ['Garage']]]);
+  });
+  test('round 30: the estimate page accept (no card pins) keeps a detached membership-email send and does not wait on the provider', async () => {
+    let release;
+    AccountMembershipEmail.sendMembershipStarted.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const world = makeWorld();
+    const outcome = await Promise.race([
+      markEstimateManuallyAccepted(base(world, fakeConverter(world))).then(() => 'accepted'),
+      new Promise((resolve) => setTimeout(() => resolve('timed out'), 500)),
+    ]);
+    expect(outcome).toBe('accepted');
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledTimes(1);
+    expect(world.state.committed).toBe(1);
+    release({ sent: true });
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

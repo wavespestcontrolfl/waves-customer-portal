@@ -718,6 +718,15 @@ const POST_COMMIT_STEPS = {
       // address changed since the card (a fresh opt-out still vetoes there too).
       const key = step.target?.recipient_key;
       const payload = key ? { ...ctx.conversion.membershipEmail, recipientKey: key } : ctx.conversion.membershipEmail;
+      // The estimate page's own Mark accepted (no card pins) keeps its
+      // detached, guarded send: the accept has committed, and a slow provider
+      // must not hold the admin request open (codex #6113 r30).
+      if (step.target === undefined) {
+        void AccountMembershipEmail.sendMembershipStarted(payload).catch((err) => {
+          logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${ctx.acceptedEstimate.id}: ${err.message}`);
+        });
+        return;
+      }
       // The card promised the email, so the send is awaited and anything but
       // a sent result (provider refusal, transient prefs/database failure, a
       // fresh opt-out) is a result warning the operator finishes by hand.

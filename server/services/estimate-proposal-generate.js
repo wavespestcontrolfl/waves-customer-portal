@@ -762,35 +762,47 @@ const rawLineLabel = (line, fallback) => String(
   line.displayName || line.label || line.display?.name || line.name || line.service || fallback,
 );
 const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
-// Collapse mirrored rows across sources: each identity is emitted at most as
-// many times as its busiest single source holds it, object-deduped so a row
-// shared by two sources never doubles. A dropped mirror whose resolved
-// amount differs from every kept clone is reported in `conflicted` (by label).
+// Collapse mirrored rows across sources: for each identity the rows of the
+// ONE source that holds the most copies are kept as a multiset (the fullest
+// source; the first such source on a tie), object-deduped so a row shared by
+// two sources counts once. Every other source's copies are mirrors: a
+// dropped mirror whose resolved amount matches no kept clone is reported in
+// `conflicted` (by label). Filling a per-identity quota across the flattened
+// sources instead kept the first source's single copy plus one engine row
+// and silently lost the second legitimate repeat (codex #6113 r30).
 function collapseMirroredRows(sources, { identity, amount, label }) {
-  const maxPerSource = new Map();
-  for (const list of sources) {
-    const counts = new Map();
-    for (const row of list) counts.set(identity(row), (counts.get(identity(row)) || 0) + 1);
-    for (const [key, count] of counts) maxPerSource.set(key, Math.max(maxPerSource.get(key) || 0, count));
-  }
   const seen = new Set();
-  const emitted = new Map();
-  const keptAmounts = new Map();
-  const conflicted = [];
-  const rows = sources.flat().filter((row) => {
-    if (seen.has(row)) return false;
-    seen.add(row);
-    const key = identity(row);
-    const already = emitted.get(key) || 0;
-    const resolved = roundCents(amount(row));
-    if (already >= (maxPerSource.get(key) || 0)) {
-      if (!(keptAmounts.get(key) || []).some((kept) => kept === resolved)) conflicted.push(label(row));
-      return false;
+  const tagged = [];
+  sources.forEach((list, sourceIndex) => {
+    for (const row of list) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      tagged.push({ row, sourceIndex, key: identity(row) });
     }
-    emitted.set(key, already + 1);
-    keptAmounts.set(key, [...(keptAmounts.get(key) || []), resolved]);
-    return true;
   });
+  const countsByKey = new Map();
+  for (const { key, sourceIndex } of tagged) {
+    const counts = countsByKey.get(key) || new Map();
+    counts.set(sourceIndex, (counts.get(sourceIndex) || 0) + 1);
+    countsByKey.set(key, counts);
+  }
+  const fullestSource = new Map();
+  for (const [key, counts] of countsByKey) {
+    let best = null;
+    for (const [sourceIndex, count] of [...counts].sort((x, y) => x[0] - y[0])) {
+      if (best === null || count > best.count) best = { sourceIndex, count };
+    }
+    fullestSource.set(key, best.sourceIndex);
+  }
+  const rows = tagged.filter((t) => t.sourceIndex === fullestSource.get(t.key)).map((t) => t.row);
+  const keptAmounts = new Map();
+  for (const t of tagged) {
+    if (t.sourceIndex !== fullestSource.get(t.key)) continue;
+    keptAmounts.set(t.key, [...(keptAmounts.get(t.key) || []), roundCents(amount(t.row))]);
+  }
+  const conflicted = tagged
+    .filter((t) => t.sourceIndex !== fullestSource.get(t.key) && !(keptAmounts.get(t.key) || []).some((kept) => kept === roundCents(amount(t.row))))
+    .map((t) => label(t.row));
   return { rows, conflicted };
 }
 
