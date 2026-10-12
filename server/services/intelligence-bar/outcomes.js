@@ -7,6 +7,15 @@ function isToolFailure(result) {
 // Codes that name a real fault (the outcome of a write is unknown, a safety
 // check could not run), not a decision the tool made about the ask.
 const FAULT_CODES = new Set(['execution_interrupted', 'verify_failed']);
+// A refusal code is one of the bar's own: lowercase snake_case words
+// ("target_clarification_required", "gate_off"). Some executors catch an
+// exception and return err.code, so a driver or provider code can arrive in
+// the same field: Node's ECONNRESET / ETIMEDOUT, a Postgres SQLSTATE such as
+// 08006 or 23505, a provider's "api_connection_error". Those are faults and
+// must still trip the breaker.
+const REFUSAL_CODE_SHAPE = /^[a-z]+(?:_[a-z0-9]+)+$/;
+const FAULT_CODE_WORDS = /(?:^|_)(?:error|errors|timeout|timedout|unavailable|connection|network|unreachable|overloaded|internal|exception|rate_limit|rate_limited|throttled)(?:_|$)/;
+const isRefusalCode = code => REFUSAL_CODE_SHAPE.test(code) && !FAULT_CODES.has(code) && !FAULT_CODE_WORDS.test(code);
 
 /**
  * A tool declined on purpose: a scope, target, permission or capability
@@ -14,7 +23,8 @@ const FAULT_CODES = new Set(['execution_interrupted', 'verify_failed']);
  *   { error, code: 'target_clarification_required' | 'permission_denied' | ... }
  *   { error, code, blocked: true | preview_changed: true }   (a failure WITH a code)
  *   { refused: '<reason>' }  /  { refusal: { error, code } }  (an explicit marker)
- * A failure with no code, a thrown error, a timeout, an unknown write outcome
+ * A failure with no code or with a driver / provider code (ECONNRESET, a
+ * SQLSTATE, "api_connection_error"), a thrown error, a timeout, an unknown write outcome
  * and the breaker's own circuit_open result are faults, never refusals.
  */
 function isPolicyRefusal(result) {
@@ -22,7 +32,7 @@ function isPolicyRefusal(result) {
   if (result.outcome_unknown === true || result.error === 'circuit_open') return false;
   if (result.refused || result.refusal) return true;
   const code = typeof result.code === 'string' ? result.code.trim() : '';
-  return isToolFailure(result) && Boolean(code) && !FAULT_CODES.has(code);
+  return isToolFailure(result) && isRefusalCode(code);
 }
 
 /**

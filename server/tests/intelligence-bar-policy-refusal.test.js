@@ -33,6 +33,10 @@ describe('isPolicyRefusal', () => {
     expect(isPolicyRefusal({ error: 'interrupted', code: 'execution_interrupted', outcome_unknown: true })).toBe(false);
     expect(isPolicyRefusal({ error: 'x', code: 'verify_failed' })).toBe(false);
     expect(isPolicyRefusal({ error: 'circuit_open', message: 'Systems are having issues' })).toBe(false);
+    // An executor that returns a caught err.code: driver and provider codes are faults.
+    for (const code of ['ECONNRESET', 'ETIMEDOUT', '08006', '23505', 'api_connection_error', 'rate_limit_error', 'service_unavailable', 'request_timeout']) {
+      expect(isPolicyRefusal({ error: 'x', code })).toBe(false);
+    }
   });
 
   test('a code on a result that did not fail is not a refusal; nothing and non-objects are not either', () => {
@@ -80,4 +84,10 @@ describe('recordToolOutcome against a real breaker', () => {
     expect(recordToolOutcome(breaker, { customers: [] })).toBe('success');
     expect(breaker.failures).toHaveLength(0);
   });
+});
+
+test('five results that carry a driver error code trip the breaker accounting', () => {
+  const breaker = { recordFailure: jest.fn(), recordSuccess: jest.fn() };
+  for (let i = 0; i < 5; i += 1) expect(recordToolOutcome(breaker, { error: 'read ECONNRESET', code: 'ECONNRESET' })).toBe('failure');
+  expect(breaker.recordFailure).toHaveBeenCalledTimes(5);
 });
