@@ -109,7 +109,17 @@ const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-met
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
-const MAX_TOOL_ROUNDS = 8;
+// 12, not 8: a "check the last call, then fix the address" ask needed nine
+// tool rounds and got the "too many steps" line (owner IB history 10-12).
+const MAX_TOOL_ROUNDS = 12;
+// The last round may not call a tool: the model answers with what it has
+// found and names what is left, in place of the generic "too many steps" line.
+const FINAL_ROUND_NOTE = '[Step limit reached. Do not call a tool. Answer now: say what you found, what you changed or proposed, and what is still left to do.]';
+function finalRoundMessages(messages) {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'user' || !Array.isArray(last.content)) return messages;
+  return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text: FINAL_ROUND_NOTE }] }];
+}
 // Model arguments that only pick WHICH task customer an operation targets.
 // They are excluded from an operation's clarification identity so a retry
 // with the corrected target answers the original clarification.
@@ -2959,7 +2969,7 @@ const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
 function withEveryPageTools(tools, context, isAdmin) {
   if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
   const present = new Set(tools.map(t => t.name));
-  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS]
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
     .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
 }
 
@@ -3601,6 +3611,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Tool-use loop
     let lastToolResponse = null;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const finalRound = round === MAX_TOOL_ROUNDS - 1;
       const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
@@ -3613,7 +3624,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // shorter-TTL ones — system renders before messages, so this is safe.
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
-        messages: withCacheBreakpoint(currentMessages),
+        ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
+        messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
