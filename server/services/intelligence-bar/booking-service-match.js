@@ -4,81 +4,140 @@
 // treatment"), not as the catalog spells it ("Slab Pre-Treat Termite
 // Service"). The exact-name resolver in tools.js (resolveBookingCatalogRow)
 // stays the first and only authority for an exact name; this module is its
-// fallback, asked ONLY when the exact resolver found nothing. It never
-// guesses between services: one clear winner resolves, anything else comes
-// back as a short list the bar can ask the owner to choose from.
+// fallback, asked ONLY when the exact resolver found nothing. A wrong service
+// on a booking card is worse than a question, so it never guesses.
 //
-// Scoring reuses the sound-alike / close-spelling ranker the customer name
-// search already uses (name-match.js rankNameMatches). Pure: no I/O.
+// The rule, by accounting for words (pure, no I/O):
+//   1. Every non-generic word the operator said must match a word of the
+//      service's name (or short name). A word the service lacks puts that
+//      service out. "annual pest control" fits no row that has no annual word.
+//   2. A match is an equal stem, or one wrong letter in a word of 6+ letters
+//      (a misspelling). A cadence word (one-time, quarterly, monthly,
+//      bi-monthly, annual, ...) is first turned into one canonical token and
+//      must be EQUAL: "bi-monthly" never matches "monthly".
+//   3. Two spoken words may join to one name word and the reverse
+//      ("pre treat" / "pretreat"; name "Pre-Treat" / said "pretreat").
+//   4. Generic words (a, the, service, treatment, visit, job, appointment,
+//      for, at, today ...) are ignored on both sides.
+//   5. Several rows fit: return them as choices. One row fits: it resolves
+//      unless the row's name carries a cadence the operator did not say
+//      ("pest control" must not become the one-time service, "lawn care"
+//      not the bi-monthly one); then the call returns nothing.
+//
+// "Defining" words are found from the catalog by the fit itself, with no list:
+// a word the operator said that a row lacks puts that row out, and the rows
+// left are the ones that share everything he said, so a word that still
+// differs between them (a cadence, a service line, a treatment type) shows up
+// as several choices. The one place a single fit is not enough is cadence,
+// which is the word a catalog most often drops (a retired or missing row),
+// so an unsaid cadence is checked directly. Only cadence wording is
+// normalized, because its synonyms ("single", "yearly") and hyphenated
+// forms ("bi-monthly") are the ones that collide.
 
-const { rankNameMatches, tokenize, wordSimilarity, phoneticKey } = require('./name-match');
+const { levenshtein } = require('./name-match');
 
-// A candidate must clear the ranker's own bar (every dictated word has to
-// match a word of the name) and the winner must lead the runner-up by this
-// much, or the call is ambiguous and returns the choices instead.
-const MIN_SCORE = 0.75;
-const WINNER_MARGIN = 0.05;
 const MAX_CANDIDATES = 5;
-// A short phrase must name the WHOLE service ("Pest Control" must not price
-// one of the several "... Pest Control Service" rows); a phrase of this many
-// words may leave out the generic words of the name ("pre-slab termite
-// treatment" for "Slab Pre-Treat Termite Service").
-const MIN_WORDS_PARTIAL = 3;
-const GENERIC_NAME_WORDS = new Set(['service', 'services']);
+const MIN_FUZZY_LENGTH = 6;
 
-// "a pre-slab termite treatment" -> "pre-slab termite treatment": a leading
-// article is no part of a service name, and the ranker has no stopword for it.
-function stripLeadingArticle(text) {
-  return String(text || '').trim().replace(/^(?:a|an|the)\s+/i, '');
+const GENERIC_WORDS = new Set([
+  'a', 'an', 'the', 'and', 'of', 'for', 'at', 'on', 'today', 'please', 'new',
+  'service', 'treat', 'treatment', 'visit', 'job', 'appointment',
+]);
+
+// Phrase -> canonical cadence token; the first match wins, so "bi-monthly" is
+// taken before "monthly" and "semi-annual" before "annual".
+const CADENCE_PATTERNS = [
+  [/\bbi[\s-]?monthly\b|\bevery (?:other|2|two) months?\b/g, 'cad:bimonthly'],
+  [/\bbi[\s-]?weekly\b|\bevery (?:other|2|two) weeks?\b/g, 'cad:biweekly'],
+  [/\bsemi[\s-]?annual(?:ly)?\b|\btwice (?:a|per) year\b/g, 'cad:semiannual'],
+  [/\bone[\s-]?time\b|\bonce\b|\bsingle\b/g, 'cad:onetime'],
+  [/\bquarterly\b/g, 'cad:quarterly'],
+  [/\bmonthly\b/g, 'cad:monthly'],
+  [/\bweekly\b/g, 'cad:weekly'],
+  [/\bannual(?:ly)?\b|\byearly\b|\bevery year\b/g, 'cad:annual'],
+  [/\bseasonal\b/g, 'cad:seasonal'],
+  [/\bevery[\s-]?(\d+)[\s-]?(day|week|month)s?\b/g, 'cad:every$1$2'],
+];
+// Long cadence words a dictation may misspell by one letter ("quartely").
+const MISSPELLABLE_CADENCE = ['quarterly', 'bimonthly', 'biweekly', 'semiannual', 'annually'];
+
+const isCadence = (token) => token.startsWith('cad:');
+
+function repairCadenceSpelling(text) {
+  return text.replace(/[a-z]{8,}/g, (word) => MISSPELLABLE_CADENCE.find((c) => levenshtein(word, c) === 1) || word);
 }
 
-// One ranker candidate per name a row answers to (its name and its short
-// name); the row id rides in the candidate id so scores fold back to rows.
-function nameCandidates(services) {
-  const candidates = [];
-  for (const row of services) {
-    if (row.name) candidates.push({ id: `${row.id}|name`, company_name: row.name });
-    if (row.short_name) candidates.push({ id: `${row.id}|short`, company_name: row.short_name });
-  }
-  return candidates;
+function canonicalCadence(text) {
+  return CADENCE_PATTERNS.reduce((acc, [pattern, token]) => acc.replace(pattern, ` ${token} `), repairCadenceSpelling(text));
 }
 
-// True when every distinguishing word of one name has a counterpart among the
-// dictated words.
-function coversName(searchTokens, name) {
-  const nameTokens = tokenize(name).filter((t) => !GENERIC_NAME_WORDS.has(t));
-  return nameTokens.every((t) => searchTokens.some((w) => wordSimilarity(w, t, phoneticKey) >= MIN_SCORE));
+// "treatment" -> "treat", "pretreatment" -> "pretreat", "shrubs" -> "shrub".
+function stem(token) {
+  if (isCadence(token)) return token;
+  if (token.length > 7 && token.endsWith('ment')) return token.slice(0, -4);
+  if (token.length > 4 && token.endsWith('ies')) return `${token.slice(0, -3)}y`;
+  if (token.length > 3 && token.endsWith('s') && !token.endsWith('ss')) return token.slice(0, -1);
+  return token;
 }
 
-function rowQualifies(row, searchTokens) {
-  if (searchTokens.length >= MIN_WORDS_PARTIAL) return true;
-  return [row.name, row.short_name].filter(Boolean).some((name) => coversName(searchTokens, name));
+function phraseTokens(text) {
+  return canonicalCadence(String(text || '').toLowerCase()).split(/[^a-z0-9:]+/).filter(Boolean).map(stem);
 }
 
-// Best score per catalog row, best first.
-function scoreRows(services, search) {
-  const ranked = rankNameMatches(search, nameCandidates(services), { minScore: MIN_SCORE, limit: services.length * 2 || 1 });
-  const bestByRow = new Map();
-  for (const { id, score } of ranked) {
-    const rowId = String(id).split('|')[0];
-    if (!bestByRow.has(rowId) || bestByRow.get(rowId) < score) bestByRow.set(rowId, score);
-  }
-  return [...bestByRow.entries()]
-    .map(([rowId, score]) => ({ row: services.find((s) => String(s.id) === rowId), score }))
-    .filter((hit) => hit.row)
-    .sort((a, b) => b.score - a.score);
+function sameWord(a, b) {
+  if (a === b) return true;
+  if (isCadence(a) || isCadence(b)) return false;
+  return Math.min(a.length, b.length) >= MIN_FUZZY_LENGTH && levenshtein(a, b) <= 1;
 }
 
-// Returns { row } for one clear match, { candidates: [row, ...] } when
-// several services are close, or { row: null } when none is.
+// The words a phrase offers to match against: its non-generic words plus every
+// pair of neighbours joined ("pre" + "treat" -> "pretreat").
+function matchUnits(tokens) {
+  const singles = tokens.filter((t) => !GENERIC_WORDS.has(t));
+  const joined = tokens.slice(1).map((t, i) => tokens[i] + t).filter((pair) => !pair.includes(':'));
+  return [...singles, ...joined];
+}
+
+// Per word of `tokens`: is it accounted for by the words of `other`? Generic
+// words always are. A joined pair that matches marks both of its words.
+function accountedWords(tokens, other) {
+  const units = matchUnits(other);
+  const found = (word) => units.some((unit) => sameWord(word, unit));
+  const done = tokens.map((t) => GENERIC_WORDS.has(t));
+  tokens.forEach((t, i) => {
+    if (found(t)) done[i] = true;
+    const next = tokens[i + 1];
+    if (next !== undefined && !isCadence(t) && !isCadence(next) && found(t + next)) { done[i] = true; done[i + 1] = true; }
+  });
+  return done;
+}
+
+// The name words the search left out, or null when the search has a word the
+// name lacks (the row is out).
+function unsaidWords(searchTokens, nameTokens) {
+  if (!accountedWords(searchTokens, nameTokens).every(Boolean)) return null;
+  const done = accountedWords(nameTokens, searchTokens);
+  return nameTokens.filter((_, i) => !done[i]);
+}
+
+// A row answers to its name and its short name; the closer one counts.
+function rowUnsaid(searchTokens, row) {
+  const fits = [row.name, row.short_name].filter(Boolean)
+    .map((name) => unsaidWords(searchTokens, phraseTokens(name))).filter((words) => words !== null);
+  return fits.length ? fits.reduce((best, words) => (words.length < best.length ? words : best)) : null;
+}
+
+// Returns { row } for one safe match, { candidates: [row, ...] } when several
+// services fit what was said, or { row: null } when none does.
 function resolveCloseCatalogService(services, serviceType) {
-  const search = stripLeadingArticle(serviceType);
-  if (!search || !Array.isArray(services) || !services.length) return { row: null };
-  const searchTokens = tokenize(search);
-  const hits = scoreRows(services, search).filter((hit) => rowQualifies(hit.row, searchTokens));
-  if (!hits.length) return { row: null };
-  if (hits.length === 1 || hits[0].score - hits[1].score >= WINNER_MARGIN) return { row: hits[0].row };
-  return { candidates: hits.slice(0, MAX_CANDIDATES).map((hit) => hit.row) };
+  const search = phraseTokens(serviceType);
+  if (!Array.isArray(services) || search.every((t) => GENERIC_WORDS.has(t))) return { row: null };
+  const fits = services
+    .map((row) => ({ row, unsaid: rowUnsaid(search, row) }))
+    .filter((fit) => fit.unsaid !== null)
+    .sort((a, b) => a.unsaid.length - b.unsaid.length || String(a.row.name).localeCompare(String(b.row.name)));
+  if (fits.length > 1) return { candidates: fits.slice(0, MAX_CANDIDATES).map((fit) => fit.row) };
+  return fits.length === 1 && !fits[0].unsaid.some(isCadence) ? { row: fits[0].row } : { row: null };
 }
 
-module.exports = { resolveCloseCatalogService, stripLeadingArticle, MIN_SCORE, WINNER_MARGIN, MAX_CANDIDATES, MIN_WORDS_PARTIAL };
+module.exports = { resolveCloseCatalogService, phraseTokens, MAX_CANDIDATES, MIN_FUZZY_LENGTH };
