@@ -9,6 +9,9 @@ import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 // "Line can get texts" confirm (onRelease), so the copy and the request are the card's.
 const CARD_STATE_LABELS = { open: "open", in_progress: "in progress", resolved: "resolved", dismissed: "dismissed" };
 
+// The server sends one row per line (the newest hold on it) with calls_on_line, line_since and the LINE's
+// blocked flag, capped after grouping. This still groups by phone so an older response shape (one row per
+// hold) reads the same.
 export function groupHeldLines(lines) {
   const byPhone = new Map();
   for (const line of lines || []) {
@@ -18,10 +21,10 @@ export function groupHeldLines(lines) {
   return [...byPhone.entries()].map(([phone, rows]) => {
     // A call with an unresolved "not my number" card can only defer the release: prefer one that can clear it.
     const primary = rows.find((r) => !r.blocked_by_ownership_card) || rows[0];
-    const since = rows.reduce((a, r) => (new Date(r.held_at) < new Date(a) ? r.held_at : a), rows[0].held_at);
-    // The line is blocked when ANY call that holds it has an unresolved "not my number" card (the server
-    // checks the line too and defers the release; this only says so up front).
-    return { phone, primary, since, others: rows.length - 1, blocked: rows.some((r) => r.blocked_by_ownership_card) };
+    const first = (r) => new Date(r.line_since || r.held_at);
+    const since = rows.reduce((a, r) => (first(r) < new Date(a) ? (r.line_since || r.held_at) : a), rows[0].line_since || rows[0].held_at);
+    const calls = Math.max(rows.length, ...rows.map((r) => Number(r.calls_on_line) || 1));
+    return { phone, primary, since, others: calls - 1, blocked: rows.some((r) => r.blocked_by_ownership_card) };
   });
 }
 

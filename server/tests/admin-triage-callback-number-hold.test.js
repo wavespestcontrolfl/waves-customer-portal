@@ -137,7 +137,27 @@ function makeFakeDb(seed = {}) {
   }
   const conn = (table) => builder(String(table).split(' ')[0]);
   conn.transaction = async (fn) => fn(conn);
-  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  // boundCardsForActiveHolds (the real SQL is pinned by no-text-held-lines-postgres.test.js): a text card binds a
+  // hold when its hold_bindings list names (line, held_at); a card with no list and no ani_phone (the shape most
+  // fixtures here use) stands for every hold of its call.
+  const sameInstant = (a, b) => new Date(a).getTime() === new Date(b).getTime();
+  const bindsHold = (card, hold) => {
+    const list = card.payload?.hold_bindings;
+    if (list) return list.some((b) => b.line_e164 === hold.phone_e164 && sameInstant(b.held_at, hold.held_at));
+    return card.payload?.ani_phone ? String(card.payload.ani_phone).replace(/\D/g, '').slice(-10) === hold.phone_e164.replace(/\D/g, '').slice(-10) : true;
+  };
+  conn.raw = (sql, bindings) => {
+    if (/FROM disclaimed_number_holds h\s+JOIN triage_items t ON/.test(sql)) {
+      const pairs = [];
+      for (const hold of ensure('disclaimed_number_holds').filter((h) => h.source_call_log_id === bindings[0] && h.cleared_at == null)) {
+        const cards = ensure('triage_items').filter((t) => t.call_log_id === hold.source_call_log_id && t.reason_code === 'text_number_differs' && bindsHold(t, hold))
+          .sort((x, y) => (String(x.created_at) < String(y.created_at) ? 1 : -1));
+        for (const card of cards) pairs.push({ phone_e164: hold.phone_e164, card_id: card.id });
+      }
+      return { rows: pairs.sort((x, y) => (x.phone_e164 < y.phone_e164 ? -1 : x.phone_e164 > y.phone_e164 ? 1 : 0)) };
+    }
+    return { __raw: sql, bindings };
+  };
   conn.schema = { hasTable: async () => false };
   return { conn, tables };
 }
@@ -957,27 +977,48 @@ describe('line_e164: release the selected line, across calls', () => {
     });
   });
 
-  describe('the supersession check is per line (codex r4 P1)', () => {
-    const lineCard = (id, line, createdAt, over = {}) => text(id, CALL_ID, { payload: { no_text_hold: true, ani_phone: line }, created_at: createdAt, ...over });
+  describe('the supersession check is per line and per binding (codex r4/r5)', () => {
+    const bound = (id, lines, createdAt, over = {}) => text(id, CALL_ID, {
+      payload: { no_text_hold: true, hold_bindings: lines.map((l) => ({ line_e164: l, held_at: l === X ? '2030-01-01T10:00:00Z' : '2030-01-02T10:00:00Z' })) },
+      created_at: createdAt, ...over,
+    });
+    const others = [text('card-2', 'call-2'), text('card-3', 'call-3')];
 
-    test('an older closed card for line X still releases X when a newer card exists for line Y', async () => {
-      const fx = multiLine({ triage_items: [lineCard('card-x', X, '2030-01-01T10:00:00Z'), lineCard('card-y', Y, '2030-01-05T10:00:00Z'), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    test('an older closed card bound to X still releases X when a newer card is bound only to Y', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x', [X], '2030-01-01T10:00:00Z'), bound('card-y', [Y], '2030-01-05T10:00:00Z'), ...others] });
       const out = await release({ line_e164: X }, 'card-x');
       expect(out.status).toBe(200);
       expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
     });
 
-    test('the inbox path from the older X card also releases (its own line\'s newest card is itself)', async () => {
-      const fx = multiLine({ triage_items: [lineCard('card-x', X, '2030-01-01T10:00:00Z'), lineCard('card-y', Y, '2030-01-05T10:00:00Z'), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    test('the inbox path from the older X card releases the call\'s bound lines when nothing newer is bound to X', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x', [X], '2030-01-01T10:00:00Z'), bound('card-y', [Y], '2030-01-05T10:00:00Z'), ...others] });
       expect((await release({}, 'card-x')).status).toBe(200);
       expect(active(fx.tables)).toEqual([]);
     });
 
-    test('a newer card for the SAME line still supersedes the older one (409 stale), and a card cannot release another line', async () => {
-      const fx = multiLine({ triage_items: [lineCard('card-x1', X, '2030-01-01T10:00:00Z'), lineCard('card-x2', X, '2030-01-05T10:00:00Z'), lineCard('card-y', Y, '2030-01-03T10:00:00Z'), text('card-2', 'call-2'), text('card-3', 'call-3')] });
-      expect((await release({ line_e164: X }, 'card-x1')).status).toBe(409);
-      expect((await release({ line_e164: Y }, 'card-x2')).status).toBe(409); // card-x2 is not line Y's newest card
+    test('a newer card bound to the SAME line supersedes the older one (409 stale); a card cannot release a line it is not the newest for', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x1', [X], '2030-01-01T10:00:00Z'), bound('card-x2', [X, Y], '2030-01-05T10:00:00Z'), ...others] });
+      expect((await release({ line_e164: X }, 'card-x1')).status).toBe(409); // card-x2 is bound to X and newer
+      expect((await release({}, 'card-x1')).status).toBe(409);
+      expect((await release({ line_e164: Y }, 'card-x2')).status).toBe(200); // card-x2 is the newest bound to Y
+      expect(active(fx.tables)).toEqual(['c1x', 'c2x']);
+    });
+
+    test('a card bound to no active hold of the call (an old arming) releases nothing: 409 while another card is bound', async () => {
+      const staleBinding = [{ line_e164: X, held_at: '2029-12-01T10:00:00Z' }];
+      const fx = multiLine({ triage_items: [text('card-old', CALL_ID, { payload: { no_text_hold: true, hold_bindings: staleBinding }, created_at: '2029-12-01T10:00:00Z' }), bound('card-new', [X, Y], '2030-01-05T10:00:00Z'), ...others] });
+      expect((await release({}, 'card-old')).status).toBe(409);
       expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+    });
+
+    test('an ownership-only hold of the call (no card bound to it) is not this card\'s to release', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x', [X], '2030-01-01T10:00:00Z'), ...others] });
+      const out = await release({ line_e164: Y }, 'card-x'); // Y is held but no text card is bound to it
+      expect(out.status).toBe(409);
+      expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+      expect((await release({}, 'card-x')).status).toBe(200); // the inbox path releases only X
+      expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
     });
   });
 
@@ -985,7 +1026,7 @@ describe('line_e164: release the selected line, across calls', () => {
     const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
     const out = await release({});
     expect(out.status).toBe(200);
-    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [Y, X] });
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [X, Y] });
     expect(active(fx.tables)).toEqual([]);
     expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${X}`, `lock:no_text_line:${Y}`]);
     // both locks are taken before the first propagation write
@@ -996,7 +1037,7 @@ describe('line_e164: release the selected line, across calls', () => {
 describe('GET /admin/triage/held-lines', () => {
   const row = { hold_id: 'h1', phone_e164: '+19415551234', held_at: '2030-01-01T10:00:00.000Z', source_call_log_id: CALL_ID, card_id: CARD_ID, card_status: 'resolved', card_updated_at: '2030-01-02T10:00:00.000Z', blocked_by_ownership_card: false };
 
-  test('lists active no-text holds with the newest text_number_differs card, newest first, limit 500; techs may read it', async () => {
+  test('lists one row per LINE (newest hold) with its bound card, the line\'s blocked flag and the cap after grouping; techs may read it', async () => {
     mockRole = 'technician';
     const fx = fixture();
     wireDb(db, { conn: fx.conn });
@@ -1007,16 +1048,22 @@ describe('GET /admin/triage/held-lines', () => {
       expect(await res.json()).toEqual({ lines: [row] });
     });
     const sql = db.raw.mock.calls[0][0];
+    const Holds = require('../services/disclaimed-number-holds');
     expect(sql).toContain('h.cleared_at IS NULL');
-    expect(sql).toContain("reason_code = 'text_number_differs'");
     expect(sql).toContain('ORDER BY t.created_at DESC LIMIT 1'); // the newest card bound to the hold
-    // the card must belong to THIS hold's current arming and the held line (codex #6292 r3 P1)
-    expect(sql).toContain(require('../services/disclaimed-number-holds').NO_TEXT_CARD_FOR_HOLD_SQL);
-    expect(sql).toContain('ORDER BY h.held_at DESC');
-    expect(sql).toContain('LIMIT 500');
-    // the release-blocked flag uses the shared ownership predicate, aliased onto the other card
-    expect(sql).toContain(require('../services/disclaimed-number-holds').OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload'));
-    expect(sql).not.toContain('__OWNERSHIP__');
+    expect(sql).toContain(Holds.NO_TEXT_CARD_FOR_HOLD_SQL); // bound to this line and this arming
+    // one representative per line, THEN the cap: a busy line cannot hide the others
+    expect(sql).toContain('SELECT DISTINCT ON (h.phone_e164)');
+    expect(sql).toContain('ORDER BY h.phone_e164, h.held_at DESC) lines');
+    expect(sql.indexOf('DISTINCT ON')).toBeLessThan(sql.lastIndexOf('LIMIT 500'));
+    expect(sql.match(/LIMIT 500/g)).toHaveLength(1);
+    expect(sql).toContain('COUNT(*) OVER (PARTITION BY h.phone_e164)');
+    expect(sql).toContain('MIN(h.held_at) OVER (PARTITION BY h.phone_e164) AS line_since');
+    expect(sql).toContain('ORDER BY held_at DESC');
+    // the blocked flag is the LINE's: every active hold on the line, the same predicate as the release check
+    expect(sql).toContain(Holds.lineOwnershipBlockSql('h.phone_e164'));
+    expect(sql).not.toContain('__BLOCK__');
+    expect(sql).not.toContain('__CARD__');
   });
 
   test('a read error is a 500 with a fixed message (no query text)', async () => {

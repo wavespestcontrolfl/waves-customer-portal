@@ -256,13 +256,14 @@ function lineNotHeldError() {
 async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
   const Holds = require('../services/disclaimed-number-holds');
   const VERIFIED = CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER;
-  const rows = await Holds.callLineRows(trx, callLogId);
-  // Only lines the call STILL actively holds: a line this call already released (say from the panel) may
-  // have been re-held by another call since, and an inbox release must not clear that fresh hold.
-  let lines = rows.filter((r) => r.active).map((r) => r.key);
+  // Only lines the call STILL actively holds AS A NO-TEXT HOLD (a text card is bound to that arming): a line
+  // this call already released (say from the panel) may have been re-held by another call since, and an
+  // ownership-only hold of the same call is not this card's to clear.
+  const bound = new Set((await Holds.boundCardsForActiveHolds(trx, callLogId)).map((pair) => pair.phone_e164));
+  let lines = [...bound];
   if (lineE164 != null) {
     const key = Holds.holdPhoneKey(lineE164);
-    if (!key || !rows.some((r) => r.key === key && r.active)) throw lineNotHeldError();
+    if (!key || !bound.has(key)) throw lineNotHeldError();
     lines = [key];
   }
   // Lock order step 2: no hold row is read-for-update or written before the phone locks, so two releases
@@ -318,6 +319,23 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
   return reply;
 }
 
+// True when `item` is not the current release surface for what it would release: for the named line, a newer
+// card is bound to that line's active hold; with no line named (the inbox card), the card is bound to no active
+// hold while others are, or a newer card is bound to a line this card is bound to. A line the call does not
+// actively hold is not judged here (releaseNoTextLines answers NO_TEXT_LINE_NOT_HELD).
+async function cardSupersededForRelease(trx, item, lineE164) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const pairs = await Holds.boundCardsForActiveHolds(trx, item.call_log_id);
+  const newest = new Map();
+  for (const pair of pairs) if (!newest.has(pair.phone_e164)) newest.set(pair.phone_e164, String(pair.card_id));
+  const mine = new Set(pairs.filter((pair) => String(pair.card_id) === String(item.id)).map((pair) => pair.phone_e164));
+  if (lineE164 != null) {
+    const key = Holds.holdPhoneKey(lineE164);
+    return newest.has(key) && newest.get(key) !== String(item.id);
+  }
+  return pairs.length > 0 && (mine.size === 0 || [...mine].some((key) => newest.get(key) !== String(item.id)));
+}
+
 // "Line can get texts" on a card that is ALREADY closed (Resolve and Dismiss both close it and leave the
 // hold in place): the same explicit, version-checked release, so staff who learn later that the line can
 // get texts are not stranded. Returns null when the card is not a closed text_number_differs card.
@@ -330,18 +348,11 @@ async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo, line
     if (!live || !expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
       return { outcome: 'stale_version' };
     }
-    // Only the NEWEST text_number_differs card FOR THIS LINE may release: a reprocess that re-armed the line
-    // filed a newer card for it, and an older closed one must not clear what that card still asks the office
-    // to review. A call can hold several lines, each with its own card, so the check is per line (the line
-    // the panel names, else the clicked card's own line), never "newest card of the whole call".
-    const Holds = require('../services/disclaimed-number-holds');
-    const lineOf = (card) => Holds.holdPhoneKey(parsePayload(card.payload)?.ani_phone);
-    const cards = await trx('triage_items').where({ call_log_id: item.call_log_id, reason_code: 'text_number_differs' })
-      .orderBy('created_at', 'desc').select('id', 'payload');
-    const wanted = lineE164 != null ? Holds.holdPhoneKey(lineE164) : lineOf(item);
-    // A card with no recorded line (an older shape) cannot be tied to one line, so it counts for any line.
-    const newest = cards.find((card) => lineOf(card) === wanted || lineOf(card) === null);
-    if (!newest || String(newest.id) !== String(id)) return { outcome: 'stale_version' };
+    // A card releases only what it is bound to, and only while it is the newest card bound to it: a reprocess
+    // that re-armed a line filed a newer card for it (or re-stamped the open one), and an older closed card must
+    // not clear what that newer card still asks the office to review. The check is per line, never "newest
+    // card of the whole call" (a call can hold several lines on one card, or one card each).
+    if (await cardSupersededForRelease(trx, item, lineE164)) return { outcome: 'stale_version' };
     const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true, lineE164);
     return { outcome: 'ok', callbackNumber: reply, status: item.status };
   });
@@ -2650,33 +2661,37 @@ router.post('/:id/verdict', async (req, res) => {
 // GET /api/admin/triage/held-lines → every line whose texts are held because the caller said it cannot
 // get texts (#6112 follow-up). The inbox tabs show only the newest 100 closed cards, but the number-wide
 // hold outlives its card, so this list reads the hold rows themselves. A no-text hold is a hold row with a
-// text_number_differs card bound to it: same line, filed in the hold's current arming (NO_TEXT_CARD_FOR_HOLD_SQL,
-// also used by clearNoTextHoldsForPhone); the newest such card is the one the
-// "Line can get texts" button resolves. blocked_by_ownership_card marks a call that also has a "not my number" card still unresolved: the release will defer, never clear.
+// text_number_differs card bound to it for that line and that arming (NO_TEXT_CARD_FOR_HOLD_SQL, also used by
+// clearNoTextHoldsForPhone); the newest bound card is the one the "Line can get texts" button resolves.
+// ONE row per line (the newest hold on it), with calls_on_line and line_since, and the 500 cap applies to
+// lines, so one busy line cannot hide the others. blocked_by_ownership_card is the LINE's flag: any active
+// hold on the line whose call has an unresolved "not my number" card (the same predicate as the release check).
 const HELD_LINES_SQL = `
-  SELECT h.id AS hold_id, h.phone_e164, h.held_at, h.source_call_log_id,
-         c.created_at AS call_created_at, c.customer_id, cu.first_name, cu.last_name,
-         card.id AS card_id, card.status AS card_status, card.updated_at AS card_updated_at,
-         EXISTS (SELECT 1 FROM triage_items d
-                  WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
-                    AND d.status <> 'resolved'
-                    AND __OWNERSHIP__) AS blocked_by_ownership_card
-    FROM disclaimed_number_holds h
-    JOIN LATERAL (SELECT t.id, t.status, t.updated_at FROM triage_items t
-                   WHERE __CARD__
-                   ORDER BY t.created_at DESC LIMIT 1) card ON true
-    LEFT JOIN call_log c ON c.id = h.source_call_log_id
-    LEFT JOIN customers cu ON cu.id = c.customer_id
-   WHERE h.cleared_at IS NULL
-   ORDER BY h.held_at DESC
+  SELECT * FROM (
+    SELECT DISTINCT ON (h.phone_e164)
+           h.id AS hold_id, h.phone_e164, h.held_at, h.source_call_log_id,
+           c.created_at AS call_created_at, c.customer_id, cu.first_name, cu.last_name,
+           card.id AS card_id, card.status AS card_status, card.updated_at AS card_updated_at,
+           __BLOCK__ AS blocked_by_ownership_card,
+           (COUNT(*) OVER (PARTITION BY h.phone_e164))::int AS calls_on_line,
+           MIN(h.held_at) OVER (PARTITION BY h.phone_e164) AS line_since
+      FROM disclaimed_number_holds h
+      JOIN LATERAL (SELECT t.id, t.status, t.updated_at FROM triage_items t
+                     WHERE __CARD__
+                     ORDER BY t.created_at DESC LIMIT 1) card ON true
+      LEFT JOIN call_log c ON c.id = h.source_call_log_id
+      LEFT JOIN customers cu ON cu.id = c.customer_id
+     WHERE h.cleared_at IS NULL
+     ORDER BY h.phone_e164, h.held_at DESC) lines
+   ORDER BY held_at DESC
    LIMIT 500`;
 
 router.get('/held-lines', async (_req, res) => {
   try {
-    const { OWNERSHIP_DISCLAIMER_CARD_SQL, NO_TEXT_CARD_FOR_HOLD_SQL } = require('../services/disclaimed-number-holds');
+    const { NO_TEXT_CARD_FOR_HOLD_SQL, lineOwnershipBlockSql } = require('../services/disclaimed-number-holds');
     const result = await db.raw(HELD_LINES_SQL
-      .replace('__CARD__', NO_TEXT_CARD_FOR_HOLD_SQL)
-      .replace('__OWNERSHIP__', OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')));
+      .replace('__CARD__', () => NO_TEXT_CARD_FOR_HOLD_SQL)
+      .replace('__BLOCK__', () => lineOwnershipBlockSql('h.phone_e164')));
     res.json({ lines: result?.rows || [] });
   } catch (err) {
     logger.error(`[admin-triage] held-lines list failed: ${err.message}`);

@@ -185,15 +185,17 @@ describe('lockNoTextLines / callLineRows', () => {
   });
 });
 
-describe('stampOpenNoTextCards', () => {
-  test('one UPDATE stamps the call\'s open text card with the active hold\'s held_at for the same line', async () => {
+describe('card <-> hold binding SQL', () => {
+  test('stampOpenNoTextCards appends a { line_e164, held_at } binding for every active hold of the call, once', async () => {
     const raw = jest.fn(async () => ({ rows: [] }));
     await Holds.stampOpenNoTextCards({ raw }, 'call-1');
     const [sql, params] = raw.mock.calls[0];
-    expect(sql).toContain("'hold_held_at', h.held_at::text");
+    expect(sql).toContain("jsonb_build_object('line_e164', h.phone_e164, 'held_at', h.held_at::text)");
     expect(sql).toContain("t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')");
     expect(sql).toContain('h.cleared_at IS NULL');
-    expect(sql).toContain("t.payload->>'ani_phone'");
+    expect(sql).toContain("COALESCE(t.payload->'hold_bindings', '[]'::jsonb) || fresh.elems"); // appended, never replaced
+    expect(sql).toContain('NOT EXISTS'); // idempotent
+    expect(sql).not.toContain('ani_phone'); // no phone matching at all: the hold row names the line
     expect(params).toEqual(['call-1']);
   });
 
@@ -203,12 +205,34 @@ describe('stampOpenNoTextCards', () => {
     expect(raw).not.toHaveBeenCalled();
   });
 
+  test('a card refresh keeps the bindings the new payload does not carry', () => {
+    const conn = { raw: jest.fn((sql, bindings) => ({ sql, bindings })) };
+    const out = Holds.refreshedCardPayload(conn, { ani_phone: '+19415550100' });
+    expect(out.sql).toContain("jsonb_build_object('hold_bindings', payload->'hold_bindings')");
+    expect(out.bindings).toEqual(['{"ani_phone":"+19415550100"}']);
+  });
+
+  test('unstamped cards bind only inside the 5-minute window and on the canonical line, never as a wildcard', () => {
+    const sql = Holds.NO_TEXT_CARD_FOR_HOLD_SQL;
+    expect(sql).toContain("t.payload->'hold_bindings' IS NULL");
+    expect(sql).toContain("h.held_at BETWEEN t.created_at - interval '5 minutes' AND t.created_at + interval '5 minutes'");
+    expect(sql).toContain("= h.phone_e164");
+  });
+
+  test('the SQL phone identity follows utils/phone.js: NANP collapses to +1 + ten digits, other countries keep every digit', () => {
+    const sql = Holds.canonicalPhoneSql('x');
+    expect(sql).toContain("'+1' || right(regexp_replace(x, '\\D', '', 'g'), 10)");
+    expect(sql).toContain("ELSE '+' || regexp_replace(x, '\\D', '', 'g')");
+    expect(sql).toContain("~ '^1\\d{10}$'");
+  });
+
   test('the line-blocked check looks at every active hold on the line, not only calls with a no-text card', async () => {
     const raw = jest.fn(async () => ({ rows: [{ phone_e164: '+19415551234' }] }));
     const out = await Holds.linesBlockedByOwnershipCard({ raw }, ['+19415551234', '+19415557777']);
     expect([...out]).toEqual(['+19415551234']);
     const [sql, params] = raw.mock.calls[0];
     expect(sql).not.toContain('text_number_differs');
+    expect(sql).toContain(Holds.lineOwnershipBlockSql('h.phone_e164'));
     expect(sql).toContain("d.reason_code = 'callback_number_needed'");
     expect(params).toEqual(['+19415551234', '+19415557777']);
   });

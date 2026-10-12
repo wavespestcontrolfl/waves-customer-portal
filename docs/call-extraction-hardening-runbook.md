@@ -133,15 +133,30 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   only disclaimed the number) belongs to a call with an unresolved "not my number" card, that line is not released on
   any call, the card still resolves, and the reply says `release: 'deferred'` with `lines_blocked`. The panel shows
   the same warning when any call on the line is blocked.
-  **What counts as a no-text hold:** a hold row with a `text_number_differs` card for the same line (`ani_phone`) that
-  belongs to the hold's current arming. The binding is durable provenance on the card: `payload.hold_held_at` is the
-  hold row's `held_at`, stamped by `stampOpenNoTextCards` in the same transaction that files or refreshes the card (the
-  card is built before the hold row gets `held_at = now()`, so a timestamp comparison cannot bind them). A hold
-  released and re-armed later for an ownership-only reason has a new `held_at`, so the older closed card no longer
-  binds: the hold is not listed and "Line can get texts" does not clear it. A card with no stamp predates the binding
-  and binds by line alone. One predicate (`NO_TEXT_CARD_FOR_HOLD_SQL`) drives the list and the cross-call release. The
-  closed-card version check is per line: a card is superseded only by a newer card for the same line. The Postgres
-  suite `no-text-held-lines-postgres.test.js` pins all of it with the processor's real order (card first, hold after).
+  **What counts as a no-text hold:** a hold row (one per line and call) with a `text_number_differs` card bound to its
+  CURRENT arming. The binding is exact per (line, arming): the card carries
+  `payload.hold_bindings = [{ line_e164, held_at }, ...]`, the hold row's own canonical `phone_e164` and full-precision
+  `held_at`. A call can hold several lines but has one open text card, so `stampOpenNoTextCards` APPENDS a binding for
+  every active hold of the call on each card write (in the transaction that files or refreshes the card; a refresh keeps
+  the list via `refreshedCardPayload`). The card is built before the hold row gets `held_at = now()`, so no `created_at`
+  comparison can bind them, and no phone matching is involved for stamped cards (the hold row names the line). A hold
+  released and re-armed later (ownership-only, or a new no-text pass) has a new `held_at`, so an older closed card no
+  longer binds: the hold is not listed and "Line can get texts" does not clear it. One predicate
+  (`NO_TEXT_CARD_FOR_HOLD_SQL`) drives the list, the cross-call release, the lines a release may touch and the closed-card
+  version check: a card is superseded when a newer card is bound to the same line. The list has one row per line (the
+  newest hold, with `calls_on_line` and `line_since`) and the 500 cap applies to lines; its blocked flag is the whole
+  line's (`lineOwnershipBlockSql`, the same predicate as the release check).
+  **Legacy cards** (filed before the bindings, no `hold_bindings`): they bind only to a hold of the same call armed
+  within 5 minutes of the card's `created_at` on the same canonical line (the repo's `phoneIdentityKey` rule in SQL:
+  NANP collapses to `+1` plus ten digits, any other country code keeps every digit, so `+44...` and `+55...` never
+  match). Never a wildcard. To make them exact, the owner runs the one-time backfill (dry run is the default; do not
+  skip the dry run):
+  `node scripts/backfill-no-text-card-bindings.js` lists the cards it would stamp and how many stay unbound;
+  `node scripts/backfill-no-text-card-bindings.js --apply` writes the bindings in one transaction. It stamps each legacy
+  card with the holds of its own call, on the same line, armed within 5 minutes of it; it is idempotent and skips
+  stamped cards. The Postgres suite `no-text-held-lines-postgres.test.js` pins all of this with the processor's real
+  order (card first, hold after).
+
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner

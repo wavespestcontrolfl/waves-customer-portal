@@ -195,57 +195,113 @@ async function callLineRows(conn, callLogId) {
   return [...byKey.values()];
 }
 
-// A text_number_differs card (alias `t`) that stands for THIS hold row (alias `h`), not merely any card the
-// call ever had (codex #6292 r3/r4). It is for the same line (its ani_phone, compared on the last 10 digits)
-// and it belongs to the hold's CURRENT arming. The arming identity is durable provenance on the card:
-// payload.hold_held_at is the hold row's held_at, written by stampOpenNoTextCards in the same transaction
-// that files the card (the card is BUILT before the hold row gets its held_at = now(), so no created_at
-// comparison can bind them). A hold released and re-armed later (ownership-only, or a new no-text pass) has a
-// new held_at, so the older closed card no longer matches. A card with no stamp predates this binding
-// (filed by #6112 before the stamp existed): it binds by line alone, as it did before.
+// ── Card <-> hold binding: exact per (line, arming) ────────────────────────────────────────────────────────
+// A hold row is one (line, call) with a held_at that changes each time the hold is re-armed after a release.
+// A text_number_differs card releases a hold only if it was filed for THAT line in THAT arming. A call can hold
+// several lines but has at most ONE open text card (partial unique index), so the card carries a list:
+//   payload.hold_bindings = [{ line_e164, held_at }, ...]
+// line_e164 is the hold row's own canonical phone_e164 and held_at its full-precision timestamp as text. The list
+// is only ever appended to (stampOpenNoTextCards), on every write, for every active hold of the call, and a card
+// refresh keeps it (refreshedCardPayload). The card is built BEFORE the hold row gets held_at = now(), so no
+// created_at comparison can bind them. A hold released and re-armed has a new held_at, so an older closed card
+// stops binding to it.
+// A card with no list predates this (filed by #6112): it binds only to a hold of the same call armed within
+// LEGACY_BINDING_WINDOW of the card's created_at, on the same canonical line, never as a wildcard.
+// scripts/backfill-no-text-card-bindings.js stamps those cards with exactly that rule.
+const LEGACY_BINDING_WINDOW = "interval '5 minutes'";
+
+// The repo's phone identity rule (utils/phone.js phoneIdentityKey) in SQL, rendered as the E.164 string a hold
+// row stores: a NANP number (1 + 10 digits, or a bare 10 digits) is +1 plus its last ten; any other country code
+// keeps its full digits, so +44... and +55... can never share a suffix.
+const canonicalPhoneSql = (expr) => `(CASE
+    WHEN ${expr} IS NULL OR regexp_replace(${expr}, '\\D', '', 'g') = '' THEN NULL
+    WHEN regexp_replace(${expr}, '\\D', '', 'g') ~ '^1\\d{10}$'
+      OR (${expr} !~ '^\\s*\\+' AND regexp_replace(${expr}, '\\D', '', 'g') ~ '^\\d{10}$')
+      THEN '+1' || right(regexp_replace(${expr}, '\\D', '', 'g'), 10)
+    ELSE '+' || regexp_replace(${expr}, '\\D', '', 'g') END)`;
+
+const LEGACY_CARD_FOR_HOLD_SQL = `t.payload->'hold_bindings' IS NULL
+  AND h.held_at BETWEEN t.created_at - ${LEGACY_BINDING_WINDOW} AND t.created_at + ${LEGACY_BINDING_WINDOW}
+  AND ${canonicalPhoneSql("t.payload->>'ani_phone'")} = h.phone_e164`;
+
 const NO_TEXT_CARD_FOR_HOLD_SQL = `t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs'
-  AND (t.payload->>'hold_held_at' IS NULL OR (t.payload->>'hold_held_at')::timestamptz = h.held_at)
-  AND right(regexp_replace(COALESCE(t.payload->>'ani_phone', ''), '\\D', '', 'g'), 10)
-    = right(regexp_replace(h.phone_e164, '\\D', '', 'g'), 10)`;
+  AND (CASE WHEN t.payload->'hold_bindings' IS NULL THEN (${LEGACY_CARD_FOR_HOLD_SQL})
+       ELSE EXISTS (SELECT 1 FROM jsonb_array_elements(t.payload->'hold_bindings') b
+                     WHERE b->>'line_e164' = h.phone_e164 AND (b->>'held_at')::timestamptz = h.held_at) END)`;
 
 /**
- * Stamps the call's OPEN text_number_differs card(s) with the arming of the active hold on the card's line
- * (payload.hold_held_at = that hold's held_at, full precision). Call in the transaction that files or
- * refreshes the card, after the hold row exists, under the per-call lock. Idempotent, and it also re-stamps an
- * open card that survived a re-arm (the card insert is a no-op while one is open).
+ * Every (active hold of the call, text card bound to it) pair, newest card first within a line:
+ * [{ phone_e164, card_id }]. The one read behind "is this card the current release surface for that line":
+ * the held-lines list, the closed-card version check and the lines a release may touch all use the same
+ * binding (NO_TEXT_CARD_FOR_HOLD_SQL).
+ */
+async function boundCardsForActiveHolds(conn, callLogId) {
+  const result = await conn.raw(
+    `SELECT h.phone_e164, t.id AS card_id FROM ${TABLE} h
+       JOIN triage_items t ON ${NO_TEXT_CARD_FOR_HOLD_SQL}
+      WHERE h.source_call_log_id = ? AND h.cleared_at IS NULL
+      ORDER BY h.phone_e164, t.created_at DESC`,
+    [callLogId],
+  );
+  return result?.rows || [];
+}
+
+/**
+ * Appends to the call's OPEN text_number_differs card a binding for every active hold the call has that the
+ * card does not already list. Call in the transaction that files or refreshes the card, after the hold row
+ * exists, under the per-call lock. Idempotent; never removes or replaces a binding.
  */
 async function stampOpenNoTextCards(conn, callLogId) {
   if (!callLogId) return;
   await conn.raw(
-    `UPDATE triage_items t
-        SET payload = COALESCE(t.payload, '{}'::jsonb) || jsonb_build_object('hold_held_at', h.held_at::text)
-       FROM ${TABLE} h
-      WHERE t.call_log_id = ? AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
-        AND h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL
-        AND right(regexp_replace(COALESCE(t.payload->>'ani_phone', ''), '\\D', '', 'g'), 10)
-          = right(regexp_replace(h.phone_e164, '\\D', '', 'g'), 10)`,
+    `WITH fresh AS (
+       SELECT t.id, jsonb_agg(jsonb_build_object('line_e164', h.phone_e164, 'held_at', h.held_at::text)) AS elems
+         FROM triage_items t
+         JOIN ${TABLE} h ON h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL
+        WHERE t.call_log_id = ? AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
+          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(t.payload->'hold_bindings', '[]'::jsonb)) b
+                           WHERE b->>'line_e164' = h.phone_e164 AND (b->>'held_at')::timestamptz = h.held_at)
+        GROUP BY t.id)
+     UPDATE triage_items t
+        SET payload = COALESCE(t.payload, '{}'::jsonb)
+          || jsonb_build_object('hold_bindings', COALESCE(t.payload->'hold_bindings', '[]'::jsonb) || fresh.elems)
+       FROM fresh WHERE t.id = fresh.id`,
     [callLogId],
   );
 }
 
 /**
- * Which of these lines are held by a call whose "not my number" card is still unresolved. EVERY active hold on
- * the line counts, with or without a no-text card: a call that only disclaimed the same number (an ownership
- * hold and a callback_number_needed card, no text_number_differs) keeps its row too (#6292 r4 P1). A shared line
- * has one hold row per call; "Line can get texts" proves the line takes SMS, never who owns it, so a call
- * with an open ownership card keeps its row, and the line as a whole stays blocked. The release asks this
- * of the LINE (every call that holds it), never only of the call whose card was clicked (#6292 r3 P1).
+ * The payload SQL for refreshing an OPEN card from a newly built one: the new payload, with the card's existing
+ * hold_bindings kept (the new payload never carries them). Use as `.update({ payload: refreshedCardPayload(trx, json) })`.
+ */
+function refreshedCardPayload(conn, payloadJson) {
+  return conn.raw(
+    `?::jsonb || CASE WHEN payload->'hold_bindings' IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('hold_bindings', payload->'hold_bindings') END`,
+    [typeof payloadJson === 'string' ? payloadJson : JSON.stringify(payloadJson)],
+  );
+}
+
+// True when some ACTIVE hold on the line (alias `x` = the line's phone_e164 expression) belongs to a call with an
+// unresolved "not my number" card: a no-text hold, or a call that only disclaimed the number. One predicate for
+// the release check and the held-lines list.
+const lineOwnershipBlockSql = (lineExpr) => `EXISTS (SELECT 1 FROM ${TABLE} oh
+      JOIN triage_items d ON d.call_log_id = oh.source_call_log_id
+     WHERE oh.phone_e164 = ${lineExpr} AND oh.cleared_at IS NULL
+       AND d.reason_code = 'callback_number_needed' AND d.status <> 'resolved'
+       AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})`;
+
+/**
+ * Which of these lines are blocked by an unresolved "not my number" card on ANY active hold of the line
+ * (#6292 r4/r5). "Line can get texts" proves the line takes SMS, never who owns it, so a call with an open
+ * ownership card keeps its row and the line as a whole stays blocked. The release asks this of the LINE, never
+ * only of the call whose card was clicked.
  */
 async function linesBlockedByOwnershipCard(conn, phoneKeys) {
   if (!phoneKeys?.length) return new Set();
   const result = await conn.raw(
     `SELECT DISTINCT h.phone_e164 FROM ${TABLE} h
-      WHERE h.phone_e164 IN (${phoneKeys.map(() => '?').join(', ')})
-        AND h.cleared_at IS NULL
-        AND EXISTS (SELECT 1 FROM triage_items d
-                     WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
-                       AND d.status <> 'resolved'
-                       AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})`,
+      WHERE h.phone_e164 IN (${phoneKeys.map(() => '?').join(', ')}) AND h.cleared_at IS NULL
+        AND ${lineOwnershipBlockSql('h.phone_e164')}`,
     phoneKeys,
   );
   return new Set((result?.rows || []).map((r) => r.phone_e164));
@@ -482,7 +538,13 @@ module.exports = {
   clearNoTextHoldsForPhone,
   lockNoTextLines,
   linesBlockedByOwnershipCard,
+  lineOwnershipBlockSql,
   stampOpenNoTextCards,
+  boundCardsForActiveHolds,
+  refreshedCardPayload,
+  canonicalPhoneSql,
+  LEGACY_CARD_FOR_HOLD_SQL,
+  LEGACY_BINDING_WINDOW,
   NO_TEXT_CARD_FOR_HOLD_SQL,
   callLineRows,
   NO_TEXT_LINE_LOCK_PREFIX,

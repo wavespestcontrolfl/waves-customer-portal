@@ -42,6 +42,16 @@ describe('useHeldLines + HeldLinesPanel', () => {
     expect(row.textContent).toContain('1 more call hold this line');
   });
 
+  it('uses the server\'s per-line row: calls_on_line gives the "+N more calls" and line_since the held-since date', async () => {
+    adminFetch.mockResolvedValue({ lines: [{ ...line, held_at: '2026-10-09T15:00:00.000Z', line_since: '2026-10-01T15:00:00.000Z', calls_on_line: 3, blocked_by_ownership_card: true }] });
+    render(<Harness />);
+    await open();
+    const row = await screen.findByTestId('held-line');
+    expect(row.textContent).toContain('Held since Oct 1, 2026');
+    expect(row.textContent).toContain('2 more calls hold this line');
+    expect(row.textContent).toContain('open "not my number" card'); // the line\'s flag, from the server
+  });
+
   it('shows nothing when closed or outside triage mode, and the empty state when no line is held', async () => {
     adminFetch.mockResolvedValue({ lines: [] });
     const { rerender } = render(<HeldLinesPanel held={{ open: true, lines: [], loading: false }} triageMode={false} onRelease={() => {}} />);

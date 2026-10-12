@@ -11192,7 +11192,7 @@ const CallRecordingProcessor = {
         await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
           .whereIn('status', ['open', 'in_progress'])
-          .update({ payload: item.payload, updated_at: new Date() });
+          .update({ payload: require('./disclaimed-number-holds').refreshedCardPayload(trx, item.payload), updated_at: new Date() });
       } else {
         await trx('triage_items').insert(item)
           .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();

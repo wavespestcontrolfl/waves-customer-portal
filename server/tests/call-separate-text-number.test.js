@@ -245,7 +245,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(writeAt).toBeGreaterThan(-1);
     expect(writeAt).toBeLessThan(fileAt);
     const write = src.slice(writeAt, fileAt);
-    expect(write).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: item\.payload/);
+    expect(write).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: require\('\.\/disclaimed-number-holds'\)\.refreshedCardPayload\(trx, item\.payload\)/);
     expect(write).not.toContain('.merge(');
     // …and the stand-alone writer runs it inside ONE transaction that takes the per-call triage lock
     // first and checks the processing claim before the write
@@ -327,12 +327,9 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})");
     const bound = require('../services/disclaimed-number-holds').NO_TEXT_CARD_FOR_HOLD_SQL;
     expect(bound).toContain("t.reason_code = 'text_number_differs'");
-    // the card belongs to the hold's current arming: durable provenance on the card, not a timestamp comparison
-    expect(bound).toContain("(t.payload->>'hold_held_at')::timestamptz = h.held_at");
-    expect(bound).not.toContain('created_at');
-    expect(bound).toContain("t.payload->>'ani_phone'"); // and to the held line
-    expect(fn).toContain("AND NOT EXISTS (SELECT 1 FROM triage_items d");
-    expect(fn).toContain("OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')");
+    // exact per (line, arming): the card's own list of { line_e164, held_at }, no suffix and no created_at compare
+    expect(bound).toContain("b->>'line_e164' = h.phone_e164 AND (b->>'held_at')::timestamptz = h.held_at");
+    expect(bound).not.toContain('right(t.payload'); // no last-10-digit suffix match on the card
     // the dual-signal stamp and the disclaimer predicate
     const gates = fs.readFileSync(require.resolve('../services/call-routing-gates'), 'utf8');
     expect(gates).toContain("? { no_text_hold: true, ...(extraction?.caller?.caller_id_disclaimed === true ? { ownership_disclaimed: true } : {}) }");
