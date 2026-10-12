@@ -827,14 +827,19 @@ function collapseMirroredRows(sources, { identity, amount, label, scope, net }) 
     if (t.sourceIndex !== fullestSource.get(t.key)) continue;
     kept.set(t.key, [...(kept.get(t.key) || []), t]);
   }
+  // Mirrors meet kept clones one-to-one (a multiset match): a clone a mirror
+  // matched is consumed, so two dropped copies cannot both vouch for one
+  // kept copy while another kept copy goes unmatched (codex #6113 r36).
   const conflicted = [];
+  const consumed = new Set();
   for (const t of tagged) {
     if (t.sourceIndex === fullestSource.get(t.key)) continue;
-    const clones = kept.get(t.key) || [];
-    if (clones.some((k) => signature(k.row) === signature(t.row))) continue;
-    const match = clones.find((k) => (!scope || scope(k.row) === scope(t.row)) && mirrorNetWinner(k.row, t.row, net) !== null);
+    const clones = (kept.get(t.key) || []).filter((k) => !consumed.has(k));
+    const match = clones.find((k) => signature(k.row) === signature(t.row))
+      || clones.find((k) => (!scope || scope(k.row) === scope(t.row)) && mirrorNetWinner(k.row, t.row, net) !== null);
     if (!match) { conflicted.push(label(t.row)); continue; }
-    if (mirrorNetWinner(match.row, t.row, net) === 'mirror') match.row = t.row;
+    consumed.add(match);
+    if (signature(match.row) !== signature(t.row) && mirrorNetWinner(match.row, t.row, net) === 'mirror') match.row = t.row;
   }
   const rows = tagged.filter((t) => t.sourceIndex === fullestSource.get(t.key)).map((t) => t.row);
   return { rows, conflicted };
@@ -992,21 +997,26 @@ function twinScopeConflicts(item, twin) {
     || (detail[0] != null && detail[1] != null && detail[0] !== detail[1]);
 }
 function mergeMappedTwin(item, mappedAmount, twin) {
-  if (explicitZeroNetRaw(twin)) return { verdict: 'comped' };
   if (twinScopeConflicts(item, twin)) return { verdict: 'conflicted' };
   const twinManual = num(twin.manualFinalOneTime);
   const itemManual = num(item.manualFinalOneTime);
   if (twinManual != null && itemManual != null && roundCents(twinManual) !== roundCents(itemManual)) return { verdict: 'conflicted' };
-  let amount = twinManual != null && itemManual == null ? twinManual : mappedAmount;
-  if (twinManual == null && itemManual == null) {
-    const agreed = twinNetAgreement(item, mappedAmount, twin);
-    if (!agreed) return { verdict: 'conflicted' };
-    amount = agreed.amount;
+  // The operator-accepted net on either side outranks every lower alias on
+  // the other, a twin's explicit zero included (codex #6113 r36): the pair is
+  // comped only when the WINNING net is zero.
+  const manual = twinManual ?? itemManual;
+  if (manual != null) {
+    if (roundCents(manual) === 0) return { verdict: 'comped' };
+    return { amount: manual, explicitTaxable: explicitTaxableOf(item, twin) };
   }
-  const explicitTaxable = (item.taxable === true || item.taxable === false) ? item.taxable
-    : ((twin.taxable === true || twin.taxable === false) ? twin.taxable : undefined);
-  return { amount, explicitTaxable };
+  if (explicitZeroNetRaw(twin)) return { verdict: 'comped' };
+  const agreed = twinNetAgreement(item, mappedAmount, twin);
+  if (!agreed) return { verdict: 'conflicted' };
+  const amount = agreed.amount;
+  return { amount, explicitTaxable: explicitTaxableOf(item, twin) };
 }
+const explicitTaxableOf = (item, twin) => ((item.taxable === true || item.taxable === false) ? item.taxable
+  : ((twin.taxable === true || twin.taxable === false) ? twin.taxable : undefined));
 // Twin: the exact-amount mirror, else any same-service raw row (one engine
 // run persists both shapes, so the same service key is a mirror).
 function claimRawTwin(rawPool, item, mappedAmount) {

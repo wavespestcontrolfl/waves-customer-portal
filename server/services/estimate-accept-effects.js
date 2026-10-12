@@ -283,8 +283,14 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   const { explicitZeroNetRaw, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
   const docs = [data, ...oneTimeContainers(data).filter((c) => c !== data).map((c) => ({ result: c }))];
   const rowName = (item) => String(item.displayName || item.label || item.display?.name || item.name || item.service || 'a one-time row').trim();
+  // Mapped items whose operator-accepted net is positive: their raw twin's
+  // lower-priority zero is outranked by that net (the extractor's own twin
+  // rule, codex #6113 r36), so it is not a comped row.
+  const serviceKey = (row) => String(row.service || row.name || '').toLowerCase();
+  const manualNetKeys = new Set();
   for (const doc of docs) {
     for (const item of converter.estimateOneTimeItemsFromData(doc)) {
+      if (Number(item.manualFinalOneTime) > 0) manualNetKeys.add(serviceKey(item));
       const amount = lineAmount(item);
       if (amount === 0) return `${rowName(item)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
       if (amount != null && amount < 0 && !hasTotal) return `${rowName(item)} is a discount row with no one-time total to apply it to`;
@@ -299,7 +305,7 @@ function unrepresentableRow(data, converter, { hasTotal }) {
       // Same gate as the extractor: a program row or a recurring row is not
       // one-time work, whatever its net aliases say (codex #6113 r28).
       if (line.onProg === true || line.includedOnProgram === true || rawRowHasRecurringEvidence(line)) continue;
-      if (explicitZeroNetRaw(line)) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+      if (explicitZeroNetRaw(line) && !(Number(line.manualFinalOneTime) > 0) && !manualNetKeys.has(serviceKey(line))) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
       const amount = rawLineAmount(line);
       if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
     }
