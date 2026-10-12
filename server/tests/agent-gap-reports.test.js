@@ -727,6 +727,13 @@ describe('agent-gap-reports', () => {
       expect(insertedRows[0].summary).toMatch(/used all its steps/);
     });
 
+    test('the tech bar keeps its prose record at the step limit (it writes no exhaustion row)', async () => {
+      const collector = collectorFor({ source: 'tech-bar' });
+      await collector.flush({ reply: "I can't do that from here.", ask: 'log the bait station count', stepLimitReached: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', source: 'tech-bar' });
+    });
+
     test('with no tool at all, running out of steps still records', async () => {
       const collector = collectorFor();
       await collector.flush({ reply: 'x', stepLimitReached: true });

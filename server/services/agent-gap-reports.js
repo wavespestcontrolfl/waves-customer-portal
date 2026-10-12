@@ -560,12 +560,13 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     try {
       if (!gapReportsEnabled()) return;
       const declined = DECLINE_RE.test(String(reply || ''));
-      const signals = [
-        ...blockedSignals({ declined, stepLimitReached }),
-        // Out of steps is ONE record: a prose decline in that same reply
-        // would add a second row with its own fingerprint (pre-push P1).
-        ...(declined && !stepLimitReached ? declinedSignals({ reply, ask }) : []),
-      ];
+      const blocked = blockedSignals({ declined, stepLimitReached });
+      // Out of steps is ONE record: when the exhaustion row is written, a prose
+      // decline in the same reply would add a second row with its own
+      // fingerprint. The tech bar writes no exhaustion row, so its prose
+      // record stays (pre-push P1s).
+      const exhaustionRecorded = Boolean(stepLimitReached) && blocked.length > 0;
+      const signals = [...blocked, ...(declined && !exhaustionRecorded ? declinedSignals({ reply, ask }) : [])];
       if (signals.length) await writeGapRows(signals);
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
