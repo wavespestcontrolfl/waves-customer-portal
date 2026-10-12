@@ -748,6 +748,12 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT TO EXPECT\nYour home is protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYou are all set.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nThe growth regulator gives continuous protection.')).toBeNull();
+    // Only the verdict, not the word: other writers and the Ask answer share this screen (Codex r6).
+    expect(screen('WHAT TO EXPECT\nThis keeps your home protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYou’re now fully protected.')).toBe('owner_phrase');
+    expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
+    expect(screen('WHAT WE DID AND WHY\nThe stations are in a protected area along the fence.')).toBeNull();
+    expect(screen('WHAT WE DID AND WHY\nThe stations are protected from rain by their covers.')).toBeNull();
     // Plan talk is neither banned nor screened: a word screen for it kept
     // catching recurring pest findings (Codex r3 to r5).
     expect(screen('WHAT WE FOUND\nRecurring ant activity was noted during this visit.')).toBeNull();
