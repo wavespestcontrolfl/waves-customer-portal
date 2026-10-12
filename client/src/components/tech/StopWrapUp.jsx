@@ -44,7 +44,7 @@ export function useStopWrapUp({ pest, lawn, rows, request, open, report, fieldsR
   const service = billingServiceOf(pest.service, lawn.service);
   const wrapUp = useWrapUp({
     gate: live && open, service, reviewService: reviewServiceOf(pest.service, lawn.service, rows), request, base: `/admin/dispatch/${pest.service.id}`,
-    omitAutoTiming: true, noPayLink: true, noAdjustTime: true, noReentry: true, onChecking,
+    omitAutoTiming: true, noPayLink: true, noAdjustTime: true, noReentry: true, hideNextVisitNote: true, onChecking,
   });
   // null: not shown (the saved bodies go as saved); {}: shown at its defaults, or withdrawn because a part's latest context
   // says the gate is off (the parts' own bodies go, no overlay); else the choices.

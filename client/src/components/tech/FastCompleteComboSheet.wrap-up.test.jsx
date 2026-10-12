@@ -127,6 +127,9 @@ describe('the section', () => {
     expect(screen.getByRole('checkbox', { name: 'Send review request' }).checked).toBe(true);
     expect(screen.getByLabelText('Review request timing')).toBeTruthy();
     await screen.findByText('Next scheduled visit');
+    // A stop has two completions: a next-visit note would be written once per member, so the stop takes none.
+    expect(screen.queryByRole('button', { name: 'Needs adjustment?' })).toBeNull();
+    expect(screen.queryByLabelText('Next visit adjustment note')).toBeNull();
     // The packet records these per service: not on the stop's section, even for an admin.
     expect(screen.queryByRole('checkbox', { name: /Include payment link/ })).toBeNull();
     expect(screen.queryByLabelText('Adjust time on site (minutes)')).toBeNull();
@@ -160,6 +163,19 @@ describe('what the packet carries', () => {
     // And it is today's bodies as the parts handed them up.
     expect(on.body.items.find((i) => i.serviceId === 'svc-pest').body).toEqual(BODIES.pest);
     expect(on.body.items.find((i) => i.serviceId === 'svc-lawn').body).toEqual(BODIES.lawn);
+  });
+
+  it('the packet carries no next-visit note or id, whatever the section does (the visit is shown, not noted)', async () => {
+    mount();
+    await prepareBoth();
+    await screen.findByText('Next scheduled visit');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Send completion text' }));
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    for (const body of Object.values(postedBodies())) {
+      expect(body).not.toHaveProperty('nextVisitAdjustmentNote');
+      expect(body).not.toHaveProperty('nextVisitId');
+    }
   });
 
   it('completion text off: false on BOTH bodies; everything else as the parts handed it', async () => {

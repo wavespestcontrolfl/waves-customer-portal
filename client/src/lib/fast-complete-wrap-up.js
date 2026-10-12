@@ -12,6 +12,7 @@ import {
   reviewScheduledForOf,
 } from './completion-review-timing';
 import { completionInvoicePrediction } from './completion-invoice-prediction';
+import { nextVisitNoteFields } from './completion-next-visit-note';
 
 export const REENTRY_MAX = 1440;
 export const ADJUSTED_RANGE_MESSAGE = 'Adjusted time on site must be 1–720 minutes.';
@@ -70,9 +71,9 @@ const payLinkPosted = ({ noPayLink, willInvoice, sendSms, includePayLink }) => (
 const reviewMarkerFields = ({ reviewMarker, willReview }) => (reviewMarker && willReview ? { wrapUpReviewAsk: true } : {});
 
 // The body fragment. Untouched it is the four customer-text flags the sheets always posted; every
-// other key appears only when the tech changed it. `adjusted` is the admin's typed minutes ('' for
+// other key appears only when the tech changed it (the next-visit note: lib/completion-next-visit-note.js). `adjusted` is the admin's typed minutes ('' for
 // anyone else): blank sends nothing (the server measures check-in to Complete), a number overrides.
-export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker }) {
+export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker, nextVisitNote, nextVisit }) {
   const timing = { willReview, reviewTiming, reviewCustomAt };
   return {
     sendCompletionSms: sendSms,
@@ -82,6 +83,7 @@ export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview,
     ...timingFields(timing, omitAutoTiming),
     ...completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }),
     ...reentryFields({ ext, int, seeds }),
+    ...nextVisitNoteFields({ nextVisitNote, nextVisit }),
   };
 }
 

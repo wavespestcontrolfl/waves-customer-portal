@@ -49,6 +49,12 @@ describe('the Wrap-up body fragment', () => {
     expect(wrapUpFields({ ...base, noPayLink: true, sendSms: false }).includePayLink).toBe(false);
     expect(wrapUpFields({ ...base, noPayLink: false, sendSms: false }).includePayLink).toBe(true);
   });
+
+  test('a typed next-visit note posts beside the id of the visit shown; blank or untouched posts neither', () => {
+    expect(wrapUpFields({ ...base, nextVisitNote: '  Gate code changed ', nextVisit: { id: 'v2' } })).toMatchObject({ nextVisitAdjustmentNote: 'Gate code changed', nextVisitId: 'v2' });
+    expect(wrapUpFields({ ...base, nextVisitNote: 'Gate code changed' })).not.toHaveProperty('nextVisitId');
+    expect(wrapUpFields({ ...base, nextVisitNote: '   ', nextVisit: { id: 'v2' } })).toEqual(wrapUpFields(base));
+  });
 });
 
 describe('the Wrap-up guards', () => {

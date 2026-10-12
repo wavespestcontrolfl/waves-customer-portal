@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const Joi = require('joi');
 const db = require('../models/db');
 const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepoint-read');
+const { storeNextVisitNote } = require('./next-visit-note');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
 const logger = require('../services/logger');
@@ -2904,6 +2905,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Voice fill's office note (GATE_FAST_COMPLETE_VOICE_FILL): staff-only,
       // appended to scheduled_services.internal_notes below; never the report.
       officeNote,
+      // The "Needs adjustment?" box under the next scheduled visit, with the id of
+      // the visit the card showed: stored on THAT visit's staff note (see
+      // services/next-visit-note.js), inside the completion transaction.
+      nextVisitAdjustmentNote,
+      nextVisitId,
       customerConcernText,
       customerRecap,
       visitOutcome = 'completed',
@@ -8465,6 +8471,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             internal_notes: trx.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`[Office note ${etDateString(completionEndedAt ? new Date(completionEndedAt) : new Date())}] ${officeNoteText}`]),
           });
         }
+        // The tech's note about the NEXT visit (the full form's and the sheets' "Needs
+        // adjustment?" box): one dated line on that visit's staff note. In this commit
+        // phase only, so it lands once per completion (a replay returns before this
+        // block, a resume skips it, the packet effects phase never reaches it) and
+        // never fails the visit: it runs in a savepoint and logs on error.
+        await storeNextVisitNote(trx, {
+          completed: { id: svc.id, customerId: svc.customer_id, date: svc.scheduled_date },
+          note: nextVisitAdjustmentNote,
+          nextVisitId,
+          actor: completionInput.actor,
+        });
 
         // The "this visit mints no dues because the month is covered" verdict is
         // CONFIRMED here, right before the status flip, under the dues-month
