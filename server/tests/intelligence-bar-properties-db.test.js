@@ -114,6 +114,9 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     // An open visit stamped with the property blocks.
     await db('scheduled_services').insert({ id: stamped, ...visit, status: 'pending', property_id: saved.propertyId });
     await blocked();
+    // A customer reschedule request parks the visit as 'rescheduled' with no replacement yet: still blocks.
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'rescheduled' });
+    await blocked();
     await db('scheduled_services').where({ id: stamped }).update({ status: 'completed' });
     // An open visit with no property link but this service address blocks.
     await db('scheduled_services').insert({ id: unstamped, ...visit, status: 'pending', service_address_line1: '2100 Example Grove',

@@ -1022,7 +1022,7 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
 // Removal is a deactivation (active=false), never a row delete: visit history,
 // reports and estimates keep their property link. It is refused, fail-closed,
 // while anything open still depends on the row: the primary, the account
-// address, an open or ongoing-recurring visit, or an open estimate. Unstamped
+// address, an open, reschedule-requested or ongoing-recurring visit, or an open estimate. Unstamped
 // visits and estimates count when their own address names this property.
 async function previewPropertyRemoval(conn, customerId, target, _primary, customer) {
   if (target.is_primary) {
@@ -1031,7 +1031,10 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
   if (customer.address_line1 && addressKey(customer) === addressKey(target)) {
     throw propertyActionError('This property is the account address. Change the account address before removing it.', 409, 'account_address');
   }
-  const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
+  // 'rescheduled' is NOT settled here: a customer reschedule request parks
+  // the visit in that status with no replacement visit yet (routes/schedule.js),
+  // so it is still an outstanding booking at this property.
+  const settledVisitStatuses = require('./property-role-proposals').TERMINAL_VISIT_STATUSES.filter(status => status !== 'rescheduled');
   const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
   const { estimateQuotesCustomerAddress, parseEstimateAddress } = require('./estimate-property-linkage');
   const estimates = await conn('estimates').where({ customer_id: customerId })
@@ -1045,7 +1048,7 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
     && !estimate.archived_at && !TERMINAL_ESTIMATE_STATUSES.includes(estimate.status));
   const visits = await conn('scheduled_services').where({ customer_id: customerId })
     .where(q => q.where('property_id', target.id).orWhereNull('property_id'))
-    .where(q => q.whereNotIn('status', TERMINAL_VISIT_STATUSES)
+    .where(q => q.whereNotIn('status', settledVisitStatuses)
       .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
     .orderBy('id')
     .select('id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
