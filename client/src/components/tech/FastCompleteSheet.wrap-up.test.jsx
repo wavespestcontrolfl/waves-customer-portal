@@ -159,10 +159,10 @@ describe.each([
     expect(request.reads(/reentry-defaults|next-visit|send-time-preview/)).toEqual([]);
   });
 
-  test('gate on, untouched: the section is on the report step with the clock, and the body is the same customer text with no reviewTiming', async () => {
+  test('gate on, untouched: the section is on the visit step and the report step with the clock, and the body is the same customer text with no reviewTiming', async () => {
     const request = makeRequest({ kind });
     await openSheet(request, service);
-    expect(wrapUpHeading()).toBeNull();
+    expect(wrapUpHeading()).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Time on-site' })).toBeTruthy();
     await generate();
     expect(wrapUpHeading()).toBeTruthy();
@@ -172,6 +172,23 @@ describe.each([
 });
 
 describe('the recurring pest visit with the Wrap-up on', () => {
+  test('choices made on the visit step show on the report step and ride the body', async () => {
+    const request = makeRequest({ nextVisit: { id: 'svc-2', date: '2026-11-05', serviceType: 'Quarterly Pest Control' } });
+    await openSheet(request);
+    fireEvent.click(await screen.findByRole('checkbox', { name: /Include payment link in the text/ }));
+    fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'customer_requested' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Needs adjustment?' }));
+    fireEvent.change(screen.getByLabelText('Next visit adjustment note'), { target: { value: 'Gate code changed' } });
+    await generate();
+    expect(screen.getByRole('checkbox', { name: /Include payment link in the text/ }).checked).toBe(false);
+    expect(screen.getByLabelText('Review request timing').value).toBe('customer_requested');
+    expect(screen.getByLabelText('Next visit adjustment note').value).toBe('Gate code changed');
+    const body = await send(request);
+    expect(body).toMatchObject({
+      includePayLink: false, requestReview: true, reviewTiming: 'customer_requested', nextVisitAdjustmentNote: 'Gate code changed', nextVisitId: 'svc-2',
+    });
+  });
+
   test('each change rides the body; Automatic again drops the reviewTiming key', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'op-1', role: 'admin' }));
     const request = makeRequest({ nextVisit: { id: 'svc-2', date: '2026-11-05', serviceType: 'Quarterly Pest Control' } });
