@@ -759,6 +759,40 @@ describe('idle conversations start fresh', () => {
     await waitFor(() => expect(screen.queryByText('Done.')).not.toBeInTheDocument());
   });
 
+  async function mountAutoResumed(hoursAgo) {
+    const lastActive = new Date(realNow() - hoursAgo * 3600000).toISOString();
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return reply({ threadSeq: 4 });
+      if (url.includes('/threads/latest')) return ok({ idleHours: 4, thread: { id: THREAD, title: 'Resumed', lastSeq: 2, last_active_at: lastActive,
+        conversationHistory: [{ role: 'user', content: 'Synthetic earlier ask' }, { role: 'assistant', content: 'Resumed answer' }] } });
+      return ok({ actions: [], tasks: [], threads: [] });
+    });
+    await mount();
+    await screen.findByText('Resumed answer');
+  }
+
+  it('an auto-resumed thread keeps the idle clock of its own last exchange: 3.5 h old, dropped 1 h later', async () => {
+    await mountAutoResumed(3.5);
+    skewMs = 60 * 60000;
+    submit('Synthetic later ask');
+    await waitFor(() => expect(queryBodies()).toHaveLength(1));
+    const [body] = queryBodies();
+    expect(body.thread_id).toBeUndefined();
+    expect(body.thread_reopened).toBeUndefined();
+    expect(body.conversationHistory).toEqual([]);
+  });
+
+  it('an auto-resumed thread 3.5 h old is still continued 10 minutes later, without the reopened flag', async () => {
+    await mountAutoResumed(3.5);
+    skewMs = 10 * 60000;
+    submit('Synthetic soon ask');
+    await waitFor(() => expect(queryBodies()).toHaveLength(1));
+    const [body] = queryBodies();
+    expect(body.thread_id).toBe(THREAD);
+    expect(body.thread_reopened).toBeUndefined();
+    expect(body.conversationHistory).toHaveLength(2);
+  });
+
   it('a thread opened by hand from History is not idle-limited, however old it is', async () => {
     fetchMock.mockImplementation(async url => {
       if (url.endsWith('/query')) return reply({ threadSeq: 6 });
@@ -780,5 +814,12 @@ describe('idle conversations start fresh', () => {
     await waitFor(() => expect(queryBodies()).toHaveLength(1));
     expect(queryBodies()[0].thread_id).toBe(THREAD);
     expect(queryBodies()[0].thread_seq).toBe(4);
+    // The server is told the operator reopened it on purpose, for the first question only.
+    expect(queryBodies()[0].thread_reopened).toBe(true);
+    await screen.findByText('Done.');
+    submit('Synthetic second question');
+    await waitFor(() => expect(queryBodies()).toHaveLength(2));
+    expect(queryBodies()[1].thread_id).toBe(THREAD);
+    expect(queryBodies()[1].thread_reopened).toBeUndefined();
   });
 });

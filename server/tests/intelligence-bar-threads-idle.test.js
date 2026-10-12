@@ -30,10 +30,12 @@ function makeDb() {
           return api;
         },
         whereRaw(sql, bindings) {
-          // The one raw condition: last_active_at within the last N hours.
-          expect(sql).toMatch(/last_active_at >= NOW\(\) - \(\? \|\| ' hours'\)::interval/);
+          // The raw condition: last_active_at within (>=) or past (<) the last N hours.
+          const match = /last_active_at (>=|<) NOW\(\) - \(\? \|\| ' hours'\)::interval/.exec(sql);
+          expect(match).not.toBeNull();
           const cutoff = Date.now() - Number(bindings[0]) * HOUR;
-          rows = rows.filter((t) => new Date(t.last_active_at).getTime() >= cutoff);
+          rows = rows.filter((t) => (match[1] === '>='
+            ? new Date(t.last_active_at).getTime() >= cutoff : new Date(t.last_active_at).getTime() < cutoff));
           return api;
         },
         orderBy(col, dir) {
@@ -140,5 +142,30 @@ describe('IbThreads idle limit', () => {
   test.each(['0', '-3', 'abc', '', 'NaN', 'Infinity'])('IB_THREAD_IDLE_HOURS=%p falls back to 4 hours', (value) => {
     process.env.IB_THREAD_IDLE_HOURS = value;
     expect(IbThreads.idleHours()).toBe(4);
+  });
+});
+
+describe('IbThreads.isThreadIdle (the server-side limit behind /query)', () => {
+  const ID = '5a1c2f7a-aaaa-4bbb-8ccc-deadbeef0001';
+  test('an owned thread past the limit is idle; inside the limit is not', async () => {
+    seed(ID, 5);
+    expect(await IbThreads.isThreadIdle(ACTOR, ID)).toBe(true);
+    threads = []; turns = [];
+    seed(ID, 3);
+    expect(await IbThreads.isThreadIdle(ACTOR, ID)).toBe(false);
+  });
+
+  test('another actor\'s, a missing and a malformed id are never idle', async () => {
+    seed(ID, 50, 'someone-else');
+    expect(await IbThreads.isThreadIdle(ACTOR, ID)).toBe(false);
+    expect(await IbThreads.isThreadIdle(ACTOR, '5a1c2f7a-aaaa-4bbb-8ccc-deadbeef0009')).toBe(false);
+    expect(await IbThreads.isThreadIdle(ACTOR, 'not-a-uuid')).toBe(false);
+    expect(await IbThreads.isThreadIdle(null, ID)).toBe(false);
+  });
+
+  test('IB_THREAD_IDLE_HOURS moves the line', async () => {
+    seed(ID, 5);
+    process.env.IB_THREAD_IDLE_HOURS = '8';
+    expect(await IbThreads.isThreadIdle(ACTOR, ID)).toBe(false);
   });
 });

@@ -375,6 +375,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // conversation for a reload, and this does the same for a held thread.
   const idleLimitMsRef = useRef(null);
   const threadActivityRef = useRef(0);
+  // True from a deliberate History open until the first exchange lands: the
+  // first question tells the server the operator chose this old conversation,
+  // so the server's own idle rule does not start a new one.
+  const threadReopenedRef = useRef(false);
   // Bumped by submit/"New chat" so a still-inflight resume or query response
   // can't clobber newer state (it only applies if the epoch is unchanged).
   const threadEpochRef = useRef(0);
@@ -539,7 +543,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // looks like a new chat while silently sending the old history with the
   // next prompt. Server-side taint markers are presentation noise here;
   // they stay on the stored turns.
-  const hydrateThread = useCallback((thread) => {
+  // deliberate: the operator picked this conversation (History). Otherwise it
+  // is the automatic resume, and the idle clock starts at the thread's own last
+  // exchange, not at the moment the palette loaded it.
+  const hydrateThread = useCallback((thread, { deliberate = false } = {}) => {
     const hist = thread?.conversationHistory;
     if (!hist?.length) return false;
     setConversationHistory(hist);
@@ -547,7 +554,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     // A thread opened by hand from History counts as active from now, so the
     // idle limit never blocks reading or continuing an old conversation.
-    threadActivityRef.current = Date.now();
+    const lastExchange = Date.parse(thread.last_active_at);
+    threadActivityRef.current = deliberate || !Number.isFinite(lastExchange) ? Date.now() : lastExchange;
+    threadReopenedRef.current = deliberate;
     setPendingActions([]);
     setChoices(null);
     setToolActivity([]);
@@ -594,7 +603,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     adminFetch(`/admin/intelligence-bar/threads/${encodeURIComponent(id)}`)
       .then((data) => {
         if (threadEpochRef.current !== epoch) return;
-        if (hydrateThread(data?.thread)) setShowThreads(false);
+        if (hydrateThread(data?.thread, { deliberate: true })) setShowThreads(false);
       })
       .catch(() => { /* thread gone or not ours — stay where we are */ })
       .finally(() => setThreadsLoading(false));
@@ -613,6 +622,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setThreadId(null);
     threadSeqRef.current = null;
     threadActivityRef.current = 0;
+    threadReopenedRef.current = false;
     setConversationHistory([]);
   }, []);
 
@@ -646,10 +656,19 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
 
   // The thread id and history a query sends: none of either when the held
   // thread is idle past the limit (it is detached here).
+  // threadFields: the request fields that name the thread. thread_reopened
+  // marks a deliberate History open, so the server's idle rule lets it through.
   const resolveSendState = useCallback(() => {
-    if (!threadIsIdle()) return { sentThreadId: threadId, sentHistory: conversationHistory };
-    detachThread();
-    return { sentThreadId: null, sentHistory: [] };
+    if (threadIsIdle()) {
+      detachThread();
+      return { sentThreadId: null, sentHistory: [], threadFields: {} };
+    }
+    const threadFields = threadId ? {
+      thread_id: threadId,
+      ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
+      ...(threadReopenedRef.current ? { thread_reopened: true } : {}),
+    } : {};
+    return { sentThreadId: threadId, sentHistory: conversationHistory, threadFields };
   }, [threadIsIdle, detachThread, threadId, conversationHistory]);
 
   // A palette left mounted past the idle limit opens as a new conversation.
@@ -672,7 +691,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       submittingRef.current = true;
       // A held thread idle past the server's limit is not continued: this
       // question starts a new conversation (old one stays in History).
-      const { sentThreadId, sentHistory } = resolveSendState();
+      const { sentThreadId, sentHistory, threadFields } = resolveSendState();
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
@@ -689,12 +708,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         conversationHistory: sentHistory,
         context,
         ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-        ...(sentThreadId
-          ? {
-              thread_id: sentThreadId,
-              ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
-            }
-          : {}),
+        ...threadFields,
         pageData: { ...ibPageData, route: location.pathname, search: location.search },
         ...(attachments.length
           ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
@@ -725,6 +739,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             setThreadId(data.threadId);
             threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
             threadActivityRef.current = Date.now();
+            threadReopenedRef.current = false;
           } else if (data.threadsEnabled === true && sentThreadId) {
             // Threads are on but this exchange wasn't appended — the server
             // rejected it (another tab appended first, or the thread is

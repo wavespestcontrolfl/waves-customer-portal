@@ -41,6 +41,8 @@ const SEED_TURN_LIMIT = 8;
 
 // Call-time read (a flip needs no redeploy); registered in
 // config/feature-gates.js (`ibThreads`) for the centralized status listing.
+const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function threadsEnabled() {
   return gateEnvValue('GATE_IB_THREADS');
 }
@@ -159,6 +161,22 @@ async function latestThread(actorId) {
   };
 }
 
+/**
+ * True when this actor's thread exists and has had no exchange for longer than
+ * idleHours(). The /query guard uses it so the limit does not depend on the
+ * client clock: an explicit thread id that is idle, and that the operator did
+ * not reopen on purpose from History, starts a new conversation. A missing,
+ * foreign or malformed id is not "idle" (the normal append path handles it).
+ */
+async function isThreadIdle(actorId, threadId) {
+  if (!actorId || !THREAD_ID_RE.test(String(threadId || ''))) return false;
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .whereRaw("last_active_at < NOW() - (? || ' hours')::interval", [String(idleHours())])
+    .first('id');
+  return !!row;
+}
+
 /** One thread by id, actor-bound. */
 async function getThread(actorId, threadId) {
   if (!actorId || !threadId) return null;
@@ -218,7 +236,6 @@ function operatorText(content) {
  * refuses prior-turn grounding entirely when it has no valid bound to pass —
  * this only enforces whatever bound it IS given.
  */
-const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30, maxSeq = null } = {}) {
   // Nothing to read when threads are off, or for a missing actor or a
   // malformed thread id (never sent to the uuid column).
@@ -264,6 +281,7 @@ async function purgeExpiredThreads() {
 module.exports = {
   threadsEnabled,
   idleHours,
+  isThreadIdle,
   appendExchange,
   latestThread,
   getThread,

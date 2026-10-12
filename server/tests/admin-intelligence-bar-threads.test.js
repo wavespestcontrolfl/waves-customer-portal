@@ -21,6 +21,7 @@ const mockAppendExchange = jest.fn();
 const mockLatestThread = jest.fn();
 const mockGetThread = jest.fn();
 const mockListThreads = jest.fn();
+const mockIsThreadIdle = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
@@ -76,6 +77,7 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
 jest.mock('../services/intelligence-bar/threads', () => ({
   threadsEnabled: () => process.env.GATE_IB_THREADS === 'true',
   idleHours: () => 4,
+  isThreadIdle: (...args) => mockIsThreadIdle(...args),
   appendExchange: (...args) => mockAppendExchange(...args),
   latestThread: (...args) => mockLatestThread(...args),
   getThread: (...args) => mockGetThread(...args),
@@ -313,6 +315,57 @@ describe('threads gate ON', () => {
       const arg = mockAppendExchange.mock.calls[0][0];
       expect(arg.threadId).toBeNull();
       expect(arg.expectedSeq).toBeNull();
+    });
+  });
+
+  describe('explicit thread_id on an idle thread (server-side idle limit)', () => {
+    afterEach(() => mockIsThreadIdle.mockReset());
+    const run = async (extra) => {
+      mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
+      scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+      let sent;
+      await withServer(async (baseUrl) => {
+        await postQuery(baseUrl, {
+          prompt: 'a later ask', context: 'customers', thread_id: THREAD_ID, thread_seq: 4,
+          conversationHistory: [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Synthetic old answer' }],
+          ...extra,
+        });
+        sent = mockAppendExchange.mock.calls[0][0];
+      });
+      return sent;
+    };
+
+    test('idle and not reopened: a new thread, no old history', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = await run({});
+      expect(mockIsThreadIdle).toHaveBeenCalledWith('admin-1', THREAD_ID);
+      expect(sent.threadId).toBeNull();
+      expect(sent.expectedSeq).toBeNull();
+      expect(sent.seedTurns).toEqual([]);
+      const modelInput = JSON.stringify(mockMessagesCreate.mock.calls[0][0].messages);
+      expect(modelInput).not.toContain('Synthetic old answer');
+    });
+
+    test('idle but reopened from History: it keeps appending to that thread', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = await run({ thread_reopened: true });
+      expect(mockIsThreadIdle).not.toHaveBeenCalled();
+      expect(sent.threadId).toBe(THREAD_ID);
+      expect(sent.expectedSeq).toBe(4);
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[0][0].messages)).toContain('Synthetic old answer');
+    });
+
+    test('inside the limit: unchanged', async () => {
+      mockIsThreadIdle.mockResolvedValue(false);
+      const sent = await run({});
+      expect(sent.threadId).toBe(THREAD_ID);
+      expect(sent.expectedSeq).toBe(4);
+    });
+
+    test('a failed idle lookup fails open and the request runs unchanged', async () => {
+      mockIsThreadIdle.mockRejectedValue(new Error('db down'));
+      const sent = await run({});
+      expect(sent.threadId).toBe(THREAD_ID);
     });
   });
 

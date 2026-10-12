@@ -4130,7 +4130,30 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
   }
 }
 
-router.post('/query', runQuery);
+// The idle limit must not rest on the client clock: an explicit thread_id whose
+// thread is idle past IB_THREAD_IDLE_HOURS starts a NEW conversation (no thread
+// id, no client history, so the model never sees the old customer) unless the
+// client says the operator reopened it on purpose from History
+// (thread_reopened: true). Direct /query only: a saved task resumed through
+// /tasks/:id/* keeps its own thread. Fails open (the request runs unchanged)
+// when the lookup throws.
+async function startFreshWhenThreadIdle(req, res, next) {
+  try {
+    const body = req.body || {};
+    if (IbThreads.threadsEnabled() && req.techRole === 'admin' && body.thread_reopened !== true
+      && UUID_RE.test(String(body.thread_id || ''))
+      && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
+      delete body.thread_id;
+      delete body.thread_seq;
+      body.conversationHistory = [];
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar] idle thread check failed (code=${err?.code || 'unknown'})`);
+  }
+  next();
+}
+
+router.post('/query', startFreshWhenThreadIdle, runQuery);
 
 // Operator-chosen knowledge gap: the client offers this after a knowledge
 // search came back empty, with the search text in an editable box. Nothing
