@@ -126,3 +126,46 @@ describe('clearNoTextHoldsForPhone', () => {
     expect(raw).not.toHaveBeenCalled();
   });
 });
+
+describe('lockNoTextLinesForCall', () => {
+  const LOCK = 'SELECT pg_advisory_xact_lock(hashtext(?))';
+  function lockConn(rows, log) {
+    const conn = (table) => {
+      const q = {
+        where() { return q; }, orderBy() { return q; },
+        select: async () => { log.push(['select', table]); return rows; },
+        update: async () => { log.push(['update', table]); return 1; },
+      };
+      return q;
+    };
+    conn.raw = async (sql, params) => { log.push(['raw', sql, params]); return { rows: [] }; };
+    return conn;
+  }
+
+  test('takes the phone-wide advisory lock on the E.164 before any hold row is written, and returns the newest line', async () => {
+    const log = [];
+    const conn = lockConn([{ phone_e164: '(941) 555-1234' }], log);
+    const own = await Holds.lockNoTextLinesForCall(conn, 7);
+    expect(own).toBe('+19415551234');
+    await Holds.clearNoTextHoldsForPhone({ phoneE164: own, exceptCallLogId: 7, reason: 'verified_same_number', conn: { raw: conn.raw } });
+    const kinds = log.map((l) => (l[0] === 'raw' ? (l[1] === LOCK ? 'lock' : 'hold-update') : l[0]));
+    expect(kinds).toEqual(['select', 'lock', 'hold-update']);
+    expect(log[1][2]).toEqual(['no_text_line:+19415551234']);
+    expect(log[2][1]).toContain('UPDATE disclaimed_number_holds');
+  });
+
+  test('a call that holds several lines locks each once, in sorted order, so two releases never take them crosswise', async () => {
+    const log = [];
+    const conn = lockConn([{ phone_e164: '+19415559999' }, { phone_e164: '+19415550001' }, { phone_e164: '+19415559999' }, { phone_e164: 'relay' }], log);
+    const own = await Holds.lockNoTextLinesForCall(conn, 7);
+    expect(own).toBe('+19415559999'); // newest held_at first
+    expect(log.filter((l) => l[0] === 'raw').map((l) => l[2][0])).toEqual(['no_text_line:+19415550001', 'no_text_line:+19415559999']);
+  });
+
+  test('no hold row or no call: no lock, no line', async () => {
+    const log = [];
+    expect(await Holds.lockNoTextLinesForCall(lockConn([], log), 7)).toBeNull();
+    expect(await Holds.lockNoTextLinesForCall(lockConn([{ phone_e164: 'x' }], log), null)).toBeNull();
+    expect(log.filter((l) => l[0] === 'raw')).toEqual([]);
+  });
+});

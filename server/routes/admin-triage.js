@@ -211,31 +211,35 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 //   DISMISS just closes the card: nothing changes, the hold stays.
 //   RESOLVE with lineCanGetTexts ("Line can get texts", its own button and confirm) closes the card and
 //     releases the hold, unless a plain disclaimed callback_number_needed card is open (its own Resolve).
+// LOCK ORDER (every line release, this path and releaseClosedNoTextHold): per-call lockTriageCall (taken by
+// the caller) -> phone-wide pg_advisory_xact_lock(hashtext('no_text_line:' || E.164)) -> hold rows -> visit rows.
 // Returns the reply for the route, or `prior` when nothing ran.
 async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineCanGetTexts) {
   if (item.reason_code !== 'text_number_differs' || !item.call_log_id || nextStatus !== 'resolved') return prior;
+  const Holds = require('../services/disclaimed-number-holds');
   const ownershipCardOpen = lineCanGetTexts === true && await disclaimedCardOpen(trx, item.call_log_id);
   const release = lineCanGetTexts === true && !ownershipCardOpen;
+  // Lock order (both release paths; the caller already holds lockTriageCall for this call): 1) the
+  // per-call triage lock, 2) the phone-wide no_text_line advisory lock below, 3) hold and visit rows.
+  // No hold row is read-for-update or written before step 2, so two releases of one shared line
+  // serialize on the phone lock instead of crossing row locks (A->B / B->A deadlock, #6112 r15).
+  const ownPhone = release ? await Holds.lockNoTextLinesForCall(trx, item.call_log_id) : null;
   const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
     clearedBy: assignedTo,
     numberVerdict: release ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
   });
-  if (release) {
+  if (release && ownPhone) {
     // The office verified the LINE, not one call: a shared office or relay number holds one row per
     // call that said it cannot get texts, and the send boundary blocks on any of them. Lift every
     // no-text hold on this number (never a plain disclaimed-number hold: its own card releases it)
     // and the visit-level holds of the calls that placed them (codex #6112 r7 P2).
-    const Holds = require('../services/disclaimed-number-holds');
-    const own = await trx(Holds.TABLE).where({ source_call_log_id: item.call_log_id }).orderBy('held_at', 'desc').first('phone_e164');
-    if (own?.phone_e164) {
-      const otherCalls = await Holds.clearNoTextHoldsForPhone({
-        phoneE164: own.phone_e164, exceptCallLogId: item.call_log_id, clearedBy: assignedTo, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
-      });
-      for (const otherCallLogId of otherCalls) {
-        await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER });
-      }
-      cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
+    const otherCalls = await Holds.clearNoTextHoldsForPhone({
+      phoneE164: ownPhone, exceptCallLogId: item.call_log_id, clearedBy: assignedTo, reason: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, conn: trx,
+    });
+    for (const otherCallLogId of otherCalls) {
+      await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER });
     }
+    cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
   }
   const reply = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
   if (ownershipCardOpen) {
@@ -2569,6 +2573,41 @@ router.post('/:id/verdict', async (req, res) => {
     // settlement's task inserts fill with addresses (pre-push audit P1).
     logger.error(`[admin-triage] verdict failed: ${err.code || err.name || 'error'}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
+  }
+});
+
+// GET /api/admin/triage/held-lines → every line whose texts are held because the caller said it cannot
+// get texts (#6112 follow-up). The inbox tabs show only the newest 100 closed cards, but the number-wide
+// hold outlives its card, so this list reads the hold rows themselves. A no-text hold is a hold row whose
+// source call has a text_number_differs card (the same test clearNoTextHoldsForPhone uses); the newest
+// such card is the one the "Line can get texts" button resolves. blocked_by_ownership_card marks a call
+// that also has a "not my number" card still unresolved: the release will defer, never clear.
+const HELD_LINES_SQL = `
+  SELECT h.id AS hold_id, h.phone_e164, h.held_at, h.source_call_log_id,
+         c.created_at AS call_created_at, c.customer_id, cu.first_name, cu.last_name,
+         t.id AS card_id, t.status AS card_status, t.updated_at AS card_updated_at,
+         EXISTS (SELECT 1 FROM triage_items d
+                  WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
+                    AND d.status <> 'resolved'
+                    AND __OWNERSHIP__) AS blocked_by_ownership_card
+    FROM disclaimed_number_holds h
+    JOIN LATERAL (SELECT id, status, updated_at FROM triage_items
+                   WHERE call_log_id = h.source_call_log_id AND reason_code = 'text_number_differs'
+                   ORDER BY created_at DESC LIMIT 1) t ON true
+    LEFT JOIN call_log c ON c.id = h.source_call_log_id
+    LEFT JOIN customers cu ON cu.id = c.customer_id
+   WHERE h.cleared_at IS NULL
+   ORDER BY h.held_at DESC
+   LIMIT 500`;
+
+router.get('/held-lines', async (_req, res) => {
+  try {
+    const { OWNERSHIP_DISCLAIMER_CARD_SQL } = require('../services/disclaimed-number-holds');
+    const result = await db.raw(HELD_LINES_SQL.replace('__OWNERSHIP__', OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')));
+    res.json({ lines: result?.rows || [] });
+  } catch (err) {
+    logger.error(`[admin-triage] held-lines list failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load held lines' });
   }
 });
 

@@ -708,4 +708,108 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     const tx = await run([textCard()], 'resolve', CARD_ID, { line_can_get_texts: true });
     expect(numberHold(tx.tables).cleared_at).toBeInstanceOf(Date);
   });
+
+  // Lock order for a "Line can get texts" release (#6112 r15 follow-up): per-call triage lock, then the
+  // phone-wide advisory lock, then the first hold row write. Two staff releasing one shared line from
+  // cards on different calls then queue on the phone lock instead of crossing row locks.
+  describe('phone-wide lock before any hold row is touched', () => {
+    const LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtext(?))';
+    const { lockTriageCall } = require('../utils/triage-locks');
+
+    // Same fake db, with every lock and every hold-row write appended to one event list.
+    function loggedDb(triage_items) {
+      const fx = fixture({ triage_items });
+      const events = [];
+      lockTriageCall.mockImplementation(async (_trx, callId) => { events.push(`triage-lock:${callId}`); });
+      const inner = fx.conn;
+      const conn = (table) => {
+        const b = inner(table);
+        if (table === 'disclaimed_number_holds') {
+          const update = b.update;
+          b.update = async (...a) => { events.push('hold-update'); return update(...a); };
+        }
+        return b;
+      };
+      conn.transaction = async (fn) => fn(conn);
+      conn.schema = inner.schema;
+      conn.raw = (sql, bindings) => {
+        if (sql === LOCK_SQL) events.push(`phone-lock:${bindings[0]}`);
+        else if (/UPDATE disclaimed_number_holds/.test(sql)) events.push('hold-update');
+        return inner.raw(sql, bindings);
+      };
+      wireDb(db, { conn });
+      return { ...fx, events };
+    }
+    const base2 = { call_log_id: CALL_ID, status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory' };
+    const textCard2 = (over = {}) => ({ id: CARD_ID, reason_code: 'text_number_differs', payload: { no_text_hold: true }, ...base2, ...over });
+    afterEach(() => lockTriageCall.mockImplementation(async () => {}));
+
+    test.each([['open card', 'open'], ['closed card', 'resolved']])('release from an %s: triage lock, then the phone lock, then the first hold write', async (_n, status) => {
+      const fx = loggedDb([textCard2({ status })]);
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base2.updated_at, line_can_get_texts: true });
+        expect(res.status).toBe(200);
+      });
+      const firstHoldWrite = fx.events.findIndex((e) => e === 'hold-update');
+      const phoneLock = fx.events.findIndex((e) => e.startsWith('phone-lock:'));
+      expect(phoneLock).toBeGreaterThan(-1);
+      expect(firstHoldWrite).toBeGreaterThan(phoneLock);
+      expect(fx.events.indexOf(`triage-lock:${CALL_ID}`)).toBeLessThan(phoneLock);
+      expect(fx.events[phoneLock]).toBe('phone-lock:no_text_line:+19415551234');
+      expect(numberHold(fx.tables).cleared_at).toBeInstanceOf(Date);
+    });
+
+    test('a release that is deferred (open "not my number" card) takes no phone lock and touches no hold row', async () => {
+      const fx = loggedDb([textCard2(), { id: 'card-cb', reason_code: 'callback_number_needed', payload: {}, ...base2 }]);
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base2.updated_at, line_can_get_texts: true })).status).toBe(200);
+      });
+      expect(fx.events.filter((e) => e.startsWith('phone-lock:') || e === 'hold-update')).toEqual([]);
+      expect(numberHold(fx.tables).cleared_at).toBeNull();
+    });
+
+    test('Resolve without line_can_get_texts never takes the phone lock', async () => {
+      const fx = loggedDb([textCard2()]);
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base2.updated_at })).status).toBe(200);
+      });
+      expect(fx.events.filter((e) => e.startsWith('phone-lock:'))).toEqual([]);
+    });
+  });
+});
+
+describe('GET /admin/triage/held-lines', () => {
+  const row = { hold_id: 'h1', phone_e164: '+19415551234', held_at: '2030-01-01T10:00:00.000Z', source_call_log_id: CALL_ID, card_id: CARD_ID, card_status: 'resolved', card_updated_at: '2030-01-02T10:00:00.000Z', blocked_by_ownership_card: false };
+
+  test('lists active no-text holds with the newest text_number_differs card, newest first, limit 500; techs may read it', async () => {
+    mockRole = 'technician';
+    const fx = fixture();
+    wireDb(db, { conn: fx.conn });
+    db.raw = jest.fn(async () => ({ rows: [row] }));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/held-lines`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ lines: [row] });
+    });
+    const sql = db.raw.mock.calls[0][0];
+    expect(sql).toContain('h.cleared_at IS NULL');
+    expect(sql).toContain("reason_code = 'text_number_differs'");
+    expect(sql).toContain('ORDER BY created_at DESC LIMIT 1'); // the newest card of the call
+    expect(sql).toContain('ORDER BY h.held_at DESC');
+    expect(sql).toContain('LIMIT 500');
+    // the release-blocked flag uses the shared ownership predicate, aliased onto the other card
+    expect(sql).toContain(require('../services/disclaimed-number-holds').OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload'));
+    expect(sql).not.toContain('__OWNERSHIP__');
+  });
+
+  test('a read error is a 500 with a fixed message (no query text)', async () => {
+    const fx = fixture();
+    wireDb(db, { conn: fx.conn });
+    db.raw = jest.fn(async () => { throw new Error('select secret from x'); });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/held-lines`);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: 'Failed to load held lines' });
+    });
+  });
 });

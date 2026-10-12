@@ -22,6 +22,7 @@ const logger = require('./logger');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 
 const TABLE = 'disclaimed_number_holds';
+const NO_TEXT_LINE_LOCK_PREFIX = 'no_text_line:';
 
 // Marks a no-text hold leaves on an OPEN callback_number_needed card an earlier pass filed:
 // no_text_hold (its Resolve must not release this hold) and, when the card did not already carry
@@ -158,6 +159,26 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
     if (afterArm) await afterArm(trx);
     return recorded;
   });
+}
+
+/**
+ * Phone-wide lock for a "Line can get texts" release (codex #6112 r15 follow-up). A shared line holds
+ * one row per call that said it cannot get texts; a release clears its own call's rows and then every
+ * other call's rows on the line. Two staff releasing the same line from cards on different calls took
+ * those row locks in opposite orders (A then B, B then A) and could deadlock.
+ * Lock order for every line release: 1) the per-call triage lock (lockTriageCall), 2) this phone-wide
+ * transaction advisory lock, one per distinct line the call holds, in sorted E.164 order, 3) hold rows,
+ * visit rows. Whoever holds a line's lock is the only releaser of that line, so row locks never cross.
+ * Call INSIDE the transaction, before any hold row is written. Returns the call's newest line (or null).
+ */
+async function lockNoTextLinesForCall(conn, callLogId) {
+  if (!callLogId) return null;
+  const rows = await conn(TABLE).where({ source_call_log_id: callLogId }).orderBy('held_at', 'desc').select('phone_e164');
+  const keys = (rows || []).map((r) => holdPhoneKey(r.phone_e164)).filter(Boolean);
+  for (const key of [...new Set(keys)].sort()) {
+    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${NO_TEXT_LINE_LOCK_PREFIX}${key}`]);
+  }
+  return keys[0] || null;
 }
 
 /**
@@ -388,6 +409,8 @@ module.exports = {
   ensureDisclaimedNumberHold,
   clearDisclaimedNumberHoldsForCall,
   clearNoTextHoldsForPhone,
+  lockNoTextLinesForCall,
+  NO_TEXT_LINE_LOCK_PREFIX,
   NO_TEXT_MARK_SQL,
   OWNERSHIP_DISCLAIMER_CARD_SQL,
   disclaimedNumberHeld,

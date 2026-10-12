@@ -112,6 +112,16 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   inbox says so. The inbox shows
   the customer's live phone, with the phone at the time of the call only when it differs. The appointment-contact backfill never saves a no-text
   line into a blank `customers.phone`. The office updates the phones by hand.
+  **Held lines.** The Resolved and Dismissed tabs show only the newest 100 cards, but the number-wide hold
+  outlives its card, so the inbox has a "Held lines" panel (chip next to the status tabs) backed by
+  `GET /admin/triage/held-lines`: every active hold row whose call has a `text_number_differs` card, newest
+  first (limit 500), with the newest such card per call. One row per line; its "Line can get texts" button and
+  confirm are the card's, and it calls `PUT /admin/triage/:id/resolve` with `line_can_get_texts: true`
+  on that card, then reloads. **Lock order for every line release** (`releaseNoTextHold`, shared by the open-card
+  and closed-card paths): the per-call `lockTriageCall`, then a phone-wide
+  `pg_advisory_xact_lock(hashtext('no_text_line:' || E.164))` for each line the call holds (sorted), and only then
+  the hold rows and visit rows. Two staff releasing one shared line from cards on different calls now queue on the
+  phone lock instead of taking row locks in opposite orders.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner

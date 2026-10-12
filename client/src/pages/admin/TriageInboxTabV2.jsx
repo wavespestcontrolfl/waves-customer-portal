@@ -633,6 +633,86 @@ function ClosedNoTextAction({ item, onLineCanText }) {
   );
 }
 
+// Held lines: every line whose texts are held because the caller said it cannot get texts. The inbox
+// tabs only reach the newest 100 closed cards, but the number-wide hold stays until someone releases it,
+// so this panel reads the hold rows (GET /admin/triage/held-lines). One row per line; a line several
+// calls hold shows the newest releasable call and a count. It releases through the same
+// "Line can get texts" confirm as the card.
+const CARD_STATE_LABELS = { open: "open", in_progress: "in progress", resolved: "resolved", dismissed: "dismissed" };
+
+export function groupHeldLines(lines) {
+  const byPhone = new Map();
+  for (const line of lines || []) {
+    if (!byPhone.has(line.phone_e164)) byPhone.set(line.phone_e164, []);
+    byPhone.get(line.phone_e164).push(line);
+  }
+  return [...byPhone.entries()].map(([phone, rows]) => {
+    // A call with an unresolved "not my number" card can only defer the release: prefer one that can clear it.
+    const primary = rows.find((r) => !r.blocked_by_ownership_card) || rows[0];
+    const since = rows.reduce((a, r) => (new Date(r.held_at) < new Date(a) ? r.held_at : a), rows[0].held_at);
+    return { phone, primary, since, others: rows.length - 1 };
+  });
+}
+
+export function heldLineItem(line) {
+  return {
+    held: true,
+    id: line.card_id,
+    status: line.card_status,
+    updated_at: line.card_updated_at,
+    first_name: line.first_name,
+    last_name: line.last_name,
+    payload: { ani_phone: line.phone_e164 },
+  };
+}
+
+function heldDate(ts) {
+  if (!ts) return "unknown date";
+  return new Date(ts).toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
+}
+
+function HeldLinesPanel({ lines, loading, actioning, onRelease }) {
+  const groups = groupHeldLines(lines);
+  return (
+    <Card>
+      <CardBody>
+        <div className="px-3 pt-3 text-13 font-medium text-zinc-900">Held lines</div>
+        <p className="px-3 text-12 text-ink-tertiary mb-2">
+          Lines where the caller said texts cannot arrive. They stay blocked until someone confirms the line can get texts.
+        </p>
+        {loading && lines === null ? (
+          <div className="p-6 text-center text-ink-tertiary text-14">Loading…</div>
+        ) : groups.length === 0 ? (
+          <div className="p-6 text-center text-14 text-ink-secondary">No held lines.</div>
+        ) : (
+          <div className="divide-y divide-zinc-200">
+            {groups.map(({ phone, primary, since, others }) => (
+              <div key={phone} className="py-3 px-3 flex flex-wrap items-start justify-between gap-2" data-testid="held-line">
+                <div className="min-w-0">
+                  <div className="text-14 font-medium text-zinc-900">{phone}</div>
+                  <div className="text-12 text-ink-secondary">
+                    Held since {heldDate(since)} · call of {heldDate(primary.call_created_at)} · {callerName(primary)}
+                  </div>
+                  <div className="text-12 text-ink-tertiary">
+                    Card {CARD_STATE_LABELS[primary.card_status] || primary.card_status}, updated {heldDate(primary.card_updated_at)}
+                    {others > 0 && ` · ${others} more call${others === 1 ? "" : "s"} hold this line`}
+                  </div>
+                  {primary.blocked_by_ownership_card && (
+                    <div className="text-12 text-alert-fg">This call also has an open "not my number" card. Resolve that card first.</div>
+                  )}
+                </div>
+                <Button size="sm" variant="secondary" disabled={actioning === primary.card_id} onClick={() => onRelease(heldLineItem(primary))}>
+                  Line can get texts
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 function LineCanTextDialog({ item, actioning, onClose, onConfirm }) {
   const busy = !!item && actioning === item.id;
   const line = item ? parsePayload(item.payload)?.ani_phone : null;
@@ -732,6 +812,26 @@ export default function TriageInboxTabV2({ isAdmin }) {
   // Email-disagreement confirm form draft, keyed by item id — which
   // candidate (or "other") is selected, and the typed value for "other".
   const [emailConfirmDrafts, setEmailConfirmDrafts] = useState({});
+  const [heldOpen, setHeldOpen] = useState(false); // "Held lines" panel (no-text lines still blocked for texts)
+  const [heldLines, setHeldLines] = useState(null); // null until first loaded
+  const [heldLoading, setHeldLoading] = useState(false);
+
+  // Reads the hold rows, not the inbox list, so a line whose card fell off the closed tabs still shows.
+  const loadHeld = useCallback(() => {
+    setHeldLoading(true);
+    adminFetch("/admin/triage/held-lines")
+      .then((d) => { setHeldLines(Array.isArray(d?.lines) ? d.lines : []); setHeldLoading(false); })
+      .catch((err) => {
+        setHeldLoading(false);
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Failed to load held lines.");
+      });
+  }, []);
+
+  const toggleHeld = () => {
+    const next = !heldOpen;
+    setHeldOpen(next);
+    if (next) loadHeld();
+  };
 
   const load = useCallback((nextMode, nextStatus, nextAutoOnly = false) => {
     setLoading(true);
@@ -962,16 +1062,24 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setError(res.callback_number.message || "The line stays blocked for texts: resolve this call's other card first.");
       }
     };
-    if (isOpenState(item.status)) { resolveItem(item, { line_can_get_texts: true }, reportDeferred); return; }
+    // A held-lines row always takes this path (open or closed card): the server releases either way,
+    // and the inbox list plus the panel both reload.
+    if (isOpenState(item.status) && !item.held) { resolveItem(item, { line_can_get_texts: true }, reportDeferred); return; }
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
       body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true }),
     })
-      .then((res) => { setActioning(null); reportDeferred(res); load(mode, status, autoOnly); })
+      .then((res) => {
+        setActioning(null);
+        // Reload first: load() clears the error banner, so the deferred message must be set after it.
+        load(mode, status, autoOnly);
+        if (heldOpen) loadHeld();
+        reportDeferred(res);
+      })
       .catch((err) => {
         setActioning(null);
-        if (err?.status === 409) { load(mode, status, autoOnly); setError("This card changed since it loaded — review the refreshed card first."); return; }
+        if (err?.status === 409) { load(mode, status, autoOnly); if (heldOpen) loadHeld(); setError("This card changed since it loaded — review the refreshed card first."); return; }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -1134,6 +1242,20 @@ export default function TriageInboxTabV2({ isAdmin }) {
               </span>
             </button>
           ))}
+          <button
+            type="button"
+            onClick={toggleHeld}
+            aria-pressed={heldOpen}
+            className={cn(
+              "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
+              heldOpen
+                ? "bg-zinc-900 text-white border-zinc-900"
+                : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
+            )}
+          >
+            Held lines
+            {heldLines && <span className={cn("text-11", heldOpen ? "text-zinc-300" : "text-ink-tertiary")}>{groupHeldLines(heldLines).length}</span>}
+          </button>
           {(status === "resolved" || status === "dismissed") && (
             <button
               type="button"
@@ -1156,6 +1278,10 @@ export default function TriageInboxTabV2({ isAdmin }) {
         <div className="flex items-center gap-2 text-13 text-alert-fg bg-alert-bg border-hairline border-alert-fg/30 rounded-md px-3 py-2">
           <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {error}
         </div>
+      )}
+
+      {isTriage && heldOpen && (
+        <HeldLinesPanel lines={heldLines} loading={heldLoading} actioning={actioning} onRelease={setLineCanTextFor} />
       )}
 
       {!isTriage && (
