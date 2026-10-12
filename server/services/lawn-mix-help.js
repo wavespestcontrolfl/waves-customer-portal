@@ -249,7 +249,9 @@ async function buildBlock({ loaded, weed, chinch, month, knex }, { readStaged, r
   const [staged, catalog] = await Promise.all([readStaged({ knex, protocolId, productIds: ids }), readCatalog(knex, ids)]);
   const rows = rowsOf({ ids, staged, catalog, month });
   if (!Object.keys(rows).length) return {};
-  return { mixHelp: { v: 1, tanks: [...TANKS], rows, weedOrder: weedOrder(weed?.weedMix?.groupProductIds, catalog) } };
+  // The plan's lawn size travels with the block so the sheet's gallons preview is held to the same cap order (visit area, then plan).
+  const planLawnSqft = positive(loaded?.plan?.mixCalculator?.lawnSqft);
+  return { mixHelp: { v: 1, tanks: [...TANKS], rows, weedOrder: weedOrder(weed?.weedMix?.groupProductIds, catalog), ...(planLawnSqft ? { planLawnSqft: Math.round(planLawnSqft) } : {}) } };
 }
 
 /**
