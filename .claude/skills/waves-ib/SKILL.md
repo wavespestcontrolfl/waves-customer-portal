@@ -29,6 +29,21 @@ Tool modules live in `server/services/intelligence-bar/{context}-tools.js`,
 one file per context. The `context` parameter drives which tools load and
 which system-prompt extension applies — no page-specific endpoints.
 
+**Full-access exception (owner ruling 2026-10-12).** On the platform path
+(`GATE_IB_PLATFORM`), a full-access login (`ibFullAccess`, the owner) on an
+ordinary admin page does NOT get a page list: `initialTools` returns
+`discover_capabilities` plus every action `allowed()` accepts whose approval
+is not `confirmed_endpoint`, sorted by tool name, so the list is identical
+on every page. The route puts one 1-hour cache breakpoint on the last tool
+(`withToolsCacheBreakpoint`), so that tools prefix is cached once and shared
+across pages; the system prompt still varies by page and keeps its own
+breakpoint. When asking "why did this tool load for the owner?", start
+there, not in the mapping below. Other admins, technicians, the tech
+context and the `agent_estimate` rail still follow the mapping. `discover()`
+remains their way to reach other pages' tools: it stems words and expands
+everyday ones through `discovery-vocabulary.js`, and ranks a match on a
+tool's own name above a description match.
+
 ## Context → Tools Mapping
 
 | Context | Route(s) | Extra tool module |
@@ -70,7 +85,8 @@ a "which value?" question, returned as `choices` (plain strings) on `/query`;
 display only, a tap sends exactly the button text as ordinary operator text
 and never confirms a write). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
-their UI-confirm card.
+their UI-confirm card. A full-access login gets the whole allowed list, not
+only this core set (see the full-access exception above).
 Tech portal is isolated — no base tools, strictly read-only, lower
 max_tokens for field speed.
 
