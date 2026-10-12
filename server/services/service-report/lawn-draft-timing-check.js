@@ -23,7 +23,6 @@
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
-const featureGates = require('../../config/feature-gates');
 
 const CHECK_TIMEOUT_MS = 8000;
 // Below this there is no time for a useful answer: skip, fail open.
@@ -78,11 +77,11 @@ function sentencesOf(text) {
     .filter(Boolean);
 }
 
-/** LAWN_DRAFT_TIMING_CHECK: on unless off / false / 0, and only while the report lead (the v6 copy) is live. */
+/** LAWN_DRAFT_TIMING_CHECK: on unless off / false / 0. */
 function lawnDraftTimingCheckLive() {
   const raw = String(process.env.LAWN_DRAFT_TIMING_CHECK || '').trim().toLowerCase();
   if (raw === 'off' || raw === 'false' || raw === '0') return false;
-  return featureGates.lawnReportLeadLive();
+  return true;
 }
 
 /**

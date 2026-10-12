@@ -34,9 +34,16 @@ const PROPERTY_TOOLS = [
     input_schema: { type: 'object', additionalProperties: false,
       properties: { customer_id: uuid, property_id: uuid }, required: ['customer_id', 'property_id'] },
   },
+  {
+    name: 'remove_customer_property',
+    description: 'Remove (deactivate) a saved property from a customer, for example a wrong address or a home the customer no longer has. Look up the exact saved property ID first. Refused for the primary property, the account address, and a property with an open or recurring visit or an open estimate; say what blocks it. History keeps the address. The removed address cannot be added again from the bar. Requires confirmation of the current preview; sends no messages.',
+    strict: true,
+    input_schema: { type: 'object', additionalProperties: false,
+      properties: { customer_id: uuid, property_id: uuid }, required: ['customer_id', 'property_id'] },
+  },
 ];
 
-const kinds = { add_customer_property: 'add', update_customer_property: 'edit', set_primary_property: 'primary' };
+const kinds = { add_customer_property: 'add', update_customer_property: 'edit', set_primary_property: 'primary', remove_customer_property: 'remove' };
 async function executePropertyTool(name, input, actionContext = {}) {
   if (!gateEnvValue('GATE_IB_PLATFORM')) return { error: 'Property actions are disabled', code: 'integration_disabled' };
   const kind = kinds[name];
@@ -49,6 +56,7 @@ async function executePropertyTool(name, input, actionContext = {}) {
     const options = { actorId: actionContext.technicianId, expectedVersion: input._verified_property_version };
     if (kind === 'add') return await properties.addManualProperty(input.customer_id, input, options);
     if (kind === 'edit') return await properties.editManualProperty(input.customer_id, input.property_id, input, options);
+    if (kind === 'remove') return await properties.removeManualProperty(input.customer_id, input.property_id, options);
     return await properties.changePrimaryProperty(input.customer_id, input.property_id, options);
   } catch (err) {
     if (!err.isOperational) throw err;

@@ -67,6 +67,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'add_customer_property',
   'update_customer_property',
   'set_primary_property',
+  'remove_customer_property',
   'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',

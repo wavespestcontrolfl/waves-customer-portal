@@ -7,7 +7,6 @@ import { describe, expect, it } from 'vitest';
 import { insightsWithoutRepeats, bannerRepeatsAftercare } from './lawnLayoutRules';
 
 const require = createRequire(import.meta.url);
-process.env.GATE_LAWN_REPORT_LEAD = 'true';
 const { buildLawnInsightCards } = require('../../../../../server/services/service-report/lawn-report-insights');
 const { buildWateringInstruction, composeBannerLines } = require('../../../../../server/services/service-report/lawn-watering-instruction');
 const { buildAftercare } = require('../../../../../server/services/service-report/lawn-report-v2');
