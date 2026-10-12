@@ -280,7 +280,6 @@ function canonicalOneTimeLines(estimate, data) {
 // are found with the converter's own item reader over the same containers.
 function unrepresentableRow(data, converter, { hasTotal }) {
   if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return null;
-  const { explicitZeroNetRaw, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
   const docs = [data, ...oneTimeContainers(data).filter((c) => c !== data).map((c) => ({ result: c }))];
   const rowName = (item) => String(item.displayName || item.label || item.display?.name || item.name || item.service || 'a one-time row').trim();
   // Mapped items whose operator-accepted net is positive: their raw twin's
@@ -302,14 +301,22 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   // no aggregate to pool against the gross line would over-invoice.
   for (const container of oneTimeContainers(data)) {
     for (const line of Array.isArray(container.lineItems) ? container.lineItems : []) {
-      // Same gate as the extractor: a program row or a recurring row is not
-      // one-time work, whatever its net aliases say (codex #6113 r28).
-      if (line.onProg === true || line.includedOnProgram === true || rawRowHasRecurringEvidence(line)) continue;
-      if (explicitZeroNetRaw(line) && !(Number(line.manualFinalOneTime) > 0) && !manualNetKeys.has(serviceKey(line))) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
-      const amount = rawLineAmount(line);
-      if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
+      const why = rawLineRefusal(line, { hasTotal, manualNetKeys, serviceKey, rowName });
+      if (why) return why;
     }
   }
+  return null;
+}
+// One raw engine line's refusal, or null. Same gate as the extractor: a
+// program row or a recurring row is not one-time work, whatever its net
+// aliases say (codex #6113 r28).
+function rawLineRefusal(line, { hasTotal, manualNetKeys, serviceKey, rowName }) {
+  const { explicitZeroNetRaw, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
+  if (line.onProg === true || line.includedOnProgram === true || rawRowHasRecurringEvidence(line)) return null;
+  const manualOutranks = Number(line.manualFinalOneTime) > 0 || manualNetKeys.has(serviceKey(line));
+  if (explicitZeroNetRaw(line) && !manualOutranks) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+  const amount = rawLineAmount(line);
+  if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
   return null;
 }
 // The raw row's amount, in the extractor's own alias order (rawResolvedAmount).
