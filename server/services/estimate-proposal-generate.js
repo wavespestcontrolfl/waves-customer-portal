@@ -181,16 +181,21 @@ const FAMILY_RESPONSIBILITIES = {
 };
 
 // An explicit $0 in the sold net is comped scope, never an unpriced row.
-// The net is the FIRST applicable alias in the resolvers' own order
-// (manualFinalOneTime, then priceAfterDiscount, amountAfterDiscount,
-// totalAfterDiscount): a positive accepted override beside a stale
-// lower-priority zero is priced work (codex #6113 r24 / r28), and a zero in
-// the first applicable alias must fail the draft, not drop the work.
-const NET_ONE_TIME_ALIASES = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
-function explicitZeroNet(row = {}) {
-  const key = NET_ONE_TIME_ALIASES.find((k) => row[k] !== null && row[k] !== undefined && row[k] !== '');
+// The net is the FIRST applicable alias in the matching resolver's own
+// order (mappedResolvedAmount for mapped items, rawResolvedAmount for raw
+// engine rows): a positive accepted override beside a stale lower-priority
+// zero is priced work (codex #6113 r24 / r28 / r29), and a zero in the first
+// applicable alias must fail the draft, not drop the work. A zero only in a
+// gross field (price / total / installation) is an unpriced row, not comped.
+const MAPPED_NET_ALIASES = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
+const RAW_NET_ALIASES = ['manualFinalOneTime', 'oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
+const firstApplicableAlias = (row, aliases) => aliases.find((k) => row[k] !== null && row[k] !== undefined && row[k] !== '');
+function zeroInFirstAlias(row, aliases) {
+  const key = firstApplicableAlias(row, aliases);
   return key !== undefined && (row[key] === 0 || row[key] === '0');
 }
+const explicitZeroNet = (row = {}) => zeroInFirstAlias(row, MAPPED_NET_ALIASES);
+const explicitZeroNetRaw = (row = {}) => zeroInFirstAlias(row, RAW_NET_ALIASES);
 // A raw engine row is recurring evidence when it is not explicitly one-time
 // and carries an annual cadence or an annual amount; such a row is never
 // one-time work, whatever its net aliases say (codex #6113 r28).
@@ -846,269 +851,192 @@ function finishCorrectiveWork(work, { gated, comped, storedOneTime }) {
 // would ERASE an authoritative one-time charge when saved (pre-push codex
 // P0). Same authority discipline as programs: reconcile against the stored
 // onetime_total to the cent or fail the whole monetary draft.
-function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null) {
+// ── deriveCorrectiveWork helpers ──────────────────────────────────────────
+// The selected engine result plus, when a mapped `result` sits beside it,
+// the agent-draft `engineResult` as a SEPARATE container (codex 1A-ii r18).
+function oneTimeResultContainers(estimateData) {
   const engineResult = estimateData.result || estimateData.engineResult || estimateData || {};
-  // Canonical extraction (estimate-converter): handles oneTime.items,
-  // specItems, nested results, one_time.items, and oneTimeItems shapes and
-  // filters included-on-program rows — never a narrower parallel walk
-  // (codex 1A-ii r2).
-  // Wrap the SELECTED engine result so the canonical extractor descends
-  // into agent-draft engineResult shapes too (codex 1A-ii r2b).
-  // collapseMirrored: same specialty row mirrored across containers
-  // collapses by content identity while LEGITIMATE repeated charges within
-  // one container are preserved (codex 1A-ii r3c). Root containers
-  // (one_time.items / oneTimeItems beside a result) AND agent-draft
-  // engineResult containers both collect — object-deduped so shared rows
-  // never double (codex 1A-ii r3d).
-  // The two source shapes can mirror the SAME row as distinct objects —
-  // collapse across them by content identity with the same max-per-source
-  // rule that preserves legitimate in-source repeats (codex 1A-ii r4b).
-  const sourceLists = [
-    estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true }),
-    estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true }),
-    // estimateData.engineResult is a SEPARATE container when a mapped
-    // `result` exists beside it — its oneTime/specItems rows are otherwise
-    // invisible (only its lineItems flow through the raw containers), and
-    // with a null onetime_total the omission has no reconcile backstop
-    // (codex 1A-ii r18; the service-lines and delivery-options collectors
-    // deliberately merge these shapes).
-    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
-      ? [estimateOneTimeItemsFromData({ result: estimateData.engineResult }, { collapseMirrored: true })]
-      : []),
-  ];
-  // Mirror-collapse keeps the FIRST clone — if any dropped twin carried a
-  // review marker the kept clone lacks, gating below would publish the
-  // provisional price (same trap the recurring side closed with
-  // gatedRawKeys in r12). Collect gated identities from EVERY clone via the
-  // UNCOLLAPSED extraction (the collapse above already dropped mirrored
-  // twins, including marker-carrying ones); the emitted representative
-  // inherits them (codex 1A-ii r14).
-  const gatedOneTimeIdentities = new Set([
-    ...estimateOneTimeItemsFromData(estimateData),
-    ...estimateOneTimeItemsFromData({ result: engineResult }),
-    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
-      ? estimateOneTimeItemsFromData({ result: estimateData.engineResult })
-      : []),
-  ].filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
-  const mappedCollapse = collapseMirroredRows(sourceLists, {
-    identity: oneTimeIdentity, amount: mappedResolvedAmount, label: (item) => String(item.label || item.name || item.service || 'item'),
-  });
-  const fromOneTime = mappedCollapse.rows;
-  // A lineItems row is one-time when it carries NO recurring evidence (no
-  // cadence, no monthly/annual dollars) but IS priced — raw engine drafts
-  // persist bed-bug/exclusion work as `{ service, price }` without the
-  // legacy oneTimePrice alias (codex 1A-ii r3).
-  // BOTH raw containers contribute (a truthy ancillary result must not
-  // hide engineResult.lineItems), object-deduped (codex 1A-ii r4).
-  const rawContainers = [
-    Array.isArray(engineResult.lineItems) ? engineResult.lineItems : [],
-    estimateData.engineResult && estimateData.engineResult !== engineResult
-      && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : [],
-  ];
-  // Clones of the same row across the two containers are mirrors, not
-  // extra charges — collapse by content identity with the max-per-container
-  // rule that preserves legitimate in-container repeats (codex 1A-ii r6).
-  // Same clone-marker rule for the raw containers: an ungated result.lineItems
-  // row deduped against its engineResult twin that carries
-  // requiresMeasurement/quoteRequired must stay gated (codex 1A-ii r14).
-  const gatedRawIdentities = new Set(rawContainers.flat()
-    .filter((line) => rowIsReviewGated(line))
-    .map(rawIdentity));
-  const rawCollapse = collapseMirroredRows(rawContainers, {
-    identity: rawIdentity, amount: rawResolvedAmount, label: (line) => rawLineLabel(line, 'item'),
-  });
-  const lineItemsRows = rawCollapse.rows;
-  const gated = [];
-  // Recurring rows can CARRY a one-time installation charge
-  // (installation.price on termite-bait lines) — extract it even though
-  // the row itself is recurring (codex 1A-ii r5).
-  const installationRows = lineItemsRows
-    .filter((line) => line.onProg !== true && line.includedOnProgram !== true
-      && num(line.installation?.price) > 0
-      && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
-  const fromLineItems = lineItemsRows.filter((line) => {
-    if (rowIsReviewGated(line) || gatedRawIdentities.has(rawIdentity(line))) {
-      gated.push(rawLineLabel(line, 'item'));
-      return false;
-    }
-    // Canonical included-on-program exclusion (same rule as
-    // estimateOneTimeItemsFromData): a row a program already includes must
-    // never bill again as corrective work (codex 1A-ii r4b).
-    if (line.onProg === true || line.includedOnProgram === true) return false;
-    if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
-    // Explicit one-time cadence wins outright; otherwise only the
-    // explicitly ANNUAL cadence fields count as recurring evidence — a
-    // package `visits` count on a priced row (german-roach cleanout, flea)
-    // must not exclude the charge from corrective work (codex 1A-ii r18).
-    // A recurring row is never one-time work, even with a $0 net alias
-    // (codex #6113 r28).
-    if (rawRowHasRecurringEvidence(line)) return false;
-    // An EXPLICIT accepted zero stays in so the comped guard below can
-    // fail the draft instead of silently dropping promised scope
-    // (codex 1A-ii r4).
-    if (explicitZeroNet(line)) return true;
-    return num(line.manualFinalOneTime ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price) > 0;
-  });
-  const work = [];
-  const comped = [];
-  const conflicted = [...mappedCollapse.conflicted, ...rawCollapse.conflicted];
-  // Mapped estimates persist specialty rows in BOTH oneTime.specItems and
-  // root specItems as distinct objects — the canonical extractor dedupes by
-  // object identity only, so dedupe here by stable service+amount identity
-  // or every specialty charge doubles and reconciliation rejects the draft
-  // (codex 1A-ii r2e).
-  // A mapped item and its raw lineItems twin are ONE charge — the mapped
-  // item CONSUMES the twin and merges its authoritative metadata instead
-  // of a drop-if-equal check (codex 1A-ii r17b P0): the twin's
-  // manualFinalOneTime (operator-accepted net) outranks the mapped gross,
-  // an explicit taxable flag on EITHER row beats the family default, and
-  // mirrors whose amounts disagree with no accepted net fail the draft —
-  // a nullable onetime_total gives reconciliation no backstop here.
-  const serviceIdOf = (row) => String(row.service || row.name || '').toLowerCase();
-  const rawPool = fromLineItems.map((line) => ({ line, used: false }));
+  const extra = estimateData.engineResult && estimateData.engineResult !== engineResult ? estimateData.engineResult : null;
+  return { engineResult, extra };
+}
+// Mapped one-time items from every container (canonical extractor, never a
+// narrower parallel walk, codex 1A-ii r2/r2b/r3c/r3d/r4b), plus the gated
+// identities read from the UNCOLLAPSED extraction so a dropped mirror's
+// review marker still gates its kept clone (codex 1A-ii r14).
+function mappedOneTimeSources(estimateData) {
+  const { engineResult, extra } = oneTimeResultContainers(estimateData);
+  const docs = [estimateData, { result: engineResult }, ...(extra ? [{ result: extra }] : [])];
+  const sourceLists = docs.map((doc) => estimateOneTimeItemsFromData(doc, { collapseMirrored: true }));
+  const gatedIdentities = new Set(docs.flatMap((doc) => estimateOneTimeItemsFromData(doc))
+    .filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
+  return { sourceLists, gatedIdentities };
+}
+// Raw engine lineItems from BOTH containers (codex 1A-ii r4), with the same
+// clone-marker rule (codex 1A-ii r14).
+function rawLineItemSources(estimateData) {
+  const { engineResult, extra } = oneTimeResultContainers(estimateData);
+  const rawContainers = [engineResult.lineItems, extra?.lineItems].map((rows) => (Array.isArray(rows) ? rows : []));
+  const gatedIdentities = new Set(rawContainers.flat().filter((line) => rowIsReviewGated(line)).map(rawIdentity));
+  return { rawContainers, gatedIdentities };
+}
+const programRow = (line) => line.onProg === true || line.includedOnProgram === true;
+// A raw row is one-time work when it is priced one-time (legacy oneTimePrice
+// aliases), or carries no recurring evidence and is either an explicit
+// accepted zero (kept so the comped guard fails the draft instead of dropping
+// scope, codex 1A-ii r4) or positive in the resolver's order. A program row
+// never bills again (codex 1A-ii r4b); a recurring row is never one-time
+// work whatever its net aliases say (codex #6113 r28).
+function rawRowIsOneTimeWork(line) {
+  if (programRow(line)) return false;
+  if (num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0) return true;
+  if (rawRowHasRecurringEvidence(line)) return false;
+  return explicitZeroNetRaw(line) || rawResolvedAmount(line) > 0;
+}
+// Recurring rows can CARRY a one-time installation charge (termite bait
+// lines, codex 1A-ii r5).
+function carriesInstallationCharge(line) {
+  return !programRow(line) && num(line.installation?.price) > 0
+    && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0));
+}
+const packageVisits = (...values) => {
+  const v = Number(values.find((x) => x !== null && x !== undefined));
+  return v > 0 ? Math.round(v) : null;
+};
+const scopeIncludes = (...rows) => {
+  const detail = rows.map((r) => r?.detail || r?.det).find(Boolean);
+  return detail ? [String(detail).slice(0, 200)] : [];
+};
+// A mapped item CONSUMES its raw twin and merges the twin's authoritative
+// metadata (codex 1A-ii r17b P0): the twin's manualFinalOneTime outranks the
+// mapped gross, an explicit taxable flag on either row wins, and mirrors
+// whose amounts disagree with no accepted net fail the draft. Returns the
+// verdict ('comped' | 'conflicted') or the merged amount/taxable.
+function mergeMappedTwin(item, mappedAmount, twin) {
+  if (explicitZeroNetRaw(twin)) return { verdict: 'comped' };
+  const twinManual = num(twin.manualFinalOneTime);
+  const itemManual = num(item.manualFinalOneTime);
+  if (twinManual != null && itemManual != null && roundCents(twinManual) !== roundCents(itemManual)) return { verdict: 'conflicted' };
+  if (twinManual == null && itemManual == null && roundCents(rawResolvedAmount(twin)) !== roundCents(mappedAmount)) return { verdict: 'conflicted' };
+  const amount = twinManual != null && itemManual == null ? twinManual : mappedAmount;
+  const explicitTaxable = (item.taxable === true || item.taxable === false) ? item.taxable
+    : ((twin.taxable === true || twin.taxable === false) ? twin.taxable : undefined);
+  return { amount, explicitTaxable };
+}
+// Twin: the exact-amount mirror, else any same-service raw row (one engine
+// run persists both shapes, so the same service key is a mirror).
+function claimRawTwin(rawPool, item, mappedAmount) {
+  const service = String(item.service || item.name || '').toLowerCase();
+  const sameService = (entry) => !entry.used && String(entry.line.service || entry.line.name || '').toLowerCase() === service;
+  const entry = rawPool.find((e) => sameService(e) && roundCents(rawResolvedAmount(e.line)) === roundCents(mappedAmount))
+    || rawPool.find(sameService);
+  if (entry) entry.used = true;
+  return entry ? entry.line : null;
+}
+function mappedWorkLine(item, label, { amount, explicitTaxable }, twin, taxabilityMap) {
+  return {
+    label: label.slice(0, 160),
+    amount: Math.round(amount * 100) / 100,
+    // Canonical id + package visit count, twin fallback for both (GH codex P1 ×2).
+    service: item.service || twin?.service || null,
+    visits: packageVisits(item.visits, item.visitsPerYear, twin?.visits, twin?.visitsPerYear),
+    taxable: commercialTaxableDefault(item.service || item.name, explicitTaxable, { taxabilityMap, oneTime: true }),
+    // `det` alias resolved like the public extraction, twin fallback (codex 1A-ii r14/r19).
+    includes: scopeIncludes(item, twin),
+  };
+}
+function rawWorkLine(line, amount, taxabilityMap) {
+  return {
+    label: rawLineLabel(line, 'One-time service').slice(0, 160),
+    amount: Math.round(amount * 100) / 100,
+    service: line.service || null,
+    visits: packageVisits(line.visits, line.visitsPerYear),
+    taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
+    includes: scopeIncludes(line),
+  };
+}
+// Mapped items → work lines, consuming raw twins; gated / comped / conflicted
+// labels accumulate on `out`.
+function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap, out) {
   for (const item of fromOneTime) {
     const label = String(item.label || item.name || item.service || 'item');
-    if (rowIsReviewGated(item) || gatedOneTimeIdentities.has(oneTimeIdentity(item))) {
-      gated.push(label);
-      continue;
-    }
-    // An EXPLICIT accepted zero is comped scope, not an unpriced row
-    // (codex 1A-ii r2c) — fail rather than silently lose it.
-    if (explicitZeroNet(item)) {
-      comped.push(label);
-      continue;
-    }
-    // manualFinalOneTime is the operator-ACCEPTED net (the engine keeps
-    // `price` gross) — it outranks everything (pre-push codex P0).
+    if (rowIsReviewGated(item) || gatedIdentities.has(oneTimeIdentity(item))) { out.gated.push(label); continue; }
+    // An EXPLICIT accepted zero is comped scope (codex 1A-ii r2c).
+    if (explicitZeroNet(item)) { out.comped.push(label); continue; }
     const mappedAmount = mappedResolvedAmount(item);
     if (!(mappedAmount > 0)) continue;
-    const itemService = serviceIdOf(item);
-    // Twin: prefer the exact-amount mirror, else any same-service raw row
-    // (the shapes persist from ONE engine run — same service key across
-    // the mapped/raw boundary is a mirror, not a second charge).
-    const twinEntry = rawPool.find((entry) => !entry.used && serviceIdOf(entry.line) === itemService
-      && roundCents(rawResolvedAmount(entry.line)) === roundCents(mappedAmount))
-      || rawPool.find((entry) => !entry.used && serviceIdOf(entry.line) === itemService);
-    let amount = mappedAmount;
-    let explicitTaxable = (item.taxable === true || item.taxable === false) ? item.taxable : undefined;
-    if (twinEntry) {
-      twinEntry.used = true;
-      const twin = twinEntry.line;
-      if (explicitZeroNet(twin)) {
-        comped.push(label);
-        continue;
-      }
-      const twinManual = num(twin.manualFinalOneTime);
-      const itemManual = num(item.manualFinalOneTime);
-      if (twinManual != null && itemManual != null && roundCents(twinManual) !== roundCents(itemManual)) {
-        conflicted.push(label);
-        continue;
-      }
-      if (twinManual != null && itemManual == null) {
-        amount = twinManual;
-      } else if (twinManual == null && itemManual == null
-        && roundCents(rawResolvedAmount(twin)) !== roundCents(mappedAmount)) {
-        conflicted.push(label);
-        continue;
-      }
-      if (explicitTaxable === undefined && (twin.taxable === true || twin.taxable === false)) {
-        explicitTaxable = twin.taxable;
-      }
-    }
-    if (!(amount > 0)) continue;
-    work.push({
-      label: label.slice(0, 160),
-      amount: Math.round(amount * 100) / 100,
-      // Same audit provenance as the raw-pool rows (GH codex P1 ×2):
-      // canonical id + package visit count, twin fallback for both.
-      service: item.service || (twinEntry ? twinEntry.line.service : null) || null,
-      visits: (() => {
-        const v = Number(item.visits ?? item.visitsPerYear ?? (twinEntry ? (twinEntry.line.visits ?? twinEntry.line.visitsPerYear) : null));
-        return v > 0 ? Math.round(v) : null;
-      })(),
-      taxable: commercialTaxableDefault(item.service || item.name, explicitTaxable, { taxabilityMap, oneTime: true }),
-      // Mapped specialty rows persist customer-facing scope (bed-bug room/
-      // visit counts) under the `det` alias — resolve it exactly like the
-      // public extraction (`item.detail || item.det`), falling back to the
-      // consumed raw twin's aliases (metadata merge, codex 1A-ii r14/r19)
-      // or Generate → Save keeps the price but silently drops the material
-      // scope.
-      includes: (() => {
-        const twinLine = twinEntry ? twinEntry.line : null;
-        const detail = item.detail || item.det || twinLine?.detail || twinLine?.det;
-        return detail ? [String(detail).slice(0, 200)] : [];
-      })(),
-    });
+    const twin = claimRawTwin(rawPool, item, mappedAmount);
+    const merged = twin ? mergeMappedTwin(item, mappedAmount, twin) : { amount: mappedAmount, explicitTaxable: (item.taxable === true || item.taxable === false) ? item.taxable : undefined };
+    if (merged.verdict) { out[merged.verdict].push(label); continue; }
+    if (merged.amount > 0) out.work.push(mappedWorkLine(item, label, merged, twin, taxabilityMap));
   }
+}
+function rawRowsToWork(rawPool, taxabilityMap, out) {
   for (const { line, used } of rawPool) {
     if (used) continue;
-    if (explicitZeroNet(line)) {
-      comped.push(rawLineLabel(line, 'item'));
-      continue;
-    }
+    if (explicitZeroNetRaw(line)) { out.comped.push(rawLineLabel(line, 'item')); continue; }
     const amount = rawResolvedAmount(line);
-    if (!(amount > 0)) continue;
-    work.push({
-      label: rawLineLabel(line, 'One-time service').slice(0, 160),
-      amount: Math.round(amount * 100) / 100,
-      // Canonical service id + package visit count survive into the
-      // persisted proposal so the pricing audit costs the real units
-      // against the real family (GH codex P1 ×2 on #3628).
-      service: line.service || null,
-      visits: Number(line.visits ?? line.visitsPerYear) > 0 ? Math.round(Number(line.visits ?? line.visitsPerYear)) : null,
-      taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
-      // Raw engine rows carry customer-facing scope under the same
-      // detail/det aliases the public extractor preserves (rodent
-      // sanitation sq ft, flea visit breakdown) — dropping it publishes
-      // the price without the material scope (codex 1A-ii r19).
-      includes: (line.detail || line.det) ? [String(line.detail || line.det).slice(0, 200)] : [],
-    });
+    if (amount > 0) out.work.push(rawWorkLine(line, amount, taxabilityMap));
   }
-  if (conflicted.length) {
-    return {
-      correctiveWork: null,
-      warning: `One-time work was not generated: ${conflicted.join(', ')} has mirrored rows with disagreeing amounts and no accepted price — verify the price and author the corrective work manually.`,
-    };
-  }
-  // The v1 mapper already emits bait installations into oneTime.items —
-  // when both the mapped result and the raw engineResult persist, the
-  // charge would double (codex 1A-ii r7). A mapped item is the mirror of an
-  // installation charge only on CONTENT identity — same amount AND (same
-  // service identity, its `_installation` variant, or an install-labeled
-  // item in the SAME program family), the same semantics the estimator
-  // client's own hasTermiteInstallRow dedupe uses — and each mapped item
-  // absorbs at most one charge. Never a first-token label heuristic, which
-  // let any same-priced "commercial …" corrective item absorb a real
-  // installation charge and silently underbill it (codex 1A-ii r9).
-  const mappedOneTimePool = fromOneTime.map((item) => ({
-    item,
-    amount: mappedResolvedAmount(item),
-    used: false,
-  }));
+}
+// The v1 mapper already emits bait installations into oneTime.items — a
+// mapped item is the mirror of an installation charge only on CONTENT
+// identity (same amount AND same service, its `_installation` variant, or an
+// install-labeled item in the same program family), each item absorbing at
+// most one charge; never a label heuristic (codex 1A-ii r7 / r9).
+function installationMirror(pool, line, rounded) {
+  const lineService = String(line.service || line.name || '').toLowerCase();
+  const lineFamily = programFamilyForService(line.service || line.name);
+  return pool.find(({ item, amount, used }) => {
+    if (used || !(amount > 0) || Math.round(amount * 100) / 100 !== rounded) return false;
+    const itemService = String(item.service || item.name || '').toLowerCase();
+    if (itemService === lineService || itemService === `${lineService}_installation`) return true;
+    const label = String(item.label || item.name || item.service || '').toLowerCase();
+    return /install/.test(label) && programFamilyForService(item.service || item.name) === lineFamily;
+  });
+}
+function installationRowsToWork(installationRows, fromOneTime, taxabilityMap, out) {
+  const pool = fromOneTime.map((item) => ({ item, amount: mappedResolvedAmount(item), used: false }));
   for (const line of installationRows) {
     const amount = num(line.installation?.price);
     const rounded = Math.round(amount * 100) / 100;
-    const lineService = String(line.service || line.name || '').toLowerCase();
-    const lineFamily = programFamilyForService(line.service || line.name);
-    const mirror = mappedOneTimePool.find(({ item, amount: amt, used }) => {
-      if (used || !(amt > 0) || Math.round(amt * 100) / 100 !== rounded) return false;
-      const itemService = String(item.service || item.name || '').toLowerCase();
-      if (itemService === lineService || itemService === `${lineService}_installation`) return true;
-      const label = String(item.label || item.name || item.service || '').toLowerCase();
-      return /install/.test(label) && programFamilyForService(item.service || item.name) === lineFamily;
-    });
-    if (mirror) {
-      mirror.used = true;
-      continue;
-    }
-    work.push({
+    const mirror = installationMirror(pool, line, rounded);
+    if (mirror) { mirror.used = true; continue; }
+    out.work.push({
       label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
-      amount: Math.round(amount * 100) / 100,
+      amount: rounded,
       taxable: commercialTaxableDefault(line.service || line.name, line.installation?.taxable ?? line.taxable, { taxabilityMap, oneTime: true }),
       includes: [],
     });
   }
-  return finishCorrectiveWork(work, { gated, comped, storedOneTime: num(estimate.onetime_total) });
+}
+
+// One-time priced work → corrective-work drafts. Orchestration only: the
+// mapped and raw sources are collected and mirror-collapsed, the mapped
+// items consume their raw twins, the leftover raw rows and the carried
+// installation charges follow, and finishCorrectiveWork gives the verdict.
+function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null) {
+  const mapped = mappedOneTimeSources(estimateData);
+  const raw = rawLineItemSources(estimateData);
+  const mappedCollapse = collapseMirroredRows(mapped.sourceLists, {
+    identity: oneTimeIdentity, amount: mappedResolvedAmount, label: (item) => String(item.label || item.name || item.service || 'item'),
+  });
+  const rawCollapse = collapseMirroredRows(raw.rawContainers, {
+    identity: rawIdentity, amount: rawResolvedAmount, label: (line) => rawLineLabel(line, 'item'),
+  });
+  const out = { work: [], gated: [], comped: [], conflicted: [...mappedCollapse.conflicted, ...rawCollapse.conflicted] };
+  const rawGated = (line) => rowIsReviewGated(line) || raw.gatedIdentities.has(rawIdentity(line));
+  for (const line of rawCollapse.rows.filter(rawGated)) out.gated.push(rawLineLabel(line, 'item'));
+  const rawPool = rawCollapse.rows.filter((line) => !rawGated(line) && rawRowIsOneTimeWork(line)).map((line) => ({ line, used: false }));
+  mappedItemsToWork(mappedCollapse.rows, mapped.gatedIdentities, rawPool, taxabilityMap, out);
+  rawRowsToWork(rawPool, taxabilityMap, out);
+  if (out.conflicted.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${out.conflicted.join(', ')} has mirrored rows with disagreeing amounts and no accepted price — verify the price and author the corrective work manually.`,
+    };
+  }
+  installationRowsToWork(rawCollapse.rows.filter(carriesInstallationCharge), mappedCollapse.rows, taxabilityMap, out);
+  return finishCorrectiveWork(out.work, { gated: out.gated, comped: out.comped, storedOneTime: num(estimate.onetime_total) });
 }
 
 function deriveResponsibilities(programs) {
@@ -1217,6 +1145,7 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
 
 module.exports = {
   explicitZeroNet,
+  explicitZeroNetRaw,
   rawRowHasRecurringEvidence,
   deriveProposalDraft,
   derivePrograms,

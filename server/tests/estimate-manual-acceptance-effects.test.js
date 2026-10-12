@@ -495,6 +495,19 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Wasp Nest Removal', 150]]);
   });
+  test('round 29: a raw row priced in the legacy oneTimePrice alias beside a stale priceAfterDiscount: 0 is priced work (raw resolver order), not comped', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', oneTimePrice: 150, priceAfterDiscount: 0, billingCadence: 'one_time' }] },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Wasp Nest Removal', 150]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

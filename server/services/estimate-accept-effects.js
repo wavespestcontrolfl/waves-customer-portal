@@ -252,7 +252,7 @@ function canonicalOneTimeLines(estimate, data) {
 // are found with the converter's own item reader over the same containers.
 function unrepresentableRow(data, converter, { hasTotal }) {
   if (typeof converter?.estimateOneTimeItemsFromData !== 'function') return null;
-  const { explicitZeroNet, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
+  const { explicitZeroNetRaw, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
   const docs = [data, ...oneTimeContainers(data).filter((c) => c !== data).map((c) => ({ result: c }))];
   const rowName = (item) => String(item.displayName || item.label || item.display?.name || item.name || item.service || 'a one-time row').trim();
   for (const doc of docs) {
@@ -271,7 +271,7 @@ function unrepresentableRow(data, converter, { hasTotal }) {
       // Same gate as the extractor: a program row or a recurring row is not
       // one-time work, whatever its net aliases say (codex #6113 r28).
       if (line.onProg === true || line.includedOnProgram === true || rawRowHasRecurringEvidence(line)) continue;
-      if (explicitZeroNet(line)) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+      if (explicitZeroNetRaw(line)) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
       const amount = rawLineAmount(line);
       if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
     }
