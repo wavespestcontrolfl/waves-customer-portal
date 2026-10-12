@@ -718,6 +718,15 @@ describe('agent-gap-reports', () => {
       expect(insertedRows[1].fingerprint).toBe(insertedRows[0].fingerprint);
     });
 
+    test('running out of steps with a prose decline still writes one row', async () => {
+      const collector = collectorFor();
+      collector.toolResult('no_such_tool', { error: 'Capability is not implemented', code: 'capability_unimplemented' }, true, { round: 11 });
+      await collector.flush({ reply: "I can't do that from here.", ask: 'do the thing', stepLimitReached: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].kind).toBe('blocked');
+      expect(insertedRows[0].summary).toMatch(/used all its steps/);
+    });
+
     test('with no tool at all, running out of steps still records', async () => {
       const collector = collectorFor();
       await collector.flush({ reply: 'x', stepLimitReached: true });

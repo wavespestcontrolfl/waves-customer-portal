@@ -562,7 +562,9 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       const declined = DECLINE_RE.test(String(reply || ''));
       const signals = [
         ...blockedSignals({ declined, stepLimitReached }),
-        ...(declined ? declinedSignals({ reply, ask }) : []),
+        // Out of steps is ONE record: a prose decline in that same reply
+        // would add a second row with its own fingerprint (pre-push P1).
+        ...(declined && !stepLimitReached ? declinedSignals({ reply, ask }) : []),
       ];
       if (signals.length) await writeGapRows(signals);
     } catch (err) {
