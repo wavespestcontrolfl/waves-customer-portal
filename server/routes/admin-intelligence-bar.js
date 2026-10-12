@@ -62,7 +62,7 @@ const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../se
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
 const { CHOICE_TOOLS, executeChoiceTool, OFFER_CHOICES_TOOL_NAME } = require('../services/intelligence-bar/choice-tools');
-const { ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME, createAddressCheckLedger } = require('../services/intelligence-bar/address-tools');
+const { ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME } = require('../services/intelligence-bar/address-tools');
 // Scope 'none' (they read no customer rows) but their inputs or results can
 // carry a customer's name or street address: treated as PII-bearing for logs
 // and thread redaction, as PII_TOOL_NAMES would if their scope were not 'none'.
@@ -3311,7 +3311,7 @@ RULES:
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
 - Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
 - Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values as the operator would say them ("$61.33", not a sentence), then ask the question in your reply text as usual. A button shows the value and a tap sends exactly that value as the operator's next message: treat it as their answer to the question you just asked. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
-- Addresses: before you save or change any street address (add_customer_property, update_customer, update_customer_property, update_lead_contact, create_customer, create_appointment with an address), run check_address on it and use Google's spelling, city and ZIP. Never guess a ZIP and never fix a street spelling from memory. If Google's result differs from what the operator said or from a call transcript, show both and ask which is right. If the operator says a spelling is wrong, run check_address again with their words instead of repeating the transcript. If check_address returns not_attempted or api_unavailable, say the address could not be verified and ask the operator for the ZIP. The server refuses an address write (address_check_required) unless check_address ran on that same street and ZIP in the same request; a street change must carry its ZIP and a ZIP change must carry its street.
+- Addresses: before you save or change any street address (add_customer_property, update_customer, update_customer_property, update_lead_contact, create_customer, create_appointment with an address), run check_address on it and use Google's spelling, city and ZIP. Never guess a ZIP and never fix a street spelling from memory. If Google's result differs from what the operator said or from a call transcript, show both and ask which is right. If the operator says a spelling is wrong, run check_address again with their words instead of repeating the transcript. If check_address returns not_attempted or api_unavailable, say the address could not be verified and ask the operator for the ZIP. An address change always shows a confirmation card with the exact address, so put Google's version on it.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
@@ -3616,9 +3616,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // LAST tool that ran before the terminal answer. Any later tool call
     // clears them: the answer then no longer is the question they belong to.
     let offeredChoices = null;
-    // Which addresses check_address has verified in this request; an address
-    // write outside it is refused (address-tools.js).
-    const addressLedger = createAddressCheckLedger();
 
     // Tool-use loop
     let lastToolResponse = null;
@@ -3701,7 +3698,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // scoped preparation actually fell back to the raw call (Codex r6).
         let readWidened = false;
         let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
-        if (!validationFailure) validationFailure = addressLedger.writeRefusal(toolUse.name, toolUse.input);
         if (!validationFailure && platformEnabled && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
           const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
             toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
@@ -3889,7 +3885,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
 
-        addressLedger.record(toolUse.name, toolUse.input, result);
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,

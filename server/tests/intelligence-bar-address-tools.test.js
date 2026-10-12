@@ -194,7 +194,7 @@ describe('check_address keeps the unit the operator gave', () => {
     const out = await run({ address });
     expect(out.unit).toBe(unit);
     expect(out.changed.filter(c => c.component === 'street' || c.input)).toEqual([]);
-    expect(out.note).toContain(`save "${unit}" as the second address line`);
+    expect(out.note).toContain(`keep "${unit}"`);
   });
 
   test('a street name that contains a unit word is not cut', async () => {
@@ -212,71 +212,37 @@ test('a unit in its own comma segment is kept when the city is passed separately
   expect(out.changed).toEqual([]);
 });
 
-// Codex r2 on #6297: evidence, not a prompt rule, links a check to a write.
-describe('address check ledger', () => {
-  const { createAddressCheckLedger, writtenAddress } = require('../services/intelligence-bar/address-tools');
-  const checked = async (ledger, input, result = google()) => {
-    validateAddress.mockResolvedValue(result);
-    ledger.record('check_address', input, await run(input));
-  };
-  const REQUIRED = { code: 'address_check_required' };
-  const full = (over = {}) => ({ address_line1: '100 Example Way', city: 'Sarasota', state: 'FL', zip: '34236', ...over });
+// #6297: a write that changes any part of a street address keeps its card.
+describe('changesAddress', () => {
+  const { changesAddress } = require('../services/intelligence-bar/address-tools');
+  const { executesWithoutCard } = require('../services/intelligence-bar/owner-direct');
 
-  test('an unchecked address write is refused; a non-address write is not', () => {
-    const ledger = createAddressCheckLedger();
-    expect(ledger.writeRefusal('add_customer_property', full())).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('update_customer', { updates: { notes: 'x' } })).toBeNull();
-    expect(ledger.writeRefusal('query_customers', { search: '100 Example Way' })).toBeNull();
+  test.each([
+    ['add_customer_property', { customer_id: 'c1', address_line1: '100 Example Way', city: 'Sarasota', zip: '34236' }],
+    ['update_customer', { customer_id: 'c1', updates: { zip: '34236' } }],
+    ['update_customer', { customer_id: 'c1', updates: { city: 'Venice' } }],
+    ['update_customer', { customer_id: 'c1', updates: { address_line2: 'Apt 4' } }],
+    ['bulk_update_customers', { customer_ids: ['c1'], updates: { state: 'FL' } }],
+    ['update_lead_contact', { lead_id: 'l1', address: '100 Example Way' }],
+    ['create_customer', { first_name: 'Pat', address_line1: '100 Example Way' }],
+    ['correct_invoice_address', { invoice_id: 'i1', address_line1: '100 Example Way' }],
+  ])('%s with an address field changes an address', (tool, input) => {
+    expect(changesAddress(tool, input)).toBe(true);
+    expect(executesWithoutCard(tool, input, { notes_replaced: { before: '' } })).toBe(false);
   });
 
-  test('the normalized address passes after a check; any other street, city or ZIP does not', async () => {
-    const ledger = createAddressCheckLedger();
-    await checked(ledger, { address: '100 example wy' }, google({ status: 'corrected' }));
-    expect(ledger.writeRefusal('add_customer_property', full())).toBeNull();
-    expect(ledger.writeRefusal('create_customer', full({ address_line1: '100 Example Way Apt 4' }))).toBeNull();
-    expect(ledger.writeRefusal('update_customer', { updates: full({ state: undefined }) })).toBeNull();
-    expect(ledger.writeRefusal('add_customer_property', full({ zip: '34999' }))).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('add_customer_property', full({ city: 'Venice' }))).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('add_customer_property', full({ state: 'GA' }))).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('add_customer_property', full({ address_line1: '200 Other Rd' }))).toMatchObject(REQUIRED);
+  test.each([
+    ['update_customer', { customer_id: 'c1', updates: { lead_source: 'Referral' } }],
+    ['update_lead_contact', { lead_id: 'l1', first_name: 'Pat' }],
+    ['add_customer_property', { customer_id: 'c1' }],
+    ['query_customers', { search: '100 Example Way' }],
+  ])('%s without an address field does not', (tool, input) => {
+    expect(changesAddress(tool, input)).toBe(false);
   });
 
-  test('when Google could not check, only the exact address the operator gave passes', async () => {
-    const ledger = createAddressCheckLedger();
-    await checked(ledger, { address: '100 17th St W', city: 'Bradenton', zip: '34205' }, { status: 'api_unavailable', ...UNVERIFIED });
-    const given = { address_line1: '100 17th St W', city: 'Bradenton', zip: '34205' };
-    expect(ledger.writeRefusal('update_customer', { updates: given })).toBeNull();
-    expect(ledger.writeRefusal('update_customer', { updates: { ...given, zip: '34237' } })).toMatchObject(REQUIRED);
-  });
-
-  test('a street with a trailing direction and no locality is recorded whole', async () => {
-    validateAddress.mockResolvedValue({ status: 'api_unavailable', ...UNVERIFIED });
-    const out = await run({ address: '100 17th St W' });
-    expect(out.status).toBe('api_unavailable');
-    const ledger = createAddressCheckLedger();
-    await checked(ledger, { address: '100 17th St W, Bradenton, FL 34205' }, { status: 'api_unavailable', ...UNVERIFIED });
-    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 17th St W', city: 'Bradenton', state: 'FL', zip: '34205' })).toBeNull();
-    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 17th St', city: 'Bradenton', state: 'FL', zip: '34205' })).toMatchObject(REQUIRED);
-  });
-
-  test('a street with no ZIP or a ZIP with no street is refused; a city alone is not held', async () => {
-    const ledger = createAddressCheckLedger();
-    await checked(ledger, { address: '100 Example Way', city: 'Sarasota', zip: '34236' });
-    expect(ledger.writeRefusal('update_customer', { updates: { zip: '34999' } })).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way' } })).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('update_lead_contact', { zip: '34999' })).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('bulk_update_customers', { customer_ids: ['c1'], updates: { zip: '34999' } })).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('bulk_update_customers', { customer_ids: ['c1'], updates: { address_line1: '9 Unchecked Rd', zip: '34236' } })).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('update_customer', { updates: { city: 'Venice' } })).toBeNull();
-    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34236' } })).toBeNull();
-    expect(ledger.writeRefusal('update_lead_contact', { first_name: 'Pat' })).toBeNull();
-  });
-
-  test('each address-writing tool is read through its own fields', () => {
-    expect(writtenAddress('update_lead_contact', { address: '100 Example Way', city: 'Sarasota', zip: '34236' })).toMatchObject({ zip: '34236', state: null });
-    expect(writtenAddress('update_lead_contact', { first_name: 'Pat' })).toBeNull();
-    expect(writtenAddress('correct_invoice_address', { address_line1: '100 Example Way' })).toEqual({ partial: true });
-    expect(writtenAddress('update_customer', { updates: { city: 'Venice', state: 'FL' } })).toBeNull();
+  test('a non-address internal edit still runs without a card on the owner login', () => {
+    expect(executesWithoutCard('update_customer', { customer_id: 'c1', updates: { lead_source: 'Referral' } })).toBe(true);
+    expect(executesWithoutCard('update_lead_contact', { lead_id: 'l1', first_name: 'Pat' })).toBe(true);
   });
 });
 
@@ -295,6 +261,12 @@ describe('check_address round 2 cases', () => {
     validateAddress.mockResolvedValue(google({ normalized: { street_line_1: '100 17th Street West', city: 'Bradenton', state: 'FL', postal_code: '34205' } }));
     const out = await run({ address: '100 17th St W', city: 'Bradenton', zip: '34205' });
     expect(out.changed).toEqual([]);
+  });
+  test('a whole address with the ZIP passed separately keeps its city', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way, Sarasota, FL', zip: '34236' });
+    expect(out.changed).toEqual([]);
+    expect(out.note).not.toMatch(/No city was given/);
   });
   test('an unrecognized state is refused, not defaulted to FL', async () => {
     const out = await run({ address: '100 Example Way', state: 'Flordia' });

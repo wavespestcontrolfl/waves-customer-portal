@@ -33,6 +33,7 @@
  * notices only.
  */
 const { gateEnvValue } = require('../../config/feature-gates');
+const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
 
@@ -90,8 +91,9 @@ const OWNER_DIRECT_TOOL_NAMES = new Set([
 //     (pre-push P0), and a live stage on a churned or inactive row
 //     reactivates the account and clears its churn history (Codex r1) —
 //     every stage change keeps the card
-const DIRECT_CUSTOMER_FIELDS = new Set(['first_name', 'last_name', 'phone', 'city', 'state', 'zip',
-  'address_line1', 'address_line2', 'lead_source', 'notes']);
+// No address field: a change to any part of a street address always keeps
+// its card (#6297; changesAddress below covers the other address writers).
+const DIRECT_CUSTOMER_FIELDS = new Set(['first_name', 'last_name', 'phone', 'lead_source', 'notes']);
 
 // Read at call time: a flip or an unset needs no redeploy.
 function ownerDirectLive(req) {
@@ -104,7 +106,9 @@ const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().rep
 // tools); the decision reads it where the input alone cannot tell a single
 // record from a group.
 function executesWithoutCard(toolName, input = {}, preview = null) {
-  if (!OWNER_DIRECT_TOOL_NAMES.has(toolName)) return false;
+  // A change to any part of a street address always keeps its card, so the
+  // operator sees the exact address before it is saved (#6297).
+  if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
   // assign_technician takes a list of stops; one stop is an internal edit,
   // several is a bulk change and keeps its card (pre-push P1). A lone stop
   // that belongs to a grouped visit is not single-record either: the

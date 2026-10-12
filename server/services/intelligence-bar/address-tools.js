@@ -70,10 +70,7 @@ function givenParts(input) {
   const withoutUnit = (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
     .map(segment => splitStreetLineUnit(segment).street || segment)
     .filter(segment => !unitWords.includes(` ${segment.toLowerCase()} `));
-  // With the city or ZIP passed separately the text is a street line: the
-  // locality parser would file a trailing direction ("17th St W") as a city.
-  const streetOnly = Boolean(cleanText(input.city) || cleanText(input.zip));
-  const parsed = streetOnly ? { line1: withoutUnit[0] || '' } : parseRawAddress(withoutUnit.join(', '));
+  const parsed = parseRawAddress(withoutUnit.join(', '));
   // The locality parser files a trailing direction ("100 17th St W") as the
   // city. A city that is only a direction word is part of the street.
   const directionAsCity = Boolean(parsed.city) && compareKey(parsed.city) in DIRECTION_KEYS;
@@ -137,7 +134,7 @@ function noteFor(status, changed, given, result) {
   if (changed.length) parts.push('Google differs from the input: show the operator both versions and ask before saving (the operator\'s own words, or a call transcript, may be the one that is wrong). If the operator insists their spelling is right, run this check again with their exact words.');
   if (changed.some(c => c.component === 'zip' && !c.input)) parts.push('The ZIP comes from Google, not from the operator: tell them which ZIP you are using.');
   if (!given.city && result.normalized?.city) parts.push('No city was given: confirm Google\'s city with the operator.');
-  if (given.unit) parts.push(`Google does not check the unit or apartment number: save "${given.unit}" as the second address line.`);
+  if (given.unit) parts.push(`Google does not check the unit or apartment number: keep "${given.unit}". Put it in the second address line when the tool has one; otherwise add it at the end of the street line.`);
   return parts.join(' ');
 }
 
@@ -159,79 +156,31 @@ function shape(result, given) {
   };
 }
 
-// ── Evidence that an address was checked (Codex r2 P1 on #6297) ──────────
-// A prompt rule alone lets the model skip check_address or guess a ZIP. The
-// route keeps one ledger per request: every finished check records the
-// address as given and, when Google answered, as normalized. An address
-// write whose street and ZIP are not in the ledger is refused with
-// address_check_required, so the model must check first and then save what
-// was checked: the street and ZIP, and the city and state when sent, must match one ledger entry.
+// ── Address changes always show a card ─────────────────────────────────
+// Rounds 2 and 3 of the review on #6297 showed that proving "this write was
+// checked" from a ledger of earlier tool calls does not hold (ordering in
+// one model message, partial updates, units, states). The rule is simpler
+// and total: a write that changes any part of a street address is never
+// committed without a confirm card (owner-direct.js asks changesAddress), so
+// the operator sees the exact address before it is saved. check_address
+// supplies Google's spelling and ZIP for that card; the prompt tells the
+// model to run it first.
 const WRITE_ADDRESS_FIELDS = {
   add_customer_property: input => input,
+  update_customer_property: input => input,
   create_customer: input => input,
   correct_invoice_address: input => input,
   update_customer: input => input.updates,
   bulk_update_customers: input => input.updates,
-  update_lead_contact: input => ({ address_line1: input.address, zip: input.zip, city: input.city, state: input.state }),
+  update_lead_contact: input => ({ ...input, address_line1: input.address }),
 };
-const streetKey = line => compareKey(normalizeStreetLine(splitStreetLineUnit(cleanText(line)).street || cleanText(line)));
-const zipKey = zip => cleanText(String(zip ?? '')).slice(0, 5);
-const stateKey = state => normalizeState(cleanText(String(state ?? ''))) || '';
-const addressKey = ({ street, city, state, zip }) => ({
-  street: streetKey(street), city: compareKey(cleanText(String(city ?? ''))), state: stateKey(state) || DEFAULT_STATE, zip: zipKey(zip),
-});
+const ADDRESS_FIELD_NAMES = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
-// The address an address-writing call would save, as comparable keys; null
-// when the call needs no check. What this rule protects is the street
-// spelling and the ZIP, the two things a model guesses:
-//  - a street must come with its ZIP, and both (plus the city and state, when
-//    the call sends them) must equal one checked entry;
-//  - a ZIP with no street is `partial`: it cannot be matched to a check, so
-//    the model must send the street it checked with it;
-//  - a city or state change alone (filling a missing city) is not held: it
-//    carries neither a street nor a ZIP to verify.
-function writtenAddress(toolName, input) {
+// True when the call would save any part of a street address.
+function changesAddress(toolName, input) {
   const fields = WRITE_ADDRESS_FIELDS[toolName]?.(input || {});
-  if (!fields) return null;
-  const present = key => Boolean(cleanText(String(fields[key] ?? '')));
-  if (!present('address_line1') && !present('zip')) return null;
-  if (!present('address_line1') || !present('zip')) return { partial: true };
-  const key = addressKey({ street: fields.address_line1, city: fields.city, state: fields.state, zip: fields.zip });
-  return { ...key, city: present('city') ? key.city : null, state: present('state') ? key.state : null };
-}
-
-const ADDRESS_CHECK_REQUIRED = Object.freeze({
-  error: 'This address has not been checked. Run check_address on it first, then save the street, city, state and ZIP that check returned (or exactly the address you checked, if the operator confirms it).',
-  code: 'address_check_required',
-});
-const ADDRESS_PARTIAL = Object.freeze({
-  error: 'A street change must carry its ZIP, and a ZIP change must carry its street. Run check_address on the whole address first, then save the street and ZIP it returned together.',
-  code: 'address_check_required',
-});
-
-function createAddressCheckLedger() {
-  const checked = [];
-  // City and state are compared when the write sends them.
-  const same = (entry, written) => entry.street === written.street && entry.zip === written.zip
-    && (written.city === null || entry.city === written.city) && (written.state === null || entry.state === written.state);
-  return {
-    // Called with every tool result; only a finished check_address records:
-    // the address as given and, when Google answered, as normalized.
-    record(toolName, input, result) {
-      if (toolName !== CHECK_ADDRESS_TOOL_NAME || !result?.status || result.status === 'invalid_input') return;
-      const given = givenParts({ ...input, address: cleanText(input?.address) });
-      checked.push(addressKey(given));
-      const n = result.normalized;
-      if (n?.address_line1) checked.push(addressKey({ street: n.address_line1, city: n.city, state: n.state, zip: n.zip }));
-    },
-    // null when the call may proceed; the refusal result otherwise.
-    writeRefusal(toolName, input) {
-      const written = writtenAddress(toolName, input);
-      if (!written) return null;
-      if (written.partial) return { ...ADDRESS_PARTIAL };
-      return checked.some(entry => same(entry, written)) ? null : { ...ADDRESS_CHECK_REQUIRED };
-    },
-  };
+  if (!fields || typeof fields !== 'object') return false;
+  return ADDRESS_FIELD_NAMES.some(name => cleanText(String(fields[name] ?? '')) !== '');
 }
 
 async function executeAddressTool(toolName, input) {
@@ -254,5 +203,5 @@ async function executeAddressTool(toolName, input) {
 
 module.exports = {
   ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME, CHECK_TIMEOUT_MS,
-  createAddressCheckLedger, writtenAddress, WRITE_ADDRESS_FIELDS,
+  changesAddress, WRITE_ADDRESS_FIELDS,
 };
