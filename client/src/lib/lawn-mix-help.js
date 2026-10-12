@@ -18,7 +18,7 @@ export function mixHelpOf(data) {
   const tanks = (Array.isArray(block.tanks) ? block.tanks : []).map(Number).filter((tank) => tank > 0);
   if (!tanks.length) return null;
   const rows = Object.fromEntries(Object.entries(block.rows).map(([id, entry]) => [lowerId(id), entry]));
-  return { tanks, rows, weedOrder: Array.isArray(block.weedOrder) ? block.weedOrder.map(lowerId) : null };
+  return { tanks, rows, weedOrder: Array.isArray(block.weedOrder) ? block.weedOrder.map(lowerId) : null, planLawnSqft: positive(block.planLawnSqft) };
 }
 
 /** One product's entry, or null. */
@@ -79,6 +79,28 @@ export function gallonsToArea(gallons, carrier, tanks = DEFAULT_TANKS) {
   return Number.isFinite(area) ? Math.max(1, area) : null;
 }
 
+/**
+ * The lawn area a gallons-derived spot area may not pass, as `{ sqft, source }`, in the server's order (services/lawn-mix-help.js lawnAreaOf):
+ * the visit area the sheet submits as propertyServiceArea.treatedSqft, else the plan's lawn size (the block's `planLawnSqft`, the plan's
+ * mixCalculator.lawnSqft). null = neither is known, and the preview is NOT capped (as today). The server's last resort, the largest
+ * whole-lawn row, is not mirrored: the sheet shows the uncapped figure there and the server still caps what it records.
+ */
+export function lawnCapOf(help, visitSqft) {
+  if (positive(visitSqft)) return { sqft: Math.round(visitSqft), source: 'visit_area' };
+  if (positive(help?.planLawnSqft)) return { sqft: Math.round(help.planLawnSqft), source: 'plan' };
+  return null;
+}
+
+/** A gallons-derived area held to the lawn's: `{ area, capped, uncapped }` (the server's `area > lawn.sqft` test). */
+export function capGallonsArea(area, lawn) {
+  if (!area) return { area: null, capped: false, uncapped: null };
+  const capped = !!lawn && area > lawn.sqft;
+  return { area: capped ? lawn.sqft : area, capped, uncapped: area };
+}
+
+/** The one-line note under a capped figure. */
+export const cappedNote = (lawn) => `Capped at the lawn's ${Number(lawn.sqft).toLocaleString('en-US')} sq ft.`;
+
 // The most gallons one spot job can state: ten fills of the largest tank the server offers (the server's MAX_GALLONS, 40 with 1, 2 and 4).
 // A larger number is a typing slip: no area is figured, and the control says so.
 const MAX_FILLS = 10;
@@ -92,10 +114,12 @@ export const gallonsTooLarge = (value, tanks) => positive(value) !== null && pos
  * gallons, a weed-mix row from the entry's shared `weedGallons`. A row with no carrier on file is left alone. The surfactant (a share
  * of the tank, no area) is never given one.
  */
-export function withGallonsArea(row, { help, weedGallons }) {
+export function withGallonsArea(row, { help, weedGallons, lawn = null }) {
   if (!row.spotRule || row.spotExempt) return row;
   const gallons = positive(row.weedGroup ? weedGallons : row.spotGallons);
-  const area = gallons ? gallonsToArea(gallons, mixEntryFor(help, row.productId)?.carrierGalPer1000, help?.tanks) : null;
+  const derived = gallons ? gallonsToArea(gallons, mixEntryFor(help, row.productId)?.carrierGalPer1000, help?.tanks) : null;
+  // A spot cannot be larger than the lawn: the area is held to the lawn's, as /complete records it (the gallons still go to the server).
+  const { area } = capGallonsArea(derived, lawn);
   return area ? { ...row, spotArea: area, areaFromGallons: gallons } : row;
 }
 
