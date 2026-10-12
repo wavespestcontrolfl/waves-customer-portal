@@ -66,6 +66,7 @@ describe('spellingCollapseSignals', () => {
     ['a repeated name token', 'Caller: My last name is Serov, Serov.'],
     ['a repeat across a full stop', 'Caller: It is Tarnow. Tarnow.'],
     ['a repeat across a speaker label', 'Agent: What is your last name?\nCaller: Marlowe.\nAgent: Marlowe? Marlowe.'],
+    ['a two-letter name with context', 'Caller: My last name is Lu, Lu.'],
     ['a repeat after "this is"', 'Caller: Hi, this is Okafor. Okafor.'],
     ['spelled, no letters after', 'Caller: Yes, it is spelled the usual way, nothing odd about it at all.'],
     ['"that\'s S" with no letters after', "Caller: Yes that's S and then the rest of it is simple enough, ok?"],
@@ -81,6 +82,9 @@ describe('spellingCollapseSignals', () => {
 
   test.each([
     ['filler repeats', 'Caller: Okay. Okay. Yes, yes, that works. Very very good.'],
+    ['"OK. OK."', 'Caller: OK. OK. Sounds good, see you then.'],
+    ['a bare two-letter repeat without context', 'Caller: Lu. Lu. That works for the garage.'],
+    ['"Hi, I" is not name context', 'Caller: Hi, I need Sentricon.\nAgent: Sentricon. Sentricon.'],
     ['a weekday repeated', 'Caller: It is Monday. Monday. Can you come then?'],
     ['a state repeated', 'Caller: We are in Florida. Florida.'],
     ['a month repeated near "name"', 'Caller: My name is on the account, it is October. October.'],
@@ -101,6 +105,20 @@ describe('spellingCollapseSignals', () => {
     const t = 'Caller: that\'s S, E, R, O, V.';
     expect(spellingCollapseSignals(t).announced).toBe(false);
     expect(detectContactDictationSignals(t).any).toBe(true);
+  });
+
+  test('a greeting with "this is <name>" still counts', () => {
+    expect(collapsed('Caller: Hi, this is Marta. Marta.')).toBe(true);
+  });
+
+  test('the extracted FIRST name alone is context (no last name needed)', () => {
+    expect(collapsed('Caller: Zuri. Zuri.', { extracted: { first_name: 'Zuri' } })).toBe(true);
+  });
+
+  test('two-letter near miss: stored Li, extracted Lu', () => {
+    expect(collapsed('x', { extracted: { last_name: 'Lu' }, knownCustomer: { last_name: 'Li' } })).toBe(true);
+    expect(collapsed('x', { extracted: { last_name: 'Xu' }, knownCustomer: { last_name: 'Li' } })).toBe(false);
+    expect(collapsed('x', { extracted: { last_name: 'Li' }, knownCustomer: { last_name: 'Li' } })).toBe(false);
   });
 
   test('the extracted name itself is name context', () => {
@@ -218,6 +236,28 @@ describe('contactDecoderGate', () => {
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
+  test('extracted first name only: the repeated-name signal reaches the late pass without a last name', async () => {
+    process.env[GATE] = 'true';
+    global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: Zuri, Z-U-R-I.'));
+    const input = base();
+    input.extracted = { first_name: 'Zuri' };
+    input.transcription = 'Caller: Zuri. Zuri.';
+    const out = await contactDecoderGate(input);
+    expect(out).toMatchObject({ run: true, lateContactPass: 'Caller: Zuri, Z-U-R-I.' });
+    expect(db.__builder.first).not.toHaveBeenCalled(); // no stored-last-name lookup
+  });
+
+  test('outbound: a collapsed signal buys no download and no pass (decoder gate and second-pass gate)', async () => {
+    process.env[GATE] = 'true';
+    const input = base();
+    input.call.direction = 'outbound-api';
+    expect(await contactDecoderGate(input)).toEqual(OFF);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(contactPassTrigger(COLLAPSED, { call: { direction: 'outbound-api' } })).toBeNull();
+    expect(contactPassTrigger(COLLAPSED, { call: { direction: 'inbound' } })).toBe('collapse:repeated');
+    expect(contactPassTrigger('Caller: my email is jay at gmail dot com', { call: { direction: 'outbound-api' } })).toBe('signals');
+  });
+
   test('kill switch: CONTACT_DICTATION_ENABLED=false means no download, no paid pass, no lookup', async () => {
     process.env[GATE] = 'true';
     process.env.CONTACT_DICTATION_ENABLED = 'false';
@@ -248,7 +288,7 @@ describe('persistLateContactPass (token-fenced audit write)', () => {
   const call = { id: 'call-1' };
   const metaOf = (patch) => JSON.parse(patch.transcription_metadata.bindings[patch.transcription_metadata.bindings.length - 1]);
 
-  test('merges contact_pass_transcript INTO the accepted transcript\'s structured data and writes model / size metadata, fenced to the claim', async () => {
+  test('merges contact_pass_transcript INTO the accepted transcript\'s structured data and merges ONLY the new fields into the current metadata, fenced to the claim', async () => {
     const meta = { transcript_chars: 99, pan_count: 0 };
     expect(await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: meta, gate, relay: false })).toBe(true);
     expect(db.__builder.where).toHaveBeenCalledWith({ id: 'call-1' });
@@ -257,8 +297,18 @@ describe('persistLateContactPass (token-fenced audit write)', () => {
     // A merge (||) onto the existing value: a fallback's segments, or none, are never replaced.
     expect(patch.transcript_structured.sql).toMatch(/COALESCE\(transcript_structured, '\{\}'::jsonb\) \|\| \?::jsonb/);
     expect(JSON.parse(patch.transcript_structured.bindings[0])).toEqual({ contact_pass_transcript: gate.late.text });
-    expect(metaOf(patch)).toMatchObject({ transcript_chars: 99, contact_pass_model: 'gpt-4o-transcribe', contact_pass_chars: 25 });
+    // Metadata: a || merge of the new keys only, so keys a relay close added since (relay, summary_source) survive.
+    expect(patch.transcription_metadata.sql).toMatch(/COALESCE\(transcription_metadata, '\{\}'::jsonb\) \|\| \?::jsonb/);
+    expect(metaOf(patch)).toEqual({ contact_pass_model: 'gpt-4o-transcribe', contact_pass_chars: 25 });
     expect(meta.contact_pass_model).toBe('gpt-4o-transcribe'); // in-memory provenance kept in step
+  });
+
+  test('a stored row with an extra relay key keeps it: the write never carries the stale provenance', async () => {
+    const stale = { transcript_chars: 99 };
+    await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: stale, gate, relay: false });
+    const written = metaOf(db.__builder.update.mock.calls[0][0]);
+    expect(Object.keys(written).sort()).toEqual(['contact_pass_chars', 'contact_pass_model']);
+    expect(written).not.toHaveProperty('transcript_chars');
   });
 
   test('works with no provenance at all (a fallback transcript): still a merge, never a replace', async () => {
@@ -304,14 +354,23 @@ describe('settleLateContactPass (a lost claim abandons the pass)', () => {
     expect(await settleLateContactPass({ ...args, gate: { late: null, panCount: 0 } })).toBeNull(); // nothing to persist
   });
 
-  test('processRecording returns that result before it can reach the decoder', () => {
+  test('a thrown fence write is NOT swallowed: it rejects out of the helper', async () => {
+    db.__builder.update.mockRejectedValueOnce(new Error('connection reset'));
+    await expect(settleLateContactPass(args)).rejects.toThrow('connection reset');
+  });
+
+  test('processRecording settles the late pass OUTSIDE the fail-open decoder try, and returns before the decoder', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const settle = src.indexOf('const lost = await settleLateContactPass(');
-    expect(settle).toBeGreaterThan(-1);
+    const start = src.indexOf('let dictationEmailPayload = null;');
+    const settle = src.indexOf('await settleLateContactPass(', start);
     const returned = src.indexOf('if (lost) return lost;', settle);
     const decode = src.indexOf('contactDictation = await decodeDictatedContacts(', settle);
+    expect(start).toBeGreaterThan(-1);
+    expect(settle).toBeGreaterThan(start);
     expect(returned).toBeGreaterThan(settle);
     expect(decode).toBeGreaterThan(returned);
+    // No try between the declarations and the settle call: an error there escapes the fail-open catch.
+    expect(src.slice(start, settle)).not.toMatch(/\btry\s*\{/);
   });
 });
 

@@ -107,11 +107,12 @@ function detectContactDictationSignals(transcript) {
 
 // (a) A name token said twice in a row across punctuation ("Serov, Serov" / "Serov. Serov"),
 // with an optional speaker label between ("Caller: Serov. Agent: Serov.").
-const REPEATED_TOKEN_RE = /\b([A-Z][\p{L}'’-]{2,})\s*[,.;:?!]+(?:\s*(?:Caller|Agent|Customer|Speaker \d+)\s*:)?\s*\1\b/gu;
+const REPEATED_TOKEN_RE = /\b([A-Z][\p{L}'’-]+)\s*[,.;:?!]+(?:\s*(?:Caller|Agent|Customer|Speaker \d+)\s*:)?\s*\1\b/gu;
 // Words that repeat in ordinary speech and are never the name being spelled: fillers, answers,
 // weekdays, months, US states and the cities of the service area ("Monday. Monday.",
 // "Florida. Florida.").
 const REPEAT_VOCABULARY = new Set([
+  'ok', 'hi', 'uh', 'um', 'oh', 'so', 'we', 'me', 'my', 'he', 'it', 'is', 'am', 'to', 'do', 'go', 'on', 'or',
   'okay', 'yes', 'yeah', 'yep', 'no', 'nope', 'sure', 'right', 'thanks', 'thank', 'sorry', 'hello', 'perfect', 'great', 'good',
   'alright', 'again', 'what', 'well', 'please', 'exactly', 'correct', 'wonderful', 'awesome', 'bye', 'goodbye', 'morning', 'afternoon',
   'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'today', 'tomorrow', 'tonight',
@@ -125,7 +126,7 @@ const REPEAT_VOCABULARY = new Set([
 ]);
 // A name is being given or asked for within this many characters before the repeat.
 const REPEAT_CONTEXT_WINDOW = 80;
-const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am|(?:hi|hello|hey)\s+(?:this\s+is\s+)?[A-Z])\b/i;
+const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am)\b/i;
 // (b) A phrase that announces a spelling. It counts only when no letter run follows within
 // ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
 // The letter forms are case sensitive on purpose ("that's S", not "that's a"). Where the words
@@ -182,12 +183,12 @@ function editDistance(a, b, limit = 2) {
 }
 
 // (c) The extracted last name is the stored last name misspelled by one or two letters,
-// same first letter. A short name (4 letters or fewer) tolerates one letter only, so "Lee"
+// same first letter (two-letter names included: "Lu" against "Li"). A short name (4 letters or fewer) tolerates one letter only, so "Lee"
 // against "Lam" is not a near miss.
 function lastNameNearMiss(extracted, knownCustomer) {
   const got = nameKey(extracted?.last_name);
   const had = nameKey(knownCustomer?.last_name);
-  if (got.length < 3 || had.length < 3 || got === had || got[0] !== had[0]) return false;
+  if (got.length < 2 || had.length < 2 || got === had || got[0] !== had[0]) return false;
   const limit = Math.min(got.length, had.length) <= 4 ? 1 : 2;
   return editDistance(got, had, limit) <= limit;
 }

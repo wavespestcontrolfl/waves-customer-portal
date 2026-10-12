@@ -8202,6 +8202,9 @@ function contactPassTrigger(transcription, ctx = {}) {
   if (!transcription) return null;
   if (detectContactDictationSignals(transcription).any) return 'signals';
   if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
+  // The name-only trigger feeds the name-spelling card, which never files on an outbound call
+  // (outbound diarization can swap the labels): no paid pass for it there.
+  if (ctx.call && isOutboundCall(ctx.call)) return null;
   const sig = spellingCollapseSignals(transcription, ctx);
   if (!sig.any) return null;
   return `collapse:${['repeated', 'announced', 'nearMiss'].filter((k) => sig[k]).join('+')}`;
@@ -8259,11 +8262,17 @@ async function contactDecoderGate({ call, contactPhone, transcription, contactPa
   if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return off;
   if (process.env.CONTACT_DICTATION_ENABLED === 'false') return off;
   try {
-    if (!call.recording_url || !extracted?.last_name) return off;
-    const known = call.customer_id
-      ? await db('customers').where({ id: call.customer_id }).first('last_name')
-      : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
-    const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known });
+    if (!call.recording_url || isOutboundCall(call)) return off;
+    // Either extracted name is context for the repeated-name signal; only the stored-last-name
+    // near miss needs a last name (and the customer lookup behind it).
+    if (!extracted?.first_name && !extracted?.last_name) return off;
+    let known = null;
+    if (extracted.last_name) {
+      known = call.customer_id
+        ? await db('customers').where({ id: call.customer_id }).first('last_name')
+        : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
+    }
+    const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known, call });
     if (!trigger) return off;
     logCollapseTrigger(trigger, callSid, 'decoder');
     const late = await lateContactPass(call);
@@ -8306,7 +8315,9 @@ async function persistLateContactPass({ call, procToken, provenanceMetadata, gat
   if (!gate?.late && !(gate?.panCount > 0)) return true;
   const meta = lateContactPassMeta({ provenanceMetadata, gate });
   if (provenanceMetadata) Object.assign(provenanceMetadata, meta);
-  const metaWrite = transcriptionMetadataWrite({ ...(provenanceMetadata || {}), ...meta });
+  // Only the new fields are merged into the CURRENT jsonb: a relay close or summary write between
+  // the main transcript write and this one may have added keys the in-memory provenance lacks.
+  const metaWrite = db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(meta)]);
   const patch = { transcription_metadata: metaWrite, updated_at: new Date() };
   if (gate.late && !relay) {
     patch.transcript_structured = db.raw(
@@ -8343,7 +8354,7 @@ async function transcribeRecording(mp3Url, opts = {}) {
       // forceContactPass (bounce re-verify): the primary transcript may have
       // normalized a misheard address into a shape that no longer trips the
       // dictation signals — the caller knows an email was dictated.
-      && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass'))
+      && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass', { call: opts.call }))
     ) {
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
@@ -11871,17 +11882,21 @@ const CallRecordingProcessor = {
     // address-recovery lookup below. Fail-open.
     let contactDictation = null;
     let dictationEmailPayload = null;
+    // The late contact pass (paid) is persisted OUTSIDE the fail-open try below: a lost claim abandons
+    // the pass like the transcript write above, and a THROWN fence write escapes to the outer
+    // processing-failure path instead of marking the call processed with the late transcript
+    // neither saved nor decoded.
+    const decoderGate = transcription
+      ? await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid })
+      : null;
+    if (decoderGate?.lateContactPass) contactPassTranscript = decoderGate.lateContactPass;
+    const lost = decoderGate
+      ? await settleLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate: decoderGate, relay: Boolean(recordedSegmentText), callSid })
+      : null;
+    if (lost) return lost;
     try {
-      if (transcription) {
-        const gate = await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid });
-        if (gate.lateContactPass) contactPassTranscript = gate.lateContactPass;
-        // A lost claim here abandons the pass exactly like the transcript write above: the peer
-        // that owns the call runs the decoder and everything after it.
-        const lost = await settleLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate, relay: Boolean(recordedSegmentText), callSid });
-        if (lost) return lost;
-        if (gate.run) {
-          contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
-        }
+      if (decoderGate?.run) {
+        contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
       }
       if (contactDictation) {
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
