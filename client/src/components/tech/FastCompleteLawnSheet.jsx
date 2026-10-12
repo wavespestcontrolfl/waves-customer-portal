@@ -900,7 +900,8 @@ function figuringRate(row) {
 // A spot row under the spot rules is figured on the area the tech set for it (spotArea) and on
 // no other: the plan's own spot estimate figures nothing there.
 const figuringArea = (row, lawnSqft) => {
-  if (row.spotRule) return row.spotArea > 0 ? row.spotArea : null;
+  // A gallons row held to the lawn (lib/lawn-mix-help.js) is figured on what the gallons cover: the amount is what was mixed.
+  if (row.spotRule) return row.spotFigureArea > 0 ? row.spotFigureArea : (row.spotArea > 0 ? row.spotArea : null);
   return requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null);
 };
 
@@ -1198,6 +1199,11 @@ const sodEcho = (newSod) => (newSod?.sodLaidOn
   ? { sod: { laidOn: newSod.sodLaidOn, covers: newSod.covers, held: (newSod.plannedHeld || []).map((entry) => entry.kind) } }
   : {});
 
+// The visit area /complete is sent as propertyServiceArea.treatedSqft (null = none is sent). The gallons preview is held to the same figure.
+function submittedVisitArea({ propertyAreas, lawnSqft, ctx }) {
+  return propertyAreas?.version && propertyAreas.propertyId && lawnSqft > 0 && detectServiceCategory(ctx.visit?.serviceType) === 'lawn' ? lawnSqft : null;
+}
+
 function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable, guideCards = null, guideChecks = {}, chinchTap = null, customerText }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
@@ -1256,7 +1262,7 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
     // property this visit is at, the version of its areas the sheet read, and
     // the lawn area the products went down on. Only while the areas were read.
     // The server takes it only for a visit it reads as a lawn service (snapshotVisitArea).
-    ...(propertyAreas?.version && propertyAreas.propertyId && lawnSqft > 0 && detectServiceCategory(ctx.visit?.serviceType) === 'lawn'
+    ...(submittedVisitArea({ propertyAreas, lawnSqft, ctx }) !== null
       ? { propertyServiceArea: { propertyId: propertyAreas.propertyId, version: propertyAreas.version, kind: 'lawn', treatedSqft: lawnSqft, ...(explicitArea ? { explicitVisitArea: true } : {}) } }
       : {}),
     ...(ctx.turfHeightCapture ? { manualHeightIn: gaugeHeightIn } : {}),
@@ -1659,7 +1665,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
   // GATE_LAWN_MIX_HELP: the shared tank size and the weed entry's gallons sprayed.
-  const mix = useMixHelp(sheetCtx.mixHelp, operatorId);
+  const mix = useMixHelp(sheetCtx.mixHelp, operatorId, submittedVisitArea({ propertyAreas: propertyAreas.data, lawnSqft, ctx }));
   const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
@@ -1674,7 +1680,7 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
       const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
       return placed.map((row) => withDerivedAmount(row, lawnSqft));
     },
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, areas, chinchDecision, weedPlace, gov.takeAll, guide],
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, mix.help, mix.weedGallons, mix.lawn, areas, chinchDecision, weedPlace, gov.takeAll, guide],
   );
   // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
   searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));

@@ -1540,6 +1540,37 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     expect(sent(P_FUNG)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 2, areaPlace: 'back' });
   });
 
+  test('gallons past the lawn (5,000 sq ft here): the area shown and sent is the lawn\'s, the amount is still what the gallons mixed (the full-tank dose)', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG }, { planLawnSqft: 3000 })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '12' } });
+    // The visit area wins over the plan's size.
+    expect(within(row).getByText('About 5,000 sq ft at 2 gal per 1,000 sq ft.')).toBeTruthy();
+    expect(within(row).getByText("Capped at the lawn's 5,000 sq ft.")).toBeTruthy();
+    expect(within(row).getByText('Spot area, 5,000 sq ft')).toBeTruthy();
+    // 12 gal at 2 gal per 1,000 sq ft covers 6,000 sq ft: 6 fl oz is what was mixed, not the 5,000 sq ft dose (5).
+    expect(within(row).getByText(/1 fl oz per 1,000 sq ft × 6,000 sq ft/)).toBeTruthy();
+    expect(within(row).getByLabelText('Spot Fungicide').value).toBe('6');
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 5000, areaUnit: 'sqft', sprayedGallons: 12 });
+    expect(Number(sent(P_FUNG).totalAmount)).toBe(6);
+  });
+
+  test('a typed amount on a capped gallons row is left as typed', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '12' } });
+    fireEvent.change(within(row).getByLabelText('Spot Fungicide'), { target: { value: '5.5' } });
+    expect(within(row).getByLabelText('Spot Fungicide').value).toBe('5.5');
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    await analyzeAndComplete();
+    expect(sent(P_FUNG)).toMatchObject({ areaValue: 5000, sprayedGallons: 12 });
+    expect(Number(sent(P_FUNG).totalAmount)).toBe(5.5);
+  });
+
   test('gallons past the bound (more than 40) figure no area and the control says so; the body carries no gallons', async () => {
     await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
     addFungicide();
