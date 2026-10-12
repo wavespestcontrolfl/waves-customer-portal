@@ -564,6 +564,74 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       expect(runV2(v2)).toBe(false);
     });
 
+    // Follow-up to #6105 (Codex r17 P2): flatView maps objections_raised into
+    // legacy pain_points; sentiment is not a service fragment.
+    test('an ordinary sales objection is not a service: the card still drops (r17 P2)', () => {
+      for (const objections of [['price'], ['too expensive', 'needs to think about it'], ['price', 'wants a second quote']]) {
+        const v2 = slabV2();
+        v2.sentiment_and_lead.objections_raised = objections;
+        expect(validatePersisted(v2).valid).toBe(true);
+        expect(runV2(v2)).toBe(true);
+      }
+    });
+
+    test('an objection that names the pre-treat itself still drops the card; one naming another service keeps it', () => {
+      const v2 = slabV2();
+      v2.sentiment_and_lead.objections_raised = ['too expensive for the slab pre-treat'];
+      expect(runV2(v2)).toBe(true);
+      v2.sentiment_and_lead.objections_raised = ['price', 'also worried about ants in the kitchen'];
+      expect(runV2(v2)).toBe(false);
+    });
+
+    test('a real second service in the V2 service fields keeps the card', () => {
+      const withName = slabV2();
+      withName.service_request.specific_service_name = 'Slab Pre-Treat Termite Service plus general pest control';
+      expect(validatePersisted(withName).valid).toBe(true);
+      expect(runV2(withName)).toBe(false);
+      const withPests = slabV2();
+      withPests.service_request.pests_observed_status = 'observed';
+      withPests.service_request.pests_observed = [{
+        pest_type: 'ants_general', location_on_property: null, severity_signal: 'sighting_single', first_observed: null, prior_treatment_attempts: null,
+      }];
+      expect(validatePersisted(withPests).errors || []).toEqual([]);
+      expect(runV2(withPests)).toBe(false);
+    });
+
+    test('an invalid V2 payload keeps the legacy proof (V1 pain points still count as fragments)', () => {
+      const v2 = slabV2();
+      const { merged } = adoptV2PrimaryFields({}, v2);
+      const extracted = { ...merged, pain_points: ['price'] };
+      expect(callIsPreConstructionPretreat({ extracted, v2Extraction: v2, services: CATALOG })).toBe(true);
+      expect(callIsPreConstructionPretreat({ extracted, v2Extraction: v2, services: CATALOG, v2Valid: false })).toBe(false);
+    });
+
+    test('Bora-Care on new framing is pre-treat wording; on an existing home or beside a second service it is not', () => {
+      const newFraming = slabV2();
+      newFraming.meta.call_summary = 'Builder wants the slab pre-treat and Bora-Care on the new framing.';
+      expect(runV2(newFraming)).toBe(true);
+      const nameOnly = slabV2();
+      nameOnly.meta.call_summary = 'Caller also asked about Bora-Care before the pour.';
+      expect(runV2(nameOnly)).toBe(true);
+      // Bora-Care in the SERVICE NAME itself: the catalog row no longer resolves to
+      // the pre-construction pre-treat, so the card stays (the row check decides).
+      const inName = slabV2();
+      inName.service_request.specific_service_name = 'Slab Pre-Treat Termite Service with Bora-Care on the framing';
+      expect(runV2(inName)).toBe(false);
+      const existingFraming = slabV2();
+      existingFraming.service_request.specific_service_name = 'Slab Pre-Treat Termite Service with Bora-Care on the existing framing';
+      expect(runV2(existingFraming)).toBe(false);
+      const existing = slabV2();
+      existing.meta.call_summary = 'Caller wants Bora-Care on the existing home.';
+      expect(runV2(existing)).toBe(false);
+      const existingWithPretreat = slabV2();
+      existingWithPretreat.meta.call_summary = 'Slab pre-treat for the addition and Bora-Care wood treatment on the existing house.';
+      expect(runV2(existingWithPretreat)).toBe(false);
+      const second = slabV2();
+      second.meta.call_summary = 'Builder wants Bora-Care on the new framing and a general pest treatment.';
+      second.service_request.specific_service_name = 'Bora-Care on new framing plus general pest control';
+      expect(runV2(second)).toBe(false);
+    });
+
     test('a follow-up intent keeps the card', () => {
       const v2 = slabV2();
       v2.service_request.service_intent = 'follow_up_existing_service';
