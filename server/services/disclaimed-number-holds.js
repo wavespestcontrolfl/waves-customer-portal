@@ -195,6 +195,38 @@ async function callLineRows(conn, callLogId) {
   return [...byKey.values()];
 }
 
+// A text_number_differs card (alias `t`) that stands for THIS hold row (alias `h`), not merely any card the
+// call ever had (codex #6292 r3 P3): it is for the same line (its ani_phone, compared on the last 10 digits)
+// and it belongs to the hold's CURRENT arming, so a card filed before the hold was last (re-)armed does not
+// count, unless it is still open (an open card is idempotently kept across a re-arm). A no-text hold that was
+// released and later re-armed for an ownership-only reason therefore has no card here.
+const NO_TEXT_CARD_FOR_HOLD_SQL = `t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs'
+  AND (t.created_at >= h.held_at OR t.status IN ('open', 'in_progress'))
+  AND right(regexp_replace(COALESCE(t.payload->>'ani_phone', ''), '\\D', '', 'g'), 10)
+    = right(regexp_replace(h.phone_e164, '\\D', '', 'g'), 10)`;
+
+/**
+ * Which of these lines are held by a call whose "not my number" card is still unresolved. A shared line
+ * has one hold row per call; "Line can get texts" proves the line takes SMS, never who owns it, so a call
+ * with an open ownership card keeps its row, and the line as a whole stays blocked. The release asks this
+ * of the LINE (every call that holds it), never only of the call whose card was clicked (#6292 r3 P1).
+ */
+async function linesBlockedByOwnershipCard(conn, phoneKeys) {
+  if (!phoneKeys?.length) return new Set();
+  const result = await conn.raw(
+    `SELECT DISTINCT h.phone_e164 FROM ${TABLE} h
+      WHERE h.phone_e164 IN (${phoneKeys.map(() => '?').join(', ')})
+        AND h.cleared_at IS NULL
+        AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})
+        AND EXISTS (SELECT 1 FROM triage_items d
+                     WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
+                       AND d.status <> 'resolved'
+                       AND ${OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')})`,
+    phoneKeys,
+  );
+  return new Set((result?.rows || []).map((r) => r.phone_e164));
+}
+
 /**
  * "Line can get texts" (admin-triage releaseNoTextHold): the office verified the LINE, so every
  * active hold a no-text statement placed on that number lifts, whichever call placed it (codex
@@ -223,8 +255,7 @@ async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, cle
       WHERE h.phone_e164 = ?
         AND h.cleared_at IS NULL
         ${exceptSql}
-        AND EXISTS (SELECT 1 FROM triage_items t
-                     WHERE t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs')
+        AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})
         AND NOT EXISTS (SELECT 1 FROM triage_items d
                          WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
                            AND d.status <> 'resolved'
@@ -426,6 +457,8 @@ module.exports = {
   clearDisclaimedNumberHoldsForCall,
   clearNoTextHoldsForPhone,
   lockNoTextLines,
+  linesBlockedByOwnershipCard,
+  NO_TEXT_CARD_FOR_HOLD_SQL,
   callLineRows,
   NO_TEXT_LINE_LOCK_PREFIX,
   NO_TEXT_MARK_SQL,

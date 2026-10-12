@@ -160,6 +160,24 @@ async function disclaimedCardOpen(trx, callLogId) {
   return !!open;
 }
 
+// A release of some lines of a call (phoneKeys) must not stamp the call-wide clearance on a visit whose
+// recipient phone is a line this call STILL holds: the visit evidence helper
+// (disclaimedNumberHoldEvidenceForVisit) reads "stamped and not cleared + an active hold on the customer's
+// phone" as held, and a cleared stamp would make a still-held line look released (#6292 r3 P1). So the
+// clearance is per visit, by the customer's phone: visits on a released line (or on no held line) clear; visits
+// on a line the call still actively holds keep a null clearance until that line is released too.
+async function visitsOnStillHeldLines(trx, callLogId, phoneKeys, liveHeldVisits) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const rows = await Holds.callLineRows(trx, callLogId);
+  const stillHeld = new Set(rows.filter((r) => r.active && !phoneKeys.includes(r.key)).map((r) => r.key));
+  if (!stillHeld.size) return [];
+  const visits = await liveHeldVisits().select('id', 'customer_id');
+  const customerIds = [...new Set(visits.map((v) => v.customer_id).filter(Boolean))];
+  if (!customerIds.length) return [];
+  const phones = new Map((await trx('customers').whereIn('id', customerIds).select('id', 'phone')).map((c) => [c.id, Holds.holdPhoneKey(c.phone)]));
+  return visits.filter((v) => stillHeld.has(phones.get(v.customer_id))).map((v) => v.id);
+}
+
 async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, noTextHold = false, phoneKeys = null } = {}) {
   if (!Object.values(CALLBACK_CARD_VERDICT).includes(requestedVerdict)) {
     // Explicit by construction: a new caller must say which meaning it is.
@@ -168,10 +186,13 @@ async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numbe
   // A no-text card's close is never a verified-same-number verdict: visits clear, the number stays held.
   const numberVerdict = noTextHold ? CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER : requestedVerdict;
   const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
-  const visits = await trx('scheduled_services')
+  const liveHeldVisits = () => trx('scheduled_services')
     .where({ source_call_log_id: callLogId })
     .whereIn('status', CLEARABLE_SCHEDULED_SERVICE_STATUSES)
-    .whereNotNull('callback_number_hold_at')
+    .whereNotNull('callback_number_hold_at');
+  const keepIds = phoneKeys ? await visitsOnStillHeldLines(trx, callLogId, phoneKeys, liveHeldVisits) : [];
+  const visits = await liveHeldVisits()
+    .modify((q) => { if (keepIds.length) q.whereNotIn('id', keepIds); })
     .update({
       // call_sms_cleared_at >= callback_number_hold_at by construction
       // (GREATEST) so the call-level clearance post-dates the hold stamp.
@@ -245,17 +266,22 @@ async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
   // Lock order step 2: no hold row is read-for-update or written before the phone locks, so two releases
   // of one shared line serialize on the phone lock instead of crossing row locks (A->B / B->A, #6112 r15).
   await Holds.lockNoTextLines(trx, lines);
+  // The LINE is checked, not only this call: another call that holds the same line with a "not my number"
+  // card still open keeps its row, so the line would stay blocked. Such a line is not released at all (the
+  // reply says so); the card the office clicked still resolves.
+  const blocked = await Holds.linesBlockedByOwnershipCard(trx, lines);
+  const releasable = lines.filter((key) => !blocked.has(key));
   const cleared = await clearCallbackNumberHold(trx, callLogId, {
-    clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: lines,
+    clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: releasable,
   });
-  for (const key of lines) {
+  for (const key of releasable) {
     const otherCalls = await Holds.clearNoTextHoldsForPhone({ phoneE164: key, exceptCallLogId: callLogId, clearedBy: assignedTo, reason: VERIFIED, conn: trx });
     for (const otherCallLogId of otherCalls) {
       await clearCallbackNumberHold(trx, otherCallLogId, { clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: [key] });
     }
     cleared.numbers = (cleared.numbers || 0) + otherCalls.length;
   }
-  return { cleared, lines };
+  return { cleared, lines: releasable, blocked: lines.filter((key) => blocked.has(key)) };
 }
 
 // Returns the reply for the route, or `prior` when nothing ran.
@@ -265,13 +291,22 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
   const release = lineCanGetTexts === true && !ownershipCardOpen;
   let cleared;
   let lines = null;
+  let blockedLines = [];
   if (release) {
-    ({ cleared, lines } = await releaseNoTextLines(trx, item.call_log_id, assignedTo, lineE164));
+    ({ cleared, lines, blocked: blockedLines } = await releaseNoTextLines(trx, item.call_log_id, assignedTo, lineE164));
   } else {
     cleared = await clearCallbackNumberHold(trx, item.call_log_id, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER });
   }
   const reply = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
   if (lines) reply.lines_released = lines;
+  if (blockedLines.length) {
+    // Another call on the same line has an open "not my number" card: that call's hold stays, so the line
+    // stays blocked. Never report "texts will resume" over it.
+    reply.release = 'deferred';
+    reply.lines_blocked = blockedLines;
+    if (!lines.length) reply.disclaimed_number_hold = 'kept';
+    reply.message = 'Card closed, but the line stays blocked for texts: another call on this line has an open "not my number" card. Resolve that card first, then use Line can get texts again.';
+  }
   if (ownershipCardOpen) {
     // The office asked for the release and did not get it: say exactly why, so the inbox never
     // reports "texts will resume" over a line that is still held (codex #6112 r10 P2).
@@ -2611,22 +2646,22 @@ router.post('/:id/verdict', async (req, res) => {
 
 // GET /api/admin/triage/held-lines → every line whose texts are held because the caller said it cannot
 // get texts (#6112 follow-up). The inbox tabs show only the newest 100 closed cards, but the number-wide
-// hold outlives its card, so this list reads the hold rows themselves. A no-text hold is a hold row whose
-// source call has a text_number_differs card (the same test clearNoTextHoldsForPhone uses); the newest
-// such card is the one the "Line can get texts" button resolves. blocked_by_ownership_card marks a call
-// that also has a "not my number" card still unresolved: the release will defer, never clear.
+// hold outlives its card, so this list reads the hold rows themselves. A no-text hold is a hold row with a
+// text_number_differs card bound to it: same line, filed in the hold's current arming (NO_TEXT_CARD_FOR_HOLD_SQL,
+// also used by clearNoTextHoldsForPhone); the newest such card is the one the
+// "Line can get texts" button resolves. blocked_by_ownership_card marks a call that also has a "not my number" card still unresolved: the release will defer, never clear.
 const HELD_LINES_SQL = `
   SELECT h.id AS hold_id, h.phone_e164, h.held_at, h.source_call_log_id,
          c.created_at AS call_created_at, c.customer_id, cu.first_name, cu.last_name,
-         t.id AS card_id, t.status AS card_status, t.updated_at AS card_updated_at,
+         card.id AS card_id, card.status AS card_status, card.updated_at AS card_updated_at,
          EXISTS (SELECT 1 FROM triage_items d
                   WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
                     AND d.status <> 'resolved'
                     AND __OWNERSHIP__) AS blocked_by_ownership_card
     FROM disclaimed_number_holds h
-    JOIN LATERAL (SELECT id, status, updated_at FROM triage_items
-                   WHERE call_log_id = h.source_call_log_id AND reason_code = 'text_number_differs'
-                   ORDER BY created_at DESC LIMIT 1) t ON true
+    JOIN LATERAL (SELECT t.id, t.status, t.updated_at FROM triage_items t
+                   WHERE __CARD__
+                   ORDER BY t.created_at DESC LIMIT 1) card ON true
     LEFT JOIN call_log c ON c.id = h.source_call_log_id
     LEFT JOIN customers cu ON cu.id = c.customer_id
    WHERE h.cleared_at IS NULL
@@ -2635,8 +2670,10 @@ const HELD_LINES_SQL = `
 
 router.get('/held-lines', async (_req, res) => {
   try {
-    const { OWNERSHIP_DISCLAIMER_CARD_SQL } = require('../services/disclaimed-number-holds');
-    const result = await db.raw(HELD_LINES_SQL.replace('__OWNERSHIP__', OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')));
+    const { OWNERSHIP_DISCLAIMER_CARD_SQL, NO_TEXT_CARD_FOR_HOLD_SQL } = require('../services/disclaimed-number-holds');
+    const result = await db.raw(HELD_LINES_SQL
+      .replace('__CARD__', NO_TEXT_CARD_FOR_HOLD_SQL)
+      .replace('__OWNERSHIP__', OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')));
     res.json({ lines: result?.rows || [] });
   } catch (err) {
     logger.error(`[admin-triage] held-lines list failed: ${err.message}`);

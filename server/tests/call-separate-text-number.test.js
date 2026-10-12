@@ -324,8 +324,11 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     const at = holds.indexOf('async function clearNoTextHoldsForPhone(');
     expect(at).toBeGreaterThan(-1);
     const fn = holds.slice(at, at + 1600);
-    expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t");
-    expect(fn).toContain("t.reason_code = 'text_number_differs'");
+    expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})");
+    const bound = require('../services/disclaimed-number-holds').NO_TEXT_CARD_FOR_HOLD_SQL;
+    expect(bound).toContain("t.reason_code = 'text_number_differs'");
+    expect(bound).toContain('t.created_at >= h.held_at'); // the card belongs to the hold's current arming
+    expect(bound).toContain("t.payload->>'ani_phone'"); // and to the held line
     expect(fn).toContain("AND NOT EXISTS (SELECT 1 FROM triage_items d");
     expect(fn).toContain("OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')");
     // the dual-signal stamp and the disclaimer predicate

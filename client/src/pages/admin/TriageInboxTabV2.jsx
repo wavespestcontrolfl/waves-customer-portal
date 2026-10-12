@@ -650,7 +650,9 @@ export function groupHeldLines(lines) {
     // A call with an unresolved "not my number" card can only defer the release: prefer one that can clear it.
     const primary = rows.find((r) => !r.blocked_by_ownership_card) || rows[0];
     const since = rows.reduce((a, r) => (new Date(r.held_at) < new Date(a) ? r.held_at : a), rows[0].held_at);
-    return { phone, primary, since, others: rows.length - 1 };
+    // The line is blocked when ANY call that holds it has an unresolved "not my number" card (the server
+    // checks the line too and defers the release; this only says so up front).
+    return { phone, primary, since, others: rows.length - 1, blocked: rows.some((r) => r.blocked_by_ownership_card) };
   });
 }
 
@@ -687,7 +689,7 @@ function HeldLinesPanel({ lines, loading, actioning, onRelease }) {
           <div className="p-6 text-center text-14 text-ink-secondary">No held lines.</div>
         ) : (
           <div className="divide-y divide-zinc-200">
-            {groups.map(({ phone, primary, since, others }) => (
+            {groups.map(({ phone, primary, since, others, blocked }) => (
               <div key={phone} className="py-3 px-3 flex flex-wrap items-start justify-between gap-2" data-testid="held-line">
                 <div className="min-w-0">
                   <div className="text-14 font-medium text-zinc-900">{phone}</div>
@@ -698,8 +700,8 @@ function HeldLinesPanel({ lines, loading, actioning, onRelease }) {
                     Card {CARD_STATE_LABELS[primary.card_status] || primary.card_status}, updated {heldDate(primary.card_updated_at)}
                     {others > 0 && ` · ${others} more call${others === 1 ? "" : "s"} hold this line`}
                   </div>
-                  {primary.blocked_by_ownership_card && (
-                    <div className="text-14 text-alert-fg">This call also has an open "not my number" card. Resolve that card first.</div>
+                  {blocked && (
+                    <div className="text-14 text-alert-fg">A call on this line also has an open "not my number" card. Resolve that card first.</div>
                   )}
                 </div>
                 <Button size="sm" variant="secondary" disabled={actioning === primary.card_id} onClick={() => onRelease(heldLineItem(primary))}>
@@ -1257,14 +1259,14 @@ export default function TriageInboxTabV2({ isAdmin }) {
             onClick={toggleHeld}
             aria-pressed={heldOpen}
             className={cn(
-              "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
+              "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-14 font-medium transition-colors",
               heldOpen
                 ? "bg-zinc-900 text-white border-zinc-900"
                 : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
             )}
           >
             Held lines
-            {heldLines && <span className={cn("text-11", heldOpen ? "text-zinc-300" : "text-ink-tertiary")}>{groupHeldLines(heldLines).length}</span>}
+            {heldLines && <span className={cn("text-14", heldOpen ? "text-zinc-300" : "text-ink-tertiary")}>{groupHeldLines(heldLines).length}</span>}
           </button>
           {(status === "resolved" || status === "dismissed") && (
             <button
