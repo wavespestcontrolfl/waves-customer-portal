@@ -15,7 +15,10 @@ const FAULT_CODES = new Set(['execution_interrupted', 'verify_failed']);
 // must still trip the breaker.
 const REFUSAL_CODE_SHAPE = /^[a-z]+(?:_[a-z0-9]+)+$/;
 const FAULT_CODE_WORDS = /(?:^|_)(?:error|errors|timeout|timedout|unavailable|connection|network|unreachable|overloaded|internal|exception|rate_limit|rate_limited|throttled)(?:_|$)/;
-const isRefusalCode = code => REFUSAL_CODE_SHAPE.test(code) && !FAULT_CODES.has(code) && !FAULT_CODE_WORDS.test(code);
+// The bar's own refusal codes that contain a fault-looking word.
+const KNOWN_REFUSAL_CODES = new Set(['record_unavailable']);
+const isRefusalCode = code => KNOWN_REFUSAL_CODES.has(code)
+  || (REFUSAL_CODE_SHAPE.test(code) && !FAULT_CODES.has(code) && !FAULT_CODE_WORDS.test(code));
 
 /**
  * A tool declined on purpose: a scope, target, permission or capability

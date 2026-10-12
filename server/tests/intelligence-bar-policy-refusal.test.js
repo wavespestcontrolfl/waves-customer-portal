@@ -18,6 +18,7 @@ describe('isPolicyRefusal', () => {
 
   test('a business failure with any other code is a refusal too (gate off, not found, a blocked write)', () => {
     expect(isPolicyRefusal({ error: 'x', code: 'gate_off' })).toBe(true);
+    expect(isPolicyRefusal({ error: 'x', code: 'record_unavailable' })).toBe(true);
     expect(isPolicyRefusal({ error: 'x', code: 'charge_limit', blocked: true })).toBe(true);
     expect(isPolicyRefusal({ success: false, code: 'invoice_not_found' })).toBe(true);
   });
