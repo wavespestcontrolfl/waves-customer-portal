@@ -140,6 +140,7 @@ const WRITE_TWO_STEP = [
   'add_customer_property',
   'update_customer_property',
   'set_primary_property',
+  'remove_customer_property',
   'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
@@ -559,6 +560,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       address_line1: '2 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' }, propertySeed],
     ['property-tools', 'executePropertyTool', 'update_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved', label: 'Family' }, propertySeed],
     ['property-tools', 'executePropertyTool', 'set_primary_property', { customer_id: 'cust-property', property_id: 'prop-saved' }, propertySeed],
+    ['property-tools', 'executePropertyTool', 'remove_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved' }, propertySeed],
     ['schedule-tools', 'executeScheduleTool', 'switch_appointment_property', {
       appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002',
     }, {

@@ -48,11 +48,14 @@ const PREVIEW_NOISE_KEYS = new Set([
 const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|took_ms|_ms$|latency|request_id|trace)/i;
 const PREVIEW_EFFECT_LINES = 12;
 const PREVIEW_EFFECT_CHARS = 200;
-const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property']);
+const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property', 'remove_customer_property']);
 
 // Tools whose commit cannot be undone from the portal (a message leaves,
 // money moves, a public reply posts). Everything else is editable after.
 const IRREVERSIBLE_TOOL_NAMES = new Set([
+  // A removed saved property has no restore in the portal or the bar, and the
+  // same address cannot be added again (the add path dedups against it).
+  'remove_customer_property',
   'send_sms',
   'reply_via_sms',
   'send_email_reply',
@@ -160,6 +163,7 @@ const ACTION_LABELS = {
   add_customer_property: 'Add saved property',
   update_customer_property: 'Update saved property',
   set_primary_property: 'Change primary property',
+  remove_customer_property: 'Remove saved property',
   create_appointment: 'Book an appointment',
   reschedule_appointment: 'Move an appointment',
   cancel_appointment: 'Cancel an appointment',
@@ -357,6 +361,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview?.customer?.name) push('customer', preview.customer.name);
     if (preview?.address) push('customer', `Save property: ${preview.address}`);
     if (preview?.property?.address) push('customer', preview.property.address);
+    if (preview?.removed_property?.address) push('customer', `Remove property: ${preview.removed_property.address}${preview.removed_property.label ? ` (${preview.removed_property.label})` : ''}`);
     if (preview?.previous_primary?.address) push('customer', `Previous primary: ${preview.previous_primary.address}`);
     if (preview?.primary_property?.address) push('customer', `New primary: ${preview.primary_property.address}`);
     for (const [field, value] of Object.entries(preview?.changes || {})) {

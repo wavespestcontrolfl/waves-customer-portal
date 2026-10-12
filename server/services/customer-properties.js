@@ -951,8 +951,8 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
       preview = { ...base, property: { id: target.id, address: propertyAddressLabel(target) },
         before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
         effects: 'Updates only this saved property’s label, relationship or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
-    } else if (kind === 'primary') {
-      preview = { ...base, ...await previewPrimaryPropertyChange(conn, customerId, target, primary, customer) };
+    } else if (TARGET_PREVIEWS[kind]) {
+      preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer) };
     } else throw propertyActionError('Unknown property operation');
   }
   preview._version = require('crypto').createHash('sha256').update(JSON.stringify([
@@ -1019,6 +1019,57 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
     ] };
 }
 
+// Removal is a deactivation (active=false), never a row delete: visit history,
+// reports and estimates keep their property link. It is refused, fail-closed,
+// while anything open still depends on the row: the primary, the account
+// address, an open or ongoing-recurring visit, or an open estimate. Unstamped
+// visits and estimates count when their own address names this property.
+async function previewPropertyRemoval(conn, customerId, target, _primary, customer) {
+  if (target.is_primary) {
+    throw propertyActionError('This is the primary property. Make another saved property primary before removing it.', 409, 'primary_property');
+  }
+  if (customer.address_line1 && addressKey(customer) === addressKey(target)) {
+    throw propertyActionError('This property is the account address. Change the account address before removing it.', 409, 'account_address');
+  }
+  const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
+  const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
+  const { estimateQuotesCustomerAddress, parseEstimateAddress } = require('./estimate-property-linkage');
+  const estimates = await conn('estimates').where({ customer_id: customerId })
+    .where(q => q.where('property_id', target.id).orWhereNull('property_id'))
+    .orderBy('id').select('id', 'status', 'archived_at', 'property_id', 'address');
+  const quotesTarget = estimate => (estimate.property_id
+    ? estimate.property_id === target.id
+    : !!parseEstimateAddress(estimate.address) && estimateQuotesCustomerAddress(estimate.address, target));
+  const targetEstimateIds = new Set(estimates.filter(quotesTarget).map(estimate => estimate.id));
+  const openEstimates = estimates.filter(estimate => targetEstimateIds.has(estimate.id)
+    && !estimate.archived_at && !TERMINAL_ESTIMATE_STATUSES.includes(estimate.status));
+  const visits = await conn('scheduled_services').where({ customer_id: customerId })
+    .where(q => q.where('property_id', target.id).orWhereNull('property_id'))
+    .where(q => q.whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
+    .orderBy('id')
+    .select('id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+  const targetKey = addressKey(target);
+  const openVisits = visits.filter(visit => visit.property_id === target.id
+    || (visit.service_address_line1 && addressKey({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
+      city: visit.service_address_city, zip: visit.service_address_zip }) === targetKey)
+    || (!visit.service_address_line1 && visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id)));
+  if (openVisits.length || openEstimates.length) {
+    const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+    const parts = [openVisits.length && count(openVisits.length, 'open or recurring visit'), openEstimates.length && count(openEstimates.length, 'open estimate')].filter(Boolean);
+    throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it.`, 409, 'property_in_use');
+  }
+  return { removed_property: { id: target.id, address: propertyAddressLabel(target), label: target.label || null },
+    effects: [
+      'Removes this saved property from the customer. It no longer shows on the customer record or in the customer portal, and it cannot be chosen for a booking or an estimate.',
+      'Completed visits, service reports, closed estimates, invoices and receipts keep this address.',
+      'The address stays on file as removed: a later call or the Add property action does not save it again.',
+      'The primary property and the account address are unchanged. Sends no messages.',
+    ] };
+}
+
+const TARGET_PREVIEWS = { primary: previewPrimaryPropertyChange, remove: previewPropertyRemoval };
+
 async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
   const changes = manualPropertyFields(kind, input);
   return db.transaction(async trx => {
@@ -1039,6 +1090,13 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     });
     const properties = await listProperties(customerId, trx);
     const saved = properties.find(p => p.id === savedId);
+    if (kind === 'remove') {
+      const row = await trx('customer_properties').where({ id: savedId, customer_id: customerId }).first('active');
+      if (saved || !row || row.active !== false) throw propertyActionError('The property was not removed', 409, 'verification_failed');
+      return { success: true, propertyId: savedId, customer_id: customerId, properties, audit_id: auditId,
+        verification: { property_id: savedId, persisted: true, removed: true },
+        href: `/admin/customers?customerId=${encodeURIComponent(customerId)}` };
+    }
     const matches = saved && Object.entries(preview.changes || {}).every(([key, value]) => saved[key] === value);
     if (!matches || (kind === 'primary' && (!saved.is_primary || saved.occupancy_type !== 'owner_occupied'))) throw propertyActionError('The saved property did not match the requested change', 409, 'verification_failed');
     if (saved.is_primary && kind !== 'edit') {
@@ -1065,6 +1123,16 @@ async function editManualProperty(customerId, propertyId, input, options = {}) {
   return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
       .update({ ...changes, updated_at: trx.fn.now() });
+    return propertyId;
+  });
+}
+
+async function removeManualProperty(customerId, propertyId, options = {}) {
+  if (!options.expectedVersion) throw propertyActionError('Review the removal preview first', 409, 'preview_required');
+  return writeManualProperty(customerId, 'remove', {}, propertyId, options, async trx => {
+    const removed = await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true, is_primary: false })
+      .update({ active: false, updated_at: trx.fn.now() });
+    if (removed !== 1) throw propertyActionError('The property changed. Request a fresh preview.', 409, 'preview_changed');
     return propertyId;
   });
 }
@@ -1155,6 +1223,7 @@ module.exports = {
   addManualProperty,
   editManualProperty,
   changePrimaryProperty,
+  removeManualProperty,
   sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,

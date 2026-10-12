@@ -92,6 +92,78 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect(await db('customer_properties').where({ customer_id: customerB })).toEqual(beforeB);
   }, 60000);
 
+  test('remove_customer_property deactivates a saved property once nothing open depends on it; history and B are untouched', async () => {
+    const service = require('../services/customer-properties');
+    const beforeB = await db('customer_properties').where({ customer_id: customerB });
+    const saved = await service.addManualProperty(customerA, address(2100, 'Old rental'), { actorId: actor });
+    const beforeCustomer = await db('customers').where({ id: customerA }).first();
+    const primary = await db('customer_properties').where({ customer_id: customerA, is_primary: true, active: true }).first();
+    const say = 'Remove the saved 2100 Example Grove property';
+    const input = { customer_id: customerA, property_id: saved.propertyId };
+    const date = require('../utils/datetime-et').etDateString(new Date());
+    const [stamped, unstamped, done, root, estimate] = [1, 2, 3, 4, 5].map(() => crypto.randomUUID());
+    const visit = { customer_id: customerA, scheduled_date: date, service_type: 'General Pest Control' };
+    const blocked = async () => {
+      const refused = await propose('remove_customer_property', input, say);
+      expect(refused.body.pendingActions || []).toHaveLength(0);
+      await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).rejects.toMatchObject({ code: 'property_in_use' });
+    };
+    // The primary is never removable.
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, primary.id)).rejects.toMatchObject({ code: 'primary_property' });
+    expect((await propose('remove_customer_property', { customer_id: customerA, property_id: primary.id }, 'Remove the primary property')).body.pendingActions || []).toHaveLength(0);
+    // An open visit stamped with the property blocks.
+    await db('scheduled_services').insert({ id: stamped, ...visit, status: 'pending', property_id: saved.propertyId });
+    await blocked();
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'completed' });
+    // An open visit with no property link but this service address blocks.
+    await db('scheduled_services').insert({ id: unstamped, ...visit, status: 'pending', service_address_line1: '2100 Example Grove',
+      service_address_city: 'Sarasota', service_address_state: 'FL', service_address_zip: '34201' });
+    await blocked();
+    await db('scheduled_services').where({ id: unstamped }).update({ status: 'cancelled' });
+    // A completed root of an ongoing recurring series still blocks.
+    await db('scheduled_services').insert({ id: root, ...visit, status: 'completed', property_id: saved.propertyId, is_recurring: true, recurring_ongoing: true });
+    await blocked();
+    await db('scheduled_services').where({ id: root }).update({ recurring_ongoing: false });
+    // An open estimate linked to the property blocks; a declined one does not.
+    await db('estimates').insert({ id: estimate, customer_id: customerA, property_id: saved.propertyId, status: 'draft',
+      token: crypto.randomBytes(16).toString('hex'), customer_name: 'Fixture Alder', address: '2100 Example Grove, Sarasota, FL 34201' });
+    await blocked();
+    await db('estimates').where({ id: estimate }).update({ status: 'declined' });
+    await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
+
+    const proposed = await propose('remove_customer_property', input, say);
+    const card = proposed.body.pendingActions[0];
+    expect(card.contract.irreversible).toBe(true);
+    expect(card.contract.effects).toContainEqual(expect.objectContaining({ label: 'Remove property: 2100 Example Grove, Sarasota, FL, 34201 (Old rental)' }));
+    expect((await db('customer_properties').where({ id: saved.propertyId }).first()).active).toBe(true);
+    // A visit booked after the card was shown fails the confirmation.
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'pending' });
+    const stale = await confirm(proposed);
+    expect(stale.body.success).not.toBe(true);
+    expect((await db('customer_properties').where({ id: saved.propertyId }).first()).active).toBe(true);
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'completed' });
+
+    const fresh = await propose('remove_customer_property', input, say);
+    const removed = await confirm(fresh);
+    expect(removed.body).toMatchObject({ success: true, outcome: 'completed', result: { verification: { persisted: true, removed: true } } });
+    expect(await db('customer_properties').where({ id: saved.propertyId }).first('active', 'is_primary', 'label', 'address_line1'))
+      .toEqual({ active: false, is_primary: false, label: 'Old rental', address_line1: '2100 Example Grove' });
+    expect(removed.body.result.properties.map(p => p.id)).not.toContain(saved.propertyId);
+    expect((await api(`/api/admin/customers/${customerA}/properties`)).body.properties.map(p => p.id)).not.toContain(saved.propertyId);
+    expect(await db('scheduled_services').where({ id: done }).first('property_id', 'service_address_line1'))
+      .toEqual({ property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
+    expect((await db('estimates').where({ id: estimate }).first()).property_id).toBe(saved.propertyId);
+    expect(await db('customer_properties').where({ id: primary.id }).first()).toEqual(primary);
+    const afterCustomer = await db('customers').where({ id: customerA }).first();
+    expect({ ...afterCustomer, updated_at: null }).toEqual({ ...beforeCustomer, updated_at: null });
+    expect(await db('audit_log').where({ action: 'customer_property_remove', resource_id: saved.propertyId }).count('* as count').first()).toEqual({ count: '1' });
+    // Replay and a second removal are refused; the address is not saved again.
+    expect((await confirm(fresh)).status).toBe(409);
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).rejects.toMatchObject({ code: 'property_not_found' });
+    await expect(service.previewManualPropertyChange(customerA, 'add', address(2100))).rejects.toMatchObject({ code: 'property_exists' });
+    expect(await db('customer_properties').where({ customer_id: customerB })).toEqual(beforeB);
+  }, 90000);
+
   test('billing contention is a confirmed failure through portal and IB, never an unknown outcome', async () => {
     const service = require('../services/customer-properties');
     const saved = await service.addManualProperty(customerA, address(1500), { actorId: actor });
