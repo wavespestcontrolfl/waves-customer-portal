@@ -29,7 +29,10 @@ const judgeTally = ({ gateChecks, ...rest }) => rest;
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
   transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(8),
-  ai_extraction: JSON.stringify({ is_lead: true }), disposition: null, ...over,
+  ai_extraction: JSON.stringify({ is_lead: true }), disposition: null,
+  // A valid V2 extraction whose appointment answer is the stored one: the V2 extractor wrote the
+  // baseline, so the call is graded by the V2 contract (call_judge.v4).
+  v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none' } }), ...over,
 });
 
 function mockDb({ calls, onInsert = () => {}, whereCalls = [], promiseCallIds = [], whereInCalls = [] }) {
@@ -650,8 +653,48 @@ describe('the auditor is told when the call started', () => {
     expect(auditUserContent(base)).toContain('Call started (Eastern Time): unknown');
     expect(auditUserContent({ ...base, created_at: 'not a date' })).toContain('Call started (Eastern Time): unknown');
   });
+  test('a row a post-call fallback path inserted: the call\'s length is backed out of created_at', () => {
+    const text = auditUserContent({ ...base, created_at: '2026-10-10T04:05:00Z', duration_seconds: 600, metadata: { source: 'twilio_recording_status_recovered' } });
+    expect(text).toContain('Call started (Eastern Time): 2026-10-09 11:55 PM');
+  });
   test('the start time is part of the audited input', () => {
     expect(auditInputHash({ ...base, created_at: '2026-10-09T19:49:00Z' })).not.toBe(auditInputHash({ ...base, created_at: '2026-10-09T23:49:00Z' }));
+  });
+});
+
+// Codex #6294 r2: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
+describe('the contract follows the extractor that wrote the stored answer', () => {
+  const { baselineFromV2, auditPromptFor, auditInputHash, AUDIT_PROMPT, AUDIT_PROMPT_V1 } = require('../services/call-self-audit');
+  const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE } = require('../services/prompts/appointment-confirmed-rules');
+  const confirmedV2 = JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' } });
+  const row = (over = {}) => ({ direction: 'inbound', transcription: 'Agent: Waves. Caller: hi.', created_at: '2026-10-09T19:49:00Z', ...over });
+
+  test('V2 wrote it: a valid V2 extraction whose appointment answer equals the stored one', () => {
+    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: confirmedV2, ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(true);
+    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none' } }), ai_extraction: '{}' }))).toBe(true);
+  });
+  test('V1 wrote it: no valid V2 extraction, an empty one, or a stored answer that differs from V2\'s', () => {
+    expect(baselineFromV2(row({ ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(false);
+    expect(baselineFromV2(row({ v2_extraction_status: 'parse_failed', ai_extraction_enriched: confirmedV2, ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(false);
+    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: null }))).toBe(false);
+    // V2 confirmed but routing did not adopt it: the stored answer is V1's "not confirmed".
+    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: confirmedV2, ai_extraction: JSON.stringify({ appointment_confirmed: false }) }))).toBe(false);
+  });
+  test('the V1 prompt keeps the shared rules and carries none of the V2-only ones; the hash follows the prompt', () => {
+    expect(AUDIT_PROMPT_V1).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(AUDIT_PROMPT_V1).not.toContain(CALLER_PROPOSED_TIME_RULE);
+    expect(AUDIT_PROMPT_V1).not.toContain(STAFF_HEDGE_RULE);
+    const v1 = row({ ai_extraction: '{}' });
+    const v2 = row({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none' } }), ai_extraction: '{}' });
+    expect(auditPromptFor(v1)).toBe(AUDIT_PROMPT_V1);
+    expect(auditPromptFor(v2)).toBe(AUDIT_PROMPT);
+    expect(auditInputHash(v1)).not.toBe(auditInputHash(v2));
+  });
+  test('the frozen v3 package is exactly the V1-baseline contract', () => {
+    const { PACKAGES } = require('../services/typed-decisions/packages');
+    const { auditAppointmentContract } = require('../services/prompts/appointment-confirmed-rules');
+    expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions)
+      .toContain(auditAppointmentContract('the date the call took place', { v2OnlyRules: false }));
   });
 });
 

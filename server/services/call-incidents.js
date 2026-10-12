@@ -121,7 +121,7 @@ async function askSecondReader(call, auditorProvider) {
   // `call` is the candidate row: transcript, direction and the disputed field.
   const { dispatchWithFallback } = require('./llm/call');
   const MODELS = require('../config/models');
-  const { AUDIT_PROMPT, auditUserContent } = require('./call-self-audit');
+  const { auditPromptFor, auditUserContent } = require('./call-self-audit');
   const policy = MODELS.TEXT_POLICIES.fastStructured;
   const leg = [policy.primary, policy.fallback].find((l) => l && l.provider !== auditorProvider);
   if (!leg) return { ok: false, reason: 'no_other_provider_leg' };
@@ -130,7 +130,7 @@ async function askSecondReader(call, auditorProvider) {
     {
       laneId: 'call_incidents',
       // The auditor's own contract, plus one ask: the words behind THIS field.
-      system: `${AUDIT_PROMPT}\nAlso include "field_excerpt": the exact words from the transcript (at most 25) that support your answer for "${call.field}".`,
+      system: `${auditPromptFor(call)}\nAlso include "field_excerpt": the exact words from the transcript (at most 25) that support your answer for "${call.field}".`,
       // The very text the auditor read (leadWithoutReading checked its hash).
       text: auditUserContent(call),
       jsonMode: true,
@@ -293,7 +293,12 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
     .select(
       'f.id as finding_id', 'f.field', 'f.old_value', 'f.new_value', 'f.transcript_excerpt', 'f.category', 'f.detail',
       dbi.raw(`${EVIDENCE_KEY_SQL} as evidence_key`),
-      'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at'
+      'c.id as call_id', 'c.direction', 'c.transcription', 'c.created_at as call_at',
+      // What the audit's input is rendered from (auditUserContent / auditPromptFor): the call's
+      // start and which extractor wrote the stored answer. Without them the replay's hash never
+      // matches the audit's.
+      'c.created_at', 'c.metadata', 'c.duration_seconds', 'c.recording_duration_seconds',
+      'c.ai_extraction', 'c.ai_extraction_enriched', 'c.v2_extraction_status'
     );
 
   const byDisposition = {};

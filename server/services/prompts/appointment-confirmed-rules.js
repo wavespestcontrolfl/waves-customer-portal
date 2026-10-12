@@ -43,11 +43,15 @@ function appointmentConfirmedRules(callDateET) {
 // confirmation rules above (bare time, missing AM/PM, staff hedges, caller-proposed
 // time). One builder for
 // the self-audit prompt and the call_judge package, so they cannot drift.
-function auditAppointmentContract(callDateText) {
-  return `${appointmentConfirmedRules(callDateText)}
+function auditAppointmentContract(callDateText, { v2OnlyRules = true } = {}) {
+  const shared = `${appointmentConfirmedRules(callDateText)}
 - Only a NEW visit agreed on this call counts. These rules from the V2 extractor also apply ("confirmed" means appointment_confirmed true; "reschedule_requested" means false):
 ${EXISTING_APPOINTMENT_RULE}
-${RESCHEDULE_RULE}
+${RESCHEDULE_RULE}`;
+  // v2OnlyRules false = the contract for an answer the V1 extractor wrote: the V1 prompt never
+  // carried the four rules below, so grading it by them reports drift that is not there.
+  if (!v2OnlyRules) return shared;
+  return `${shared}
 ${bareTimeNoDayRule(callDateText)}
 ${MISSING_AMPM_RULE}
 ${STAFF_HEDGE_RULE}
