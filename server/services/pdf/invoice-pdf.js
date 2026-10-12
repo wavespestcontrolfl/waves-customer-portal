@@ -237,11 +237,28 @@ function annualPrepayCallout(doc, prepay, x, y, width) {
   return y + boxH + 14;
 }
 
-function lineItemsTable(doc, lineItems, x, y, width) {
-  const visibleLineItems = (lineItems || []).filter((item) => {
+// The lines the PDF table lists: discounts and other negative lines are not rows (the totals block carries them). Shared
+// with the Intelligence Bar's send card, which shows the customer the same breakdown the PDF does.
+function visibleInvoiceLines(lineItems) {
+  let items = lineItems;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = []; }
+  }
+  return (Array.isArray(items) ? items : []).filter((item) => {
     const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
     return item?._kind !== 'discount' && !item?.discount_for && amount >= 0;
   });
+}
+
+// One table row's numbers, exactly as the PDF prints them.
+function invoiceLineParts(item) {
+  const qty = Number(item.quantity || 1);
+  const rate = Number(item.unit_price || 0);
+  return { description: String(item.description || '').slice(0, 200), qty, rate, amount: Number(item.amount ?? qty * rate) };
+}
+
+function lineItemsTable(doc, lineItems, x, y, width) {
+  const visibleLineItems = visibleInvoiceLines(lineItems);
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 8;
@@ -256,10 +273,7 @@ function lineItemsTable(doc, lineItems, x, y, width) {
 
   doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
   for (const item of visibleLineItems) {
-    const description = String(item.description || '').slice(0, 200);
-    const qty = Number(item.quantity || 1);
-    const rate = Number(item.unit_price || 0);
-    const amount = Number(item.amount ?? qty * rate);
+    const { description, qty, rate, amount } = invoiceLineParts(item);
     const descHeight = doc.heightOfString(description, { width: x + width - 210 - x });
     const rowHeight = Math.max(descHeight + 6, 18);
     doc.text(description, x, y, { width: width - 210 });
@@ -288,17 +302,50 @@ function depositCreditTotalFromLineItems(lineItems) {
     }, 0);
 }
 
+// The totals rows the PDF prints, from the invoice's own fields. Tax is commercial-only per operator policy: the guard defends
+// against legacy invoices that may have a non-zero tax_amount for a residential customer (the stored total is authoritative
+// since the customer already agreed to it). Shared with the Intelligence Bar's send card.
+function invoiceTotalsFacts(invoice, customer = null) {
+  const subtotal = Number(invoice.subtotal || 0);
+  const discount = Number(invoice.discount_amount || 0);
+  const tax = Number(invoice.tax_amount || 0);
+  const total = Number(invoice.total || 0);
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  return {
+    subtotal,
+    discount,
+    discountLabel: invoice.discount_label || 'Discount',
+    tax,
+    showTax: tax > 0 && isCommercial,
+    taxLabel: `Tax (${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%)`,
+    depositCredit: depositCreditTotalFromLineItems(invoice.line_items),
+    total,
+    creditApplied: Number(invoice.credit_applied || 0),
+  };
+}
+
+// The same rows as text ("label: $amount"), in the PDF's order, for the send card.
+function invoiceBreakdownRows(invoice, customer = null) {
+  const f = invoiceTotalsFacts(invoice, customer);
+  return [
+    ['Subtotal', currency(f.subtotal)],
+    f.discount > 0 ? [f.discountLabel, `− ${currency(f.discount)}`] : null,
+    f.showTax ? [f.taxLabel, currency(f.tax)] : null,
+    f.depositCredit > 0 ? ['Deposit paid at acceptance', `− ${currency(f.depositCredit)}`] : null,
+    ['Total', currency(f.total)],
+    f.creditApplied > 0 ? ['Account credit applied', `− ${currency(f.creditApplied)}`] : null,
+    f.creditApplied > 0 ? ['Amount due', currency(Math.max(0, f.total - f.creditApplied))] : null,
+  ].filter(Boolean).map(([label, value]) => `${label}: ${value}`);
+}
+
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const { highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null } = opts;
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 10;
 
-  const subtotal = Number(invoice.subtotal || 0);
-  const discount = Number(invoice.discount_amount || 0);
-  const tax = Number(invoice.tax_amount || 0);
-  const total = Number(invoice.total || 0);
-  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  const facts = invoiceTotalsFacts(invoice, customer);
+  const { subtotal, discount, tax, total } = facts;
 
   const labelX = x + width - 240;
   const valueX = x + width - 70;
@@ -311,13 +358,9 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   };
 
   row('Subtotal', currency(subtotal));
-  if (discount > 0) row(invoice.discount_label || 'Discount', `− ${currency(discount)}`);
-  // Tax line is commercial-only per operator policy. Guard defends against
-  // legacy invoices that may have a non-zero tax_amount for a residential
-  // customer — we still hide the line in that case; the stored total is
-  // authoritative since the customer already agreed to it.
-  if (tax > 0 && isCommercial) row(`Tax (${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%)`, currency(tax));
-  const depositCredit = depositCreditTotalFromLineItems(invoice.line_items);
+  if (discount > 0) row(facts.discountLabel, `− ${currency(discount)}`);
+  if (facts.showTax) row(facts.taxLabel, currency(tax));
+  const depositCredit = facts.depositCredit;
   if (depositCredit > 0) row('Deposit paid at acceptance', `− ${currency(depositCredit)}`);
 
   y += 2;
@@ -513,6 +556,10 @@ async function buildReceiptPDFBuffer(invoice, payment) {
 }
 
 module.exports = {
+  visibleInvoiceLines,
+  invoiceLineParts,
+  invoiceTotalsFacts,
+  invoiceBreakdownRows,
   generateInvoicePDF,
   generateReceiptPDF,
   buildInvoicePDFBuffer,

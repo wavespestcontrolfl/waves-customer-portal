@@ -1336,7 +1336,7 @@ function CustomerContact({ service, visit, request }) {
 // `onPrepared` (GATE_COMBO_FAST_COMPLETE; a part of a grouped stop): Complete hands the body it would have
 // posted to onPrepared(serviceId, body) and posts nothing. `sharedNote` is the stop's one note: it stands
 // in for this sheet's own, which hides. Without them the sheet is as it was.
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, suspended = false, onPrepared, sharedNote, embedded }) {
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, suspended = false, onPrepared, sharedNote, embedded, onWrapUpGate }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   // As a part of a stop (embedded) the container owns focus, scroll lock and the frame.
@@ -1356,6 +1356,8 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   // Every write (a sod rooted date, a cleared trouble area, a photo, Analyze, Confirm) counts as work in flight.
   const stopRequest = useWriteTracking(headerRequest, preparing);
   const ctx = useLawnFastContext({ base, request: stopRequest, service });
+  // The stop's container learns from this read whether the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) is on; the part itself shows none.
+  useEffect(() => { onWrapUpGate?.(ctx.wrapUp === true); return () => onWrapUpGate?.(null); }, [onWrapUpGate, ctx.wrapUp]);
   // The visit's own property areas (read by PropertyServiceAreas, in the form) and
   // their hold: see usePropertyAreaLifecycle. A refused completion starts a refresh.
   const propertyAreas = usePropertyAreaLifecycle();

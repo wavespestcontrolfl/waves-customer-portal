@@ -20,6 +20,8 @@ import { Button, ActionFeedback } from '../ui';
 import FastCompleteSheet from './FastCompleteSheet';
 import FastCompleteLawnSheet from './FastCompleteLawnSheet';
 import { FastCompleteFrame, PartBusyContext, VisitNote } from './FastCompleteParts';
+import { StopWrapUpSection, useStopWrapUp } from './StopWrapUp';
+import { WrapUpClock } from './FastCompleteWrapUp';
 import { deleteVisitCompletionDraft } from '../../lib/completion-resume-store';
 import { isFinishedState, isOfficeReviewState, operatorScope, paymentLine } from '../../lib/visit-closeout-packet';
 import '../../styles/tech-workflow.css';
@@ -45,8 +47,8 @@ function PartCard({ title, status, children }) {
   );
 }
 
-function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared, onFullForm }) {
-  const common = { service: part.service, request, operatorId, embedded: true, onPrepared, sharedNote: note, onFullForm, onClose: noop, onCompleted: noop };
+function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared, onFullForm, onWrapUpGate }) {
+  const common = { service: part.service, request, operatorId, embedded: true, onPrepared, sharedNote: note, onFullForm, onClose: noop, onCompleted: noop, onWrapUpGate };
   return kind === 'pest'
     ? <FastCompleteSheet {...common} voiceFillEnabled={part.voiceFillEnabled === true} />
     : <FastCompleteLawnSheet {...common} catalog={catalog} />;
@@ -54,7 +56,8 @@ function PartSheet({ kind, part, note, request, operatorId, catalog, onPrepared,
 
 // `onViewDetails`: the Details pill (owner 2026-10-09), as on every Fast Complete sheet, offered once the stop is loaded,
 // still this pair and not finished (`detailsOffered`); absent = no pill.
-function Header({ titleId, pest, lawn, onFullForm, onViewDetails, detailsOffered, onClose, blocked }) {
+// `blocked`: work in flight (Close waits). `frozen`: that, or a replay pending (Details and Full form wait; Close still works).
+function Header({ titleId, pest, lawn, onFullForm, onViewDetails, detailsOffered, onClose, blocked, frozen }) {
   const { customerName, address } = pest.service;
   return (
     <header className="tech-visit-header">
@@ -65,8 +68,8 @@ function Header({ titleId, pest, lawn, onFullForm, onViewDetails, detailsOffered
         <p className="tech-visit-muted">{pest.service.serviceType} + {lawn.service.serviceType}</p>
       </div>
       <div className="tech-visit-header-actions">
-        {onViewDetails && detailsOffered && <Button variant="ghost" className="tech-visit-action" onClick={onViewDetails} disabled={blocked}>Details</Button>}
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={blocked}>Full form</Button>
+        {onViewDetails && detailsOffered && <Button variant="ghost" className="tech-visit-action" onClick={onViewDetails} disabled={frozen}>Details</Button>}
+        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={frozen}>Full form</Button>
       </div>
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={blocked} aria-label="Close">×</Button>
     </header>
@@ -93,7 +96,7 @@ function partStatus(readiness, id, label, changed) {
 
 // One part: its saved summary after a reload (until the tech edits it or the note changes), else the embedded sheet.
 function ComboPart({ kind, part, shared }) {
-  const { readiness, send, note, request, operatorId, catalog, onFullForm, changed, markChanged } = shared;
+  const { readiness, send, note, request, operatorId, catalog, onFullForm, changed, markChanged, wrapUpGates } = shared;
   const id = part.service.id;
   const label = LABELS[kind];
   const showSaved = readiness.ready(id) && readiness.restored.includes(id);
@@ -110,16 +113,16 @@ function ComboPart({ kind, part, shared }) {
       {showSaved ? (
         <div className="tech-visit-card">
           <p className="tech-visit-muted">Saved earlier on this device. Edit it to change anything.</p>
-          <Button className="tech-visit-action" onClick={() => { void readiness.drop(id); markChanged(kind, true); }}>Edit this part</Button>
+          <Button className="tech-visit-action" disabled={send.replaying} onClick={() => { void readiness.drop(id); markChanged(kind, true); }}>Edit this part</Button>
         </div>
       ) : (
-        <PartSheet key={`${kind}-${send.fresh[kind] || 0}`} kind={kind} part={part} note={note} request={request} operatorId={operatorId} catalog={catalog} onPrepared={onPrepared} onFullForm={onFullForm} />
+        <PartSheet key={`${kind}-${send.fresh[kind] || 0}`} kind={kind} part={part} note={note} request={request} operatorId={operatorId} catalog={catalog} onPrepared={onPrepared} onFullForm={onFullForm} onWrapUpGate={wrapUpGates[kind]} />
       )}
     </PartCard>
   );
 }
 
-function ComboFooter({ error, state, lines, blocked, canComplete, onDone, onSubmit, onRetry }) {
+function ComboFooter({ error, state, lines, blocked, canComplete, checking, onDone, onSubmit, onRetry }) {
   const finished = isFinishedState(state);
   const resume = state === 'pending_resume';
   return (
@@ -131,7 +134,7 @@ function ComboFooter({ error, state, lines, blocked, canComplete, onDone, onSubm
         {finished ? (
           <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={onDone}>Done</Button>
         ) : (
-          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" loading={state === 'busy'} disabled={resume ? blocked : !canComplete} onClick={onSubmit}>
+          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" loading={state === 'busy' || checking} disabled={resume ? blocked : !canComplete} onClick={onSubmit}>
             {resume ? 'Resume closeout' : 'Complete stop'}
           </Button>
         )}
@@ -174,7 +177,10 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const ids = useMemo(() => ({ pest: pest.service.id, lawn: lawn.service.id }), [pest.service.id, lawn.service.id]);
   const load = useStopLoad(visitId, scope);
   const readiness = useStopReadiness({ visitId, scope, status: load.status, draft: load.draft });
-  const send = useStopSend({ visitId, scope, load, readiness, ids, onSaved });
+  // The stop-level Wrap-up's choices, read at send (set by useStopWrapUp below).
+  const fieldsRef = useRef(null);
+  const stopFields = useCallback(() => fieldsRef.current?.() ?? null, []);
+  const send = useStopSend({ visitId, scope, load, readiness, ids, onSaved, stopFields });
   const { anyPartBusy, report } = usePartsBusy();
   const [dictating, setDictating] = useState(false);
   const [changed, setChanged] = useState({});
@@ -184,7 +190,12 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const live = (load.detail?.members || []).filter((member) => member.requiresForm === true).map((member) => member.id).sort();
   const samePair = load.status === 'ready' && live.join() === [ids.pest, ids.lawn].sort().join();
   const finished = isFinishedState(send.display);
+  // The stop-level Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): open while the stop is this pair, loaded and not sent.
+  const stopWrapUp = useStopWrapUp({ pest, lawn, rows: load.rows, request, open: [samePair, !finished, !send.started].every(Boolean), report, fieldsRef });
   const blocked = send.busy || dictating || anyPartBusy;
+  // A replay pending (a send the server may have recorded) locks the whole stop like a send in flight; only Complete stop (which replays
+  // the stored draft unchanged) and Close stay.
+  const frozen = [blocked, send.replaying].some(Boolean);
   const canComplete = [[ids.pest, ids.lawn].every(readiness.ready), !readiness.persistError, !blocked, !send.refusal, samePair, !finished].every(Boolean);
 
   const close = useCallback(() => { if (!blocked) onClose?.(); }, [blocked, onClose]);
@@ -193,45 +204,47 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   // resolves false on a failure, it does not reject). On a failure the tech stays here with the error and tries again.
   const [leaveError, setLeaveError] = useState('');
   const fullForm = async () => {
-    if (blocked) return;
+    if (frozen) return;
     const removed = await deleteVisitCompletionDraft(readiness.draftId, scope).catch(() => false);
     if (!removed) { setLeaveError('Could not discard the saved forms on this device, so the long form was not opened. Tap Full form to try again.'); return; }
     setLeaveError('');
     onFullForm?.();
   };
   const partFullForm = useCallback(() => send.setRefusal('The server says this stop needs the long form.'), [send.setRefusal]);
-  const shared = { readiness, send, note: readiness.note, request, operatorId, catalog, onFullForm: partFullForm, changed, markChanged };
+  const shared = { readiness, send, note: readiness.note, request, operatorId, catalog, onFullForm: partFullForm, changed, markChanged, wrapUpGates: stopWrapUp.gates };
   const lines = PARTS.filter(({ kind }) => !readiness.ready(ids[kind])).map(({ kind, label }) => `${label} part: ${partStatus(readiness, ids[kind], label, changed[kind]).line}`);
   const error = leaveError || send.error || readiness.persistError;
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
-      <Header titleId={titleId} pest={pest} lawn={lawn} onFullForm={fullForm} onViewDetails={onViewDetails && (() => onViewDetails(load.rows))} detailsOffered={[samePair, !finished].every(Boolean)} onClose={close} blocked={blocked} />
+      <Header titleId={titleId} pest={pest} lawn={lawn} onFullForm={fullForm} onViewDetails={onViewDetails && (() => onViewDetails(load.rows))} detailsOffered={[samePair, !finished].every(Boolean)} onClose={close} blocked={blocked} frozen={frozen} />
       <div className="tech-visit-body">
         {load.status === 'loading' && <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading the stop…</ActionFeedback>}
-        {load.status === 'error' && <FullFormCard text={load.error} onFullForm={fullForm} disabled={blocked} />}
-        {load.status === 'ready' && !samePair && <FullFormCard text="This stop changed since the schedule loaded. Use the long form." onFullForm={fullForm} disabled={blocked} />}
+        {load.status === 'error' && <FullFormCard text={load.error} onFullForm={fullForm} disabled={frozen} />}
+        {load.status === 'ready' && !samePair && <FullFormCard text="This stop changed since the schedule loaded. Use the long form." onFullForm={fullForm} disabled={frozen} />}
         {samePair && (
           <PartBusyContext.Provider value={report}>
-            <div {...(send.busy || finished || send.started ? INERT : {})}>
-              {send.refusal && <FullFormCard text={send.refusal} onFullForm={fullForm} disabled={blocked} />}
+            <div {...([send.busy, finished, send.started, send.replaying, stopWrapUp.wrapUp.checking].some(Boolean) ? INERT : {})}>
+              {send.refusal && <FullFormCard text={send.refusal} onFullForm={fullForm} disabled={frozen} />}
+              <WrapUpClock wrapUp={stopWrapUp.wrapUp} since={stopWrapUp.since} />
               <VisitNote
                 note={readiness.note}
                 onChange={readiness.setNote}
                 onDictated={(text) => readiness.setNote(readiness.note.trim() ? `${readiness.note.trimEnd()} ${text}` : text)}
                 onDictationPending={setDictating}
                 serviceId={ids.pest}
-                locked={send.busy}
+                locked={[send.busy, send.replaying].some(Boolean)}
                 micInside
               />
               <ComboPart kind="pest" part={pest} shared={shared} />
               <ComboPart kind="lawn" part={lawn} shared={shared} />
+              <StopWrapUpSection stop={stopWrapUp} disabled={frozen} />
             </div>
           </PartBusyContext.Provider>
         )}
         {finished && <FinishedNote state={send.display} result={send.result} />}
       </div>
-      <ComboFooter error={error} state={send.display} lines={lines} blocked={blocked} canComplete={canComplete} onDone={onClose} onSubmit={() => send.submit()} onRetry={readiness.persistError ? readiness.retryPersist : null} />
+      <ComboFooter error={error} state={send.display} lines={lines} blocked={blocked} canComplete={canComplete} checking={stopWrapUp.wrapUp.checking} onDone={onClose} onSubmit={() => stopWrapUp.submit(send)} onRetry={readiness.persistError ? readiness.retryPersist : null} />
     </FastCompleteFrame>
   );
 }

@@ -6,7 +6,9 @@ import {
   previewRecheckWanted,
   reentrySeedsFrom,
   reviewTimeMissingProblem,
+  overlayStopFields,
   stepReentry,
+  stopWrapUpFields,
   wrapUpBilling,
   wrapUpFields,
 } from './fast-complete-wrap-up';
@@ -46,6 +48,12 @@ describe('the Wrap-up body fragment', () => {
     expect(wrapUpFields({ ...base, noPayLink: true, willInvoice: true, includePayLink: true }).includePayLink).toBe(false);
     expect(wrapUpFields({ ...base, noPayLink: true, sendSms: false }).includePayLink).toBe(false);
     expect(wrapUpFields({ ...base, noPayLink: false, sendSms: false }).includePayLink).toBe(true);
+  });
+
+  test('a typed next-visit note posts beside the id of the visit shown; blank or untouched posts neither', () => {
+    expect(wrapUpFields({ ...base, nextVisitNote: '  Gate code changed ', nextVisit: { id: 'v2' } })).toMatchObject({ nextVisitAdjustmentNote: 'Gate code changed', nextVisitId: 'v2' });
+    expect(wrapUpFields({ ...base, nextVisitNote: 'Gate code changed' })).not.toHaveProperty('nextVisitId');
+    expect(wrapUpFields({ ...base, nextVisitNote: '   ', nextVisit: { id: 'v2' } })).toEqual(wrapUpFields(base));
   });
 });
 
@@ -93,5 +101,27 @@ describe('re-entry seeds and billing facts', () => {
     expect(wrapUpBilling({ estimatedPrice: 90, createInvoiceOnComplete: true, billedToPayer: { name: 'Fixture Group' } }).payerBanner).toMatch(/^Billed to Fixture Group/);
     expect(wrapUpBilling({ estimatedPrice: 90, createInvoiceOnComplete: true })).toEqual({ willInvoice: true, reviewAwaitsPayment: true, payerBanner: null });
     expect(wrapUpBilling(undefined).willInvoice).toBe(false);
+  });
+});
+
+describe('the grouped stop\'s fields', () => {
+  const stopBase = { ...base, omitAutoTiming: true, noPayLink: true };
+  test('only the text, the review and its timing leave the section: never the pay link, time or re-entry', () => {
+    const fields = wrapUpFields({ ...stopBase, adjusted: '45', ext: 35, int: 120, seeds: { exteriorMinutes: 30, interiorMinutes: 120 }, reviewTiming: 'tomorrow_8' });
+    expect(Object.keys(stopWrapUpFields(fields)).sort()).toEqual(['requestReview', 'reviewDelayMinutes', 'reviewScheduledFor', 'reviewTiming', 'sendCompletionSms']);
+    expect(Object.keys(stopWrapUpFields(wrapUpFields(stopBase))).sort()).toEqual(['requestReview', 'sendCompletionSms']);
+  });
+
+  test('the fields go on every item body identically; the timing keys it owns are cleared first; the draft in is not changed', () => {
+    const draft = { key: 'k', forms: { a: { body: { x: 1, reviewTiming: 'auto', reviewDelayMinutes: 5 }, noteAtSave: 'n' }, b: { body: { y: 2 } } } };
+    const copy = JSON.parse(JSON.stringify(draft));
+    const next = overlayStopFields(draft, { sendCompletionSms: false, requestReview: true });
+    expect(next.forms.a).toEqual({ body: { x: 1, sendCompletionSms: false, requestReview: true }, noteAtSave: 'n' });
+    expect(next.forms.b.body).toEqual({ y: 2, sendCompletionSms: false, requestReview: true });
+    expect(next.key).toBe('k');
+    expect(draft).toEqual(copy);
+    const timed = overlayStopFields(next, { sendCompletionSms: true, requestReview: true, reviewTiming: 'now', reviewDelayMinutes: 0, reviewScheduledFor: null });
+    expect(timed.forms.a.body).toMatchObject({ reviewTiming: 'now', reviewDelayMinutes: 0, reviewScheduledFor: null });
+    expect(timed.forms.a.body).toEqual({ ...timed.forms.b.body, x: 1, y: undefined });
   });
 });

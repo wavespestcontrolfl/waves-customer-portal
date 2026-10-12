@@ -110,6 +110,22 @@ function hiddenValue(html, name) {
   return m ? m[1] : '';
 }
 
+/**
+ * Where a non-CSV answer came from, for the error line: the file name of the
+ * URL the request ended on (ShowReport.aspx, or the Login.aspx / Error.aspx
+ * it was redirected to) and the body size. On 2026-10-12 both reports came
+ * back as text/html and job_health could not say which page that was.
+ * NO page text (codex #6286 P1): the reports carry street addresses and
+ * owner names, and a page that echoes a record must not reach the log.
+ */
+function pageSource(res, text) {
+  let file = '';
+  try {
+    file = new URL(res.url).pathname.split('/').pop().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 40);
+  } catch { /* no final URL on the response */ }
+  return `${file ? `${file}, ` : ''}${String(text || '').length} chars`;
+}
+
 /** A request failure worth a fresh-session retry (vs. a report/schema break). */
 class TransientAcaError extends Error {}
 
@@ -194,7 +210,9 @@ async function fetchAcaReportCsvOnce({ reportId, dateFromField, dateToField }, f
   }
   const { res: report, text } = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer, step: 'report download' });
   const ctype = String(report.headers.get('content-type') || '');
-  if (!/csv/i.test(ctype)) throw new Error(`report output is not CSV (${ctype || 'no content-type'})`);
+  if (!/csv/i.test(ctype)) {
+    throw new Error(`report output is not CSV (${ctype || 'no content-type'}; ${pageSource(report, text)})`);
+  }
   return text;
 }
 

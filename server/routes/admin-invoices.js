@@ -1657,7 +1657,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 // Either channel failing alone doesn't abort the other — returns per-
 // channel status so the UI can toast accordingly. Missing phone / email
 // on the customer record is treated as "channel skipped", not an error.
-router.post('/:id/send', requireAdmin, async (req, res, next) => {
+router.post('/:id/send', requireAdmin, invoiceSendHandler);
+async function invoiceSendHandler(req, res, next) {
   try {
     const { id } = req.params;
     const {
@@ -1740,6 +1741,21 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         operatorInitiated: true,
         holdExempt: 'operator',
         actorTechnicianId: req.technicianId || null,
+        // Set only by sendInvoiceFromBar (never an HTTP field): the total and the
+        // phone the bar's card showed, no account-credit draw (the card never
+        // offered one), no dispute-hold exemption (the bar never overrides one) and
+        // refusalOnly: a terminal-visit invoice is never voided and a hold refusal is
+        // never requeued for a later send outside the approval.
+        ...(req.ibApprovedSend ? {
+          expectedTotal: req.ibApprovedSend.expectedTotal, expectedRecipients: req.ibApprovedSend.recipients,
+          // The row version the card showed (edit time + amount due / lines digest): the
+          // claim refuses an edit or partial credit that landed after the card.
+          expectedVersion: req.ibApprovedSend.version || null,
+          skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true,
+          // The bar sends ONE text and nothing else: no email leg, and a pay-link text already queued for the send window is
+          // never adopted or cancelled (the claim refuses it).
+          channels: ['sms'], adoptsQueuedInvoiceSend: false,
+        } : {}),
       });
     } catch (err) {
       // A FIRST delivery finding the invoice already owned by another live
@@ -1824,7 +1840,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
 
 // POST /:id/schedule-send — send invoice later via the scheduler.
 router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
@@ -3735,4 +3751,30 @@ router._private = {
   stopInvoiceFollowupsForPaymentPlan,
 };
 
+// The Intelligence Bar's send_invoice (owner ruling 2026-10-07) runs the
+// SAME handler as POST /:id/send, without an HTTP request (the #6086 adapter pattern): the handler gets the
+// only request fields it reads and a capture response, and the promise
+// resolves the reply it would send, { status, json }. An error passed to
+// next() rejects. The ib* fields exist only here, so the HTTP routes never
+// set them.
+function runInvoiceHandler(handler, req) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    Promise.resolve(handler(req, res, reject)).catch(reject);
+  });
+}
+function barRequest(invoiceId, body, actor, extra) {
+  return { params: { id: invoiceId }, body, technicianId: actor?.technicianId || null, ip: null, get: () => null, ...extra };
+}
+// approvedSend: { expectedTotal } — the invoice total the card showed.
+function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
+  return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
+}
+
 module.exports = router;
+module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
+module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;
