@@ -167,19 +167,28 @@ const WRITE_ADDRESS_FIELDS = {
   create_customer: input => input,
   correct_invoice_address: input => input,
   update_customer: input => input.updates,
-  update_lead_contact: input => ({ address_line1: input.address, zip: input.zip }),
+  update_lead_contact: input => ({ address_line1: input.address, zip: input.zip, city: input.city }),
 };
 const streetKey = line => compareKey(normalizeStreetLine(splitStreetLineUnit(cleanText(line)).street || cleanText(line)));
 const zipKey = zip => cleanText(String(zip ?? '')).slice(0, 5);
 
-// The street and ZIP an address-writing call would save, or null when the
-// call does not touch a street address.
+// The street and ZIP an address-writing call would save; null when the call
+// touches no address field. A call that changes the ZIP, city or state with
+// no street is `partial`: nothing can be matched to a check, so it is refused
+// and the model must send the whole address it checked.
 function writtenAddress(toolName, input) {
   const fields = WRITE_ADDRESS_FIELDS[toolName]?.(input || {});
-  const line = cleanText(fields?.address_line1);
-  return line ? { street: streetKey(line), zip: zipKey(fields.zip) } : null;
+  if (!fields) return null;
+  const line = cleanText(fields.address_line1);
+  if (line) return { street: streetKey(line), zip: zipKey(fields.zip) };
+  const partial = [fields.zip, fields.city, fields.state].some(value => cleanText(String(value ?? '')));
+  return partial ? { partial: true } : null;
 }
 
+const ADDRESS_PARTIAL = Object.freeze({
+  error: 'Send the street address together with the city, state or ZIP: a ZIP, city or state cannot be changed alone. Run check_address on the whole address first, then save what it returned.',
+  code: 'address_check_required',
+});
 const ADDRESS_CHECK_REQUIRED = Object.freeze({
   error: 'This address has not been checked. Run check_address on it first, then save the address that check returned (or the exact address you checked, if the operator confirms it).',
   code: 'address_check_required',
@@ -199,6 +208,7 @@ function createAddressCheckLedger() {
     writeRefusal(toolName, input) {
       const written = writtenAddress(toolName, input);
       if (!written) return null;
+      if (written.partial) return { ...ADDRESS_PARTIAL };
       const covered = checked.some(c => c.street === written.street && (!written.zip || c.zip === written.zip));
       return covered ? null : { ...ADDRESS_CHECK_REQUIRED };
     },

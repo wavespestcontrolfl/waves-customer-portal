@@ -243,6 +243,15 @@ describe('address check ledger', () => {
     expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34237' } })).toMatchObject({ code: 'address_check_required' });
   });
 
+  test('a ZIP, city or state change with no street is refused', async () => {
+    const ledger = createAddressCheckLedger();
+    await checked(ledger, { address: '100 Example Way', zip: '34236' });
+    expect(ledger.writeRefusal('update_customer', { updates: { zip: '34999' } })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('update_customer', { updates: { city: 'Venice' } })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('update_lead_contact', { zip: '34999' })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('update_lead_contact', { first_name: 'Pat' })).toBeNull();
+  });
+
   test('each address-writing tool is read through its own fields', () => {
     expect(writtenAddress('update_lead_contact', { address: '100 Example Way', zip: '34236' })).toEqual({ street: expect.any(String), zip: '34236' });
     expect(writtenAddress('update_lead_contact', { first_name: 'Pat' })).toBeNull();
