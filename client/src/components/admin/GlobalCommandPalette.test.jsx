@@ -700,3 +700,85 @@ describe('answer choice buttons', () => {
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/query'))).toBe(false);
   });
 });
+
+describe('idle conversations start fresh', () => {
+  const THREAD = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const reply = (extra = {}) => ok({ response: 'Done.', conversationHistory: [
+    { role: 'user', content: 'Synthetic first ask' }, { role: 'assistant', content: 'Done.' }],
+  threadId: THREAD, threadSeq: 2, threadsEnabled: true, ...extra });
+  const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
+  const realNow = Date.now;
+  let skewMs;
+  beforeEach(() => {
+    skewMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skewMs);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function firstExchange(latestBody = { thread: null, idleHours: 4 }) {
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return reply();
+      if (url.includes('/threads/latest')) return ok(latestBody);
+      return ok({ actions: [], tasks: [], threads: [] });
+    });
+    const ref = await mount();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+    submit('Synthetic first ask');
+    await waitFor(() => expect(queryBodies()).toHaveLength(1));
+    await screen.findByText('Done.');
+    return ref;
+  }
+
+  it('a follow-up inside the idle limit keeps the thread and its history', async () => {
+    await firstExchange();
+    skewMs = 3 * 3600000;
+    submit('Synthetic follow-up');
+    await waitFor(() => expect(queryBodies()).toHaveLength(2));
+    const [, followUp] = queryBodies();
+    expect(followUp.thread_id).toBe(THREAD);
+    expect(followUp.conversationHistory).toHaveLength(2);
+  });
+
+  it('a question after the idle limit sends no thread id and no history', async () => {
+    await firstExchange();
+    skewMs = 5 * 3600000;
+    submit('Synthetic later ask');
+    await waitFor(() => expect(queryBodies()).toHaveLength(2));
+    const [, later] = queryBodies();
+    expect(later.thread_id).toBeUndefined();
+    expect(later.thread_seq).toBeUndefined();
+    expect(later.conversationHistory).toEqual([]);
+  });
+
+  it('reopening a palette that sat idle past the limit shows a new conversation', async () => {
+    const ref = await firstExchange();
+    act(() => ref.current.close());
+    skewMs = 5 * 3600000;
+    act(() => ref.current.open());
+    await screen.findByPlaceholderText(/Ask anything/);
+    await waitFor(() => expect(screen.queryByText('Done.')).not.toBeInTheDocument());
+  });
+
+  it('a thread opened by hand from History is not idle-limited, however old it is', async () => {
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return reply({ threadSeq: 6 });
+      if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
+      if (url.includes(`/threads/${THREAD}`)) return ok({ thread: { id: THREAD, title: 'Old chat', lastSeq: 4, last_active_at: '2026-09-03T12:00:00Z',
+        conversationHistory: [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Old answer' }] } });
+      if (url.includes('/threads')) return ok({ threads: [{ id: THREAD, title: 'Old chat', last_active_at: '2026-09-03T12:00:00Z' }] });
+      return ok({ actions: [], tasks: [] });
+    });
+    useIsMobile.mockReturnValue(true);
+    await mount();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+    fireEvent.click(screen.getByLabelText('Conversation options'));
+    fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: /Old chat/ }));
+    await screen.findByText('Old answer');
+    skewMs = 60 * 60000;
+    submit('Synthetic continue');
+    await waitFor(() => expect(queryBodies()).toHaveLength(1));
+    expect(queryBodies()[0].thread_id).toBe(THREAD);
+    expect(queryBodies()[0].thread_seq).toBe(4);
+  });
+});

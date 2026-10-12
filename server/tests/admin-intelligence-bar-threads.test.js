@@ -75,6 +75,7 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
 }));
 jest.mock('../services/intelligence-bar/threads', () => ({
   threadsEnabled: () => process.env.GATE_IB_THREADS === 'true',
+  idleHours: () => 4,
   appendExchange: (...args) => mockAppendExchange(...args),
   latestThread: (...args) => mockLatestThread(...args),
   getThread: (...args) => mockGetThread(...args),
@@ -287,6 +288,31 @@ describe('threads gate ON', () => {
 
       const techRes = await getPath(baseUrl, '/threads/latest', 'tech');
       expect(techRes.status).toBe(403);
+    });
+  });
+
+  test('/threads/latest with an idle newest thread answers no thread and states the limit', async () => {
+    mockLatestThread.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await getPath(baseUrl, '/threads/latest');
+      expect(status).toBe(200);
+      expect(body).toEqual({ thread: null, idleHours: 4 });
+    });
+  });
+
+  test('/query with no thread_id starts a new thread and never resumes the latest one', async () => {
+    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
+    scriptModelTurns([[{ type: 'text', text: 'fresh' }]]);
+    await withServer(async (baseUrl) => {
+      // The latest thread is idle: the lookup would answer null, and /query
+      // must not look for a thread at all.
+      mockLatestThread.mockResolvedValue(null);
+      await postQuery(baseUrl, { prompt: 'a new ask', context: 'customers' });
+      expect(mockLatestThread).not.toHaveBeenCalled();
+      expect(mockGetThread).not.toHaveBeenCalled();
+      const arg = mockAppendExchange.mock.calls[0][0];
+      expect(arg.threadId).toBeNull();
+      expect(arg.expectedSeq).toBeNull();
     });
   });
 

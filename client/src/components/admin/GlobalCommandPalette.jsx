@@ -369,6 +369,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // server rejects an append that would interleave with another tab's.
   const threadSeqRef = useRef(null);
   const resumeAttemptedRef = useRef(false);
+  // Idle limit the server states on /threads/latest, and when this palette
+  // last touched the thread it holds. A palette left mounted for hours must
+  // not keep sending an hours-old thread id: the server starts a new
+  // conversation for a reload, and this does the same for a held thread.
+  const idleLimitMsRef = useRef(null);
+  const threadActivityRef = useRef(0);
   // Bumped by submit/"New chat" so a still-inflight resume or query response
   // can't clobber newer state (it only applies if the epoch is unchanged).
   const threadEpochRef = useRef(0);
@@ -539,6 +545,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setConversationHistory(hist);
     setThreadId(thread.id);
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
+    // A thread opened by hand from History counts as active from now, so the
+    // idle limit never blocks reading or continuing an old conversation.
+    threadActivityRef.current = Date.now();
     setPendingActions([]);
     setChoices(null);
     setToolActivity([]);
@@ -591,6 +600,22 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       .finally(() => setThreadsLoading(false));
   };
 
+  // True when the held thread has had no exchange for longer than the
+  // server's idle limit (stated by /threads/latest). Unknown limit = never.
+  const threadIsIdle = useCallback(() => (
+    !!threadId && idleLimitMsRef.current !== null && threadActivityRef.current > 0
+    && Date.now() - threadActivityRef.current > idleLimitMsRef.current
+  ), [threadId]);
+
+  // Drop the held thread and its history so the next query starts a new
+  // conversation. The old thread stays on the server (History).
+  const detachThread = useCallback(() => {
+    setThreadId(null);
+    threadSeqRef.current = null;
+    threadActivityRef.current = 0;
+    setConversationHistory([]);
+  }, []);
+
   // Resume the latest server-persisted thread when the palette first opens
   // with no local history. 404 = threads not enabled — quietly stay
   // ephemeral (the pre-threads behavior).
@@ -601,6 +626,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     adminFetch("/admin/intelligence-bar/threads/latest")
       .then((data) => {
         markThreadsAvailable(true); // 200 = gate on (thread may be null)
+        idleLimitMsRef.current = Number(data?.idleHours) > 0 ? Number(data.idleHours) * 3600000 : null;
         if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
         let dismissedId = null;
         try { dismissedId = localStorage.getItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
@@ -618,11 +644,35 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       });
   }, [open, conversationHistory.length]);
 
+  // The thread id and history a query sends: none of either when the held
+  // thread is idle past the limit (it is detached here).
+  const resolveSendState = useCallback(() => {
+    if (!threadIsIdle()) return { sentThreadId: threadId, sentHistory: conversationHistory };
+    detachThread();
+    return { sentThreadId: null, sentHistory: [] };
+  }, [threadIsIdle, detachThread, threadId, conversationHistory]);
+
+  // A palette left mounted past the idle limit opens as a new conversation.
+  useEffect(() => {
+    if (!open || !threadIsIdle()) return;
+    threadEpochRef.current += 1; // invalidate any inflight thread resume
+    detachThread();
+    setResponse(null);
+    setChoices(null);
+    setPendingActions([]);
+    setToolActivity([]);
+    setActiveTask(null);
+    knowledgeGaps.reset();
+  }, [open]);
+
   const submit = useCallback(
     async (text, selectedTarget) => {
       const q = (text || prompt).trim();
       if (!q || loading || submittingRef.current || attachmentsLoadingRef.current || dictationPendingRef.current) return;
       submittingRef.current = true;
+      // A held thread idle past the server's limit is not continued: this
+      // question starts a new conversation (old one stays in History).
+      const { sentThreadId, sentHistory } = resolveSendState();
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
@@ -636,12 +686,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
 
       const request = {
         prompt: q,
-        conversationHistory,
+        conversationHistory: sentHistory,
         context,
         ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-        ...(threadId
+        ...(sentThreadId
           ? {
-              thread_id: threadId,
+              thread_id: sentThreadId,
               ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
             }
           : {}),
@@ -674,7 +724,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           if (data.threadId) {
             setThreadId(data.threadId);
             threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-          } else if (data.threadsEnabled === true && threadId) {
+            threadActivityRef.current = Date.now();
+          } else if (data.threadsEnabled === true && sentThreadId) {
             // Threads are on but this exchange wasn't appended — the server
             // rejected it (another tab appended first, or the thread is
             // gone) or the best-effort write failed. Detach so the next
@@ -715,7 +766,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments, ibPageData],
+    [prompt, loading, conversationHistory, context, threadId, resolveSendState, location.pathname, location.search, attachments, resetAttachments, ibPageData],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -737,6 +788,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setConversationHistory(data.conversationHistory || []);
       setThreadId(data.threadId || null);
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
+      threadActivityRef.current = Date.now();
       setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
       setToolActivity(data.toolActivity || []);
       knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);

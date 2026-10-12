@@ -20,6 +20,14 @@ const { gateEnvValue } = require('../../config/feature-gates');
 // default 365; override via IB_THREAD_RETENTION_DAYS.
 const DEFAULT_RETENTION_DAYS = 365;
 
+// Idle limit (hours) after which the palette starts a NEW conversation
+// instead of resuming the latest thread (owner 2026-10-12: one thread ran
+// from 2026-09-03 with 178 turns, and an old customer bled into a new ask).
+// Override via IB_THREAD_IDLE_HOURS; 0, negative or invalid = this default.
+// The old thread stays in History and opens by hand (getThread has no limit).
+const DEFAULT_IDLE_HOURS = 4;
+const MAX_IDLE_HOURS = 24 * 365;
+
 // How many trailing turns hydrate the client on resume. The model window
 // stays the route's own trim (~8 turns) — this only bounds what the palette
 // re-displays.
@@ -40,6 +48,13 @@ function threadsEnabled() {
 function retentionDays() {
   const n = Math.floor(Number(process.env.IB_THREAD_RETENTION_DAYS));
   return Number.isFinite(n) && n >= 30 ? n : DEFAULT_RETENTION_DAYS;
+}
+
+// Call-time read, like retentionDays.
+function idleHours() {
+  const n = Number(process.env.IB_THREAD_IDLE_HOURS);
+  // Capped at a year so a typo can never overflow the interval cast.
+  return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_IDLE_HOURS) : DEFAULT_IDLE_HOURS;
 }
 
 function deriveTitle(userText) {
@@ -117,11 +132,19 @@ async function turnsAsHistory(threadId) {
   };
 }
 
-/** The actor's most recently active thread, hydrated for the palette. */
+/**
+ * The actor's most recently active thread, hydrated for the palette, or null
+ * when there is none OR the newest one has been idle past idleHours(): the
+ * palette then opens a new conversation. Only this "resume the latest" lookup
+ * has the limit: getThread (a thread opened by hand from History, or an
+ * explicit thread_id on /query) is never idle-limited. /query itself never
+ * picks "the latest" thread; with no thread_id it creates a new one.
+ */
 async function latestThread(actorId) {
   if (!actorId) return null;
   const thread = await db('ib_threads')
     .where('admin_actor_id', actorId)
+    .whereRaw("last_active_at >= NOW() - (? || ' hours')::interval", [String(idleHours())])
     .orderBy('last_active_at', 'desc')
     .first();
   if (!thread) return null;
@@ -240,6 +263,7 @@ async function purgeExpiredThreads() {
 
 module.exports = {
   threadsEnabled,
+  idleHours,
   appendExchange,
   latestThread,
   getThread,

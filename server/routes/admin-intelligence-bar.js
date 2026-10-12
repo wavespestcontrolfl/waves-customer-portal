@@ -5047,8 +5047,11 @@ function threadsGuard(req, res) {
 router.get('/threads/latest', async (req, res, next) => {
   try {
     if (!threadsGuard(req, res)) return;
+    // null = nothing to resume: no thread, or the newest is idle past the
+    // limit (a new conversation starts). idleHours lets a palette that stays
+    // open for hours apply the same limit to the thread it holds.
     const thread = await IbThreads.latestThread(getAdminActorId(req));
-    res.json({ thread: thread || null });
+    res.json({ thread: thread || null, idleHours: IbThreads.idleHours() });
   } catch (err) {
     logger.error('[intelligence-bar] threads/latest failed:', err);
     next(err);
