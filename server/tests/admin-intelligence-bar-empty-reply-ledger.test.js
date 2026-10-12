@@ -124,3 +124,23 @@ test('an exhausted tool loop fails the last round and still returns the fallback
     expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'tool_loop_exhausted');
   });
 });
+
+// Owner IB history 10-12: a nine-round ask got the generic "too many steps"
+// line. The last round now may not call a tool and is told to report.
+test('the last round forbids tools and asks for a report of what was found', async () => {
+  mockMessagesCreate.mockImplementation(async (request) => (request.tool_choice?.type === 'none'
+    ? { content: [{ type: 'text', text: 'Found the call. The address change is still left.' }] }
+    : { content: [{ type: 'tool_use', id: 't1', name: 'no_such_tool', input: {} }] }));
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).toBe('Found the call. The address change is still left.');
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+  const calls = mockMessagesCreate.mock.calls.map(([request]) => request);
+  expect(calls.length).toBe(12);
+  expect(calls.slice(0, -1).every(request => request.tool_choice === undefined)).toBe(true);
+  const lastContent = calls[calls.length - 1].messages.at(-1).content;
+  expect(lastContent.at(-1)).toMatchObject({ type: 'text', text: expect.stringMatching(/^\[Step limit reached/) });
+  expect(lastContent.some(block => block.type === 'tool_result')).toBe(true);
+});
