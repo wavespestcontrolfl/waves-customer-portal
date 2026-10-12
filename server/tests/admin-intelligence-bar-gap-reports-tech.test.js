@@ -140,6 +140,8 @@ describe('gap reports on /query', () => {
     expect(lastCollector.flush).toHaveBeenCalledWith({
       reply: "Sorry, I can't do that from here.",
       ask: 'add a note to my next stop',
+      stepLimitReached: false,
+      noReply: false,
     });
   });
 
