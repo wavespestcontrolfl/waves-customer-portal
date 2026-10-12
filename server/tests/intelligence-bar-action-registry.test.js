@@ -475,3 +475,116 @@ test('a tool in the named domain outranks an equal match from another domain', (
   const ids = registry.discover({ query: 'switch appointment property', domain: 'schedule' }, scope).result.capabilities.map(c => c.id);
   expect(ids[0]).toBe('switch_appointment_property');
 });
+
+// Owner ruling 2026-10-12: the owner login has every allowed tool on every page.
+describe('full-access login loads every allowed tool', () => {
+  const { FULL_ACCESS_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+  const names = list => list.map(t => t.name);
+  const fullScope = context => ({ role: 'admin', context, fullAccess: true });
+
+  test('the same list, in the same order, on every ordinary admin page', () => {
+    const dashboard = names(registry.initialTools('dashboard', fullScope('dashboard')));
+    for (const context of ['customers', 'comms', 'schedule', 'revenue', 'estimates']) {
+      expect(names(registry.initialTools(context, fullScope(context)))).toEqual(dashboard);
+    }
+    expect(dashboard[0]).toBe('discover_capabilities');
+    // Sorted by name after the discovery tool: a fixed prefix for prompt caching.
+    expect(dashboard.slice(1)).toEqual([...dashboard.slice(1)].sort());
+    expect(new Set(dashboard).size).toBe(dashboard.length);
+  });
+
+  test('holds the booking tool, the call log and an outside-write tool, and no confirmed-endpoint tool', () => {
+    const list = names(registry.initialTools('customers', fullScope('customers')));
+    expect(list).toEqual(expect.arrayContaining(['create_appointment', 'get_call_log', 'get_review_stats']));
+    expect(list.some(name => FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name))).toBe(true);
+    for (const action of registry.actions.values()) {
+      if (action.approval === 'confirmed_endpoint') expect(list).not.toContain(action.id);
+    }
+    // Everything on the list passes allowed(); nothing allowed is left off.
+    const expected = [...registry.actions.values()]
+      .filter(a => registry.allowed(a, fullScope('customers')) && a.approval !== 'confirmed_endpoint').map(a => a.id);
+    expect(list.slice(1).sort()).toEqual(expected.sort());
+  });
+
+  test('gated tools stay behind their own gate, even on the full list', () => {
+    const original = process.env.GATE_IB_MERGE_CUSTOMERS;
+    try {
+      delete process.env.GATE_IB_MERGE_CUSTOMERS;
+      expect(names(registry.initialTools('dashboard', fullScope('dashboard')))).not.toContain('merge_customers');
+      process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+      expect(names(registry.initialTools('dashboard', fullScope('dashboard')))).toContain('merge_customers');
+    } finally {
+      if (original === undefined) delete process.env.GATE_IB_MERGE_CUSTOMERS; else process.env.GATE_IB_MERGE_CUSTOMERS = original;
+    }
+  });
+
+  test('an admin without full access keeps the page-scoped list', () => {
+    const scope = { role: 'admin', context: 'dashboard' };
+    const list = names(registry.initialTools('dashboard', scope));
+    expect(list).toContain('create_appointment');
+    expect(list).not.toContain('get_review_stats');
+    expect(list.some(name => FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name))).toBe(false);
+    expect(list.length).toBeLessThan(60);
+    expect(names(registry.initialTools('dashboard', { ...scope, fullAccess: false }))).toEqual(list);
+  });
+
+  test('the technician rail and the estimate rail are unchanged for a full-access login', () => {
+    for (const context of ['tech', 'agent_estimate']) {
+      const withAccess = names(registry.initialTools(context, { role: 'admin', context, fullAccess: true }));
+      expect(withAccess).toEqual(names(registry.initialTools(context, { role: 'admin', context })));
+      expect(withAccess).not.toContain('discover_capabilities');
+      expect(withAccess.length).toBeLessThan(40);
+    }
+    const technician = names(registry.initialTools('customers', { role: 'technician', context: 'customers', fullAccess: true }));
+    expect(technician).not.toContain('discover_capabilities');
+    expect(technician.length).toBeLessThan(40);
+  });
+});
+
+// Owner IB history 10-12: 14 of 40 plain phrasings missed their tool. A plain
+// admin (no full access) still depends on discovery, so these must resolve.
+describe('discovery understands everyday phrasing', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  test.each([
+    ['book a visit for Friday', 'create_appointment'],
+    ['upgrade him to gold', 'update_customer'],
+    ['downgrade her to bronze', 'update_customer'],
+    ['put a note on his account', 'update_customer'],
+    ['change her address', 'update_customer'],
+    ['change the tech on Friday', 'assign_technician'],
+    ['what did he say on the call', 'get_call_log'],
+    ['I need the recording of the call', 'get_call_log'],
+    ['move her visit to Monday', 'reschedule_appointment'],
+    ['push the stops to Thursday', 'move_stops_to_day'],
+    ['text him that we are running late', 'send_sms'],
+    ['mark the prospect as lost', 'update_lead_status'],
+    ['resend the receipt', 'resend_receipt'],
+    ['quote for a new lawn', 'save_customer_estimate'],
+    ['how much stock of this product is left', 'query_stock'],
+    ['remove her saved card', 'remove_saved_payment_method'],
+  ])('%s finds %s', (query, id) => {
+    const found = registry.discover({ query }, scope);
+    expect(found.result.capabilities.map(c => c.id)).toContain(id);
+    expect(found.definitions.map(t => t.name)).toContain(id);
+  });
+
+  test('stemming treats plural, -ing and -ed forms alike on both sides', () => {
+    const { stem } = require('../services/intelligence-bar/discovery-vocabulary');
+    expect(stem('appointments')).toBe(stem('appointment'));
+    expect(stem('scheduling')).toBe(stem('scheduled'));
+    expect(stem('scheduled')).toBe(stem('schedule'));
+    expect(stem('invoices')).toBe(stem('invoice'));
+    expect(stem('queries')).toBe(stem('query'));
+  });
+
+  test('a synonym never makes an unsupported capability appear', () => {
+    // Filler and say/tell words are dropped before the table is read.
+    for (const query of ['tell me what he said', 'please say it', 'frobnicate the thing']) {
+      expect(registry.discover({ query }, scope)).toMatchObject({ definitions: [], result: { status: 'capability_unimplemented' } });
+    }
+    // There is no SMS template tool, so the word "template" is not mapped to one.
+    const { SYNONYMS, stem } = require('../services/intelligence-bar/discovery-vocabulary');
+    expect(SYNONYMS.has(stem('template'))).toBe(false);
+    expect([...registry.actions.keys()].some(id => /template/.test(id))).toBe(false);
+  });
+});

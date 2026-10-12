@@ -17,6 +17,7 @@ const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
+const { expandTerms, stemmedWordSet, words } = require('./discovery-vocabulary');
 
 const MODULES = [
   ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
@@ -118,7 +119,7 @@ const DISCOVERY_TOOL = {
   },
 };
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
-const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
+const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list say says said tell told'.split(' '));
 
 // Actions offered only while their own gate reads on (read at call time).
 const GATED_ACTIONS = {
@@ -162,11 +163,20 @@ function validateInput(name, input, scope) {
   return null;
 }
 
+// Stemmed words of a tool's id, domain and description; computed once per tool.
+const ACTION_WORDS = new Map();
+function actionWordSet(a) {
+  if (!ACTION_WORDS.has(a.id)) ACTION_WORDS.set(a.id, stemmedWordSet(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`));
+  return ACTION_WORDS.get(a.id);
+}
+
 function discover(input, scope) {
   const failure = validateInput(DISCOVERY_TOOL.name, input, scope);
   if (failure) return { result: failure, definitions: [] };
-  const terms = [...new Set(input.query.toLowerCase().match(/[a-z0-9]+/g) || [])]
-    .filter(term => !DISCOVERY_STOPWORDS.has(term));
+  // Stopwords are dropped from the raw query first; the rest are stemmed and
+  // widened by the everyday-word table (discovery-vocabulary.js). A query with
+  // no meaningful term stays empty, so no synonym can invent a match.
+  const terms = [...expandTerms([...new Set(words(input.query))].filter(term => !DISCOVERY_STOPWORDS.has(term)))];
   // The model's domain is a ranking hint, never a filter: booking lives under
   // "customers", so a "schedule" search used to return every schedule tool
   // and not the one that books (owner IB history 10-12). A matching tool in
@@ -174,8 +184,8 @@ function discover(input, scope) {
   const inDomain = a => (input.domain && a.domain === input.domain ? 1 : 0);
   const ranked = [...actions.values()].filter(a => allowed(a, scope))
     .map(a => {
-      const words = new Set(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase().match(/[a-z0-9]+/g) || []);
-      return { action: a, score: terms.reduce((n, word) => n + (words.has(word) ? 1 : 0), 0) };
+      const actionWords = actionWordSet(a);
+      return { action: a, score: terms.reduce((n, word) => n + (actionWords.has(word) ? 1 : 0), 0) };
     }).filter(r => r.score > 0)
     .sort((a, b) => (b.score + inDomain(b.action)) - (a.score + inDomain(a.action))
       || inDomain(b.action) - inDomain(a.action) || a.action.id.localeCompare(b.action.id));
@@ -214,12 +224,35 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'update_customer', 'get_call_log',
 ]);
 
+// An ordinary admin page: not the technician rail and not the dedicated
+// estimate-drafting rail, both of which keep their own narrow tool lists.
+function isOrdinaryAdminPage(context, scope) {
+  return scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context);
+}
+
+// Owner ruling 2026-10-12: a full-access login has every tool on every page,
+// so the bar never answers "no tool for that" when the tool exists (an audit
+// found 14 of 40 plain phrasings missed their tool through discover()).
+// Still goes through allowed(): gated tools and FULL_ACCESS_TWO_STEP tools
+// keep their own checks, and confirmed_endpoint tools are never loaded.
+// Order is fixed (discovery tool first, then by tool name) and does not
+// depend on the page: the tools array is part of the cached prompt prefix
+// (1 h TTL), so one cache entry serves every page for the same login.
+function fullAccessTools(context, scope) {
+  const tools = [...actions.values()]
+    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint')
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(a => a.definition);
+  return [DISCOVERY_TOOL, ...tools];
+}
+
 function initialTools(context, scope) {
+  if (scope.fullAccess === true && isOrdinaryAdminPage(context, scope)) return fullAccessTools(context, scope);
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
   // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
   if (context === 'revenue' || context === 'dashboard') common.add('send_invoice');
-  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
+  const discovery = isOrdinaryAdminPage(context, scope) ? [DISCOVERY_TOOL] : [];
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...discovery, ...[...actions.values()]
