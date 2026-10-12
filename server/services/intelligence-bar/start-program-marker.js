@@ -208,7 +208,7 @@ const alertOwed = (marker) => raiseLedgerAlert(marker, {
   action: 'Program bill not set',
   why: (name) => `A program start for ${name} booked its visits, but the bill update did not finish.`,
   detail: (name) => `A program start for ${name} booked its visits but the monthly bill update did not finish. ${OWED_INSTRUCTION}`,
-  dedupe: 'start-program-pending-bill',
+  dedupe: OWED_DEDUPE,
 });
 
 const alertUnfinished = (marker) => raiseLedgerAlert(marker, {
@@ -218,8 +218,24 @@ const alertUnfinished = (marker) => raiseLedgerAlert(marker, {
   dedupe: 'start-program-unfinished',
 });
 
-async function stampAlerted(id, extra = {}) {
-  await db('ib_action_phases').where({ id }).update({ alerted_at: new Date(), updated_at: new Date(), ...extra });
+async function stampAlerted(id, extra = {}, conn = db) {
+  await conn('ib_action_phases').where({ id }).update({ alerted_at: new Date(), updated_at: new Date(), ...extra });
+}
+
+const OWED_DEDUPE = 'start-program-pending-bill';
+
+// The row billed (or its bill was set by hand): the bill-owed alert for it, if one stands, is done. Best effort, after the
+// billing commit: a failure here leaves a stale bell that the office marks done, and never fails the bill.
+async function retireOwedAlert(markerId, conn = db) {
+  try {
+    const rows = await conn('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' = ?", [`${OWED_DEDUPE}:${markerId}`]).select('id');
+    if (!rows || !rows.length) return 0;
+    return await require('../notification-service').markAdminDone(rows.map((r) => r.id), { by: 'start-program', resolution: 'The monthly bill was set by the program card.' }, conn);
+  } catch (err) {
+    logger.error(`[start-program-marker] could not retire the bill-owed alert for ${markerId}: ${err.message}`);
+    return 0;
+  }
 }
 
 // The office marks the alert done: the stored notification id reads done. Anything unreadable counts as not done.
@@ -325,14 +341,38 @@ async function judgeBookingRow(row) {
   return judged;
 }
 
+// Create the bill-owed alert for a row the sweep read earlier. The row is read AGAIN under the customer row lock (the lock
+// the bill transaction holds when it moves the row to billed): billing that landed since the sweep's read is seen, and no
+// alert is raised for it. NOWAIT: a held lock means a booking or a bill is running, so this pass skips the row.
 async function postOwedAlert(marker) {
+  let posted = 0;
+  try {
+    await db.transaction(async (trx) => {
+      await trx('customers').where({ id: marker.customerId }).forUpdate().noWait().first('id');
+      const fresh = await trx('ib_action_phases').where({ id: marker.id }).first();
+      if (!fresh || fresh.phase !== 'booked_pending_bill') return;
+      const live = readMarker(fresh);
+      if (live.payload.alert_id) return;
+      posted = await createOwedAlert(live, trx);
+    });
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      logger.info(`[start-program-marker] customer ${marker.customerId} is locked (a booking or a bill may be running); the bill-owed alert for ${marker.id} waits for a later pass`);
+      return 0;
+    }
+    throw err;
+  }
+  return posted;
+}
+
+async function createOwedAlert(marker, conn) {
   const alertId = await alertOwed(marker);
   if (!alertId) {
     // No id to store: leave the row unstamped so the next pass posts it again. The row never expires.
     logger.warn(`[start-program-marker] bill-owed alert for ${marker.id} came back without an id; it will be posted again`);
     return 0;
   }
-  await stampAlerted(marker.id, { payload: db.raw('payload || ?::jsonb', [JSON.stringify({ alert_id: alertId })]) });
+  await stampAlerted(marker.id, { payload: conn.raw('payload || ?::jsonb', [JSON.stringify({ alert_id: alertId })]) }, conn);
   return 1;
 }
 
@@ -374,5 +414,5 @@ async function sweepStalePending() {
 
 module.exports = {
   TOOL, STAMP_ACTION, ONE_OPEN_INDEX, ALERT_MINUTES, BOOKING_STALE_MINUTES, OWED_INSTRUCTION,
-  writeMarker, setPhase, settle, audit, markBooked, stampedVisitIds, stampedIds, seriesDrift, readOpenMarker, findOpenMarker, sweepStalePending,
+  writeMarker, setPhase, settle, audit, markBooked, stampedVisitIds, stampedIds, seriesDrift, retireOwedAlert, readOpenMarker, findOpenMarker, sweepStalePending,
 };

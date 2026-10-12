@@ -1009,7 +1009,10 @@ async function applyTierAndBill(plan) {
     if (plan.markerId) await Marker.setPhase(plan.markerId, 'billed', {}, trx);
   });
   // The append-only event goes in after the commit (it never fails the step).
-  if (plan.markerId) await Marker.audit(plan.markerId, 'billed');
+  if (plan.markerId) {
+    await Marker.audit(plan.markerId, 'billed');
+    await Marker.retireOwedAlert(plan.markerId);
+  }
 }
 
 // After a failed or ambiguous tier-and-bill step (an acknowledgement lost after COMMIT looks like a failure),
@@ -1147,6 +1150,18 @@ async function bookSeries(plan, actionContext) {
   return booking;
 }
 
+// The welcome sentence of the receipt, from the pinned recipients and toggles (the same legs the card line reads): "queued"
+// only for a leg that has someone to reach and is switched on.
+function welcomeReceipt(plan) {
+  if (!plan.welcomeCandidate) return '';
+  const { text, email } = require('../booking-contact-state').welcomeLegs(plan.contact.state, { welcomeEmailCovered: plan.welcomeEmailCovered });
+  const when = 'for about 1 hour from now';
+  if (text && email) return ` Welcome text and welcome email queued ${when} (a failure is logged).`;
+  if (text) return ` Welcome text queued ${when}; ${plan.welcomeEmailCovered ? "no welcome email (today's signup email covers it)" : 'no welcome email (their email is off or has no address)'}.`;
+  if (email) return ` Welcome email queued ${when}; no welcome text (their texts are off or there is no phone).`;
+  return ' No welcome message (their settings turn it off or leave no phone or email to reach).';
+}
+
 // The handler queues its texts after it replies (setImmediate), so the
 // receipt says queued, never sent.
 function receiptTexts(plan) {
@@ -1157,11 +1172,7 @@ function receiptTexts(plan) {
       ? ' Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).'
       : ' No booking confirmation (their settings turn it off or leave no phone or email to reach).';
   }
-  const welcome = plan.welcomeCandidate
-    ? (plan.welcomeEmailCovered
-      ? ' Welcome text queued for about 1 hour from now; no welcome email (today\'s signup email covers it).'
-      : ' Welcome text and welcome email queued for about 1 hour from now (a failure is logged).')
-    : '';
+  const welcome = welcomeReceipt(plan);
   return `${confirmation}${welcome}`;
 }
 
@@ -1262,6 +1273,7 @@ async function billFailure(run, err) {
   const landed = err.drift ? 'not_done' : await reconcileTierAndBill(plan);
   if (landed === 'done') {
     await Marker.settle(plan.markerId, 'billed', { via: 'reconcile' });
+    await Marker.retireOwedAlert(plan.markerId);
     return programStartedReceipt(plan, created, booked, warnings);
   }
   if (landed !== 'not_done') return tierAndBillUnknown(plan, booked, err);

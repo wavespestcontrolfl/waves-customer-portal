@@ -107,6 +107,8 @@ beforeEach(() => {
   trx.fn = { now: jest.fn(() => 'now()') };
   trx.transaction = jest.fn(async (cb) => cb(trx));
   db.transaction = jest.fn(async (cb) => cb(trx));
+  // The mock transaction is not flagged as one, so the closure-state lock (which refuses a plain connection) is stubbed.
+  jest.spyOn(require('../services/scheduling/blackout-dates'), 'lockClosureState').mockResolvedValue(undefined);
 });
 
 // The 201 path's post-commit side effects run in a setImmediate after the
@@ -229,6 +231,41 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(changed.status).toBe(409);
       expect(changed.json.code).toBe('DATES_CHANGED');
       expect(inserts).toEqual([]);
+    });
+
+    test('a blackout day added after the card refuses with DATES_CHANGED: the closure lock is taken shared and the dates are generated again under it (round 19)', async () => {
+      const plain = await createScheduleBooking({ body: recurringBody, actor });
+      const dates = plain.json.appointments.map((a) => a.date);
+      inserts.length = 0;
+      const baseTransaction = db.transaction.getMockImplementation();
+      let closureLocked = false;
+      require('../services/scheduling/blackout-dates').lockClosureState.mockImplementation(async () => { closureLocked = true; });
+      db.transaction = jest.fn(async (cb) => baseTransaction(async (trx) => {
+        const wrapped = jest.fn((table) => (table === 'schedule_blackout_dates' && closureLocked ? Object.assign(chain({ date: dates[1] }), { whereBetween() { return this; } }) : trx(table)));
+        Object.assign(wrapped, trx);
+        wrapped.transaction = async (inner) => inner(wrapped);
+        return cb(wrapped);
+      }));
+      // The closure state changed after the card was planned: only a read taken after the shared lock sees it.
+      const refused = await createScheduleBooking({ body: recurringBody, actor, approvedVisitDates: dates });
+      expect(closureLocked).toBe(true);
+      expect(refused.status).toBe(409);
+      expect(refused.json.code).toBe('DATES_CHANGED');
+      expect(inserts).toEqual([]);
+    });
+
+    test('the approved-card overlap recheck is technician-blind: a visit given to another technician after the card refuses (round 19)', async () => {
+      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      const other = [{ id: 'visit-9', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Lawn Care', technician_id: 'tech-2' }];
+      // A scoped probe would see only tech-1's visits and the unassigned ones; the blind probe sees tech-2's.
+      findConflictingVisits.mockImplementation(async ({ technicianId }) => (technicianId ? [] : other));
+      const refused = await createScheduleBooking({ body: oneOff, actor, approvedOverlapFacts: [] });
+      expect(refused.status).toBe(409);
+      expect(refused.json.code).toBe('OVERLAP_CHANGED');
+      expect(inserts).toEqual([]);
+      for (const call of findConflictingVisits.mock.calls) expect(call[0].technicianId == null).toBe(true);
+      findConflictingVisits.mockReset();
+      findConflictingVisits.mockResolvedValue([]);
     });
 
     test('approvedContact threads to the rail: a recipient key that moved refuses with CONTACT_CHANGED', async () => {

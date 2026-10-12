@@ -153,6 +153,23 @@ const RAILS = [
     matches: (read, approved) => read.confirmation === approved.confirmation && read.welcome === approved.welcome,
   },
   {
+    // The series dates the card showed. The dates the handler planned BEFORE the transaction rest on the closure state
+    // (blackout days, weekly days off) read then; a writer that changed it since is serialized against by the shared
+    // closure-state lock taken here, and the dates are generated again under it. The planned dates and the regenerated
+    // dates must both be the card's. Taken before the estimate lock (a leaf): the closure writers hold no other lock.
+    code: 'DATES_CHANGED',
+    message: 'The visit dates changed since the card was shown. Nothing was booked.',
+    applies: (ctx) => Array.isArray(ctx.req.approvedVisitDates),
+    lock: (trx) => require('../scheduling/blackout-dates').lockClosureState(trx),
+    read: async (trx, ctx) => {
+      const planned = ctx.seriesDates.join(',');
+      if (typeof ctx.replanSeriesDates !== 'function') return planned;
+      const fresh = (await ctx.replanSeriesDates(trx)).join(',');
+      return fresh === planned ? planned : `${planned}|regenerated:${fresh}`;
+    },
+    approved: (ctx) => ctx.req.approvedVisitDates.join(','),
+  },
+  {
     // The card's open-estimate check: the SAME any-open condition the card's own check uses
     // (openEstimateForCustomer; no service-family reading). Every estimate insert and reopening
     // for a customer takes this lock first (utils/customer-estimate-lock.js),
@@ -178,14 +195,6 @@ const RAILS = [
       return (Number(projected?.amount ?? projected) || 0) > 0;
     },
     approved: () => false,
-  },
-  {
-    // The series dates the card showed.
-    code: 'DATES_CHANGED',
-    message: 'The visit dates changed since the card was shown. Nothing was booked.',
-    applies: (ctx) => Array.isArray(ctx.req.approvedVisitDates),
-    read: async (_trx, ctx) => ctx.seriesDates.join(','),
-    approved: (ctx) => ctx.req.approvedVisitDates.join(','),
   },
   {
     // The service address the booking will stamp must be the one the card showed.

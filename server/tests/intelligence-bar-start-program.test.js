@@ -71,7 +71,14 @@ function fakeDb() {
         if (prop === 'first') return () => { state.single = true; return b; };
         if (prop === 'columnInfo') return async () => (table === 'customers' ? CUSTOMER_COLUMNS : {});
         if (prop === 'update' || prop === 'insert' || prop === 'del') {
-          return (data) => { writes.push({ table, op: prop, data }); return b; };
+          return (data) => {
+            writes.push({ table, op: prop, data });
+            // A phase move is applied to the staged ledger row, as the database would (the sweep re-reads the row under the lock).
+            if (table === 'ib_action_phases' && prop === 'update' && data && typeof data.phase === 'string' && tables.ib_action_phases?.length) {
+              tables.ib_action_phases = tables.ib_action_phases.map((r) => ({ ...r, phase: data.phase }));
+            }
+            return b;
+          };
         }
         return (...args) => {
           calls.push({ table, method: String(prop), args });
@@ -1175,10 +1182,51 @@ describe('commit', () => {
       expect(rowUpdates().map((w) => w.data.phase)).toEqual(['abandoned']);
       expect(auditPhases()).toContain('abandoned');
       writes = [];
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', payload: JSON.stringify({ target: {}, alert_id: 'n1' }) })];
       tables.notifications = [{ id: 'n1', done_at: null }];
       expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_bill_step_owed' });
       expect(await run(BASE_INPUT, { confirmed: true })).toMatchObject({ code: 'program_bill_step_owed' });
       expect(rowUpdates()).toEqual([]);
+    });
+
+    test('the sweep re-reads the row under the customer lock: billing that landed since its read raises no alert (round 19)', async () => {
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n9' });
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', created_at: ago(15) })];
+      const base = db.transaction.getMockImplementation();
+      // The bill transaction commits between the sweep's list read and its locked re-read.
+      db.transaction.mockImplementation(async (cb) => {
+        tables.ib_action_phases = tables.ib_action_phases.map((r) => ({ ...r, phase: 'billed' }));
+        return base(cb);
+      });
+      expect(await Marker.sweepStalePending()).toBe(0);
+      expect(alert).not.toHaveBeenCalled();
+      expect(calls.some((c) => c.table === 'customers' && c.method === 'forUpdate')).toBe(true);
+      expect(calls.some((c) => c.table === 'customers' && c.method === 'noWait')).toBe(true);
+      expect(rowUpdates()).toEqual([]);
+      // Still owed at the locked re-read: the alert is raised and its id stored, inside that transaction.
+      db.transaction.mockImplementation(base);
+      tables.ib_action_phases = [phaseRow({ phase: 'booked_pending_bill', created_at: ago(15) })];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(alert).toHaveBeenCalledTimes(1);
+    });
+
+    test('billing retires the standing bill-owed alert after it commits; a retire failure never fails the bill (round 19)', async () => {
+      const Notifications = require('../services/notification-service');
+      const done = jest.spyOn(Notifications, 'markAdminDone').mockResolvedValue(1);
+      tables.notifications = [{ id: 'n-owed' }];
+      const version = await approvedVersion();
+      bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result.success).toBe(true);
+      expect(result.partial).toBeUndefined();
+      expect(done).toHaveBeenCalledWith(['n-owed'], expect.objectContaining({ by: 'start-program' }), expect.anything());
+      expect(calls.some((c) => c.table === 'notifications' && c.method === 'whereRaw' && String(c.args[1]).includes('start-program-pending-bill:'))).toBe(true);
+      // A failing retire is logged and the receipt still says the program started.
+      done.mockRejectedValue(new Error('notifications down'));
+      writes = [];
+      const again = await run({ ...BASE_INPUT, _verified_program_version: await approvedVersion() }, { confirmed: true });
+      expect(again.partial).toBeUndefined();
     });
 
     test('there is no expiry: a 3-day-old pending-bill row with no alert id still refuses, and the sweep posts a fresh alert and stores its id', async () => {
@@ -1744,6 +1792,22 @@ describe('commit', () => {
     bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result.message).toContain('Welcome text and welcome email queued for about 1 hour from now (a failure is logged).');
+  });
+
+  test.each([
+    ['no phone and no email on the account holder', { holder: { phone: '', email: null } }, 'No welcome message (their settings turn it off or leave no phone or email to reach).'],
+    ['texts and email both switched off', { toggles: { channel: 'sms', confirmation: true, sms: false, email: false } }, 'No welcome message (their settings turn it off or leave no phone or email to reach).'],
+    ['email off, texts on', { toggles: { channel: 'sms', confirmation: true, sms: true, email: false } }, 'Welcome text queued for about 1 hour from now; no welcome email (their email is off or has no address).'],
+    ['texts off, email on', { toggles: { channel: 'sms', confirmation: true, sms: false, email: true } }, 'Welcome email queued for about 1 hour from now; no welcome text (their texts are off or there is no phone).'],
+    ['both on with a phone and an email', {}, 'Welcome text and welcome email queued for about 1 hour from now (a failure is logged).'],
+  ])('the receipt names only the welcome legs the pinned state reaches (%s) (round 19)', async (_name, overrides, sentence) => {
+    Welcome.isNewRecurringSignupCandidate.mockResolvedValue(true);
+    contactState = contactStateFixture(overrides);
+    const version = await approvedVersion();
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.message).toContain(sentence);
+    if (sentence.startsWith('No welcome')) expect(result.message).not.toMatch(/Welcome (text|email) queued/);
   });
 
   test('a changed plan-sync prediction after the card refuses with preview_changed', async () => {

@@ -19,7 +19,7 @@ let catalogRow;
 let prefsGate = null;
 
 function fakeTrx() {
-  return (table) => {
+  const trx = (table) => {
     let locked = false;
     const b = {
       where: () => b, whereIn: () => b, whereRaw: () => b, orderBy: () => b, select: () => (table === 'notification_prefs' && prefsGate ? prefsGate.then(() => b) : b),
@@ -29,6 +29,9 @@ function fakeTrx() {
     };
     return b;
   };
+  trx.isTransaction = true;
+  trx.raw = jest.fn(async (sql, bindings) => { log.push(/lock_shared/.test(sql) ? `lock:closure-state:${bindings.join('/')}` : 'raw'); return {}; });
+  return trx;
 }
 
 const baseCtx = (req) => ({
@@ -61,7 +64,7 @@ const codeOf = async (promise) => { try { await promise; return null; } catch (e
 
 test('the table names every rail code once', () => {
   expect(RAILS.map((r) => r.code)).toEqual([
-    'BILLING_CHANGED', 'COMMERCIAL_CHANGED', 'CATALOG_CHANGED', 'LEDGER_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'DATES_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
+    'BILLING_CHANGED', 'COMMERCIAL_CHANGED', 'CATALOG_CHANGED', 'LEDGER_CHANGED', 'CONSULTATIONS_CHANGED', 'CONTACT_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED', 'INSPECTION_CREDIT_CHANGED', 'ADDRESS_CHANGED', 'OVERLAP_CHANGED', 'TECH_NOT_ASSIGNABLE',
   ]);
 });
 
@@ -212,6 +215,27 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     expect(await codeOf(pending)).toBeNull();
     expect(log).toContain('read:contact');
   });
+  test('the contact lock set includes the account primary customer row a secondary profile falls back to, before the prefs rows (round 19)', async () => {
+    const req = { approvedContact: 'key-a', approvedServiceAnchor: { propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' } };
+    log = [];
+    expect(await codeOf(run(req))).toBeNull();
+    // Own row FOR UPDATE, then the fallback primary row FOR SHARE, then the prefs rows, then the first read of the key.
+    const own = log.indexOf('lock:customers');
+    const customerLocks = log.filter((l) => l === 'lock:customers').length;
+    expect(customerLocks).toBeGreaterThanOrEqual(2);
+    const primary = log.indexOf('lock:customers', own + 1);
+    expect(primary).toBeGreaterThan(own);
+    expect(primary).toBeLessThan(log.indexOf('lock:notification_prefs'));
+    expect(log.indexOf('lock:notification_prefs')).toBeLessThan(log.indexOf('lock:property_notification_prefs'));
+    expect(log.indexOf('lock:property_notification_prefs')).toBeLessThan(log.indexOf('read:contact'));
+    // The statement is one locking query (no read first) that finds the primary through the profile's account.
+    const helper = require('fs').readFileSync(require.resolve('../services/booking-contact-state'), 'utf8');
+    const fn = helper.slice(helper.indexOf('async function lockContactPrefs'));
+    expect(fn.indexOf("conn('customers')")).toBeLessThan(fn.indexOf("conn('notification_prefs')"));
+    expect(fn).toContain('is_primary_profile = true AND deleted_at IS NULL');
+    expect(fn).toContain('is_primary_profile IS NOT TRUE');
+    expect(fn).toContain('.forShare().select(\'id\')');
+  });
   test('the admin notification-prefs save takes the comms lock, then its prefs row FOR UPDATE (source order, round 15)', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/admin-customers'), 'utf8');
     const start = src.indexOf("router.put('/:id/notification-prefs'");
@@ -236,6 +260,25 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
   test('DATES_CHANGED', async () => {
     expect(await codeOf(run({ approvedVisitDates: ['2099-03-03', '2099-04-08'] }))).toBe('DATES_CHANGED');
     expect(await codeOf(run({ approvedVisitDates: ['2099-03-03', '2099-04-07'] }))).toBeNull();
+  });
+  test('DATES_CHANGED: the closure-state lock is taken SHARED before the dates are generated again, and a regenerated difference refuses (round 19)', async () => {
+    const req = { approvedVisitDates: ['2099-03-03', '2099-04-07'] };
+    const replan = jest.fn(async () => { log.push('replan'); return ['2099-03-03', '2099-04-07']; });
+    log = [];
+    await run(req, { replanSeriesDates: replan });
+    expect(log).toEqual(['lock:closure-state:slot-reserve/closure-state', 'replan']);
+    // A blackout day added after the card moves a regenerated date: the planned dates are stale.
+    replan.mockResolvedValue(['2099-03-03', '2099-04-08']);
+    expect(await codeOf(run(req, { replanSeriesDates: replan }))).toBe('DATES_CHANGED');
+    // Planned dates that differ from the regenerated ones refuse even when the regenerated ones are the card's.
+    replan.mockResolvedValue(['2099-03-03', '2099-04-07']);
+    expect(await codeOf(run(req, { seriesDates: ['2099-03-03', '2099-04-08'], replanSeriesDates: replan }))).toBe('DATES_CHANGED');
+  });
+  test('the closure-state lock runs before the estimate advisory lock (a leaf in the lock order)', async () => {
+    log = [];
+    await run({ approvedVisitDates: ['2099-03-03', '2099-04-07'], approvedNoOpenEstimate: true });
+    expect(log.indexOf('lock:closure-state:slot-reserve/closure-state')).toBeGreaterThan(-1);
+    expect(log.indexOf('lock:closure-state:slot-reserve/closure-state')).toBeLessThan(log.indexOf('lock:estimates-advisory'));
   });
   test('ADDRESS_CHANGED (a different property, and a different address)', async () => {
     expect(await codeOf(run({ approvedServiceAnchor: { propertyId: 'prop-2', address: '1 Example St, Sarasota, FL 34201' } }))).toBe('ADDRESS_CHANGED');
@@ -282,8 +325,9 @@ test('every lock is taken before any read, and the estimate lock is the last loc
   const firstRead = log.findIndex((e) => e.startsWith('read:'));
   const lastLock = log.map((e) => e.startsWith('lock:')).lastIndexOf(true);
   expect(lastLock).toBeLessThan(firstRead);
-  // Every customer row lock (billing, commercial, ledger, consultations, contact) comes before the estimate lock, which is a leaf.
-  expect(log.slice(0, 6)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:notification_prefs']);
+  // Every customer row lock (billing, commercial, ledger, consultations, contact, and the contact fallback primary) comes before the estimate lock, which is a leaf.
+  expect(log.slice(0, 7)).toEqual(['lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:customers', 'lock:notification_prefs']);
+  expect(log.indexOf('lock:closure-state:slot-reserve/closure-state')).toBeLessThan(log.indexOf('lock:estimates-advisory'));
   expect(log.indexOf('lock:property_notification_prefs')).toBeLessThan(log.indexOf('lock:estimates-advisory'));
   // The billing read comes after the customer row lock.
   expect(log.indexOf('lock:customers')).toBeLessThan(log.indexOf('read:customers'));

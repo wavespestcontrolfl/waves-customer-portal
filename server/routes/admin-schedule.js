@@ -8440,9 +8440,12 @@ async function lockBookingScope(trx, c) {
     req, customerId, seriesDates,
     techDates: resolvedTechId ? [...new Set([dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates].filter(Boolean))] : [],
     assertTech: (conn, date) => assertAssignableTechnician(resolvedTechId, { conn, date: String(date).slice(0, 10) }),
+    // Technician-blind, like the card's own probe (probeSlotOverlap): a scoped probe sees only the booked technician's
+    // visits and the unassigned ones, so a visit given to another technician after the card would pass the rail.
     probeOverlap: (conn, date) => (windowStart && computedEnd ? findConflictingVisits({
-      db: conn, date, windowStart, windowEnd: computedEnd, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES, technicianId: resolvedTechId || null,
+      db: conn, date, windowStart, windowEnd: computedEnd, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
     }) : []),
+    replanSeriesDates: async (conn) => [dateOnly(scheduledDate), ...(await replanChildDates(conn, c))],
     resolveAnchorPropertyId: async (conn) => {
       if (bookingProperty) return bookingProperty.property_id;
       if (!cols.property_id || propertyOwnedByEstimateLinkage) return null;
@@ -10201,6 +10204,22 @@ async function planSeriesDates(c) {
   planChildDates(plan);
   planBoosterDates(plan);
   return { plannedChildDates, plannedBoosterDates, plannedCount, skipWeekendsEffective, seriesBlackoutDates };
+}
+
+// The recurring children's dates generated again on `conn` (inside the booking transaction, under the shared closure-state
+// lock), from the closure state read there. Same generator and inputs as planSeriesDates; nothing is written.
+async function replanChildDates(conn, c) {
+  const { isRecurring, monthAnchorOpts, plannedCount, recurringIntervalDays, recurringPattern, scheduledDate, skipWeekendsEffective, weekendShift } = c;
+  if (!(isRecurring && recurringPattern)) return [];
+  const plan = {
+    bookingWarnings: [], isRecurring, plannedChildDates: [], plannedCount, recurringPattern, scheduledDate, skipWeekendsEffective,
+    rOpts: { ...monthAnchorOpts, intervalDays: recurringIntervalDays },
+    shiftDir: weekendShift === 'back' ? 'back' : 'forward',
+    seriesDates: new Set([dateOnly(scheduledDate) || '']),
+    seriesBlackoutDates: await loadSeriesBlackoutDates(conn, dateOnly(scheduledDate)),
+  };
+  planChildDates(plan);
+  return plan.plannedChildDates;
 }
 
 function planChildDates(c) {

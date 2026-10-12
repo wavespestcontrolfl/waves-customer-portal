@@ -72,11 +72,22 @@ async function bookingContactState(customerId, { propertyId = null, conn = null 
 }
 
 // Share-lock the rows the recipient key is read from, inside the booking transaction and BEFORE the key is read: the
-// customer's own notification_prefs row, the account owner's (the confirmation channel is read from the owner's row for a
+// account primary's customers row (the contact fallback of a secondary profile), the customer's own notification_prefs row, the account owner's (the confirmation channel is read from the owner's row for a
 // secondary profile) and the saved property's per-property row. A writer that updates one of them (the admin
 // notification-prefs save locks its row FOR UPDATE) then waits for the booking to commit, or commits first and is seen,
 // so it cannot slip in between the rail's read and the booking commit. Rows are taken in sorted order.
 async function lockContactPrefs(conn, customerId, { propertyId = null } = {}) {
+  // A secondary profile with blank contact fields has its email and phone filled from the account primary's customers row
+  // (appointment-email loadCustomer, withAccountPrimaryContact), so that row is part of what the key is read from. FOR SHARE
+  // (not KEY SHARE): an ordinary UPDATE of the primary's phone or email must wait for the booking. Own row first (the
+  // caller holds it FOR UPDATE), then this fallback row, then the prefs rows. One statement, no preceding read.
+  await conn('customers')
+    .whereRaw(
+      `id <> ? AND is_primary_profile = true AND deleted_at IS NULL
+        AND account_id = (SELECT account_id FROM customers WHERE id = ? AND is_primary_profile IS NOT TRUE)`,
+      [customerId, customerId],
+    )
+    .forShare().select('id');
   // One locking statement per table and no preceding read: the rails take every lock before their first read. The owner
   // row is found inside the statement (the profile itself, plus the account primary when the profile is a secondary one).
   await conn('notification_prefs')
@@ -152,15 +163,24 @@ function confirmationLine(state) {
   return legs.length ? `Confirmation goes to ${legs.join(' and ')}` : `No confirmation message: ${noConfirmationReason(state.toggles)}`;
 }
 
+// The welcome legs the pinned state reaches, masked: the account holder's own phone (when texts are on) and email (when
+// email is on and today's signup email does not already cover it). The card line and the receipt's "queued" claim both
+// read this. A leg is null when it is off or has nobody to reach.
+function welcomeLegs(state, { welcomeEmailCovered = false } = {}) {
+  const account = state.accountToggles || state.toggles;
+  return {
+    text: account.sms ? maskPhone(state.holder.phone) : null,
+    // The welcome EMAIL is skipped when today's signup email already covers it (GATE_SIGNUP_SINGLE_EMAIL); the text is not.
+    email: account.email && !welcomeEmailCovered ? maskEmail(state.holder.email) : null,
+  };
+}
+
 function contactCardLines(state, { sendTexts, welcome, welcomeEmailCovered = false }) {
   const lines = [];
   const t = state.toggles;
   if (sendTexts) lines.push(confirmationLine(state));
   if (welcome) {
-    const account = state.accountToggles || t;
-    const text = account.sms ? maskPhone(state.holder.phone) : null;
-    // The welcome EMAIL is skipped when today's signup email already covers it (GATE_SIGNUP_SINGLE_EMAIL); the text is not.
-    const email = account.email && !welcomeEmailCovered ? maskEmail(state.holder.email) : null;
+    const { text, email } = welcomeLegs(state, { welcomeEmailCovered });
     const legs = [text && `${text} by text`, email && `${email} by email`].filter(Boolean);
     lines.push(legs.length ? `Welcome goes to ${legs.join(' and ')}` : 'No welcome message: no phone or email to reach, or texts and email are off');
   }
@@ -172,4 +192,4 @@ function contactCardLines(state, { sendTexts, welcome, welcomeEmailCovered = fal
 // send that happens later (the recovery sweep included) cannot reach recipients the card did not show.
 const CONTACT_PIN_ACTION = 'booking_contact_pin';
 
-module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, confirmationKeyFromLoaded, contactCardLines, confirmationLegs, maskPhone, maskEmail };
+module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, confirmationKeyFromLoaded, contactCardLines, confirmationLegs, welcomeLegs, maskPhone, maskEmail };
