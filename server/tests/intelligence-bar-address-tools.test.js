@@ -177,3 +177,28 @@ describe('check_address registry entry', () => {
     expect(out.status).toBe('validated_accept');
   });
 });
+
+// Pre-push audit P1 on #6297: a hand-written unit regex missed "# 4", lost a
+// comma-separated "Apt 4" into the city, and cut "100 Space Coast Blvd" to
+// "100". The unit is now peeled with the shared address-normalizer grammar.
+describe('check_address keeps the unit the operator gave', () => {
+  test.each([
+    ['100 Example Way Apt 4', 'Apt 4'],
+    ['100 Example Way # 4', 'Unit 4'],
+    ['100 Example Way, Apt 4, Sarasota FL', 'Apt 4'],
+    ['Apt 204, 100 Example Way, Sarasota, FL 34236', 'Apt 204'],
+  ])('%s returns its unit and reports no street change', async (address, unit) => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address });
+    expect(out.unit).toBe(unit);
+    expect(out.changed.filter(c => c.component === 'street' || c.input)).toEqual([]);
+    expect(out.note).toContain(`save "${unit}" as the second address line`);
+  });
+
+  test('a street name that contains a unit word is not cut', async () => {
+    validateAddress.mockResolvedValue(google({ normalized: { street_line_1: '100 Space Coast Blvd', city: 'Sarasota', state: 'FL', postal_code: '34236' } }));
+    const out = await run({ address: '100 Space Coast Blvd, Sarasota, FL 34236' });
+    expect(out.unit).toBeNull();
+    expect(out.changed).toEqual([]);
+  });
+});

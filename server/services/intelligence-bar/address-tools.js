@@ -16,7 +16,9 @@
  */
 
 const { validateAddress, STATUSES } = require('../address-validation');
-const { parseRawAddress, normalizeStreetLine, normalizeState } = require('../../utils/address-normalizer');
+const {
+  parseRawAddress, normalizeStreetLine, normalizeState, splitStreetLineUnit, splitUnitFirstLine, normalizeUnitLine,
+} = require('../../utils/address-normalizer');
 
 const CHECK_ADDRESS_TOOL_NAME = 'check_address';
 // The provider has its own per-request timeout (default 30 s). The bar's tool
@@ -27,7 +29,7 @@ const DEFAULT_STATE = 'FL';
 const ADDRESS_TOOLS = [
   {
     name: CHECK_ADDRESS_TOOL_NAME,
-    description: `Check a street address with Google (Address Validation). Returns Google's spelling of the street, the city, state, ZIP and county, whether it is inside the service area, and a plain verdict. Read only: it saves nothing and looks up no customer.
+    description: `Check a street address with Google (Address Validation). Returns Google's spelling of the street, the city, state, ZIP and county, whether it is inside the service area, the unit or apartment the operator gave (Google does not check it), and a plain verdict. Read only: it saves nothing and looks up no customer.
 Run it BEFORE you save or change any street address (add_customer_property, update_customer, update_customer_property, update_lead_contact, create_customer, create_appointment with an address), and whenever the operator asks whether an address or its spelling is right. Pass the address exactly as heard or typed: the street line alone, or the whole address. Add city, state or zip only when the operator gave them. Never guess a ZIP: use the zip from this tool. If status is not_attempted or api_unavailable, Google could not check it: say so and ask the operator for the ZIP.
 Use for: "add 100 Example Way to this customer", "is that street spelled right?", "fix the address using Google", "what ZIP is that?"`,
     input_schema: {
@@ -44,8 +46,6 @@ Use for: "add 100 Example Way to this customer", "is that street spelled right?"
   },
 ];
 
-const UNIT_TAIL = /\s+(?:apt|apartment|unit|ste|suite|bldg|building|lot|spc|space|rm|room|#)\b.*$/i;
-
 const DIRECTIONS = { north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw' };
 // Case, punctuation and a spelled-out direction ("North" / "N") are not differences.
 const compareKey = value => String(value).toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).map(w => DIRECTIONS[w] || w).join('');
@@ -53,15 +53,23 @@ const sameText = (a, b) => compareKey(a) === compareKey(b);
 const cleanText = value => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '');
 
 // What the operator gave, split into parts. Explicit city/state/zip win over
-// anything parsed out of the address text.
+// anything parsed out of the address text. The unit is peeled with the shared
+// address-normalizer grammar (trailing "Apt 4" / "# 4", or a unit-first
+// "Apt 4, 100 Example Way"), so a street word such as "Space" is never taken
+// for a unit and the unit the operator gave is handed back to be saved.
+const TRAILING_STATE = /\s+(fl|florida)$/i;
 function givenParts(input) {
-  const parsed = parseRawAddress(cleanText(input.address));
-  const line1 = cleanText(parsed.line1) || cleanText(input.address);
+  const text = cleanText(input.address);
+  const unitFirst = splitUnitFirstLine(text);
+  const parsed = parseRawAddress(unitFirst ? unitFirst.rest : text);
+  const { street, unit } = splitStreetLineUnit(cleanText(parsed.line1) || text);
+  const parsedCity = cleanText(parsed.city);
+  const stateInCity = !parsed.state && TRAILING_STATE.test(parsedCity);
   return {
-    street: normalizeStreetLine(line1.replace(UNIT_TAIL, '')),
-    hasUnit: UNIT_TAIL.test(line1),
-    city: cleanText(input.city) || cleanText(parsed.city),
-    state: normalizeState(cleanText(input.state) || cleanText(parsed.state)) || '',
+    street: normalizeStreetLine(street),
+    unit: normalizeUnitLine(unitFirst ? unitFirst.unit : unit),
+    city: cleanText(input.city) || (stateInCity ? parsedCity.replace(TRAILING_STATE, '') : parsedCity),
+    state: normalizeState(cleanText(input.state) || cleanText(parsed.state) || (stateInCity ? 'FL' : '')) || '',
     zip: (cleanText(input.zip) || cleanText(parsed.zip)).slice(0, 5),
   };
 }
@@ -112,7 +120,7 @@ function noteFor(status, changed, given, result) {
   if (changed.length) parts.push('Google differs from the input: show the operator both versions and ask before saving (the operator\'s own words, or a call transcript, may be the one that is wrong). If the operator insists their spelling is right, run this check again with their exact words.');
   if (changed.some(c => c.component === 'zip' && !c.input)) parts.push('The ZIP comes from Google, not from the operator: tell them which ZIP you are using.');
   if (!given.city && result.normalized?.city) parts.push('No city was given: confirm Google\'s city with the operator.');
-  if (given.hasUnit) parts.push('Google does not check the unit or apartment number: keep the unit the operator gave.');
+  if (given.unit) parts.push(`Google does not check the unit or apartment number: save "${given.unit}" as the second address line.`);
   return parts.join(' ');
 }
 
@@ -124,6 +132,7 @@ function shape(result, given) {
     status,
     verdict: VERDICTS[status] || 'Google returned a result this tool does not recognize.',
     normalized: n ? { address_line1: n.street_line_1, city: n.city, state: n.state, zip: n.postal_code } : null,
+    unit: given.unit || null,
     county: result.county || null,
     in_service_area: typeof result.inServiceArea === 'boolean' ? result.inServiceArea : null,
     changed,
