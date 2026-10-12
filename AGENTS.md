@@ -6,8 +6,8 @@ GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
 names the failure it prevents and the file it protects. Codex invocations
 return JSON matching `.github/codex-review-schema.json`; every reviewer
 cites `file:line` for every finding.
-Other tasks use the user's requested response format. Coding agents follow
-the applicable invariants and Implementation defaults below.
+Other tasks use the user's requested format; coding agents follow the
+invariants and Implementation defaults below.
 The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
 `npm prepare`) blocks a push on any P0 and warns on P1.
 
@@ -131,8 +131,8 @@ execute the workflows they describe.
   limits, no raw question/query logging, and never book. Re-run gates and
   eligibility refusals on the locked row at commit, not just on the
   preflight read (`reserveSlot`, `validateBookingSlotGeometry` vs
-  `customerWindowAdmits`), except where the entry keeps a time the
-  customer already has — a certified hold, a committed-booking retry. Any
+  `customerWindowAdmits`); skipping it is P0 unless that route's entry
+  records the exception (a certified hold, a committed-booking retry). Any
   change to a listed route's auth, gate, payload, or headers that the
   document does not describe is P0.
 - **`/receipt/:token` permanence.** The receipt token is `invoices.token`
