@@ -7254,15 +7254,16 @@ function hasTermiteAddonWording(text) {
     && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
 }
 const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+const ATTIC_CRAWLSPACE_RE = /\b(?:attic|crawl\s?space)\b/i;
 const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b/i;
 const NEW_BUILD_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|new[-\s]build|pre[-\s]?slab)\b/i;
 function hasExistingStructureContext(text) {
-  return EXISTING_STRUCTURE_CONTEXT_RE.test(text) && !NEW_BUILD_WORDING_RE.test(text);
+  return (EXISTING_STRUCTURE_CONTEXT_RE.test(text) || ATTIC_CRAWLSPACE_RE.test(text)) && !NEW_BUILD_WORDING_RE.test(text);
 }
 // New-construction wording for the wood-treatment exemption below: Bora-Care
 // sprayed on new framing is a builder's pre-construction add-on, not work on an
 // existing structure.
-const NEW_CONSTRUCTION_CONTEXT_RE = /\bpre[-\s]?(?:slab|construction)\b|\bslab\s+pre[-\s]?treat\w*|\bnew[-\s](?:construction|build)\b|\bframing\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bpour\b|\bbuilder\b/i;
+const NEW_CONSTRUCTION_CONTEXT_RE = /\bpre[-\s]?(?:slab|construction)\b|\bslab\s+pre[-\s]?treat\w*|\bnew[-\s](?:construction|build)\b|\bnew\s+framing\b|\bframing\s+(?:before|prior to)\s+(?:the\s+)?(?:slab|pour)\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bpour\b|\bbuilder\b/i;
 // Wood treatment / Bora-Care is a cue only without new-construction context
 // (the caller supplies it: the same fragment, or the call's service name).
 // Existing-structure context and a second service still veto on their own.
@@ -7272,10 +7273,20 @@ const NEW_CONSTRUCTION_CONTEXT_RE = /\bpre[-\s]?(?:slab|construction)\b|\bslab\s
 // control of an existing infestation, Termidor around or trenched at a building,
 // localized and injection work. One class for the objection check and every
 // service-word veto: a match is another ask whatever the family label says.
-const TERMITE_OTHER_TREATMENT_RE = /\bdry[-\s]?wood\b|\bno[-\s]tent\b|\btent(?:s|ing|ed)?\b|\bfumigat\w*|\bsubterranean\s+(?:termite\s+)?(?:treatment|control)\b|\btermidor\s+(?:around|trench\w*|foam\w*|perimeter)\b|\blocalized\b|\binject\w*/i;
-function hasNonPretreatTermiteCue(text, { woodTreatmentOk = false } = {}) {
+const TERMITE_OTHER_TREATMENT_RE = /\bdry[-\s]?wood\b|\bno[-\s]tent\b|\btent(?:s|ing|ed)?\b|\bfumigat\w*|\blocalized\b/i;
+// The liquid / subterranean / injection class is soil work too, so a fragment
+// that says outright it is pre-construction ("injection before the slab pour")
+// is the pre-treat itself. Existing-structure wording on the fragment still vetoes.
+const TERMITE_LIQUID_TREATMENT_RE = /\bsubterranean\s+(?:termite\s+)?(?:treatment|control)\b|\btermidor\s+(?:around|trench\w*|foam\w*|perimeter)\b|\binject\w*|\bliquid\s+(?:termite\b|treatment\b)|\btermite\s+liquid\b/i;
+const EXPLICIT_PRECONSTRUCTION_RE = /\bpre[-\s]?(?:slab|construction)\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bnew[-\s]construction\b|\bslab\s+pre[-\s]?treat\w*/i;
+function isLiquidTreatmentVeto(value, softTreatmentOk) {
+  if (softTreatmentOk || !TERMITE_LIQUID_TREATMENT_RE.test(value)) return false;
+  const explicit = EXPLICIT_PRECONSTRUCTION_RE.test(value);
+  return !explicit || EXISTING_WORK_WORDING_RE.test(value) || EXISTING_STRUCTURE_CONTEXT_RE.test(value);
+}
+function hasNonPretreatTermiteCue(text, { woodTreatmentOk = false, softTreatmentOk = false } = {}) {
   const value = String(text || '').toLowerCase();
-  return TERMITE_OTHER_TREATMENT_RE.test(value) || (!woodTreatmentOk && TERMITE_WOOD_TREATMENT_CUE_RE.test(value)) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+  return TERMITE_OTHER_TREATMENT_RE.test(value) || isLiquidTreatmentVeto(value, softTreatmentOk) || (!woodTreatmentOk && TERMITE_WOOD_TREATMENT_CUE_RE.test(value)) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
     || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
     || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
 }
@@ -7370,7 +7381,7 @@ function v2ObjectionTexts(view, v2Extraction) {
 function v2ObjectionFragments(view, v2Extraction) {
   return v2ObjectionTexts(view, v2Extraction).flatMap(splitFragments);
 }
-const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|already built)\b/i;
+const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|already built|attic|crawl\s?space)\b/i;
 // The service name's new-construction context may be borrowed only by a
 // sentence about the SAME job. A separate-job marker or a different location
 // ("also Bora-Care at the sales office") must carry its own context.
@@ -7425,7 +7436,7 @@ function pretreatIsOnlyTermiteWork(view, v2Extraction = null, { v2Proof = false 
   );
   // The joined check skips the wood cue (a single-word cue judged per fragment).
   const joined = [...structured, ...narrative, ...objections].join('. ');
-  if (hasNonPretreatTermiteCue(joined, { woodTreatmentOk: true })) return false;
+  if (hasNonPretreatTermiteCue(joined, { woodTreatmentOk: true, softTreatmentOk: true })) return false;
   // Wood treatment: a structured fragment carries its own context; narrative and
   // objection sentences may borrow the service name's only for the same job.
   if (structured.some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: isWoodTreatmentOnNewConstruction(f, false) }))) return false;

@@ -624,6 +624,38 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       expect(withSummary('Builder wants the slab pre-treat and Bora-Care.')).toBe(true);
     });
 
+    test('framing needs a new-construction cue; attic and crawlspace framing is existing work (codex r5)', () => {
+      const withSummary = (summary) => {
+        const v2 = slabV2();
+        v2.meta.call_summary = summary;
+        return runV2(v2);
+      };
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care in the attic framing.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care in the crawlspace.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care on the new framing.')).toBe(true);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care on the framing before the pour.')).toBe(true);
+    });
+
+    test('explicit slab wording beats the liquid / injection veto; existing-structure wording does not (codex r5)', () => {
+      const withSummary = (summary) => {
+        const v2 = slabV2();
+        v2.meta.call_summary = summary;
+        return runV2(v2);
+      };
+      expect(withSummary('Subterranean termite treatment before the slab pour.')).toBe(true);
+      expect(withSummary('Inject Termidor before the slab.')).toBe(true);
+      expect(withSummary('Liquid pre-treat before the slab.')).toBe(true);
+      expect(withSummary('Builder wants the slab pre-treat. Subterranean termite treatment around the house.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Injection on the existing home before the pour.')).toBe(false);
+      const v2 = slabV2();
+      for (const objection of ['Termite Liquid Treatment is too expensive', 'liquid termite treatment costs too much']) {
+        v2.sentiment_and_lead.objections_raised = [objection];
+        expect(runV2(v2)).toBe(false);
+      }
+      v2.sentiment_and_lead.objections_raised = ['liquid pre-treat before the slab is too expensive'];
+      expect(runV2(v2)).toBe(true);
+    });
+
     test('a real second service in the V2 service fields keeps the card', () => {
       const withName = slabV2();
       withName.service_request.specific_service_name = 'Slab Pre-Treat Termite Service plus general pest control';
