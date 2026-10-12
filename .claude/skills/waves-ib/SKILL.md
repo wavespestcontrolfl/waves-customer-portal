@@ -40,9 +40,7 @@ across pages; the system prompt still varies by page and keeps its own
 breakpoint. When asking "why did this tool load for the owner?", start
 there, not in the mapping below. Other admins, technicians, the tech
 context and the `agent_estimate` rail still follow the mapping. `discover()`
-remains their way to reach other pages' tools: it stems words and expands
-everyday ones through `discovery-vocabulary.js`, and ranks a match on a
-tool's own name above a description match.
+remains their way to reach other pages' tools.
 
 ## Context → Tools Mapping
 

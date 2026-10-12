@@ -17,7 +17,6 @@ const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
-const { expandTerms, stem, stemmedWordSet, words } = require('./discovery-vocabulary');
 
 const MODULES = [
   ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
@@ -119,7 +118,7 @@ const DISCOVERY_TOOL = {
   },
 };
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
-const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list say says said tell told'.split(' '));
+const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
 // Actions offered only while their own gate reads on (read at call time).
 const GATED_ACTIONS = {
@@ -163,51 +162,21 @@ function validateInput(name, input, scope) {
   return null;
 }
 
-// Stemmed words of a tool's id, domain and description, and of its id alone;
-// computed once per tool.
-const ACTION_WORDS = new Map();
-function actionWordSets(a) {
-  if (!ACTION_WORDS.has(a.id)) {
-    const idText = a.id.replace(/_/g, ' ');
-    ACTION_WORDS.set(a.id, { all: stemmedWordSet(`${idText} ${a.domain} ${a.definition.description}`), id: stemmedWordSet(idText) });
-  }
-  return ACTION_WORDS.get(a.id);
-}
-
-// The tool's own name is the strongest signal: a term found in the id counts
-// three times a term found only in the description or domain, and a tool whose
-// id words are ALL in the query ("search emails" -> search_emails) gets a
-// bonus that outranks any pile of incidental description matches. Without it,
-// stemming made many descriptions tie and the alphabetical cutoff dropped the
-// exact tool from the 12 returned. Zero stays zero: no description or name
-// match, no result.
-const ID_WORD_SCORE = 3;
-const WHOLE_NAME_BONUS = 10;
-function scoreAction(a, terms, queryStems) {
-  const { all, id } = actionWordSets(a);
-  const base = terms.reduce((n, word) => n + (id.has(word) ? ID_WORD_SCORE : all.has(word) ? 1 : 0), 0);
-  if (base === 0) return 0;
-  return base + ([...id].every(word => queryStems.has(word)) ? WHOLE_NAME_BONUS : 0);
-}
-
 function discover(input, scope) {
   const failure = validateInput(DISCOVERY_TOOL.name, input, scope);
   if (failure) return { result: failure, definitions: [] };
-  // Stopwords are dropped from the raw query first; the rest are stemmed and
-  // widened by the everyday-word table (discovery-vocabulary.js). A query with
-  // no meaningful term stays empty, so no synonym can invent a match.
-  const raw = [...new Set(words(input.query))];
-  const terms = [...expandTerms(raw.filter(term => !DISCOVERY_STOPWORDS.has(term)))];
-  // Every query word, stopwords included, so "search emails" covers the name
-  // search_emails even though "search" carries no meaning of its own.
-  const queryStems = new Set([...terms, ...raw.map(stem)]);
+  const terms = [...new Set(input.query.toLowerCase().match(/[a-z0-9]+/g) || [])]
+    .filter(term => !DISCOVERY_STOPWORDS.has(term));
   // The model's domain is a ranking hint, never a filter: booking lives under
   // "customers", so a "schedule" search used to return every schedule tool
   // and not the one that books (owner IB history 10-12). A matching tool in
   // the named domain ranks one point higher and wins ties.
   const inDomain = a => (input.domain && a.domain === input.domain ? 1 : 0);
   const ranked = [...actions.values()].filter(a => allowed(a, scope))
-    .map(a => ({ action: a, score: scoreAction(a, terms, queryStems) })).filter(r => r.score > 0)
+    .map(a => {
+      const words = new Set(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase().match(/[a-z0-9]+/g) || []);
+      return { action: a, score: terms.reduce((n, word) => n + (words.has(word) ? 1 : 0), 0) };
+    }).filter(r => r.score > 0)
     .sort((a, b) => (b.score + inDomain(b.action)) - (a.score + inDomain(a.action))
       || inDomain(b.action) - inDomain(a.action) || a.action.id.localeCompare(b.action.id));
   const selected = ranked.slice(0, 12).map(r => r.action);
@@ -252,8 +221,7 @@ function isOrdinaryAdminPage(context, scope) {
 }
 
 // Owner ruling 2026-10-12: a full-access login has every tool on every page,
-// so the bar never answers "no tool for that" when the tool exists (an audit
-// found 14 of 40 plain phrasings missed their tool through discover()).
+// so the bar never answers "no tool for that" when the tool exists.
 // Still goes through allowed(): gated tools and FULL_ACCESS_TWO_STEP tools
 // keep their own checks, and confirmed_endpoint tools are never loaded.
 // Order is fixed (discovery tool first, then by tool name) and does not
