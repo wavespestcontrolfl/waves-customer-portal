@@ -234,8 +234,16 @@ snapshot, hiding the plan (#6236); a widened company-facts render stopped
 matching stored drafts compared byte-for-byte, so grounded replies were
 marked unsafe (#6197); and live labor/drive-time inputs moved a saved
 4,500 sq ft quote from $693 to $864 on the customer's existing link
-(#6195). Version the render and treat legacy rows as the old version;
-never diff a stored blob against a freshly computed one.
+(#6195). Version the render and treat legacy rows as the old version.
+
+This governs FAITHFUL HISTORICAL REPLAY only — never send-time or
+commit-time eligibility, which must read live state and fail closed.
+`sms-amount-recheck.js` re-reads billing and Zelle facts and re-renders
+every copied money sentence right before sending, so a paid invoice, a
+changed balance, or a rotated recipient holds the message; the same
+`message_drafts.facts_block` is therefore an immutable input to the judge
+AND a revalidated one at send. Never weaken a send-time recheck to make a
+stored row "replay".
 
 ## 6. Schema truth traps (wrong-answer generators)
 
@@ -245,13 +253,22 @@ never diff a stored blob against a freshly computed one.
   `server/services/customer-stages.js`, which is the exported predicate.
   (`whereRealCustomer` is a route-local copy in `admin-dashboard.js:152`
   — not importable, don't reach for it.) A scope that checks `active`
-  alone counts leads as customers: a namesake lead in `new_lead` looked
-  like a live account and suppressed the unbooked-call pager (#6274).
+  alone counts leads as customers, so it must never NAME a lead row as an
+  account (#6274). The inverse is just as real: because the booking path
+  does not promote the stage, a booked customer can still sit at
+  `new_lead`, so a deliberately broad "any active stage" query can be the
+  correct one — `call-booking-miss-watchdog.js:286-294` keeps the wide
+  namesake scope on purpose and applies `whereLiveCustomer` only to the
+  stricter likely-account hint. Narrow the hint, not the evidence.
   `customers.status` does not exist. `member_since` is canonical;
   `customer_since` is dead.
 - Eligibility and scope predicates are shared so they can't drift — reuse
   `whereLiveCustomer`, `duplicatePairEligibility`, and
-  `seriesExtensionUnbillable` rather than re-deriving one inline. The tell
+  `seriesNextOccurrencesUnbillable` — the wrapper that walks the cadence and
+  assembles the inputs, not the lower-level `seriesExtensionUnbillable`
+  that expects them pre-derived (`admin-schedule.js:6178`; reaching past the
+  wrapper invites the very re-derivation this rule prevents) — rather than
+  re-deriving one inline. The tell
   is a local check that consults FEWER conditions than the canonical one:
   score alone instead of name/address conflict before archiving a
   duplicate (#6115), the overlaid root's `estimated_price` instead of the

@@ -18,9 +18,9 @@ in `.claude/skills/*`, and the per-route security contracts live in
 `docs/public-route-contracts.md`. Do not duplicate them here; point at
 them.
 
-For coding work, read `CLAUDE.md` before editing and load only the relevant
-skills and reference sections. For an audit or explanation, read applicable
-rules as evidence; do not execute the workflows they describe.
+For coding work read `CLAUDE.md` first and load only the relevant skills
+and reference sections. For an audit, read rules as evidence; do not
+execute the workflows they describe.
 
 ## Codex local database policy
 
@@ -130,10 +130,11 @@ rules as evidence; do not execute the workflows they describe.
   short-lived signed `askToken`, terminal/expired rejection, their rate
   limits, no raw question/query logging, and never book. Re-run gates and
   eligibility refusals on the locked row at commit, not just on the
-  preflight read — a live offer or signed token must be refused once a
-  gate flips (`reserveSlot`, `validateBookingSlotGeometry` vs
-  `customerWindowAdmits`). Any change to a listed route's auth, gate,
-  payload, or headers that the document does not describe is P0.
+  preflight read (`reserveSlot`, `validateBookingSlotGeometry` vs
+  `customerWindowAdmits`), except where the entry keeps a time the
+  customer already has — a certified hold, a committed-booking retry. Any
+  change to a listed route's auth, gate, payload, or headers that the
+  document does not describe is P0.
 - **`/receipt/:token` permanence.** The receipt token is `invoices.token`
   and is intentionally permanent — customers re-share receipt links with
   bookkeepers months later. A `used` / `viewed_count` / `expires_at` gate
