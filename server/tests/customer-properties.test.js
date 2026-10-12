@@ -423,6 +423,8 @@ describe('addressCanNameProperty (saved-property removal dependency match)', () 
     ['mailing-city alias with the same ZIP', { address_line1: '100 Example Dr E', city: 'Lakewood Ranch', zip: '34201-1234' }, true],
     ['unparsed one-line address', { address_line1: '100 Example Dr E Bradenton FL' }, true],
     ['different unit', { address_line1: '100 Example Dr E', address_line2: 'Apt 5', zip: '34201' }, false],
+    ['different unit on a street-only stamp', { address_line1: '100 Example Dr E', address_line2: 'Apt 5' }, false],
+    ['missing unit on a street-only stamp', { address_line1: '100 Example Drive East' }, true],
     ['different ZIP', { address_line1: '100 Example Dr E', city: 'Bradenton', zip: '34239' }, false],
     ['different city and no ZIP', { address_line1: '100 Example Dr E', city: 'Venice' }, false],
     ['different directional', { address_line1: '100 Example Dr W', zip: '34201' }, false],

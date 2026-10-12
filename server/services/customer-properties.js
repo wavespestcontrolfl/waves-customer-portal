@@ -1036,11 +1036,15 @@ function addressCanNameProperty(address, target) {
   if (!street || !targetStreet) return false;
   const [zip, targetZip] = [normalizeZip(address.zip), normalizeZip(target.zip)];
   // An unparsed one-line address keeps its locality inside the street text.
-  const unparsed = !address.city && !zip && street.startsWith(targetStreet);
+  const unparsed = street !== targetStreet && !address.city && !zip && street.startsWith(targetStreet);
   if (street !== targetStreet && !unparsed) return false;
+  // A missing unit is a wildcard; a present, different unit is another
+  // address. An unparsed line's trailing text is locality, not a unit, so
+  // only its explicit line 2 is read.
   const unitOf = (line1, line2) => unitKey(line2) || streetEmbeddedUnitKey(line1);
   const differs = (a, b) => !!a && !!b && a !== b;
-  if (!unparsed && differs(unitOf(address.address_line1, address.address_line2), unitOf(target.address_line1, target.address_line2))) return false;
+  const unit = unparsed ? unitKey(address.address_line2) : unitOf(address.address_line1, address.address_line2);
+  if (differs(unit, unitOf(target.address_line1, target.address_line2))) return false;
   // ZIP first, like addressKey: mailing-city aliases (Bradenton / Lakewood
   // Ranch) name one address, so cities are compared only without two ZIPs.
   if (zip && targetZip) return zip === targetZip;
@@ -1094,13 +1098,21 @@ async function propertyRemovalDependents(conn, customerId, target) {
   const openVisitIds = new Set(openVisits.map(visit => visit.id));
   const openGroups = groups.filter(group => group.property_id === target.id
     || children.some(child => child.visit_id === group.id && !openVisitIds.has(child.id) && visitNamesProperty(child)));
-  return { visits: openVisits.length + openGroups.length, estimates: openEstimates.length };
+  // A prepaid annual plan sold on an estimate that names this property seeds
+  // its future coverage visits here (annual-prepay-renewals termiteRenewalScope
+  // walks a renewal back to its first term's estimate), even while no visit
+  // is open. Only a cancelled or refunded term is settled; a renewed first
+  // term still carries the estimate its successors read.
+  const prepaidTerms = targetEstimateIds.size ? await conn('annual_prepay_terms').where({ customer_id: customerId })
+    .whereIn('source_estimate_id', [...targetEstimateIds]).whereNotIn('status', ['cancelled', 'canceled', 'refunded']).select('id') : [];
+  return { visits: openVisits.length + openGroups.length, estimates: openEstimates.length, prepaidTerms: prepaidTerms.length };
 }
 
-function assertNoRemovalDependents({ visits, estimates }) {
-  if (!visits && !estimates) return;
+function assertNoRemovalDependents({ visits, estimates, prepaidTerms }) {
+  if (!visits && !estimates && !prepaidTerms) return;
   const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
-  const parts = [visits && count(visits, 'open or recurring visit'), estimates && count(estimates, 'open estimate')].filter(Boolean);
+  const parts = [visits && count(visits, 'open or recurring visit'), estimates && count(estimates, 'open estimate'),
+    prepaidTerms && count(prepaidTerms, 'prepaid annual plan')].filter(Boolean);
   throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it.`, 409, 'property_in_use');
 }
 

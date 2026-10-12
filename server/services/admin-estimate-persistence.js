@@ -3398,7 +3398,6 @@ async function reviseAdminEstimate({
   // described the PREVIOUS quote (the public view falls back to live pricing
   // until the next send re-stamps a snapshot).
   const updated = await database.transaction(async (trx) => {
-    await lockSelectedEstimateProperty(trx, writeFields);
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
       await lockEstimateGroupAddressRevision(trx, writeFields.estimate_group_id);
@@ -3440,6 +3439,9 @@ async function reviseAdminEstimate({
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', key]);
       }
     }
+    // After the contact-pair locks (the IB estimate save takes address-verdict
+    // and then the customer row), before the group and row locks.
+    await lockSelectedEstimateProperty(trx, writeFields);
     // Group advisory lock(s) AFTER the contact-pair locks and BEFORE the
     // row lock — see lockScheduledGroupGuardGroups for the deadlock the
     // group-before-row order prevents; the contact pair goes first because
