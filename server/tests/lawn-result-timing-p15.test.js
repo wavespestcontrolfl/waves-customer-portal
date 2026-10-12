@@ -15,11 +15,11 @@ const SHARED = '# SHARED\n## HARD CONSTRAINTS\nShared safety.\n## ANTI-TEMPLATE 
 const LAWN = { serviceKey: 'lawn_care_recurring', findingsType: null };
 const PRODUCTS = [{ name: 'Test Herbicide B', kind: 'herbicide', activeIngredient: 'Testazone', method: 'spot', targets: ['broadleaf weeds'] }];
 
-const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+const ENV = ['GATE_LAWN_REPORT_COPY_V6'];
 const saved = {};
 beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); });
 afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
-const live = () => { process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
+const live = () => { process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; };
 
 describe('lawn technician writer: RESULT TIMING rule', () => {
   test('gate live: the lawn prompt is the old one plus the rule, appended last', () => {

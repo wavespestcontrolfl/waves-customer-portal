@@ -37,7 +37,6 @@ const fs = require('fs');
 const path = require('path');
 
 // Gates that are live in production for lawn reports. The layout gate is set per output file.
-process.env.GATE_LAWN_REPORT_LEAD = 'true';
 process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
 process.env.GATE_LAWN_PROGRAM_DETAIL = 'true';
 process.env.GATE_LAWN_REPORT_CLARITY = 'true';

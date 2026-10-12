@@ -167,9 +167,6 @@ describe('lead word budget with the v6 fields', () => {
 });
 
 describe('the hand-off never reaches the payload', () => {
-  const ENV = 'GATE_LAWN_REPORT_LEAD';
-  const saved = process.env[ENV];
-  afterEach(() => { if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved; });
   const dynamic = () => ({ reentry: { targets: [{ statusAtGeneratedAt: 'ready' }], petAdvisory: 'Keep pets off treated turf until dry.' } });
   // The hand-off is non-enumerable, exactly as report-data.js attaches it (and
   // as reportV2.progress is): the reconcile pass's spread would drop an enumerable-less copy,
@@ -181,22 +178,13 @@ describe('the hand-off never reaches the payload', () => {
   };
 
   test('the lead carries the fields, and no copyV6 key ever appears in the payload', () => {
-    process.env[ENV] = 'true';
     const out = applyLawnReportReconciliation(payload(V6), dynamic());
     expect(out.reportV2.lead).toMatchObject({ headline: V6.headline, applied: V6.whatWeDid, whatToExpect: V6.whatToExpect, watching: V6.watching });
     expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'copyV6')).toBe(false);
     expect(JSON.stringify(out)).not.toContain('copyV6');
   });
 
-  test('lead gate off: no lead, no copyV6 key, and the writer fields appear nowhere', () => {
-    delete process.env[ENV];
-    const off = applyLawnReportReconciliation(payload(V6), dynamic());
-    expect(Object.prototype.hasOwnProperty.call(off.reportV2, 'lead')).toBe(false);
-    expect(JSON.stringify(off)).not.toContain(V6.headline);
-  });
-
   test('no hand-off: the payload is exactly what it was', () => {
-    process.env[ENV] = 'true';
     const out = applyLawnReportReconciliation(payload(null), dynamic());
     expect(Object.keys(out.reportV2.lead).sort()).toEqual(['applied', 'headline', 'next', 'why', 'yourPart']);
   });

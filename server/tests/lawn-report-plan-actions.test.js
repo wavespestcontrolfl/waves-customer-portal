@@ -26,8 +26,8 @@ describe('insight cards defer to the plan', () => {
     expect(withPlan.customerAction).toMatch(/Follow this week’s watering plan below/);
     expect(withPlan.customerAction).not.toMatch(/irrigation time/);
     expect(withPlan.nextVisitPlan).not.toMatch(/added water/);
-    // Gate off (this suite): the stock line stays. GATE_LAWN_REPORT_LEAD nulls it (lawn-report-card-diet.test.js).
-    expect(withPlan.wavesAction).toMatch(/this week’s watering plan/);
+    // The stock past-action line is dropped (lawn-report-card-diet.test.js).
+    expect(withPlan.wavesAction).toBeNull();
   });
   test('surplus: no "ease back by one cycle" when a plan is present (watering-in variant included)', () => {
     expect(waterCard({ status: 'surplus' }).customerAction).toMatch(/Ease back on irrigation by one cycle/);

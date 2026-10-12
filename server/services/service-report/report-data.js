@@ -2881,12 +2881,11 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
   // GATE_LAWN_WATER_IN_RAIN: rain since the visit can change a frozen water-in banner, so the key follows what it will say. Empty while dark.
   irrigationStamp += await lawnWaterInRainStamp(service, knex);
-  // The report lead (GATE_LAWN_REPORT_LEAD) changes what the lawn web report
-  // and its PDF render (lead-mode findings, stock sentences left out), so a PDF
-  // cached before a flip must never be served after it, nor the reverse. The
-  // stamp rides only while the gate is live: gate off leaves every signature,
-  // and so every cached PDF key, byte-identical to before.
-  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
+  // The report lead changes what the lawn web report and its PDF render
+  // (lead-mode findings, stock sentences left out). The gate that used to add
+  // this stamp is gone, but the stamp stays as a constant: PDFs cached before
+  // the lead went live have keys without it and must never be served again.
+  irrigationStamp += ':lead=1';
   // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
   // its PDF key moves with it; the stamp rides only while the gate is live.
   // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),

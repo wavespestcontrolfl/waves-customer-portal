@@ -229,7 +229,7 @@ describe('change 1: the damage finding names the targeted pest', () => {
     const acelepryn = { ...ARENA, product: { name: 'Acelepryn Insecticide', category: 'insecticide', active_ingredient: 'chlorantraniliprole' }, targets: ['Fall armyworms'] };
     const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [acelepryn] }));
     expect(card).toMatchObject(OLD);
-    expect(card.wavesAction).toBe('Documented the areas for comparison next visit.');
+    expect(card.wavesAction).toBeNull(); // the stock action line is dropped (the lead owns the words)
   });
 
   test('a product the expectation table does not map has no known mode: unchanged', () => {
@@ -266,7 +266,7 @@ describe('change 1: the damage finding names the targeted pest', () => {
     gateOn();
     const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, areaValue: null, areaUnit: null }], frozenTies: [TECH_CHINCH] }));
     expect(card.headline).toMatch(/^Chinch bug damage/);
-    expect(card.wavesAction).toBe('Documented the areas for comparison next visit.');
+    expect(card.wavesAction).toBeNull(); // the stock action line is dropped (the lead owns the words)
   });
 
   test('a frozen spot text decides the area: a figure in it is used, a plain "Spot treatment" means none', () => {
@@ -274,13 +274,13 @@ describe('change 1: the damage finding names the targeted pest', () => {
     const withText = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, areaValue: 6000, areaUse: 'Spot treatment, about 250 sq ft' }] }));
     expect(withText.wavesAction).toBe('Applied Arena 50 WDG to about 250 sq ft.');
     const plain = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, areaValue: 6000, areaUse: 'Spot treatment' }] }));
-    expect(plain.wavesAction).toBe('Documented the areas for comparison next visit.');
+    expect(plain.wavesAction).toBeNull(); // the stock action line is dropped (the lead owns the words)
   });
 
   test('a recorded area in another unit is not read as square feet', () => {
     gateOn();
     const card = damageOf(buildLawnReportV2({ lawnAssessment: baseAssessment(), applications: [{ ...ARENA, areaValue: 3, areaUnit: 'acres' }] }));
-    expect(card.wavesAction).toBe('Documented the areas for comparison next visit.');
+    expect(card.wavesAction).toBeNull(); // the stock action line is dropped (the lead owns the words)
   });
 
   test('copy fixes live too: the product category phrase stands for the name', () => {

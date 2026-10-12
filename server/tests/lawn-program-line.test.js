@@ -363,7 +363,7 @@ describe('resolveProgramVisit: only recurring lawn plan visits get the line', ()
   });
   test('buildLawnReportV2 never crashes on a partial feature-gates mock (gate missing = off)', () => {
     jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => false, lawnReportLeadLive: () => false }));
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => false }));
       const { buildLawnReportV2: build } = require('../services/service-report/lawn-report-v2');
       const out = build({ lawnAssessment: assessment(), programVisit: true, protocolVersion: LAWN_V13_VERSION });
       expect(out.snapshot.seasonalNote).toMatch(/transitional stretch/);
@@ -381,7 +381,7 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
   });
 
   const { PROGRAM_DETAIL_V13, buildProgramDetail } = require('../services/service-report/lawn-program-line');
-  const withBoth = (detail, fn, lead = 'true') => withEnv({ [GATE]: 'true', GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: lead === null ? undefined : lead, GATE_LAWN_PROGRAM_DETAIL: detail }, fn);
+  const withBoth = (detail, fn) => withEnv({ [GATE]: 'true', GATE_LAWN_V13: 'true', GATE_LAWN_PROGRAM_DETAIL: detail }, fn);
 
   test('every month has a why-now line and nothing else: no watering advice, no outcome timing (codex #6091 r5, r6)', () => {
     for (let m = 1; m <= 12; m += 1) {
@@ -403,13 +403,12 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     expect(all).not.toMatch(/LESCO|Stonewall|Dimension|Celsius|Certainty|Artavia|Velista|Arena|Acelepryn|Tetrino|Dylox|Gravex|Dismiss|Nutra|prodiamine|dithiopyr|azoxystrobin|\bper 1,000\b|\blb\b|fl oz/i);
   });
 
-  test('no detail without a program line; gate is strict and needs the lead layout', () => {
+  test('no detail without a program line; gate is strict', () => {
     withBoth('true', () => {
       expect(buildProgramDetail({ month: 10, programLine: null })).toBeUndefined();
       expect(buildProgramDetail({ month: 10, programLine: 'x' })).toEqual({ whyNow: PROGRAM_DETAIL_V13[10].whyNow });
     });
     for (const loose of ['1', 'on', 'TRUE']) withBoth(loose, () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined());
-    withBoth('true', () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined(), null);
   });
 
   test('barrier months and the May insect step keep the program line qualifier (codex #6091 r1, r2)', () => {
@@ -432,7 +431,7 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
   });
 
   test('gate on without the program line (expectations off): no detail', () => {
-    const on = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, () => v13Report());
+    const on = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, () => v13Report());
     expect(on.snapshot.seasonalDetail).toBeUndefined();
   });
 

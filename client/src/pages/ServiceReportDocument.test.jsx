@@ -2055,7 +2055,7 @@ describe('ServiceReportDocument: the four-section report', () => {
 });
 
 // Lawn PDF diet (lawn report rebuild P8): a payload carrying `lead`
-// (GATE_LAWN_REPORT_LEAD) prints the lead's reason as the status detail, finding
+// prints the lead's reason as the status detail, finding
 // bullets as headline + what we saw (+ why it matters only for needs_attention),
 // never the "What Waves did" line, and not the follow-up's stock no-action line.
 // The same payload without `lead`, and tree & shrub, print exactly as before.

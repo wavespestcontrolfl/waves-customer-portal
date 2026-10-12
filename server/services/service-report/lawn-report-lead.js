@@ -1,5 +1,5 @@
 /**
- * Lawn report LEAD (lawn report rebuild P7, GATE_LAWN_REPORT_LEAD).
+ * Lawn report LEAD (lawn report rebuild P7).
  *
  * The above-the-fold block of the web report: state, why, what was
  * applied, the homeowner's part this week and the next visit, in one place so
