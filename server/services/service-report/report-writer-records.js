@@ -11,7 +11,7 @@
  * (nextSameServiceAppointment) and never enters this text (Codex #5500).
  */
 const {
-  buildWhatToExpect, expectationWindowClasses, igrLabelDuration, IGR_LABEL_DURATION_SENTENCES, toExpectationProduct,
+  buildWhatToExpect, expectationWindowClasses, toExpectationProduct,
 } = require('./pest-report-expectations');
 const { findReportProductCopyEntry, labeledPestCountText } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
@@ -107,7 +107,12 @@ function productFactLines(applications) {
     const entry = findReportProductCopyEntry({ epaReg: application?.epaReg, name: application?.name });
     if (!entry?.mainPests?.length) return [];
     const count = labeledPestCountText(entry);
-    const facts = [`mainly used for ${entry.mainPests.join(' and ')}`, count ? `labeled for ${count}` : null].filter(Boolean);
+    const tagged = (Array.isArray(application.targets) ? application.targets : []).map(cleanText).filter(Boolean);
+    const facts = [
+      `mainly used for ${entry.mainPests.join(' and ')}`,
+      `tagged today for ${tagged.length ? tagged.join(', ') : 'no pest'}`,
+      count ? `labeled for ${count}` : null,
+    ].filter(Boolean);
     const label = [application.role, application.methodLabel, application.applicationArea]
       .map(cleanText).filter(Boolean).join(', ');
     const lineText = `- ${label ? `${label}: ` : ''}${facts.join('; ')}.`;
@@ -117,14 +122,11 @@ function productFactLines(applications) {
   });
 }
 
-function productFactsSection(applications, labelDuration) {
+function productFactsSection(applications) {
   const lines = productFactLines(applications);
-  if (!lines.length && !labelDuration) return null;
-  const duration = labelDuration
-    ? `\nLABEL DURATION (the growth regulator recorded today): ${labelDuration} Say it at most once, in WHAT TO EXPECT, in these words; it is how long the product keeps working, never a time to contact us.`
-    : '';
-  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Labeled for" is how many pests the label covers: say it only when the customer asked about a pest other than the main one, and say nothing else about the label):'
-    + `${lines.length ? `\n${lines.join('\n')}` : ''}${duration}`;
+  if (!lines.length) return null;
+  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Tagged today for" is what the technician recorded this one treatment for. "Labeled for" is how many pests the label covers: say it only when the customer asked about a pest other than the main one, and say nothing else about the label):'
+    + `\n${lines.join('\n')}`;
 }
 
 function howItWorksLines(applications) {
@@ -153,17 +155,6 @@ function reachOutDate(serviceYmd, days) {
   return { full: `${weekday}, ${monthDay}`, monthDay };
 }
 
-// A label duration's words pass in WHAT TO EXPECT only: in WHAT'S NEXT they
-// would read as a time to contact us. Used at generation and at the edit
-// review, which rebuilds its phrases from the generated draft.
-const LABEL_DURATION_PHRASES = new Set(groundedTimeframePhrases(IGR_LABEL_DURATION_SENTENCES).map((phrase) => phrase.toLowerCase()));
-function scopeLabelDurationPhrases(phrases) {
-  return (Array.isArray(phrases) ? phrases : []).map((phrase) => (
-    typeof phrase === 'string' && LABEL_DURATION_PHRASES.has(phrase.toLowerCase())
-      ? { phrase, sections: ['WHAT TO EXPECT'] }
-      : phrase));
-}
-
 function buildWriterRecords({
   serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [], promises = [],
 } = {}) {
@@ -176,8 +167,7 @@ function buildWriterRecords({
   if (howItWorks.length) {
     sections.push(`HOW IT WORKS (approved product wording for the work recorded today; use it only to say why the work fits what was found, never for where or how anything was applied):\n${howItWorks.join('\n')}`);
   }
-  const labelDuration = line === 'pest' ? igrLabelDuration(expectationProducts(applications)) : '';
-  const productFacts = line === 'pest' ? productFactsSection(applications, labelDuration) : null;
+  const productFacts = line === 'pest' ? productFactsSection(applications) : null;
   if (productFacts) sections.push(productFacts);
   if (SERVICE_KIND_LABELS[serviceKind]) sections.push(`SERVICE TYPE: ${SERVICE_KIND_LABELS[serviceKind]}.`);
   const reach = (serviceKind === 'one_time' || serviceKind === 're_service')
@@ -194,10 +184,7 @@ function buildWriterRecords({
   }
   return {
     sections,
-    allowedPhrases: [
-      ...groundedTimeframePhrases(expectations.lines),
-      ...scopeLabelDurationPhrases(groundedTimeframePhrases(labelDuration ? [labelDuration] : [])),
-    ],
+    allowedPhrases: groundedTimeframePhrases(expectations.lines),
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
     // How many marked promises reached the writer (the generate route's
     // promise-only grounding check).
@@ -206,7 +193,6 @@ function buildWriterRecords({
 }
 
 module.exports = {
-  scopeLabelDurationPhrases,
   SERVICE_EXPECTATIONS,
   EXPECTATION_WINDOW_DAYS,
   writerExpectations,

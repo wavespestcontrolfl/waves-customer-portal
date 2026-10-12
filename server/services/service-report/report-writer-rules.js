@@ -34,7 +34,7 @@ WHAT'S NEXT: what we will check or do next, what the customer can do, and when t
 8. Say nothing about EPA registration. If it ever must appear, only "EPA-registered" or "EPA-exempt", never "EPA-approved".
 9. No prices, "free", "included", "covered", warranty, guarantee, bond, or "per visit". If a cadence must be named, say "per application".
 10. The company is "Waves Pest Control", or "we". Never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".
-11. Timeframes and dates. A timeframe ("a few days", "about 1–2 weeks") may appear only in WHAT TO EXPECT and WHAT'S NEXT, and only in the words of an EXPECTATIONS line: never invent, stretch, convert or combine one. One exception: a LABEL DURATION supplied under PRODUCT FACTS may be said once, in WHAT TO EXPECT only, in its own words, as how long the product keeps working and never as a time to contact us. Never write a calendar date, weekday or arrival window, except an earlier visit's date and the REACH-OUT DATE when one is supplied, written exactly as supplied. Never say whether a visit is booked, scheduled or coming: the report shows the next visit itself, as it stands when the customer opens it.
+11. Timeframes and dates. A timeframe ("a few days", "about 1–2 weeks") may appear only in WHAT TO EXPECT and WHAT'S NEXT, and only in the words of an EXPECTATIONS line: never invent, stretch, convert or combine one. Never write a calendar date, weekday or arrival window, except an earlier visit's date and the REACH-OUT DATE when one is supplied, written exactly as supplied. Never say whether a visit is booked, scheduled or coming: the report shows the next visit itself, as it stands when the customer opens it.
 12. Do not repeat what the report prints on its own: the product list, each product's "How it works" line word for word, re-entry and aftercare guidance, the next visit's date and window, the technician's tip, the rain and spider cards, the "What you flagged" card, and the activity gauge's number or scale. A short clause on why a treatment fits this problem is not repetition. The activity level in words ("light activity along the fence") is what the technician saw and belongs in WHAT WE FOUND.
 13. The report refuses these words, so never use them: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, "all clear", "is clear", "clear of pests", pest-free, any "-proof" word, guarantee, guaranteed, toxic, poison, poisonous, dangerous, deadly, unsafe.
 14. Never mention a treatment map, a traced route or a treated outline.
@@ -214,19 +214,19 @@ WHAT WE FOUND. Fill from, in this order: the customer's words (BOOKED REASON, Cu
 
 WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of webs is work: when the TECHNICIAN NOTE names the places swept, name only those places, even when Actions completed lists more; when the note names none, use the places Actions completed lists; add none.
 
-PRODUCT FACTS are how you know what each treatment is for. Write each treatment by its job words, never by a name. Tie "mainly used for" to what was found: when the technician or the customer recorded that pest, say the treatment was placed for it ("the treatment along the foundation is the one for the ants you saw"); when that pest was not recorded, the treatment is routine coverage and not a response to a sighting. Take the "why" from HOW IT WORKS. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
+PRODUCT FACTS are how you know what each treatment is for. Write each treatment by its job words, never by a name. Each entry also says what that one treatment was "tagged today for". Say a treatment was placed for a pest that was found only when that pest is in the same entry's "tagged today for" list ("the treatment along the foundation is the one for the ants you saw"); a pest found somewhere else, or tagged on another entry, is never the reason for this one. With no matching tag the treatment is routine coverage and not a response to a sighting. Take the "why" from HOW IT WORKS. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
 
-WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line, or of the LABEL DURATION under PRODUCT FACTS (this section only). With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
+WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
 
 WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice. With none of these recorded (no next step, no pest found, no customer concern, no EXPECTATIONS, no REACH-OUT DATE), write the one sentence rule 1 gives an empty section, and invent no sign, no contact trigger and no follow-up.
 
 Reassure with a recorded fact, never with a verdict: what the treatment is for, what the EXPECTATIONS lines say the customer may see and that seeing it is expected, where the technician checked and found none, when to contact us. Never "protected", "all set" or "nothing to worry about".
 
-An absence names the pest and the place ("no ants were seen in the garage today"), never "none were seen" alone. Never say the service is part of a plan, recurring or scheduled: that is not news to the customer.
+An absence names the pest and the place ("no ants were seen in the garage today"), never "none were seen" alone. Never say the service is part of a plan or is the customer's recurring service: that is not news to the customer.
 
 A thin record gets one sentence per section, each one from the record. Write as the technician who was there would say it to the homeowner at the door.
 
-BEFORE YOU ANSWER, read your draft for these. The report is rejected if any appears: "no issues", "no problems", "all clear", "nothing to worry about"; an absence with no place named in the same clause; infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guarantee, bond, the word "map"; safe, safely, unsafe, non-toxic, harmless, toxic, poison, dangerous, chemical; a product, brand or active ingredient name; an amount, rate, percentage or footage; a price, "free" or "included"; a timeframe that is not copied from an EXPECTATIONS line or the LABEL DURATION; the LABEL DURATION outside WHAT TO EXPECT; "protected" or "all set"; a date, weekday or clock time other than an earlier visit's date and the REACH-OUT DATE; the activity rating as a number; a quotation of the customer's message; an instruction to leave, clean, water or avoid a treated area or a bait.`;
+BEFORE YOU ANSWER, read your draft for these. The report is rejected if any appears: "no issues", "no problems", "all clear", "nothing to worry about"; an absence with no place named in the same clause; infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guarantee, bond, the word "map"; safe, safely, unsafe, non-toxic, harmless, toxic, poison, dangerous, chemical; a product, brand or active ingredient name; an amount, rate, percentage or footage; a price, "free" or "included"; a timeframe that is not copied from an EXPECTATIONS line; "protected" or "all set"; that the service is part of a plan or is the customer's recurring service; a date, weekday or clock time other than an earlier visit's date and the REACH-OUT DATE; the activity rating as a number; a quotation of the customer's message; an instruction to leave, clean, water or avoid a treated area or a bait.`;
 
 // A note that says "no issues" / "no problems" pulls those words into every
 // draft, and the screen refuses them (2026-10-09: four drafts in a row, then
@@ -614,7 +614,7 @@ const AFTERCARE_RE = new RegExp(`${INSTRUCTION_START}(?:`
   + ')', 'im');
 // Phrases the owner rules name that no older screen covers (rules 4, 9,
 // 13, 14).
-const OWNER_PHRASE_RE = /\binfested\b|\bprotected\b|\ball\s+set\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmap(?:s|ped|ping)?\b|\btrac(?:e|ed|ing)\s+(?:route|outline|path|area|perimeter|line)s?\b|\btreated\s+outlines?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
+const OWNER_PHRASE_RE = /\binfested\b|\bprotected\b|\ball\s+set\b|\bpart\s+of\s+(?:your|the|a|an|our)\s+(?:[\w-]+\s+){0,3}(?:plan|program)\b|\b(?:your|a|the|our)\s+recurring\s+(?:service|plan|program|visit)s?\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmap(?:s|ped|ping)?\b|\btrac(?:e|ed|ing)\s+(?:route|outline|path|area|perimeter|line)s?\b|\btreated\s+outlines?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\b(?:allow|let|give)\s+(?:the\s+)?(?:treated\s+\w+|treatment|product|spray|application|areas?|surfaces?)\b[^.!?]{0,30}?\bto\s+dry\b|\bwait\s+(?:for|until)\b[^.!?]{0,40}?\bdr(?:y|ied|ies)\b|\bavoid\s+(?:\w+\s+){0,2}?contact\b|\bcontact\s+with\s+(?:the\s+|any\s+)?treated\b|\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\b(?:stay|keep)\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
@@ -665,20 +665,18 @@ const ALLOWANCE_SECTIONS = new Set(['WHAT TO EXPECT', 'WHAT\'S NEXT']);
 // Applies `fn` only to the text of the sections where supplied timeframes
 // and dates belong (rule 11): WHAT TO EXPECT and WHAT'S NEXT. Copy with no
 // report titles at all (a single sentence) is one such section.
-function withinAllowanceSections(copy, fn, sections = ALLOWANCE_SECTIONS) {
+function withinAllowanceSections(copy, fn) {
   const lines = copy.split('\n');
-  // Untitled copy counts as one such section, except for a phrase tied to
-  // named sections: with no title there is no proof it sits in one.
-  if (!lines.some((line) => REPORT_TITLE_LINE_RE.test(line))) return sections === ALLOWANCE_SECTIONS ? fn(copy) : copy;
+  if (!lines.some((line) => REPORT_TITLE_LINE_RE.test(line))) return fn(copy);
   let current = null;
   return lines.map((line) => {
     const title = REPORT_TITLE_LINE_RE.exec(line);
     if (title) {
       current = title[1].replace(/[’]/g, "'");
       const rest = title[2];
-      return rest !== undefined && sections.has(current) ? line.replace(rest, fn(rest)) : line;
+      return rest !== undefined && ALLOWANCE_SECTIONS.has(current) ? line.replace(rest, fn(rest)) : line;
     }
-    return current && sections.has(current) ? fn(line) : line;
+    return current && ALLOWANCE_SECTIONS.has(current) ? fn(line) : line;
   }).join('\n');
 }
 
@@ -689,27 +687,6 @@ function withinAllowanceSections(copy, fn, sections = ALLOWANCE_SECTIONS) {
 // it states recorded re-entry instructions, timeframes, dates and the gauge
 // from the report's own facts. Every other rule, and every rule added later,
 // applies to it unchanged.
-// A section-scoped phrase (a label duration) passes once, and never in a
-// sentence that tells the customer when to contact us: a second use, or a
-// use as a contact time, is left for the timeframe screen.
-function maskOnceOutsideContact(phraseRe) {
-  let used = false;
-  return (part) => part.split(/(?<=[.!?])\s+/).map((sentence) => {
-    if (REACH_OUT_CONTACT_RE.test(sentence)) return sentence;
-    return sentence.replace(phraseRe, (found) => {
-      if (used) return found;
-      used = true;
-      return 'X';
-    });
-  }).join(' ');
-}
-
-function allowedPhraseEntry(entry) {
-  const scoped = entry && typeof entry === 'object';
-  const sections = scoped && Array.isArray(entry.sections) ? new Set(entry.sections) : ALLOWANCE_SECTIONS;
-  return { phrase: String((scoped ? entry.phrase : entry) || ''), sections };
-}
-
 function writerRulesRejection(text, options = {}) {
   return writerRulesRejectionDetail(text, options)?.reason || null;
 }
@@ -744,18 +721,13 @@ function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhras
   // and WHAT'S NEXT; the same words elsewhere (a residual period in WHAT WE
   // DID AND WHY) still trip the screen (Codex #5500).
   // Longest first, so a whole phrase is matched before any part of it.
-  // An entry is a phrase, or { phrase, sections } for one that belongs to
-  // fewer sections (a label duration: WHAT TO EXPECT only, so it can never
-  // stand as a contact time in WHAT'S NEXT).
   const phrases = [...(Array.isArray(allowedPhrases) ? allowedPhrases : []), ...dates]
-    .map(allowedPhraseEntry)
-    .sort((a, b) => b.phrase.length - a.phrase.length);
-  for (const { phrase, sections } of phrases) {
+    .sort((a, b) => String(b || '').length - String(a || '').length);
+  for (const phrase of phrases) {
     const pattern = allowedPhrasePattern(phrase);
-    if (phrase.trim().length < 3 || !pattern) continue;
+    if (String(phrase || '').trim().length < 3 || !pattern) continue;
     const phraseRe = new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi');
-    const mask = sections === ALLOWANCE_SECTIONS ? (part) => part.replace(phraseRe, 'X') : maskOnceOutsideContact(phraseRe);
-    copy = withinAllowanceSections(copy, mask, sections);
+    copy = withinAllowanceSections(copy, (part) => part.replace(phraseRe, 'X'));
   }
   const hit = WRITER_RULE_SCREENS.find(([check, reason]) => !skipped.has(reason)
     && (typeof check === 'function' ? check(copy) : check.test(copy)));

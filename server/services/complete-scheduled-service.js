@@ -2292,12 +2292,9 @@ function reportRulesReviewBlockPayload({
     // The same context the generation screen had: this visit's catalog
     // actives, and the timeframes and dates the generated draft carried
     // (they passed that screen), so an edit that keeps them is no finding.
-    // Required here, not at the top: report-writer-records reaches back into
-    // this module's own imports (a load-time cycle).
-    const { scopeLabelDurationPhrases } = require('./service-report/report-writer-records');
     const screenOptions = {
       activeIngredients,
-      allowedPhrases: scopeLabelDurationPhrases(groundedTimeframePhrases([base?.body || ''])),
+      allowedPhrases: groundedTimeframePhrases([base?.body || '']),
       allowedDates: draftDatePhrases(base?.body || ''),
     };
     const findings = [];

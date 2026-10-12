@@ -684,45 +684,33 @@ describe('product facts for the pest writer', () => {
       app('Atticus Talak 7.9 F', 'insect-control application', 'perimeter_spray', 'Outside', ['ants']),
       app('LESCO 90/10 Nonionic Surfactant', 'adjuvant', 'perimeter_spray', 'Outside', []),
     ]));
-    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; labeled for 25+ pests.');
-    expect(text).toContain('mainly used for spiders and crawling insects; labeled for 75+ pests.');
+    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants; labeled for 25+ pests.');
+    expect(text).toContain('mainly used for spiders and crawling insects; tagged today for ants; labeled for 75+ pests.');
     expect(text).not.toMatch(/taurus|talak|lesco|adjuvant/i);
-    expect(text).not.toContain('LABEL DURATION');
   });
 
-  test('a roach visit: the growth regulator duration is a label duration, allowed in its own words, not an expectation', () => {
+  test('a roach visit: each entry carries its own tags; the label duration stays on the card, never with the writer', () => {
     const records = facts([
       app('Alpine WSG', 'insect-control application', 'crack_and_crevice', 'Kitchen', ['roaches']),
       app('Gentrol IGR', 'insect growth regulator', 'crack_and_crevice', 'Kitchen', ['roaches']),
-      app('Advion Evolution Cockroach Gel Bait', 'bait application', 'bait_placement', 'Kitchen', ['roaches']),
+      app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', ['ants']),
     ]);
     const text = block(records);
-    expect(text).toContain('insect growth regulator, crack and crevice, Kitchen: mainly used for roaches.');
-    expect(text).toContain('LABEL DURATION (the growth regulator recorded today): Its label gives up to 4 months of continuous protection.');
-    expect(text).toContain('never a time to contact us');
-    expect(records.allowedPhrases).toContainEqual({ phrase: 'up to 4 months', sections: ['WHAT TO EXPECT'] });
-    // Never a contact time: the same words in WHAT'S NEXT, or with no title, are refused (Codex r1).
-    expect(screen("WHAT'S NEXT\nContact us in up to 4 months.", records)).toBe('timeframe');
-    expect(screen('Contact us in up to 4 months.', records)).toBe('timeframe');
-    expect(OWNER_RULES).toContain('a LABEL DURATION supplied under PRODUCT FACTS may be said once, in WHAT TO EXPECT only');
-    // Once, and never as a contact time, even inside WHAT TO EXPECT (Codex r2).
-    expect(screen('WHAT TO EXPECT\nIt keeps working for up to 4 months. Yes, up to 4 months.', records)).toBe('timeframe');
-    expect(screen('WHAT TO EXPECT\nContact us in up to 4 months.', records)).toBe('timeframe');
-    expect(screen('WHAT TO EXPECT\nThe growth regulator keeps working for up to 4 months. Contact us if you see live roaches.', records)).toBeNull();
-    const expectations = records.sections.find((section) => section.startsWith('EXPECTATIONS'));
-    expect(expectations).not.toContain('4 months');
-    const report = (line) => `WHAT TO EXPECT\n${line}`;
-    expect(screen(report('The growth regulator keeps working for up to 4 months.'), records)).toBeNull();
-    expect(screen(report('The growth regulator keeps working for up to 6 months.'), records)).toBe('timeframe');
+    // Alpine in the kitchen is tagged for roaches only: never the reason for ants found outside (Codex r3).
+    expect(text).toContain('- insect-control application, crack and crevice, Kitchen: mainly used for ants and roaches; tagged today for roaches; labeled for 25+ pests.');
+    expect(text).toContain('- insect growth regulator, crack and crevice, Kitchen: mainly used for roaches; tagged today for roaches.');
+    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants; labeled for 25+ pests.');
+    expect(PEST_WRITER_ADAPTER).toContain('only when that pest is in the same entry\'s "tagged today for" list');
+    // The duration: on the card, not with the writer, and its words are no allowance (Codex r1 to r3).
+    expect(records.sections.join('\n')).not.toMatch(/4 months|LABEL DURATION/);
+    expect(JSON.stringify(records.allowedPhrases)).not.toContain('4 months');
+    expect(screen('WHAT TO EXPECT\nThe growth regulator keeps working for up to 4 months.', records)).toBe('timeframe');
+    expect(OWNER_RULES).not.toContain('LABEL DURATION');
   });
 
-  test('two growth regulators, or none: no label duration', () => {
-    const two = facts([
-      app('Gentrol IGR', 'insect growth regulator', 'crack_and_crevice', 'Kitchen', ['roaches']),
-      app('Tekko Pro IGR', 'insect growth regulator', 'crack_and_crevice', 'Kitchen', ['roaches']),
-    ]);
-    expect(block(two)).not.toContain('LABEL DURATION');
-    expect(JSON.stringify(two.allowedPhrases)).not.toContain('4 months');
+  test('an untagged application says so', () => {
+    expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', [])])))
+      .toContain('mainly used for ants; tagged today for no pest; labeled for 25+ pests.');
   });
 
   test('no reviewed product, or a lawn visit: no block', () => {
@@ -756,6 +744,11 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT TO EXPECT\nYour home is protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYou are all set.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nThe growth regulator gives continuous protection.')).toBeNull();
+    // The plan filler the adapter bans is refused too (Codex r3).
+    expect(screen("WHAT'S NEXT\nThis quarterly pest control service remains part of your recurring plan.")).toBe('owner_phrase');
+    expect(screen('WHAT WE FOUND\nThis was your recurring service.')).toBe('owner_phrase');
+    expect(screen('WHAT WE FOUND\nWe walked the exterior as part of our quarterly program.')).toBe('owner_phrase');
+    expect(screen('WHAT WE DID AND WHY\nWe completed the outside part of your quarterly service.')).toBeNull();
   });
 
   test('the customer card still gets the Gentrol duration', () => {
