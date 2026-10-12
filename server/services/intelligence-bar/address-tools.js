@@ -50,6 +50,7 @@ const DIRECTIONS = { north: 'n', south: 's', east: 'e', west: 'w', northeast: 'n
 // Case, punctuation and a spelled-out direction ("North" / "N") are not differences.
 const compareKey = value => String(value).toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).map(w => DIRECTIONS[w] || w).join('');
 const sameText = (a, b) => compareKey(a) === compareKey(b);
+const DIRECTION_KEYS = Object.fromEntries(Object.values(DIRECTIONS).map(key => [key, true]));
 const cleanText = value => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '');
 
 // What the operator gave, split into parts. Explicit city/state/zip win over
@@ -73,8 +74,11 @@ function givenParts(input) {
   // locality parser would file a trailing direction ("17th St W") as a city.
   const streetOnly = Boolean(cleanText(input.city) || cleanText(input.zip));
   const parsed = streetOnly ? { line1: withoutUnit[0] || '' } : parseRawAddress(withoutUnit.join(', '));
-  const street = cleanText(parsed.line1) || withoutUnit[0] || text;
-  const parsedCity = cleanText(parsed.city);
+  // The locality parser files a trailing direction ("100 17th St W") as the
+  // city. A city that is only a direction word is part of the street.
+  const directionAsCity = Boolean(parsed.city) && compareKey(parsed.city) in DIRECTION_KEYS;
+  const street = [cleanText(parsed.line1) || withoutUnit[0] || text, directionAsCity ? cleanText(parsed.city) : ''].filter(Boolean).join(' ');
+  const parsedCity = directionAsCity ? '' : cleanText(parsed.city);
   const stateInCity = !parsed.state && TRAILING_STATE.test(parsedCity);
   return {
     street: normalizeStreetLine(street),
@@ -161,56 +165,63 @@ function shape(result, given) {
 // address as given and, when Google answered, as normalized. An address
 // write whose street and ZIP are not in the ledger is refused with
 // address_check_required, so the model must check first and then save what
-// was checked. A write with no ZIP matches on the street alone.
+// was checked: street, city, state and ZIP must all match one ledger entry.
 const WRITE_ADDRESS_FIELDS = {
   add_customer_property: input => input,
   create_customer: input => input,
   correct_invoice_address: input => input,
   update_customer: input => input.updates,
-  update_lead_contact: input => ({ address_line1: input.address, zip: input.zip, city: input.city }),
+  update_lead_contact: input => ({ address_line1: input.address, zip: input.zip, city: input.city, state: input.state }),
 };
 const streetKey = line => compareKey(normalizeStreetLine(splitStreetLineUnit(cleanText(line)).street || cleanText(line)));
 const zipKey = zip => cleanText(String(zip ?? '')).slice(0, 5);
+const stateKey = state => normalizeState(cleanText(String(state ?? ''))) || '';
+const addressKey = ({ street, city, state, zip }) => ({
+  street: streetKey(street), city: compareKey(cleanText(String(city ?? ''))), state: stateKey(state) || DEFAULT_STATE, zip: zipKey(zip),
+});
 
-// The street and ZIP an address-writing call would save; null when the call
-// touches no address field. A call that changes the ZIP, city or state with
-// no street is `partial`: nothing can be matched to a check, so it is refused
-// and the model must send the whole address it checked.
+// The address an address-writing call would save, as comparable keys; null
+// when the call touches no address field. A call must carry the street, the
+// city and the ZIP together (`partial` otherwise): a street saved over the
+// record's old city or ZIP, or a ZIP changed alone, cannot be matched to a
+// check, so the model must send the whole address it checked.
 function writtenAddress(toolName, input) {
   const fields = WRITE_ADDRESS_FIELDS[toolName]?.(input || {});
   if (!fields) return null;
-  const line = cleanText(fields.address_line1);
-  if (line) return { street: streetKey(line), zip: zipKey(fields.zip) };
-  const partial = [fields.zip, fields.city, fields.state].some(value => cleanText(String(value ?? '')));
-  return partial ? { partial: true } : null;
+  const present = key => Boolean(cleanText(String(fields[key] ?? '')));
+  if (!['address_line1', 'city', 'state', 'zip'].some(present)) return null;
+  if (!present('address_line1') || !present('city') || !present('zip')) return { partial: true };
+  return addressKey({ street: fields.address_line1, city: fields.city, state: fields.state, zip: fields.zip });
 }
 
-const ADDRESS_PARTIAL = Object.freeze({
-  error: 'Send the street address together with the city, state or ZIP: a ZIP, city or state cannot be changed alone. Run check_address on the whole address first, then save what it returned.',
+const ADDRESS_CHECK_REQUIRED = Object.freeze({
+  error: 'This address has not been checked. Run check_address on it first, then save the street, city, state and ZIP that check returned (or exactly the address you checked, if the operator confirms it).',
   code: 'address_check_required',
 });
-const ADDRESS_CHECK_REQUIRED = Object.freeze({
-  error: 'This address has not been checked. Run check_address on it first, then save the address that check returned (or the exact address you checked, if the operator confirms it).',
+const ADDRESS_PARTIAL = Object.freeze({
+  error: 'An address change must carry the street, the city and the ZIP together. Run check_address on the whole address first, then save what it returned.',
   code: 'address_check_required',
 });
 
 function createAddressCheckLedger() {
   const checked = [];
+  const same = (a, b) => a.street === b.street && a.city === b.city && a.state === b.state && a.zip === b.zip;
   return {
-    // Called with every tool result; only a finished check_address records.
+    // Called with every tool result; only a finished check_address records:
+    // the address as given and, when Google answered, as normalized.
     record(toolName, input, result) {
       if (toolName !== CHECK_ADDRESS_TOOL_NAME || !result?.status || result.status === 'invalid_input') return;
       const given = givenParts({ ...input, address: cleanText(input?.address) });
-      checked.push({ street: streetKey(given.street), zip: given.zip });
-      if (result.normalized?.address_line1) checked.push({ street: streetKey(result.normalized.address_line1), zip: zipKey(result.normalized.zip) });
+      checked.push(addressKey(given));
+      const n = result.normalized;
+      if (n?.address_line1) checked.push(addressKey({ street: n.address_line1, city: n.city, state: n.state, zip: n.zip }));
     },
     // null when the call may proceed; the refusal result otherwise.
     writeRefusal(toolName, input) {
       const written = writtenAddress(toolName, input);
       if (!written) return null;
       if (written.partial) return { ...ADDRESS_PARTIAL };
-      const covered = checked.some(c => c.street === written.street && (!written.zip || c.zip === written.zip));
-      return covered ? null : { ...ADDRESS_CHECK_REQUIRED };
+      return checked.some(entry => same(entry, written)) ? null : { ...ADDRESS_CHECK_REQUIRED };
     },
   };
 }

@@ -219,43 +219,60 @@ describe('address check ledger', () => {
     validateAddress.mockResolvedValue(result);
     ledger.record('check_address', input, await run(input));
   };
+  const REQUIRED = { code: 'address_check_required' };
+  const full = (over = {}) => ({ address_line1: '100 Example Way', city: 'Sarasota', state: 'FL', zip: '34236', ...over });
 
   test('an unchecked address write is refused; a non-address write is not', () => {
     const ledger = createAddressCheckLedger();
-    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 Example Way', zip: '34236' })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('add_customer_property', full())).toMatchObject(REQUIRED);
     expect(ledger.writeRefusal('update_customer', { updates: { notes: 'x' } })).toBeNull();
     expect(ledger.writeRefusal('query_customers', { search: '100 Example Way' })).toBeNull();
   });
 
-  test('the normalized address passes after a check; a guessed ZIP on the given street does not', async () => {
+  test('the normalized address passes after a check; any other street, city or ZIP does not', async () => {
     const ledger = createAddressCheckLedger();
     await checked(ledger, { address: '100 example wy' }, google({ status: 'corrected' }));
-    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 Example Way', zip: '34236' })).toBeNull();
-    expect(ledger.writeRefusal('create_customer', { address_line1: '100 Example Way Apt 4', zip: '34236' })).toBeNull();
-    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 example wy', zip: '34999' })).toMatchObject({ code: 'address_check_required' });
-    expect(ledger.writeRefusal('add_customer_property', { address_line1: '200 Other Rd', zip: '34236' })).toMatchObject({ code: 'address_check_required' });
+    expect(ledger.writeRefusal('add_customer_property', full())).toBeNull();
+    expect(ledger.writeRefusal('create_customer', full({ address_line1: '100 Example Way Apt 4' }))).toBeNull();
+    expect(ledger.writeRefusal('update_customer', { updates: full({ state: undefined }) })).toBeNull();
+    expect(ledger.writeRefusal('add_customer_property', full({ zip: '34999' }))).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('add_customer_property', full({ city: 'Venice' }))).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('add_customer_property', full({ state: 'GA' }))).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('add_customer_property', full({ address_line1: '200 Other Rd' }))).toMatchObject(REQUIRED);
   });
 
   test('when Google could not check, only the exact address the operator gave passes', async () => {
     const ledger = createAddressCheckLedger();
-    await checked(ledger, { address: '100 Example Way', zip: '34236' }, { status: 'api_unavailable', ...UNVERIFIED });
-    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34236' } })).toBeNull();
-    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34237' } })).toMatchObject({ code: 'address_check_required' });
+    await checked(ledger, { address: '100 17th St W', city: 'Bradenton', zip: '34205' }, { status: 'api_unavailable', ...UNVERIFIED });
+    const given = { address_line1: '100 17th St W', city: 'Bradenton', zip: '34205' };
+    expect(ledger.writeRefusal('update_customer', { updates: given })).toBeNull();
+    expect(ledger.writeRefusal('update_customer', { updates: { ...given, zip: '34237' } })).toMatchObject(REQUIRED);
   });
 
-  test('a ZIP, city or state change with no street is refused', async () => {
+  test('a street with a trailing direction and no locality is recorded whole', async () => {
+    validateAddress.mockResolvedValue({ status: 'api_unavailable', ...UNVERIFIED });
+    const out = await run({ address: '100 17th St W' });
+    expect(out.status).toBe('api_unavailable');
     const ledger = createAddressCheckLedger();
-    await checked(ledger, { address: '100 Example Way', zip: '34236' });
-    expect(ledger.writeRefusal('update_customer', { updates: { zip: '34999' } })).toMatchObject({ code: 'address_check_required' });
-    expect(ledger.writeRefusal('update_customer', { updates: { city: 'Venice' } })).toMatchObject({ code: 'address_check_required' });
-    expect(ledger.writeRefusal('update_lead_contact', { zip: '34999' })).toMatchObject({ code: 'address_check_required' });
+    await checked(ledger, { address: '100 17th St W, Bradenton, FL 34205' }, { status: 'api_unavailable', ...UNVERIFIED });
+    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 17th St W', city: 'Bradenton', state: 'FL', zip: '34205' })).toBeNull();
+    expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 17th St', city: 'Bradenton', state: 'FL', zip: '34205' })).toMatchObject(REQUIRED);
+  });
+
+  test('a change that does not carry street, city and ZIP together is refused', async () => {
+    const ledger = createAddressCheckLedger();
+    await checked(ledger, { address: '100 Example Way', city: 'Sarasota', zip: '34236' });
+    expect(ledger.writeRefusal('update_customer', { updates: { zip: '34999' } })).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('update_customer', { updates: { city: 'Venice' } })).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way' } })).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('update_lead_contact', { zip: '34999' })).toMatchObject(REQUIRED);
     expect(ledger.writeRefusal('update_lead_contact', { first_name: 'Pat' })).toBeNull();
   });
 
   test('each address-writing tool is read through its own fields', () => {
-    expect(writtenAddress('update_lead_contact', { address: '100 Example Way', zip: '34236' })).toEqual({ street: expect.any(String), zip: '34236' });
+    expect(writtenAddress('update_lead_contact', { address: '100 Example Way', city: 'Sarasota', zip: '34236' })).toMatchObject({ zip: '34236', state: 'FL' });
     expect(writtenAddress('update_lead_contact', { first_name: 'Pat' })).toBeNull();
-    expect(writtenAddress('correct_invoice_address', { address_line1: '100 Example Way' })).toMatchObject({ zip: '' });
+    expect(writtenAddress('correct_invoice_address', { address_line1: '100 Example Way' })).toEqual({ partial: true });
   });
 });
 
