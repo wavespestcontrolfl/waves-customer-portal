@@ -703,7 +703,7 @@ describe('product facts for the pest writer', () => {
     expect(text).toContain('- insect-control application, crack and crevice, Kitchen: mainly used for ants and roaches; tagged today for roaches.');
     expect(text).toContain('- insect growth regulator, crack and crevice, Kitchen: mainly used for roaches; tagged today for roaches.');
     expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants.');
-    expect(PEST_WRITER_ADAPTER).toContain('only when that pest is in the same entry\'s "tagged today for" list');
+    expect(PEST_WRITER_ADAPTER).toContain("use that entry's own tags");
     // The duration: on the card, not with the writer, and its words are no allowance (Codex r1 to r3).
     expect(records.sections.join('\n')).not.toMatch(/4 months|LABEL DURATION/);
     expect(JSON.stringify(records.allowedPhrases)).not.toContain('4 months');
@@ -715,7 +715,7 @@ describe('product facts for the pest writer', () => {
     expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', [])])))
       .toContain('mainly used for ants; not tagged today (its reason is not recorded here).');
     // No tag is not proof of routine coverage (Codex r8).
-    expect(PEST_WRITER_ADAPTER).toContain('With no matching tag the reason is not recorded');
+    expect(PEST_WRITER_ADAPTER).toContain('An entry that is not tagged has no recorded reason');
     expect(PEST_WRITER_ADAPTER).not.toContain('routine coverage');
   });
 
@@ -750,35 +750,13 @@ describe('product facts for the pest writer', () => {
     expect(records([alpine(['roaches']), app('Advion Evolution Cockroach Gel Bait', 'bait application', 'bait_placement', 'Kitchen', ['roaches'])]).allowedDates).toHaveLength(2);
   });
 
-  test('reassurance verdicts are refused by the screen (Codex r1)', () => {
-    expect(screen('WHAT TO EXPECT\nYour home is protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYou are all set.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nThe growth regulator gives continuous protection.')).toBeNull();
-    // Only the verdict, not the word: other writers and the Ask answer share this screen (Codex r6).
-    expect(screen('WHAT TO EXPECT\nThis keeps your home protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYou’re now fully protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYour home is completely protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYour home is currently protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYour home has been protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYour home was protected today.')).toBe('owner_phrase');
-    expect(screen('WHAT WE DID AND WHY\nThe bait was protected from rain by the station cover.')).toBeNull();
-    // Any verdict, whatever the verb: the word is refused unless it describes a thing ("a protected spot") or names what from (Codex r9).
-    expect(screen('WHAT TO EXPECT\nThe treatment leaves your home protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYour home feels protected.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nThe treatment has your home protected.')).toBe('owner_phrase');
-    expect(screen('WHAT WE DID AND WHY\nWe placed bait in the protected stations along the fence.')).toBeNull();
-    // A protected noun phrase is a verdict too, unless the noun is a placement (Codex r10).
-    expect(screen('WHAT TO EXPECT\nYour home is a protected space.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nThe treatment leaves a protected home.')).toBe('owner_phrase');
-    expect(screen('WHAT TO EXPECT\nYou now have a protected property.')).toBe('owner_phrase');
-    expect(screen('WHAT WE DID AND WHY\nThe gel went into a protected bait station under the sink.')).toBeNull();
+  test('no new word screen: the owner phrase screen is as on main (Codex r6 to r11)', () => {
+    // A "protected" verdict screen was tried for six rounds; every form either
+    // missed a wording or refused a placement. The adapter asks for facts instead.
     expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
-    expect(screen('WHAT WE DID AND WHY\nThe stations are in a protected area along the fence.')).toBeNull();
-    expect(screen('WHAT WE DID AND WHY\nThe stations are protected from rain by their covers.')).toBeNull();
-    // Plan talk is neither banned nor screened: a word screen for it kept
-    // catching recurring pest findings (Codex r3 to r5).
     expect(screen('WHAT WE FOUND\nRecurring ant activity was noted during this visit.')).toBeNull();
-    expect(PEST_WRITER_ADAPTER).not.toMatch(/part of a plan/);
+    expect(PEST_WRITER_ADAPTER).toContain('Reassure with recorded facts:');
+    expect(PEST_WRITER_ADAPTER).not.toMatch(/protected|all set|part of a plan/);
   });
 
   test('the customer card still gets the Gentrol duration', () => {
@@ -788,7 +766,6 @@ describe('product facts for the pest writer', () => {
 
   test('the adapter tells the writer how to use the facts, reassure, and name a sweep', () => {
     expect(PEST_WRITER_ADAPTER).toContain('PRODUCT FACTS are how you know what each treatment is for');
-    expect(PEST_WRITER_ADAPTER).toContain('Reassure with a recorded fact, never with a verdict');
     expect(PEST_WRITER_ADAPTER).toContain('when the TECHNICIAN NOTE names the places swept, name only those places');
   });
 });
