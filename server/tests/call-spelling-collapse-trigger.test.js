@@ -48,7 +48,7 @@ const {
   nameSpellingDifferences,
 } = require('../services/contact-dictation');
 
-const { contactPassTrigger, contactPassTriggerLogged, contactDecoderGate, persistLateContactPass } = _test;
+const { contactPassTrigger, contactPassTriggerLogged, contactDecoderGate, persistLateContactPass, settleLateContactPass } = _test;
 const collapsed = (t, ctx) => spellingCollapseSignals(t, ctx).any;
 const GATE = 'GATE_CALL_SPELLING_COLLAPSE_TRIGGER';
 const COLLAPSED = 'Agent: Can I get your last name?\nCaller: Serov, Serov.\nAgent: Thanks, and the best number to reach you?';
@@ -70,6 +70,10 @@ describe('spellingCollapseSignals', () => {
     ['spelled, no letters after', 'Caller: Yes, it is spelled the usual way, nothing odd about it at all.'],
     ['"that\'s S" with no letters after', "Caller: Yes that's S and then the rest of it is simple enough, ok?"],
     ['"with a C" with no letters after', 'Caller: It begins with a C, like the sea. Then a long ending that I never say.'],
+    ['"that\'s an A" with no letters after', "Caller: That's an A and then the rest is easy enough to say aloud, ok?"],
+    ['"with an I" with no letters after', 'Caller: It begins with an I and then the rest is easy enough to say aloud, ok?'],
+    ['"A as in" with no word after', 'Caller: A as in, you know, the usual way people say it for the office.'],
+    ['"I as in" with no word after', 'Caller: I as in, you know, the usual way people say it for the office.'],
     ['a letter then "as in" with no word after', 'Caller: T as in, you know, the usual way people say it for the office.'],
   ])('fires on %s', (_label, text) => {
     expect(collapsed(text)).toBe(true);
@@ -81,6 +85,8 @@ describe('spellingCollapseSignals', () => {
     ['a state repeated', 'Caller: We are in Florida. Florida.'],
     ['a month repeated near "name"', 'Caller: My name is on the account, it is October. October.'],
     ['a capitalized repeat with no name context', 'Caller: Tarnow. Tarnow.'],
+    ['"with a" before an ordinary word', 'Caller: I spoke with a tech last week about the garage.'],
+    ['"I like in-person" visits', 'Caller: I like in-person visits better than phone calls.'],
     ['a plain greeting', 'Caller: Hi, I have ants in my kitchen and I would like a quote.'],
     ['a dry spell', 'Caller: We had a dry spell and the lawn is brown.'],
     ['a stutter without punctuation', 'Caller: The the garage side is the worst.'],
@@ -280,6 +286,32 @@ describe('persistLateContactPass (token-fenced audit write)', () => {
     db.__builder.update.mockClear();
     expect(await persistLateContactPass({ call, procToken: 'tok-1', provenanceMetadata: {}, gate: { late: null, panCount: 0 }, relay: false })).toBe(true);
     expect(db.__builder.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('settleLateContactPass (a lost claim abandons the pass)', () => {
+  const gate = { late: { text: 'Caller: Serov, S-E-R-O-V.', model: 'gpt-4o-transcribe', chars: 25 }, panCount: 0 };
+  const args = { call: { id: 'call-1' }, procToken: 'tok-1', provenanceMetadata: {}, gate, relay: false, callSid: 'CA1234567890abcdef' };
+
+  test('claim lost: returns the same ownership-lost result the transcript write returns', async () => {
+    db.__builder.update.mockResolvedValueOnce(0);
+    expect(await settleLateContactPass(args)).toEqual({ success: false, skipped: true, reason: 'terminal_write_ownership_lost' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('abandoning this pass'));
+  });
+
+  test('claim held: null, the pass carries on', async () => {
+    expect(await settleLateContactPass(args)).toBeNull();
+    expect(await settleLateContactPass({ ...args, gate: { late: null, panCount: 0 } })).toBeNull(); // nothing to persist
+  });
+
+  test('processRecording returns that result before it can reach the decoder', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const settle = src.indexOf('const lost = await settleLateContactPass(');
+    expect(settle).toBeGreaterThan(-1);
+    const returned = src.indexOf('if (lost) return lost;', settle);
+    const decode = src.indexOf('contactDictation = await decodeDictatedContacts(', settle);
+    expect(returned).toBeGreaterThan(settle);
+    expect(decode).toBeGreaterThan(returned);
   });
 });
 

@@ -128,14 +128,18 @@ const REPEAT_CONTEXT_WINDOW = 80;
 const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am|(?:hi|hello|hey)\s+(?:this\s+is\s+)?[A-Z])\b/i;
 // (b) A phrase that announces a spelling. It counts only when no letter run follows within
 // ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
-// The letter forms are case sensitive on purpose ("that's S", not "that's a").
+// The letter forms are case sensitive on purpose ("that's S", not "that's a"). Where the words
+// around the letter already say a spelling is coming ("that's an", "with a", "as in", "like in")
+// an uppercase A or I counts too (not "I like in", which is ordinary speech); the bare-letter
+// class excludes them so "I spoke with a tech" and a stray "A" do not fire.
 const ANNOUNCE_WINDOW = 60;
 const SPELLING_ANNOUNCE_RES = [
   new RegExp(NAME_SPELLING_WORD_RE.source, 'gi'),
   new RegExp([
-    String.raw`\bthat'?s\s+(?:an?\s+)?[B-HJ-Z]\b(?![\p{L}'’])`,
-    String.raw`\bwith\s+an?\s+[B-HJ-Z]\b(?![\p{L}'’])`,
-    String.raw`\b[B-HJ-Z]\s+(?:as|like)\s+in\b`,
+    String.raw`\b[Tt]hat'?s\s+(?:an?\s+)?[B-HJ-Z]\b(?![\p{L}'’])`,
+    String.raw`\b[Tt]hat'?s\s+an?\s+[AI]\b(?![\p{L}'’])`,
+    String.raw`\b[Ww]ith\s+an?\s+[A-Z]\b(?![\p{L}'’])`,
+    String.raw`\b(?:[A-Z]\s+as|[A-HJ-Z]\s+like)\s+in\b`,
   ].join('|'), 'gu'),
 ];
 const LETTER_RUN_AFTER_RE = new RegExp(`${NAME_SPELLING_LETTERS_RE.source}|${NAME_SPELLING_PHONETIC_RE.source}`, 'i');

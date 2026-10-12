@@ -8318,6 +8318,14 @@ async function persistLateContactPass({ call, procToken, provenanceMetadata, gat
   return Number(rows) > 0;
 }
 
+// Persists a late contact pass and answers whether the claim is still ours: null to carry on, or
+// the same ownership-lost result the transcript write returns when a peer reclaimed the call.
+async function settleLateContactPass({ callSid, ...rest }) {
+  if (await persistLateContactPass(rest)) return null;
+  logger.warn(`[call-proc] late contact pass write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer; abandoning this pass`);
+  return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+}
+
 // Wrapper: primary transcription + (when the call dictated contact info) a
 // SECOND full-call pass on a promptable model. The diarized primary cannot be
 // prompted, so token-level dictation fidelity ("W, C as in Charlie, W, six
@@ -11867,9 +11875,10 @@ const CallRecordingProcessor = {
       if (transcription) {
         const gate = await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid });
         if (gate.lateContactPass) contactPassTranscript = gate.lateContactPass;
-        if (!(await persistLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate, relay: Boolean(recordedSegmentText) }))) {
-          logger.warn(`[call-proc] late contact pass write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
-        }
+        // A lost claim here abandons the pass exactly like the transcript write above: the peer
+        // that owns the call runs the decoder and everything after it.
+        const lost = await settleLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate, relay: Boolean(recordedSegmentText), callSid });
+        if (lost) return lost;
         if (gate.run) {
           contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
         }
@@ -24394,6 +24403,7 @@ CallRecordingProcessor._test = {
   contactPassTriggerLogged,
   contactDecoderGate,
   persistLateContactPass,
+  settleLateContactPass,
   lateContactPassMeta,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
