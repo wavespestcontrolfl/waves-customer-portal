@@ -94,6 +94,14 @@ function linesToComponents(lines) {
 // line at a time — the SAME steps, in the same order, the commit runs with
 // setLineForScalarWrite. Returns { steps, lines, totalBefore, totalAfter,
 // newLine } or { error, code }.
+// customers.monthly_rate and customer_plan_rates.monthly_rate are decimal(10,2): the largest amount a column holds is just
+// under 100,000,000. A bill past it would fail at the bill step AFTER the visits are booked, so the card refuses first.
+const MONEY_COLUMN_LIMIT = 100000000;
+const outOfRange = (amount) => !(Math.abs(round(amount)) < MONEY_COLUMN_LIMIT);
+function moneyRangeRefusal() {
+  return refusal(`A monthly amount is larger than the bill can hold (the limit is under ${MONEY_COLUMN_LIMIT.toLocaleString('en-US')} dollars a month). Check the amounts. Nothing was proposed.`, 'monthly_total_out_of_range');
+}
+
 function planBill({ components, previousScalar, family, monthly, monthlyTotal, reprice }) {
   const PlanRateLedger = require('../plan-rate-ledger');
   const before = PlanRateLedger.billLines(components, previousScalar);
@@ -103,6 +111,7 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
   for (const r of reprice) {
     const lineBefore = current.get(r.family) || 0;
     const next = round(scalar - lineBefore + r.monthly);
+    if (outOfRange(r.monthly) || outOfRange(next)) return moneyRangeRefusal();
     const change = PlanRateLedger.planRateChange({
       components: linesToComponents(current), previousScalar: scalar, newScalar: next, familyKey: r.family,
     });
@@ -113,6 +122,8 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
   }
   const others = round([...current.values()].reduce((s, v) => s + v, 0));
   const total = monthly != null ? round(others + monthly) : round(monthlyTotal);
+  // The FINAL total, and the amounts that feed it, against the column range (a small new-service amount can still cross it).
+  if (outOfRange(total) || outOfRange(others) || (monthly != null && outOfRange(monthly))) return moneyRangeRefusal();
   // D4: a total below the other lines is refused by the ledger itself.
   const change = PlanRateLedger.planRateChange({
     components: linesToComponents(current), previousScalar: scalar, newScalar: total, familyKey: family,
@@ -210,6 +221,7 @@ function parsePrices(input) {
   }
   const positive = (n) => n == null || (Number.isFinite(n) && n > 0);
   if (!positive(monthly) || !positive(monthlyTotal)) return refusal('Monthly prices must be positive dollar amounts.');
+  if ((monthly != null && outOfRange(monthly)) || (monthlyTotal != null && outOfRange(monthlyTotal))) return moneyRangeRefusal();
   return { monthly, monthlyTotal };
 }
 

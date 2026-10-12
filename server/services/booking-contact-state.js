@@ -120,7 +120,7 @@ async function currentContactKey(customerId, { propertyId = null, kind = 'confir
 // The confirmation key from rows the CALLER already loaded (the deferred sender's own prefs and customer row), so the send
 // it guards goes to exactly the recipients hashed here. The text leg is built from those rows (the sender's SMS attempt is
 // handed the same rows); only the email leg is read now, through the email sender's own loaders. null = could not be read.
-async function confirmationKeyFromLoaded(customerId, { prefs, textCustomer, propertyId = null, conn = null } = {}) {
+async function confirmationKeyFromLoaded(customerId, { prefs, textCustomer, propertyId = null, conn = null, out = null } = {}) {
   try {
     if (!prefs || prefs.unavailable || !textCustomer) return null;
     const AppointmentEmail = require('./appointment-email')._private;
@@ -129,11 +129,14 @@ async function confirmationKeyFromLoaded(customerId, { prefs, textCustomer, prop
     const emailCustomer = await AppointmentEmail.loadCustomer(customerId, handle);
     if (!emailCustomer) return null;
     const emailRecipients = await AppointmentEmail.resolveRecipients(emailCustomer, { propertyId, conn: handle });
-    return confirmationKey({
+    const state = {
       textTo: uniqueSorted(getAppointmentContacts(textCustomer, prefs.raw).map((c) => digits10(c.phone))),
       emailTo: uniqueSorted(emailRecipients.map((r) => String(r.email || '').trim().toLowerCase())),
       toggles: toggleSet(prefs),
-    });
+    };
+    // `out`: the caller's out-param for the checked email set (the email leg is limited to it).
+    if (out) out.emailTo = state.emailTo;
+    return confirmationKey(state);
   } catch {
     return null;
   }

@@ -168,6 +168,21 @@ describe('the send-time check runs on the rows the send loaded (round 18)', () =
     expect(loaded).not.toHaveBeenCalled();
   });
 
+  test('the email leg is limited to the address set that was checked, and an address added after the check is audited, not sent (round 20)', async () => {
+    jest.spyOn(Contact, 'currentContactKey').mockResolvedValue('key-a');
+    jest.spyOn(Contact, 'confirmationKeyFromLoaded').mockImplementation(async (_id, opts) => { opts.out.emailTo = ['pinned@example.com']; return 'key-a'; });
+    const Email = require('../services/appointment-email');
+    const send = jest.spyOn(Email, 'sendAppointmentConfirmationEmail').mockResolvedValue({ ok: true });
+    await AppointmentReminders.sendConfirmation('visit-1');
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ recipientFilter: ['pinned@example.com'], onRecipientsDropped: expect.any(Function) }));
+    // The email sender reports an address it resolved that is outside the checked set.
+    await send.mock.calls[0][0].onRecipientsDropped(['added-later@example.com']);
+    expect(inserts).toEqual([expect.objectContaining({ table: 'activity_log', row: expect.objectContaining({
+      action: 'confirmation_email_recipient_skipped', metadata: expect.stringContaining('"reason":"recipient_changed"'),
+    }) })]);
+    expect(JSON.stringify(inserts)).not.toContain('added-later@example.com');
+  });
+
   test('the key from loaded rows hashes the same recipients as the card key', async () => {
     const AppointmentEmail = require('../services/appointment-email')._private;
     const Customer = require('../services/customer-contact');

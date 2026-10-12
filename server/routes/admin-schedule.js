@@ -8446,6 +8446,7 @@ async function lockBookingScope(trx, c) {
       db: conn, date, windowStart, windowEnd: computedEnd, excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
     }) : []),
     replanSeriesDates: async (conn) => [dateOnly(scheduledDate), ...(await replanChildDates(conn, c))],
+    preferencesUnchanged: (conn) => noWeekendsAnswerUnchanged(conn, c),
     resolveAnchorPropertyId: async (conn) => {
       if (bookingProperty) return bookingProperty.property_id;
       if (!cols.property_id || propertyOwnedByEstimateLinkage) return null;
@@ -10209,10 +10210,12 @@ async function planSeriesDates(c) {
 // The recurring children's dates generated again on `conn` (inside the booking transaction, under the shared closure-state
 // lock), from the closure state read there. Same generator and inputs as planSeriesDates; nothing is written.
 async function replanChildDates(conn, c) {
-  const { isRecurring, monthAnchorOpts, plannedCount, recurringIntervalDays, recurringPattern, scheduledDate, skipWeekendsEffective, weekendShift } = c;
+  const { customerId, isRecurring, monthAnchorOpts, plannedCount, recurringIntervalDays, recurringPattern, scheduledDate, skipWeekends, weekendShift } = c;
   if (!(isRecurring && recurringPattern)) return [];
   const plan = {
-    bookingWarnings: [], isRecurring, plannedChildDates: [], plannedCount, recurringPattern, scheduledDate, skipWeekendsEffective,
+    bookingWarnings: [], isRecurring, plannedChildDates: [], plannedCount, recurringPattern, scheduledDate,
+    // Read again here, under the shared `property-preferences` lock: the answer the card was planned with can have moved.
+    skipWeekendsEffective: !!skipWeekends || await customerPrefersNoWeekends(conn, customerId),
     rOpts: { ...monthAnchorOpts, intervalDays: recurringIntervalDays },
     shiftDir: weekendShift === 'back' ? 'back' : 'forward',
     seriesDates: new Set([dateOnly(scheduledDate) || '']),
@@ -10220,6 +10223,12 @@ async function replanChildDates(conn, c) {
   };
   planChildDates(plan);
   return plan.plannedChildDates;
+}
+
+// True while the customer's "not weekends" answer is the one the dates were planned with.
+async function noWeekendsAnswerUnchanged(conn, c) {
+  if (!(c.isRecurring && c.recurringPattern)) return true;
+  return (!!c.skipWeekends || await customerPrefersNoWeekends(conn, c.customerId)) === c.skipWeekendsEffective;
 }
 
 function planChildDates(c) {

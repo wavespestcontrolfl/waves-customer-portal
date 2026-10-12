@@ -1810,6 +1810,28 @@ describe('commit', () => {
     if (sentence.startsWith('No welcome')) expect(result.message).not.toMatch(/Welcome (text|email) queued/);
   });
 
+  test.each([
+    ['monthly_total at the column limit', { monthly: undefined, monthly_total: 100000000 }],
+    ['monthly_total far past the limit', { monthly: undefined, monthly_total: 1e12 }],
+    ['a monthly new-service amount at the limit', { monthly: 100000000 }],
+    ['a small new-service amount whose computed total crosses the limit', { monthly: 99999980 }],
+  ])('%s refuses at the card and again before booking, with monthly_total_out_of_range (round 20)', async (_name, overrides) => {
+    const input = { ...BASE_INPUT, ...overrides };
+    const preview = await run(input);
+    expect(preview).toMatchObject({ code: 'monthly_total_out_of_range' });
+    expect(preview.preview).toBeUndefined();
+    // The confirmed path builds the plan again: nothing is recorded or booked.
+    const result = await run({ ...input, _verified_program_version: 'v1:any' }, { confirmed: true });
+    expect(result.code === 'monthly_total_out_of_range' || result.preview_changed === true).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  test('the largest amount the column holds still previews (round 20)', async () => {
+    const preview = await run({ ...BASE_INPUT, monthly: undefined, monthly_total: 99999999.99 });
+    expect(preview.preview).toBe(true);
+  });
+
   test('a changed plan-sync prediction after the card refuses with preview_changed', async () => {
     const version = await approvedVersion();
     Sync.scheduledServiceRowsForCustomer.mockResolvedValue([]);

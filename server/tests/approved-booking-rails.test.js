@@ -17,6 +17,7 @@ let log;
 let billingRow;
 let catalogRow;
 let prefsGate = null;
+let prefsLockBusy = false;
 
 function fakeTrx() {
   const trx = (table) => {
@@ -30,7 +31,11 @@ function fakeTrx() {
     return b;
   };
   trx.isTransaction = true;
-  trx.raw = jest.fn(async (sql, bindings) => { log.push(/lock_shared/.test(sql) ? `lock:closure-state:${bindings.join('/')}` : 'raw'); return {}; });
+  trx.raw = jest.fn(async (sql, bindings) => {
+    if (/try_advisory_xact_lock_shared/.test(sql)) { log.push(`lock:preferences-shared:${bindings.join('/')}`); return { rows: [{ locked: !prefsLockBusy }] }; }
+    log.push(/lock_shared/.test(sql) ? `lock:closure-state:${bindings.join('/')}` : 'raw');
+    return {};
+  });
   return trx;
 }
 
@@ -47,6 +52,7 @@ const BILLING = { payer_id: null, billing_mode: 'monthly_membership', per_applic
 beforeEach(() => {
   log = [];
   prefsGate = null;
+  prefsLockBusy = false;
   jest.spyOn(require('../services/booking-contact-state'), 'currentContactKey').mockImplementation(async () => { log.push('read:contact'); return 'key-a'; });
   jest.spyOn(require('../services/consultation-outcomes'), 'openConsultationCandidates').mockImplementation(async () => { log.push('read:consultations'); return []; });
   billingRow = { ...BILLING };
@@ -266,13 +272,37 @@ describe('each rail: a read that differs from the pinned fact throws its code', 
     const replan = jest.fn(async () => { log.push('replan'); return ['2099-03-03', '2099-04-07']; });
     log = [];
     await run(req, { replanSeriesDates: replan });
-    expect(log).toEqual(['lock:closure-state:slot-reserve/closure-state', 'replan']);
+    expect(log).toEqual(['lock:closure-state:slot-reserve/closure-state', `lock:preferences-shared:property-preferences/${CUSTOMER_ID}`, 'replan']);
     // A blackout day added after the card moves a regenerated date: the planned dates are stale.
     replan.mockResolvedValue(['2099-03-03', '2099-04-08']);
     expect(await codeOf(run(req, { replanSeriesDates: replan }))).toBe('DATES_CHANGED');
     // Planned dates that differ from the regenerated ones refuse even when the regenerated ones are the card's.
     replan.mockResolvedValue(['2099-03-03', '2099-04-07']);
     expect(await codeOf(run(req, { seriesDates: ['2099-03-03', '2099-04-08'], replanSeriesDates: replan }))).toBe('DATES_CHANGED');
+  });
+  test('DATES_CHANGED: a "not weekends" preference flipped after the card refuses; a writer in flight (the shared lock is only tried) refuses too (round 20)', async () => {
+    const req = { approvedVisitDates: ['2099-03-03', '2099-04-07'] };
+    const same = jest.fn(async () => ['2099-03-03', '2099-04-07']);
+    const unchanged = jest.fn(async () => true);
+    await expect(run(req, { replanSeriesDates: same, preferencesUnchanged: unchanged })).resolves.toBeUndefined();
+    expect(unchanged).toHaveBeenCalledTimes(1);
+    // The answer moved (dates may even regenerate the same): refused.
+    expect(await codeOf(run(req, { replanSeriesDates: same, preferencesUnchanged: jest.fn(async () => false) }))).toBe('DATES_CHANGED');
+    // A preference writer holds the exclusive lock: the try fails, nothing waits, the rail refuses.
+    prefsLockBusy = true;
+    expect(await codeOf(run(req, { replanSeriesDates: same, preferencesUnchanged: unchanged }))).toBe('DATES_CHANGED');
+  });
+  test('the shared preferences lock is taken after the closure-state lock and before the estimate lock, and only tried (round 20)', async () => {
+    log = [];
+    await run({ approvedVisitDates: ['2099-03-03', '2099-04-07'], approvedNoOpenEstimate: true });
+    const closure = log.indexOf('lock:closure-state:slot-reserve/closure-state');
+    const prefs = log.findIndex((l) => l.startsWith('lock:preferences-shared:'));
+    expect(closure).toBeGreaterThan(-1);
+    expect(prefs).toBeGreaterThan(closure);
+    expect(prefs).toBeLessThan(log.indexOf('lock:estimates-advisory'));
+    const src = require('fs').readFileSync(require.resolve('../services/scheduling/approved-booking-rails'), 'utf8');
+    expect(src).toContain('pg_try_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))');
+    expect(src).not.toMatch(/pg_advisory_xact_lock_shared\(hashtext\(\?\), hashtext\(\?::text\)\)', \['property-preferences'/);
   });
   test('the closure-state lock runs before the estimate advisory lock (a leaf in the lock order)', async () => {
     log = [];

@@ -424,7 +424,7 @@ async function callbackNumberHoldConfirmedForVisit(idsOrScheduledServiceId) {
 // `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
 // claim owner sends under — see visitReminderEmailKey. Null keeps the
 // per-service key.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms', emailRecipientFilter = null, onRecipientsDropped = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // App backups, including the terminal quiet-hour email, share one
@@ -454,7 +454,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, ...(Array.isArray(emailRecipientFilter) ? { recipientFilter: emailRecipientFilter, onRecipientsDropped } : {}) });
     }
     if (kind === '72h' || kind === '24h') {
       return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
@@ -472,9 +472,9 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
 // the email handoff is recorded there as MOVE_HOLD so the notice defers
 // (row unmarked, visit claim released) instead of reading as suppressed.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms', emailRecipientFilter = null, onRecipientsDropped = null }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel, emailRecipientFilter, onRecipientsDropped });
   if (res?.reason === 'preferences_unavailable') {
     if (smsOutcome) {
       smsOutcome.retryable = true;
@@ -538,7 +538,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, emailRecipientFilter = null, onRecipientsDropped = null }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -561,7 +561,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return false;
   }
   const ch = apptChannel(channel, { preserveAppChoice: kind === '72h' || kind === '24h' });
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey, emailRecipientFilter, onRecipientsDropped };
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
@@ -2335,7 +2335,12 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // A visit booked from a program card: re-check its pinned recipient key against the rows THIS send loaded, right
       // before it. The card check in sendConfirmation read its own snapshot; a phone or setting change after that read
       // must not reach the send below, which uses `prefs` and `customer` as loaded here.
-      if (contactPin && await loadedRecipientsBlockConfirmation(record, scheduledServiceId, contactPin, { prefs, customer })) return false;
+      const checked = {};
+      if (contactPin && await loadedRecipientsBlockConfirmation(record, scheduledServiceId, contactPin, { prefs, customer, checked })) return false;
+      // The email leg reloads the customer and its recipients itself. For a pinned visit it is handed the address set that
+      // was just checked, and any other address it resolves is skipped and audited (an address added after the check).
+      const emailRecipientFilter = contactPin && Array.isArray(checked.emailTo) ? checked.emailTo : null;
+      const onRecipientsDropped = emailRecipientFilter ? (addresses) => auditUnpinnedEmailRecipients(record, scheduledServiceId, addresses) : null;
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the pre-check
@@ -2352,6 +2357,8 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         apptTime,
         serviceLabel,
         rescheduleUrl: reschedule.url,
+        emailRecipientFilter,
+        onRecipientsDropped,
         smsOutcome,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
@@ -2498,12 +2505,28 @@ async function contactPinBlocksConfirmation(record, scheduledServiceId, knownPin
   return true;
 }
 
+// An email address the confirmation's email leg resolved that was not in the set the send-time check approved. It is not
+// sent to; the skip is audited for the office.
+async function auditUnpinnedEmailRecipients(record, scheduledServiceId, addresses) {
+  logger.warn(`[appt-remind] confirmation for ${scheduledServiceId}: ${addresses.length} email recipient(s) added after the check were skipped`);
+  try {
+    await db('activity_log').insert({
+      customer_id: record.customer_id,
+      action: 'confirmation_email_recipient_skipped',
+      description: `Visit ${scheduledServiceId}: ${addresses.length} email address(es) were added after the program card was approved, so the booking confirmation email was not sent to them. Check the recipients, then send it by hand if needed.`,
+      metadata: JSON.stringify({ scheduled_service_id: scheduledServiceId, reason: 'recipient_changed', skipped: addresses.length }),
+    });
+  } catch (err) {
+    logger.error(`[appt-remind] could not audit skipped email recipients for ${scheduledServiceId}: ${err.message}`);
+  }
+}
+
 // The send-time check on the rows deliverConfirmation itself loaded (its prefs and customer row), run immediately before
 // the send: the text leg then goes to the recipients checked here, not to a second read taken after the check. Mismatch
 // closes and audits the row as recipient_changed; an unreadable state holds it unsent for the next run.
-async function loadedRecipientsBlockConfirmation(record, scheduledServiceId, contactPin, { prefs, customer }) {
+async function loadedRecipientsBlockConfirmation(record, scheduledServiceId, contactPin, { prefs, customer, checked = {} }) {
   const { confirmationKeyFromLoaded } = require('./booking-contact-state');
-  const live = await confirmationKeyFromLoaded(record.customer_id, { prefs, textCustomer: customer, propertyId: contactPin.property_id || null });
+  const live = await confirmationKeyFromLoaded(record.customer_id, { prefs, textCustomer: customer, propertyId: contactPin.property_id || null, out: checked });
   if (live === contactPin.contact_key) return false;
   if (live === null) {
     logger.warn(`[appt-remind] confirmation for ${scheduledServiceId} held at the send: the recipients could not be verified`);

@@ -290,7 +290,7 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
   return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs);
 }
 
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, onRecipientsDropped = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
   // Street-level address hold (owner ruling 2026-10-01): no email about a visit that is a live
   // unconfirmed hold until the office confirms. Same predicate as the SMS send step; fails closed.
   const holdVisitId = scheduledServiceId || moveHoldServiceId;
@@ -320,7 +320,14 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
   // semantics stay identical to a full send.
   if (Array.isArray(recipientFilter)) {
     const allow = new Set(recipientFilter.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean));
-    recipients = recipients.filter((r) => allow.has(r.email.toLowerCase()));
+    const kept = recipients.filter((r) => allow.has(r.email.toLowerCase()));
+    // A caller that checked a pinned recipient set (the program card's confirmation) hears about every address that is
+    // resolved now but was not in the checked set, so it can audit the skip.
+    const dropped = recipients.filter((r) => !allow.has(r.email.toLowerCase()));
+    if (dropped.length && typeof onRecipientsDropped === 'function') {
+      try { await onRecipientsDropped(dropped.map((r) => String(r.email).toLowerCase())); } catch (err) { logger.warn(`[appointment-email] dropped-recipient callback failed: ${err.message}`); }
+    }
+    recipients = kept;
   }
   if (!recipients.length) {
     await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'missing_email', metadata });
@@ -435,13 +442,14 @@ function apptStamp(apptTime) {
   return apptTime ? String(apptTime.getTime()) : 'na';
 }
 
-async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null } = {}) {
+async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null, onRecipientsDropped = null } = {}) {
   const apptTime = toDate(appointmentTime);
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
     scheduledServiceId,
     recipientFilter,
+    onRecipientsDropped,
     templateKey: 'appointment.confirmation',
     eventType: 'appointment.confirmation',
     payload: {

@@ -254,6 +254,27 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(inserts).toEqual([]);
     });
 
+    test('a "not weekends" preference set after the card refuses with DATES_CHANGED (round 20)', async () => {
+      const plain = await createScheduleBooking({ body: recurringBody, actor });
+      const dates = plain.json.appointments.map((a) => a.date);
+      inserts.length = 0;
+      const baseTransaction = db.transaction.getMockImplementation();
+      let locked = false;
+      require('../services/scheduling/blackout-dates').lockClosureState.mockImplementation(async () => { locked = true; });
+      db.transaction = jest.fn(async (cb) => baseTransaction(async (trx) => {
+        // Only a read taken after the lock step sees the preference the customer saved after the card.
+        const wrapped = jest.fn((table) => (table === 'property_preferences' && locked ? chain({ preferred_day: 'monday' }) : trx(table)));
+        Object.assign(wrapped, trx);
+        wrapped.transaction = async (inner) => inner(wrapped);
+        return cb(wrapped);
+      }));
+      const refused = await createScheduleBooking({ body: recurringBody, actor, approvedVisitDates: dates });
+      expect(locked).toBe(true);
+      expect(refused.status).toBe(409);
+      expect(refused.json.code).toBe('DATES_CHANGED');
+      expect(inserts).toEqual([]);
+    });
+
     test('the approved-card overlap recheck is technician-blind: a visit given to another technician after the card refuses (round 19)', async () => {
       const { findConflictingVisits } = require('../services/scheduling/occupancy');
       const other = [{ id: 'visit-9', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Lawn Care', technician_id: 'tech-2' }];

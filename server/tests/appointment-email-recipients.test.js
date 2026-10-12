@@ -152,6 +152,26 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.first_name).toBe('Joseph');
   });
 
+  test('a recipient added after the checked set is not sent to, the checked one still is, and the caller hears about the skip (round 20)', async () => {
+    mockDb({
+      customer: {
+        id: 'c7', first_name: 'Pat', email: 'primary@example.com', phone: '+19415551234',
+        service_contact_name: 'Joseph Haught', service_contact_phone: null, service_contact_email: 'added-later@example.com',
+      },
+      prefs: { appointment_notify_primary: true },
+      slot: { scheduled_date: '2026-07-09', window_start: '12:00' },
+    });
+    const dropped = jest.fn();
+    const res = await AppointmentEmail.sendAppointmentConfirmationEmail({
+      customerId: 'c7', scheduledServiceId: 'ss7', appointmentTime: '2026-07-09T16:00:00.000Z', serviceLabel: 'Pest Control',
+      recipientFilter: ['primary@example.com'], onRecipientsDropped: dropped,
+    });
+    expect(res.ok).toBe(true);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'primary@example.com' }));
+    expect(dropped).toHaveBeenCalledWith(['added-later@example.com']);
+  });
+
   test('email-only customer (no phone contacts) still gets the email at the primary address', async () => {
     mockDb({
       customer: { id: 'c3', first_name: 'Pat', email: 'primary@example.com', phone: null },

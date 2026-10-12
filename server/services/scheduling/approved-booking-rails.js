@@ -160,12 +160,22 @@ const RAILS = [
     code: 'DATES_CHANGED',
     message: 'The visit dates changed since the card was shown. Nothing was booked.',
     applies: (ctx) => Array.isArray(ctx.req.approvedVisitDates),
-    lock: (trx) => require('../scheduling/blackout-dates').lockClosureState(trx),
+    lock: async (trx, ctx) => {
+      await require('../scheduling/blackout-dates').lockClosureState(trx);
+      // The customer's "not weekends" preference (property_preferences.preferred_day) also decides the dates. Its writers take
+      // the exclusive `property-preferences` advisory lock FIRST and then the comms lock and the customer row, which this
+      // booking already holds: a waiting request here could deadlock with one. So the SHARED lock is only tried. Held by a
+      // writer in flight = the dates cannot be confirmed now, and the rail refuses (the card is asked again).
+      const got = await trx.raw('SELECT pg_try_advisory_xact_lock_shared(hashtext(?), hashtext(?::text)) AS locked', ['property-preferences', String(ctx.customerId)]);
+      const row = Array.isArray(got?.rows) ? got.rows[0] : got;
+      ctx.preferencesBusy = row?.locked === false;
+    },
     read: async (trx, ctx) => {
       const planned = ctx.seriesDates.join(',');
       if (typeof ctx.replanSeriesDates !== 'function') return planned;
       const fresh = (await ctx.replanSeriesDates(trx)).join(',');
-      return fresh === planned ? planned : `${planned}|regenerated:${fresh}`;
+      const preferenceMoved = ctx.preferencesBusy === true || (typeof ctx.preferencesUnchanged === 'function' && !(await ctx.preferencesUnchanged(trx)));
+      return fresh === planned && !preferenceMoved ? planned : `${planned}|regenerated:${fresh}${preferenceMoved ? '|preference-changed' : ''}`;
     },
     approved: (ctx) => ctx.req.approvedVisitDates.join(','),
   },
