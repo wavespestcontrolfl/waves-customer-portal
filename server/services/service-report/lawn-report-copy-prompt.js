@@ -139,8 +139,8 @@ The title WHAT WE FOUND does not authorize inventing a finding. When findings ar
 
 The application already appends selected next-step copy. When that instruction is present, do not repeat or paraphrase it as your closing line. Spend the available space explaining the recorded work and what remains to be assessed.`;
 
-// Lawn result timing (P15, only while GATE_LAWN_REPORT_COPY_V6 is live, so the
-// gate-off prompt is byte-identical): the writer states no result timing; the
+// Lawn result timing (P15, only while the report lead (the v6 copy) is live, so the
+// lead-off prompt is byte-identical): the writer states no result timing; the
 // report's "What to expect" carries it in owner-approved words, built from the
 // final products (owner rulings 2026-10-01 / 10-02). generate-report screens
 // the output with report-writer-rules lawnResultTimingViolation.
@@ -230,7 +230,7 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
     palm: ['# SERVICE REPORT COPY — TREE AND SHRUB v1', TREE_SHRUB_MAIN_REPORT_PROMPT],
     pest: ['# SERVICE REPORT COPY — RECURRING PEST v1', RECURRING_PEST_MAIN_REPORT_PROMPT],
   };
-  const selected = writer === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live()
+  const selected = writer === 'lawn' && require('../../config/feature-gates').lawnReportLeadLive()
     ? [...modules.lawn, LAWN_RESULT_TIMING_RULE]
     : modules[writer];
   if (!selected) return null;

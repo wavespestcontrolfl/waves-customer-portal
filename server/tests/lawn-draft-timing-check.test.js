@@ -121,14 +121,13 @@ describe('lawnDraftTimingRejection', () => {
 });
 
 describe('lawnDraftTimingCheckLive', () => {
-  const ENV = ['LAWN_DRAFT_TIMING_CHECK', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+  const ENV = ['LAWN_DRAFT_TIMING_CHECK', 'GATE_LAWN_REPORT_LEAD'];
   const saved = {};
   beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); });
   afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
 
-  test('on only under the v6 gate, and off by its own kill switch', () => {
+  test('on only while the report lead (v6 copy) is live, and off by its own kill switch', () => {
     expect(lawnDraftTimingCheckLive()).toBe(false);
-    process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
     process.env.GATE_LAWN_REPORT_LEAD = 'true';
     expect(lawnDraftTimingCheckLive()).toBe(true);
     for (const off of ['off', 'false', '0', 'OFF']) {

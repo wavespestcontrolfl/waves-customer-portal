@@ -27122,7 +27122,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.
-    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
+    // Lawn with the v6 copy live (P15): the prompt carried the
     // RESULT TIMING rule, so the copy is screened for it too; any forward
     // result timing is rejected (the report's "What to expect" owns timing).
     const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');

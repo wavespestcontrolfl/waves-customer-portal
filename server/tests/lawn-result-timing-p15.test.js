@@ -1,7 +1,7 @@
-// Lawn result timing (lawn report rebuild P15, rides GATE_LAWN_REPORT_COPY_V6):
+// Lawn result timing (lawn report rebuild P15, rides the lawn v6 copy, live with GATE_LAWN_REPORT_LEAD):
 // the lawn technician writer gets the RESULT TIMING rule, and the lawn "What
 // we applied today" paragraph states no timing (own prompt version, timing
-// backstop). Gate off: both byte-identical to before. Pure, no network.
+// backstop). Lead off: both byte-identical to before. Pure, no network.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
@@ -15,11 +15,11 @@ const SHARED = '# SHARED\n## HARD CONSTRAINTS\nShared safety.\n## ANTI-TEMPLATE 
 const LAWN = { serviceKey: 'lawn_care_recurring', findingsType: null };
 const PRODUCTS = [{ name: 'Test Herbicide B', kind: 'herbicide', activeIngredient: 'Testazone', method: 'spot', targets: ['broadleaf weeds'] }];
 
-const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+const ENV = ['GATE_LAWN_REPORT_LEAD'];
 const saved = {};
 beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); });
 afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
-const live = () => { process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
+const live = () => { process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
 
 describe('lawn technician writer: RESULT TIMING rule', () => {
   test('gate live: the lawn prompt is the old one plus the rule, appended last', () => {
@@ -86,7 +86,7 @@ describe('lawn treatment paragraph: no timing', () => {
     live();
     await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'lawn' });
     await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'tree_shrub' });
-    delete process.env.GATE_LAWN_REPORT_COPY_V6;
+    delete process.env.GATE_LAWN_REPORT_LEAD;
     await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'lawn' });
     expect(seen).toEqual([[LAWN_NO_TIMING_PROMPT_VERSION], [PROMPT_VERSION], [PROMPT_VERSION]]);
   });

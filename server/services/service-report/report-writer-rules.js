@@ -392,7 +392,7 @@ const DURATION_PHRASE_RE = new RegExp(
   + `|\\b(?:(?:over|in|during|for|within)\\s+)?the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?\\b`,
   'gi',
 );
-// Lawn model copy under GATE_LAWN_REPORT_COPY_V6 (P15) states NO result
+// Lawn model copy with the v6 copy live (P15) states NO result
 // timing: the report's "What to expect" carries it in owner-approved words.
 // CLOSED WORLD on calendar language, not a list of forward phrasings (those
 // never converge): every time-unit word ("days", "a week", "this week",
