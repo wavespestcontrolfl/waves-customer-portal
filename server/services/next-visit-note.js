@@ -47,13 +47,16 @@ const dayOf = (value) => (value ? etCalendarDayOf(value) : null);
 // A visit may take the note only when it is the same customer's, a different
 // visit, dated after the completed one, still on the books, and (for a
 // technician) assigned to that technician, as the next-visit route scopes it.
-function isLiveNextVisitTarget({ target, completed, actor = {} }) {
+function isLiveNextVisitTarget({ target, completed, actor = {}, today = etDateString() }) {
   if (!target || !completed) return false;
   if (!target.customer_id || String(target.customer_id) !== String(completed.customerId)) return false;
   if (String(target.id) === String(completed.id)) return false;
   const targetDay = dayOf(target.scheduled_date);
   const completedDay = dayOf(completed.date);
   if (!targetDay || !completedDay || targetDay <= completedDay) return false;
+  // Still a FUTURE visit today (ET), as the next-visit route shows it: a backfill or a late retry
+  // must not put the note on a visit whose day has come.
+  if (targetDay <= today) return false;
   if (DEAD_VISIT_STATUSES.includes(target.status)) return false;
   if (actor.techRole === 'technician'
     && (!actor.technicianId || String(target.technician_id || '') !== String(actor.technicianId))) return false;

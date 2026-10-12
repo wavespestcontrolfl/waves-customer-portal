@@ -11,6 +11,10 @@ const {
   NEXT_VISIT_NOTE_MAX_CHARS, VISIT_NOTES_MAX_CHARS, DEAD_VISIT_STATUSES,
 } = require('../services/next-visit-note');
 
+// The fixtures use fixed dates; the clock is pinned so "future today" does not depend on the run date.
+beforeAll(() => { jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'], now: new Date('2026-10-12T16:00:00Z') }); });
+afterAll(() => { jest.useRealTimers(); });
+
 describe('the note line', () => {
   test('is "[From M/D visit] note" from the completed visit\'s ET calendar day, no leading zeros', () => {
     expect(nextVisitNoteLine('2026-10-02', 'Gate code changed')).toBe('[From 10/2 visit] Gate code changed');
@@ -30,7 +34,14 @@ describe('the note line', () => {
 describe('which visit may take the note', () => {
   const completed = { id: 'v1', customerId: 'c1', date: '2026-10-12' };
   const target = { id: 'v2', customer_id: 'c1', scheduled_date: '2026-11-12', status: 'confirmed', technician_id: 't1' };
-  const ok = (over, actor) => isLiveNextVisitTarget({ target: { ...target, ...over }, completed, actor });
+  const ok = (over, actor, today = '2026-10-12') => isLiveNextVisitTarget({ target: { ...target, ...over }, completed, actor, today });
+
+  // A backfill or a late retry: the id the card showed is no longer a future visit today.
+  test('a posted visit whose day has come is refused', () => {
+    expect(ok({}, undefined, '2026-11-12')).toBe(false);
+    expect(ok({}, undefined, '2026-11-13')).toBe(false);
+    expect(ok({}, undefined, '2026-11-11')).toBe(true);
+  });
 
   test('the same customer\'s later, live visit', () => {
     expect(ok({})).toBe(true);
