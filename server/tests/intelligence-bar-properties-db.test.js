@@ -217,25 +217,6 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     const afterCustomer = await db('customers').where({ id: customerA }).first();
     expect({ ...afterCustomer, updated_at: null }).toEqual({ ...beforeCustomer, updated_at: null });
     expect(await db('audit_log').where({ action: 'customer_property_remove', resource_id: saved.propertyId }).count('* as count').first()).toEqual({ count: '1' });
-    // An estimate save that validated the property before the removal is refused inside its transaction,
-    // and a save holding its shared lock makes a removal wait and then see the estimate.
-    const { lockSelectedEstimateProperty } = require('../services/admin-estimate-persistence');
-    await expect(db.transaction(trx => lockSelectedEstimateProperty(trx, { property_id: saved.propertyId }))).rejects.toMatchObject({ statusCode: 404 });
-    const second = await service.addManualProperty(customerA, address(2200), { actorId: actor });
-    const secondPreview = await service.previewManualPropertyChange(customerA, 'remove', {}, second.propertyId);
-    const saving = await db.transaction();
-    let removal;
-    try {
-      await lockSelectedEstimateProperty(saving, { property_id: second.propertyId });
-      removal = service.removeManualProperty(customerA, second.propertyId, { actorId: actor, expectedVersion: secondPreview._version });
-      removal.catch(() => {});
-      await new Promise(resolve => setTimeout(resolve, 300));
-      await saving('estimates').insert({ customer_id: customerA, property_id: second.propertyId, status: 'draft',
-        token: crypto.randomBytes(16).toString('hex'), customer_name: 'Fixture Alder', address: '2200 Example Grove, Sarasota, FL 34201' });
-      await saving.commit();
-    } catch (err) { await saving.rollback(); throw err; }
-    await expect(removal).rejects.toMatchObject({ code: 'property_in_use' });
-    expect((await db('customer_properties').where({ id: second.propertyId }).first()).active).toBe(true);
     // Replay and a second removal are refused; the address is not saved again.
     expect((await confirm(fresh)).status).toBe(409);
     await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).rejects.toMatchObject({ code: 'property_not_found' });

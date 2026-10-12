@@ -1241,6 +1241,14 @@ async function removeManualProperty(customerId, propertyId, options = {}) {
     // this property as active before the update and committed its reference
     // while it ran is invisible to the preview above. A late reference rolls
     // the removal back (same doctrine as migration 20260829000050).
+    // Known limit: a writer that validated the property before this
+    // transaction locked it and inserts its reference after this commit is
+    // not seen. A foreign-key insert waits on the row lock held here, so the
+    // window is only that writer's own read-to-insert gap. The admin estimate
+    // save deliberately takes no property lock for it: a lock there must be
+    // ordered against the address-verdict, property-preferences and
+    // customer-comms locks of every estimate path, and a deadlocked estimate
+    // save is a worse failure than an open estimate on a removed property.
     const target = await trx('customer_properties').where({ id: propertyId, customer_id: customerId }).first();
     assertNoRemovalDependents(await propertyRemovalDependents(trx, customerId, target));
     return propertyId;
