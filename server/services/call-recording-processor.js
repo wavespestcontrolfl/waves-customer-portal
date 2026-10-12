@@ -1139,7 +1139,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // strand what the feature closed); the forward halves below are gated.
   const gateOn = isEnabled('callbackSpamClosesParent');
   // settledParentSql for a NEW settlement (strict); the terminal twins for corrections.
-  const { terminalNonSpamCallbackSql, terminalParentSql, settledParentSql } = require('./call-commitments');
+  const { terminalNonSpamCallbackSql, obsoleteParentSql, settledParentSql } = require('./call-commitments');
   // Terminal on anything but spam, an exhausted extraction_failed included (no
   // pass will ever say spam about it); the promise proof's positive predicate
   // is stricter and never counts an exhausted failure as contact.
@@ -1166,9 +1166,9 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
   // cards and the dismissal it holds are retired through the same correction
   // (standingSpamCallbacks is empty for a non-voicemail parent).
   const notVoicemail = (q) => whereNotSandboxCall(q, 'cb.source').where('cb.processing_status', 'spam').whereNull('cb.processing_token')
-    // NULL-safe (adoption clears the markers to NULL): isVoicemailParent's twin.
-    .whereRaw("p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail'")
-    .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(terminalParentSql('p'));
+    // obsoleteParentSql: markers cleared and terminal, OR the last pass ran out
+    // of retries (an ordinary voicemail keeps its dial stamp through a replacement).
+    .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(obsoleteParentSql('p'));
   const obsoleteStamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
     .modify(recentParent).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
   // Driven by the dismissed set (its partial index); the parent, stamped or
@@ -1199,7 +1199,7 @@ async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
     // before the immediate correction ran: neither source above sees that
     // pair, codex #6271 r43 P1). Either way the correction reopens the card.
     .whereRaw(`(((p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail') AND p.duration_seconds IS NOT NULL AND p.processing_token IS NULL)
-      OR (p.call_outcome IS DISTINCT FROM 'voicemail' AND p.answered_by IS DISTINCT FROM 'voicemail' AND p.processing_status IS DISTINCT FROM 'voicemail' AND ${terminalParentSql('p')}))`)
+      OR ${obsoleteParentSql('p')})`)
     .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(COALESCE(p.duration_seconds, 0), 0))")
     .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
     // ...and only the NEWEST row for its reason: a later row of any status

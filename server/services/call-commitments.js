@@ -2116,6 +2116,14 @@ const settledParentSql = (t) => `(${t}.duration_seconds IS NOT NULL AND ${t}.pro
 // it, so an obsolete settlement must not wait on one). Never evidence for a
 // NEW settlement.
 const terminalParentSql = (t) => `(${settledParentSql(t)} OR (${t}.processing_token IS NULL AND ${exhaustedExtractionSql(t)}))`;
+// The PARENT no longer supports a callback-spam settlement: re-read as not a
+// voicemail (every marker cleared; NULL-safe) and terminal, OR its last pass
+// ran out of retries. The second arm matters for an ordinary voicemail whose
+// audio was replaced: a Twilio dial stamp (answered_by / call_outcome =
+// 'voicemail') survives the replacement and forces the next pass into the
+// voicemail lane, so the markers alone never say "obsolete"; an exhausted
+// pass on that row does (codex #6271 r47).
+const obsoleteParentSql = (t) => `((${t}.call_outcome IS DISTINCT FROM 'voicemail' AND ${t}.answered_by IS DISTINCT FROM 'voicemail' AND ${t}.processing_status IS DISTINCT FROM 'voicemail' AND ${terminalParentSql(t)}) OR (${t}.processing_token IS NULL AND ${exhaustedExtractionSql(t)}))`;
 // The write-time fence every callback_spam dismissal carries: the parent must
 // still be a settled voicemail IN the conditional UPDATE, read FOR SHARE like
 // the callback arm, so an adoption or reprocess that holds the parent row
@@ -4165,6 +4173,7 @@ module.exports = {
   settledNonSpamCallbackSql,
   terminalNonSpamCallbackSql,
   terminalParentSql,
+  obsoleteParentSql,
   UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,

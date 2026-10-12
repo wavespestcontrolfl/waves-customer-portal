@@ -708,8 +708,10 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     await db('triage_items').insert([card(parentId, 'missing_service_address')]);
     const childId = await insertChild(PEXHAUST_CHILD_SID, parentId, { to_phone: '+15555550138' });
     expect(await close(PEXHAUST_CHILD_SID)).toMatchObject({ applied: true, cards: 1 });
-    // Adoption cleared the voicemail markers; the replacement's pass failed extraction three times.
-    await db('call_log').where({ id: parentId }).update({ call_outcome: null, answered_by: null, processing_status: 'extraction_failed', extraction_attempts: 3, recording_sid: 'RE' + 'e'.repeat(32) });
+    // The replacement's pass failed extraction three times. The Twilio dial stamp
+    // (answered_by / call_outcome = 'voicemail') survives an ordinary replacement,
+    // so the markers still read voicemail: exhaustion alone must retire the settlement.
+    await db('call_log').where({ id: parentId }).update({ processing_status: 'extraction_failed', extraction_attempts: 3, recording_sid: 'RE' + 'e'.repeat(32) });
     const run = await processor.reconcileCorrectedCallbackVerdicts();
     expect(run.results.find((r) => r.callbackCallId === childId)).toMatchObject({ applied: true, cards: 1 });
     expect((await db('triage_items').where({ call_log_id: parentId }).first()).status).toBe('open');
