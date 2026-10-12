@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import FastCompleteComboSheet from './FastCompleteComboSheet';
 import { adminFetch } from '../../utils/admin-fetch';
 import * as store from '../../lib/completion-resume-store';
+import { reviewScheduledForOf } from '../../lib/completion-review-timing';
 
 vi.setConfig({ testTimeout: 20000 });
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
@@ -369,6 +370,127 @@ describe('a new attempt after a rejection follows the screen', () => {
     click('Complete stop');
     await screen.findByText(/Stop recorded/);
     expect(postedBodies(1)).toEqual(originals());
+  });
+});
+
+// What a send posts is decided once: a definite refusal starts a new attempt that follows the screen; anything the server may have
+// recorded (the shared submit's "retry" class: no answer, 408, 5xx ...) replays the first attempt's own draft, bodies and key, with the
+// section held and without the fresh-submit check.
+describe('the retry rule', () => {
+  const keyOf = (call) => post.mock.calls[call][1].headers['Idempotency-Key'];
+  const review = () => screen.getByRole('checkbox', { name: 'Send review request', hidden: true });
+
+  it.each([[504], [503], [408], [500]])('a %i may have been recorded: the retry replays the same draft under the same key, with the section held', async (status) => {
+    post.mockRejectedValueOnce(Object.assign(new Error('Gateway timeout'), { status }));
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/Gateway timeout/);
+    await waitFor(() => expect(review().matches(':disabled')).toBe(true));
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(post.mock.calls[1][1].body).toBe(post.mock.calls[0][1].body);
+    expect(keyOf(1)).toBe(keyOf(0));
+  });
+
+  it('a 422 is a definite refusal: the section is not held and the next attempt follows the screen', async () => {
+    post.mockRejectedValueOnce(Object.assign(new Error('The server refused this closeout.'), { status: 422 }));
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/The server refused/);
+    expect(review().matches(':disabled')).toBe(false);
+    fireEvent.click(review());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(JSON.parse(post.mock.calls[1][1].body).items.map((i) => i.body)).toEqual(expect.arrayContaining([BODIES.pest, BODIES.lawn]));
+  });
+
+  it('a replay keeps the first draft\'s exact bodies when the clock has passed Eastern midnight ("tomorrow at 8 AM" is not recomputed)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-12T03:30:00Z'));
+      post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      mount();
+      await prepareBoth();
+      fireEvent.change(await screen.findByLabelText('Review request timing'), { target: { value: 'tomorrow_8' } });
+      click('Complete stop');
+      await screen.findByText(/Connection interrupted/);
+      const first = post.mock.calls[0][1].body;
+      const shown = reviewScheduledForOf({ willReview: true, reviewTiming: 'tomorrow_8', reviewCustomAt: '' });
+      vi.setSystemTime(new Date('2026-10-12T05:30:00Z'));
+      // The control: a recomputation now would give another day.
+      expect(reviewScheduledForOf({ willReview: true, reviewTiming: 'tomorrow_8', reviewCustomAt: '' })).not.toBe(shown);
+      click('Complete stop');
+      await screen.findByText(/Stop recorded/);
+      expect(post.mock.calls[1][1].body).toBe(first);
+      expect(keyOf(1)).toBe(keyOf(0));
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a replay does not run the fresh-submit check: a preview read that fails cannot block or change it', async () => {
+    post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Send review request' }));
+    fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'auto' } });
+    click('Complete stop');
+    await screen.findByText(/Connection interrupted/);
+    const readsBefore = request.mock.calls.filter(([p]) => p.startsWith('/admin/reviews/send-time-preview')).length;
+    request.mockImplementation(async (path) => { if (path.startsWith('/admin/reviews/send-time-preview')) throw new Error('preview down'); return {}; });
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(request.mock.calls.filter(([p]) => p.startsWith('/admin/reviews/send-time-preview')).length).toBe(readsBefore);
+    expect(post.mock.calls[1][1].body).toBe(post.mock.calls[0][1].body);
+  });
+});
+
+// The section is on only while the parts' latest contexts allow it: fail closed.
+describe('the gate, from the parts\' current answers', () => {
+  const reporters = () => ({ pest: partProps.pest.onWrapUpGate, lawn: partProps.lawn.onWrapUpGate });
+
+  it('a part that says false, or that is not mounted, does not grant the section', async () => {
+    mount();
+    await prepareBoth();
+    await waitFor(() => expect(wrapUpSection()).toBeTruthy());
+    act(() => reporters().lawn(false));
+    await waitFor(() => expect(wrapUpSection()).toBeNull());
+    act(() => reporters().lawn(true));
+    await waitFor(() => expect(wrapUpSection()).toBeTruthy());
+    // Both parts leave (restored from the saved draft): nothing grants it.
+    act(() => { reporters().pest(null); reporters().lawn(null); });
+    await waitFor(() => expect(wrapUpSection()).toBeNull());
+  });
+
+  it('rollback: true, a choice made, the part remounts and reports false: the send posts the parts\' own bodies', async () => {
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Send completion text' }));
+    act(() => { reporters().pest(null); reporters().pest(false); });
+    await waitFor(() => expect(wrapUpSection()).toBeNull());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(postedBodies()).toEqual({ 'svc-pest': BODIES.pest, 'svc-lawn': BODIES.lawn });
+  });
+
+  it('the review send time is previewed for the packet\'s first member (window start, then id), not the billing part', async () => {
+    rows[0] = { id: 'svc-lawn', visitId: 'visit', windowStart: '08:00:00' };
+    rows[1] = { id: 'svc-pest', visitId: 'visit', windowStart: '09:00:00' };
+    try {
+      mount({ pest: { service: { ...PEST, estimatedPrice: 95, createInvoiceOnComplete: true } } });
+      await prepareBoth();
+      await waitFor(() => expect(request.mock.calls.some(([p]) => p.startsWith('/admin/reviews/send-time-preview'))).toBe(true));
+      const paths = request.mock.calls.map(([p]) => p).filter((p) => p.startsWith('/admin/reviews/send-time-preview'));
+      expect(paths.every((p) => p.includes('serviceType=Lawn+Care'))).toBe(true);
+      expect(paths.some((p) => p.includes('Quarterly'))).toBe(false);
+    } finally {
+      rows[0] = { id: 'svc-lawn', visitId: 'visit' };
+      rows[1] = { id: 'svc-pest', visitId: 'visit' };
+    }
   });
 });
 

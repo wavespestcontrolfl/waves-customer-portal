@@ -190,7 +190,7 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const samePair = load.status === 'ready' && live.join() === [ids.pest, ids.lawn].sort().join();
   const finished = isFinishedState(send.display);
   // The stop-level Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): open while the stop is this pair, loaded and not sent.
-  const stopWrapUp = useStopWrapUp({ pest, lawn, request, open: [samePair, !finished, !send.started].every(Boolean), report, fieldsRef });
+  const stopWrapUp = useStopWrapUp({ pest, lawn, rows: load.rows, request, open: [samePair, !finished, !send.started].every(Boolean), report, fieldsRef });
   const blocked = send.busy || dictating || anyPartBusy;
   const canComplete = [[ids.pest, ids.lawn].every(readiness.ready), !readiness.persistError, !blocked, !send.refusal, samePair, !finished].every(Boolean);
 

@@ -85,6 +85,13 @@ export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview,
   };
 }
 
+// The member the packet enrolls the review from: the first by window_start (a member with no start last), then by id
+// (visit-completion-packets.js enrollVisitCompletionReviewOnce). `rows` are the stop's schedule rows.
+export function firstMemberId(rows) {
+  const keyOf = (row) => `${row.windowStart ? 0 : 1}|${row.windowStart || ''}|${row.id}`;
+  return [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : 1))[0]?.id ?? null;
+}
+
 // The grouped stop's Wrap-up (owner 2026-10-12): the three things the packet reads for the whole stop. One text
 // goes if ANY item asks for it, one review ask goes only if EVERY item allows it, and its delay comes from the
 // FIRST member, so each of these must be the same on every item. The stop keeps no pay-link row, no time

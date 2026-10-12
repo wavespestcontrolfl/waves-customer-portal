@@ -1357,7 +1357,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const stopRequest = useWriteTracking(headerRequest, preparing);
   const ctx = useLawnFastContext({ base, request: stopRequest, service });
   // The stop's container learns from this read whether the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) is on; the part itself shows none.
-  useEffect(() => { onWrapUpGate?.(ctx.wrapUp === true); }, [onWrapUpGate, ctx.wrapUp]);
+  useEffect(() => { onWrapUpGate?.(ctx.wrapUp === true); return () => onWrapUpGate?.(null); }, [onWrapUpGate, ctx.wrapUp]);
   // The visit's own property areas (read by PropertyServiceAreas, in the form) and
   // their hold: see usePropertyAreaLifecycle. A refused completion starts a refresh.
   const propertyAreas = usePropertyAreaLifecycle();

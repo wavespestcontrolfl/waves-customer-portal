@@ -53,10 +53,10 @@ const choiceTouched = (choice) => Object.keys(INITIAL_CHOICE).some((key) => choi
 // posted no `reviewTiming` before (the pest report flow), so the key stays absent while the timing is
 // Automatic. `noPayLink`: the sheet's text carries no pay link (a pest re-service), so the row is not
 // shown and `includePayLink` posts false. `noAdjustTime` and `noReentry` (the grouped stop): those rows are not shown and nothing is
-// read or posted for them. `touched` tells the stop whether to lay its choices onto the parts at all. `reviewMarker`: a re-service sheet, whose review ask rides the body with
+// read or posted for them. `reviewService` (the grouped stop): the service the review send time is previewed for, when it is not the billing `service`. `touched` tells the stop whether to lay its choices onto the parts at all. `reviewMarker`: a re-service sheet, whose review ask rides the body with
 // `wrapUpReviewAsk: true` (the server refuses it once the gate is off). `onChecking(busy)`: the sheet that owns Close and the lock
 // hears when the submit-time check starts and ends.
-export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, noAdjustTime, noReentry, reviewMarker, onChecking }) {
+export function useWrapUp({ gate, submission, sharedNote, service, request, base, applicationsRecorded, customerConcern, omitAutoTiming, noPayLink, noAdjustTime, noReentry, reviewService, reviewMarker, onChecking }) {
   const enabled = gate === true && !submission?.preparing && sharedNote == null;
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -78,7 +78,7 @@ export function useWrapUp({ gate, submission, sharedNote, service, request, base
   const willReview = completionWillReview({ requestReview: choice.requestReview, reviewSuppressionReason: suppression });
   const stepper = useReentrySteppers({ enabled: enabled && !noReentry, serviceId: service?.id, base, requestRef, applicationsRecorded });
   const nextVisit = useNextVisit({ enabled, customerId: service?.customerId || service?.routedCustomerId, requestRef });
-  const review = useReviewPreview({ enabled, willReview, serviceId: service?.id, serviceType: service?.serviceType, requestRef });
+  const review = useReviewPreview({ enabled, willReview, serviceId: (reviewService || service)?.id, serviceType: (reviewService || service)?.serviceType, requestRef });
   const hint = completionReviewHint({ willReview, effectiveSendSms: choice.sendSms, reviewTiming: choice.reviewTiming, reviewCustomAt: choice.reviewCustomAt, preview: review.preview, reviewAwaitsPayment: billing.reviewAwaitsPayment }).text;
 
   const state = { ...choice, omitAutoTiming, noPayLink, reviewMarker, adjusted: isAdmin ? choice.adjusted : '', isAdmin, willReview, willInvoice: billing.willInvoice, ext: stepper.ext, int: stepper.int, seeds: stepper.seeds };

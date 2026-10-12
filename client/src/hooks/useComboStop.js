@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { putVisitCompletionDraft } from '../lib/completion-resume-store';
 import { overlayStopFields } from '../lib/fast-complete-wrap-up';
+import { completionFailureOutcome } from './useFastCompleteSubmit';
 import {
   clearTerminalDrafts, comboDraftId, loadVisitCloseout, packetAfterSend, packetDisplayState, postVisitPacket, resolveSendFailure,
 } from '../lib/visit-closeout-packet';
@@ -166,6 +167,7 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     persist().catch((err) => setPersistError(err.message));
   }, [persist, bump]);
 
+  const seqOf = (id) => entries.current[id]?.seq ?? 0;
   const ready = (id) => !!entries.current[id] && entries.current[id].noteAtSave === noteRef.current;
   const stale = (id) => !!entries.current[id] && !ready(id);
   // The draft the packet request sends: ready parts only, from the map (never from the loaded draft).
@@ -173,13 +175,15 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     visitId, key: keyRef.current, note: noteRef.current,
     forms: Object.fromEntries(ids.filter(ready).map((id) => [id, fromBase ? { body: entries.current[id].base, base: entries.current[id].base } : formOf(entries.current[id])])),
   });
-  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, persistError, draftId };
+  return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, seqOf, persistError, draftId };
 }
 
-// A send whose answer never came (no HTTP answer, and the server could not be re-read to see whether it kept the packet) may
-// have been recorded: a retry under the same key must then carry the same bodies. Any answer, or a re-read that finds no
-// packet, means the attempt did not happen.
-const outcomeUnknown = (err, outcome) => outcome.kind === 'error' && !outcome.found && typeof err.status !== 'number';
+// A send the server may have recorded: the shared submit's own classification (hooks/useFastCompleteSubmit.js
+// completionFailureOutcome) calls it a "retry": no answer, a timeout (408, 425), a rate limit or lapsed login, any 5xx, an
+// attempt still running. A retry under the same key must then carry the same bodies. A definite refusal (the correctable
+// and terminal families, answered before any write) did not happen, so the next attempt follows the screen. A re-read that
+// finds no packet proves nothing here: the first request may still be running.
+const outcomeUnknown = (err, outcome) => outcome.kind === 'error' && completionFailureOutcome(err) === 'retry';
 
 // `stopFields()`: what the stop's Wrap-up asks of the bodies, read at each send: null while the section is not shown (the
 // saved bodies go as saved), {} while it is shown at its defaults (the parts' own handed-over bodies go, exactly), else the
@@ -192,11 +196,14 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
   // A part whose form was put back (a declined promise) starts a fresh sheet.
   const [fresh, setFresh] = useState({});
   const submitting = useRef(false);
-  // The Wrap-up's fields the last send used, and whether that send's outcome is unknown (see outcomeUnknown).
-  const lastFields = useRef(null);
-  const unknownRef = useRef(null);
-  const [replaying, setReplaying] = useState(false);
-  const remember = (unknown) => { unknownRef.current = unknown ? { fields: lastFields.current } : null; setReplaying(unknown); };
+  // The attempt whose outcome is unknown (see outcomeUnknown): the exact draft it sent, and the parts' save numbers it was
+  // built from. A retry sends that draft itself, never one rebuilt from remembered choices (a time computed from "tomorrow
+  // at 8 AM" moves with the clock). It holds only while no part has been saved again since.
+  const lastSeqs = useRef([]);
+  const held = useRef(null);
+  const [, bumpHeld] = useState(0);
+  const heldStands = () => !!held.current && held.current.seqs.join() === [ids.pest, ids.lawn].map(readiness.seqOf).join();
+  const remember = (candidate) => { held.current = candidate ? { candidate, seqs: lastSeqs.current } : null; bumpHeld((v) => v + 1); };
   const packet = load.detail?.packet;
   const display = packetDisplayState({ result, detail: load.detail, busy });
 
@@ -211,7 +218,7 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
   // Applies what resolveSendFailure decided, exactly as the long form does. Returns the draft to send again, or null.
   const failed = async (err, candidate) => {
     const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope, draftId: readiness.draftId });
-    remember(outcomeUnknown(err, outcome));
+    remember(outcomeUnknown(err, outcome) ? candidate : null);
     if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft, candidate); return outcome.draft; }
     if (outcome.kind === 'reopened') {
       readiness.replaceFrom(outcome.draft);
@@ -237,8 +244,9 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
   // original again, and are saved with the bodies (replaceFrom persists them), so a retry under the same key and a reload
   // replay what was sent. The exception is an attempt whose outcome is unknown: its retry keeps that attempt's choices.
   const stopCandidate = () => {
-    const fields = unknownRef.current ? unknownRef.current.fields : stopFields?.();
-    lastFields.current = fields ?? null;
+    if (heldStands()) return held.current.candidate;
+    lastSeqs.current = [ids.pest, ids.lawn].map(readiness.seqOf);
+    const fields = stopFields?.();
     if (!fields || Object.keys(readiness.draftFor([ids.pest, ids.lawn]).forms).length < 2) return readiness.draftFor([ids.pest, ids.lawn]);
     const base = readiness.draftFor([ids.pest, ids.lawn], true);
     const next = Object.keys(fields).length ? overlayStopFields(base, fields) : base;
@@ -253,12 +261,12 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
     setBusy(true);
     setError('');
     let again = null;
-    try { await send(candidate); remember(false); } catch (err) { again = await failed(err, candidate); } finally {
+    try { await send(candidate); remember(null); } catch (err) { again = await failed(err, candidate); } finally {
       submitting.current = false;
       setBusy(false);
     }
     if (again) await submit(again);
   };
 
-  return { busy, error, refusal, setRefusal, result, display, started: !!packet, fresh, replaying, submit };
+  return { busy, error, refusal, setRefusal, result, display, started: !!packet, fresh, replaying: heldStands(), submit };
 }
