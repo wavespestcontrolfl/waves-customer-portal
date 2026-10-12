@@ -108,8 +108,24 @@ function detectContactDictationSignals(transcript) {
 // (a) A name token said twice in a row across punctuation ("Serov, Serov" / "Serov. Serov"),
 // with an optional speaker label between ("Caller: Serov. Agent: Serov.").
 const REPEATED_TOKEN_RE = /\b([A-Z][\p{L}'’-]{2,})\s*[,.;:?!]+(?:\s*(?:Caller|Agent|Customer|Speaker \d+)\s*:)?\s*\1\b/gu;
-// Capitalized words that repeat in ordinary speech ("Okay. Okay.") are not names.
-const REPEAT_STOPWORDS = new Set(['okay', 'yes', 'yeah', 'yep', 'sure', 'right', 'thanks', 'thank', 'sorry', 'hello', 'perfect', 'great', 'good', 'alright', 'again', 'what', 'well', 'please', 'exactly', 'correct', 'wonderful', 'awesome', 'bye', 'goodbye', 'morning', 'afternoon']);
+// Words that repeat in ordinary speech and are never the name being spelled: fillers, answers,
+// weekdays, months, US states and the cities of the service area ("Monday. Monday.",
+// "Florida. Florida.").
+const REPEAT_VOCABULARY = new Set([
+  'okay', 'yes', 'yeah', 'yep', 'no', 'nope', 'sure', 'right', 'thanks', 'thank', 'sorry', 'hello', 'perfect', 'great', 'good',
+  'alright', 'again', 'what', 'well', 'please', 'exactly', 'correct', 'wonderful', 'awesome', 'bye', 'goodbye', 'morning', 'afternoon',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'today', 'tomorrow', 'tonight',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+  'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota',
+  'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'hampshire', 'jersey', 'mexico', 'york', 'carolina', 'dakota', 'ohio',
+  'oklahoma', 'oregon', 'pennsylvania', 'rhode', 'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'wisconsin', 'wyoming',
+  'sarasota', 'bradenton', 'venice', 'parrish', 'palmetto', 'nokomis', 'osprey', 'englewood', 'north', 'port', 'charlotte', 'punta', 'gorda',
+  'ellenton', 'longboat', 'siesta', 'lakewood', 'ranch', 'tampa', 'naples', 'miami', 'orlando', 'manatee', 'north port', 'myakka', 'bayshore',
+]);
+// A name is being given or asked for within this many characters before the repeat.
+const REPEAT_CONTEXT_WINDOW = 80;
+const NAME_CONTEXT_RE = /\b(?:last\s+name|first\s+name|full\s+name|name|spell(?:ed|ing)?|it'?s|it\s+is|this\s+is|that'?s|i'?m|i\s+am|(?:hi|hello|hey)\s+(?:this\s+is\s+)?[A-Z])\b/i;
 // (b) A phrase that announces a spelling. It counts only when no letter run follows within
 // ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
 // The letter forms are case sensitive on purpose ("that's S", not "that's a").
@@ -124,9 +140,15 @@ const SPELLING_ANNOUNCE_RES = [
 ];
 const LETTER_RUN_AFTER_RE = new RegExp(`${NAME_SPELLING_LETTERS_RE.source}|${NAME_SPELLING_PHONETIC_RE.source}`, 'i');
 
-function repeatedNameToken(text) {
+// A repeated capitalized token counts when it is not everyday vocabulary AND a name is being given
+// or asked for just before it (or it is the extracted first or last name itself).
+function repeatedNameToken(text, extracted = null) {
+  const extractedNames = [extracted?.first_name, extracted?.last_name].map(nameKey).filter(Boolean);
   for (const m of text.matchAll(REPEATED_TOKEN_RE)) {
-    if (!REPEAT_STOPWORDS.has(m[1].toLowerCase())) return true;
+    const token = m[1].toLowerCase();
+    if (REPEAT_VOCABULARY.has(token)) continue;
+    if (extractedNames.includes(nameKey(token))) return true;
+    if (NAME_CONTEXT_RE.test(text.slice(Math.max(0, m.index - REPEAT_CONTEXT_WINDOW), m.index))) return true;
   }
   return false;
 }
@@ -173,14 +195,10 @@ function lastNameNearMiss(extracted, knownCustomer) {
  */
 function spellingCollapseSignals(transcript, { extracted = null, knownCustomer = null } = {}) {
   const t = String(transcript || '');
-  const repeated = repeatedNameToken(t);
+  const repeated = repeatedNameToken(t, extracted);
   const announced = announcedWithoutLetters(t);
   const nearMiss = lastNameNearMiss(extracted, knownCustomer);
   return { repeated, announced, nearMiss, any: repeated || announced || nearMiss };
-}
-
-function spellingLikelyCollapsed(transcript, ctx = {}) {
-  return spellingCollapseSignals(transcript, ctx).any;
 }
 
 // ── Second-pass transcription prompt ─────────────────────────────────────────
@@ -645,7 +663,6 @@ function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
 
 module.exports = {
   detectContactDictationSignals,
-  spellingLikelyCollapsed,
   spellingCollapseSignals,
   decodeDictatedContacts,
   applyEmailDictationPolicy,
