@@ -18,6 +18,7 @@ const { applyAssignable, assertAssignableTechnician } = require('../technician-e
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
+const { isNameLikeSearch, rankNameMatches } = require('./name-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -71,7 +72,8 @@ Use for: "what do we know about large patch on zoysia", "how has K-Flow performe
     name: 'query_customers',
     description: `Search/filter the customer database. Returns matching customers with key fields.
 Use for: finding customers by attribute, missing data, filtering by city/tier/stage/tags/service type.
-Supports SQL-like conditions via the filters parameter.`,
+Supports SQL-like conditions via the filters parameter.
+When a name search finds nothing exact, it falls back to sound-alike / close-spelling matches (result has approximate: true); offer those with offer_choices and confirm with the operator before acting on one.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -510,6 +512,7 @@ async function queryCustomers(input, readCustomerIds = []) {
   // bare — may only return that customer; a genuinely unscoped request
   // arrives with an empty scope and stays broad.
   if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
+  const unsearched = query.clone(); // filters + scope, no text search
   if (search) {
     const s = `%${search}%`;
     query = query.where(function () {
@@ -534,36 +537,72 @@ async function queryCustomers(input, readCustomerIds = []) {
   const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
   const total = await db('customers').whereNull('deleted_at').count('* as count').first();
 
-  return {
-    customers: customers.map(c => ({
-      id: c.id,
-      name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
-      first_name: c.first_name,
-      last_name: c.last_name,
-      email: c.email || null,
-      phone: c.phone || null,
-      city: c.city || null,
-      state: c.state || null,
-      zip: c.zip || null,
-      address: c.address_line1 || null,
-      tier: c.waveguard_tier || null,
-      stage: c.pipeline_stage,
-      monthly_rate: parseFloat(c.monthly_rate || 0),
-      lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
-      lead_score: c.lead_score,
-      health_score: c.health_score ? parseInt(c.health_score) : null,
-      active: c.active,
-      member_since: c.member_since,
-      last_service_date: c.last_service_date,
-      next_service_date: c.next_service_date,
-      last_contact_date: c.last_contact_date,
-      lead_source: c.lead_source,
-    })),
+  const result = {
+    customers: customers.map(customerListRow),
     total_matching: Number(matched.count),
     returned_count: customers.length,
     has_more: offset + customers.length < Number(matched.count),
     next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
     total_customers: parseInt(total.count),
+  };
+  return Number(matched.count) === 0 ? await withApproximateCustomers(result, unsearched, search) : result;
+}
+
+function customerListRow(c) {
+  return {
+    id: c.id,
+    name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+    first_name: c.first_name,
+    last_name: c.last_name,
+    email: c.email || null,
+    phone: c.phone || null,
+    city: c.city || null,
+    state: c.state || null,
+    zip: c.zip || null,
+    address: c.address_line1 || null,
+    tier: c.waveguard_tier || null,
+    stage: c.pipeline_stage,
+    monthly_rate: parseFloat(c.monthly_rate || 0),
+    lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
+    lead_score: c.lead_score,
+    health_score: c.health_score ? parseInt(c.health_score) : null,
+    active: c.active,
+    member_since: c.member_since,
+    last_service_date: c.last_service_date,
+    next_service_date: c.next_service_date,
+    last_contact_date: c.last_contact_date,
+    lead_source: c.lead_source,
+  };
+}
+
+const APPROXIMATE_CUSTOMER_NOTE = 'No customer matched that search exactly. These are sound-alike / close-spelling matches, best first, and may be the wrong people. Show them to the operator with offer_choices and get a confirmed pick before any write or send.';
+// Name columns only, so 20,000 rows stay a light read; a larger book is
+// scanned in id order and the fallback is best-effort past the cap.
+const APPROXIMATE_CANDIDATE_CAP = 20000;
+
+// Rescue path for a dictated, misspelled name. `unsearched` is the main query
+// with its filters and customer scope but no text search. Ranks those
+// customers by sound and spelling in Node, then reads the best few with the
+// main query's columns. Returns `result` unchanged when nothing is close.
+async function withApproximateCustomers(result, unsearched, search) {
+  if (!search || !isNameLikeSearch(search)) return result;
+  const candidates = await unsearched.clone().clearSelect().clearOrder()
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
+    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+  const ranked = rankNameMatches(search, candidates);
+  if (!ranked.length) return result;
+  const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
+  const rank = new Map(ranked.map((r, i) => [r.id, i]));
+  const customers = rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
+  return {
+    ...result,
+    approximate: true,
+    note: APPROXIMATE_CUSTOMER_NOTE,
+    customers,
+    total_matching: customers.length,
+    returned_count: customers.length,
+    has_more: false,
+    next_offset: null,
   };
 }
 
