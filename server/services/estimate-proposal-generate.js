@@ -739,10 +739,13 @@ const oneTimeIdentity = (item) => [
   String(item.name || item.label || '').toLowerCase(),
   String(item.price ?? item.amount ?? item.total ?? ''),
 ].join('|');
+// manualFinalOneTime is NOT part of the identity: it is the operator-accepted
+// net on one mirror of the same row, and the collapse's net reconciliation
+// must see both copies as one row (codex #6113 r34).
 const rawIdentity = (line) => [
   String(line.service || line.name || '').toLowerCase(),
   String(line.price ?? ''), String(line.oneTimePrice ?? ''), String(line.total ?? ''),
-  String(line.installation?.price ?? ''), String(line.manualFinalOneTime ?? ''),
+  String(line.installation?.price ?? ''),
 ].join('|');
 // manualFinalOneTime is the operator-ACCEPTED net (the engine keeps `price`
 // gross) — it outranks everything (pre-push codex P0); amountAfterDiscount
@@ -762,6 +765,19 @@ const rawLineLabel = (line, fallback) => String(
   line.displayName || line.label || line.display?.name || line.name || line.service || fallback,
 );
 const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
+// Which of two same-scope mirrors with differing nets is the sold row:
+// 'kept' | 'mirror' | null (a conflict). `net(row)` describes the row:
+// { manual, alias, gross }.
+function mirrorNetWinner(keptRow, mirrorRow, net) {
+  if (!net) return null;
+  const k = net(keptRow);
+  const m = net(mirrorRow);
+  if (k.manual !== m.manual) return m.manual ? 'mirror' : 'kept';
+  if (k.manual) return null;
+  const grossesAgree = k.gross != null && m.gross != null && roundCents(k.gross) === roundCents(m.gross);
+  if (!grossesAgree || k.alias === m.alias) return null;
+  return m.alias ? 'mirror' : 'kept';
+}
 // Collapse mirrored rows across sources: for each identity the rows of the
 // ONE source that holds the most copies are kept as a multiset (the fullest
 // source; the first such source on a tie), object-deduped so a row shared by
@@ -770,7 +786,7 @@ const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
 // reported in `conflicted` (by label). Filling a per-identity quota across the flattened
 // sources instead kept the first source's single copy plus one engine row
 // and silently lost the second legitimate repeat (codex #6113 r30).
-function collapseMirroredRows(sources, { identity, amount, label, scope }) {
+function collapseMirroredRows(sources, { identity, amount, label, scope, net }) {
   const seen = new Set();
   const tagged = [];
   sources.forEach((list, sourceIndex) => {
@@ -794,19 +810,29 @@ function collapseMirroredRows(sources, { identity, amount, label, scope }) {
     }
     fullestSource.set(key, best.sourceIndex);
   }
-  const rows = tagged.filter((t) => t.sourceIndex === fullestSource.get(t.key)).map((t) => t.row);
-  // A mirror is silent only when a kept clone matches it on the resolved
-  // amount AND the sold scope (package visits + detail): an equal-price
-  // mirror that sells a different scope is a conflict too (codex #6113 r31).
+  // A mirror is silent when a kept clone matches it on the resolved amount
+  // AND the sold scope (package visits + detail). A mirror that differs only
+  // in its net is reconciled the way a mapped/raw twin is: with equal scope,
+  // the one side that carries manualFinalOneTime wins outright (the
+  // operator-accepted net), else the one side that carries a sold-net alias
+  // wins when both keep the same gross; the winning copy is the row kept.
+  // Anything else is a conflict (codex #6113 r31, r34).
   const signature = (row) => `${roundCents(amount(row))}|${scope ? scope(row) : ''}`;
-  const keptSignatures = new Map();
+  const kept = new Map();
   for (const t of tagged) {
     if (t.sourceIndex !== fullestSource.get(t.key)) continue;
-    keptSignatures.set(t.key, [...(keptSignatures.get(t.key) || []), signature(t.row)]);
+    kept.set(t.key, [...(kept.get(t.key) || []), t]);
   }
-  const conflicted = tagged
-    .filter((t) => t.sourceIndex !== fullestSource.get(t.key) && !(keptSignatures.get(t.key) || []).includes(signature(t.row)))
-    .map((t) => label(t.row));
+  const conflicted = [];
+  for (const t of tagged) {
+    if (t.sourceIndex === fullestSource.get(t.key)) continue;
+    const clones = kept.get(t.key) || [];
+    if (clones.some((k) => signature(k.row) === signature(t.row))) continue;
+    const match = clones.find((k) => (!scope || scope(k.row) === scope(t.row)) && mirrorNetWinner(k.row, t.row, net) !== null);
+    if (!match) { conflicted.push(label(t.row)); continue; }
+    if (mirrorNetWinner(match.row, t.row, net) === 'mirror') match.row = t.row;
+  }
+  const rows = tagged.filter((t) => t.sourceIndex === fullestSource.get(t.key)).map((t) => t.row);
   return { rows, conflicted };
 }
 
@@ -934,6 +960,8 @@ const soldScopeSignature = (row) => JSON.stringify([packageVisits(row.visits, ro
 const MAPPED_SOLD_NET_ALIASES = MAPPED_NET_ALIASES.slice(1);
 const RAW_SOLD_NET_ALIASES = RAW_NET_ALIASES.slice(1);
 const grossOf = (row) => num(row.price ?? row.amount ?? row.total);
+const mappedNetShape = (row) => ({ manual: num(row.manualFinalOneTime) != null, alias: firstApplicableAlias(row, MAPPED_SOLD_NET_ALIASES) !== undefined, gross: grossOf(row) });
+const rawNetShape = (row) => ({ manual: num(row.manualFinalOneTime) != null, alias: firstApplicableAlias(row, RAW_SOLD_NET_ALIASES) !== undefined, gross: grossOf(row) });
 // With neither manual net present: the resolved amounts agree, or exactly
 // one side carries an explicit sold-net alias while the other keeps only the
 // SAME gross (one engine run persists the mapped shape net and the raw shape
@@ -980,7 +1008,12 @@ function mergeMappedTwin(item, mappedAmount, twin) {
 function claimRawTwin(rawPool, item, mappedAmount) {
   const service = String(item.service || item.name || '').toLowerCase();
   const sameService = (entry) => !entry.used && String(entry.line.service || entry.line.name || '').toLowerCase() === service;
-  const entry = rawPool.find((e) => sameService(e) && roundCents(rawResolvedAmount(e.line)) === roundCents(mappedAmount))
+  const sameAmount = (e) => roundCents(rawResolvedAmount(e.line)) === roundCents(mappedAmount);
+  // Repeated same-price rows pair by sold scope first, so two legitimate
+  // rows persisted in the opposite order in the raw shape still meet their
+  // own twins (codex #6113 r34).
+  const entry = rawPool.find((e) => sameService(e) && sameAmount(e) && soldScopeSignature(e.line) === soldScopeSignature(item))
+    || rawPool.find((e) => sameService(e) && sameAmount(e))
     || rawPool.find(sameService);
   if (entry) entry.used = true;
   return entry ? entry.line : null;
@@ -1071,10 +1104,10 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   const mapped = mappedOneTimeSources(estimateData);
   const raw = rawLineItemSources(estimateData);
   const mappedCollapse = collapseMirroredRows(mapped.sourceLists, {
-    identity: oneTimeIdentity, amount: mappedResolvedAmount, scope: soldScopeSignature, label: (item) => String(item.label || item.name || item.service || 'item'),
+    identity: oneTimeIdentity, amount: mappedResolvedAmount, scope: soldScopeSignature, net: mappedNetShape, label: (item) => String(item.label || item.name || item.service || 'item'),
   });
   const rawCollapse = collapseMirroredRows(raw.rawContainers, {
-    identity: rawIdentity, amount: rawResolvedAmount, scope: soldScopeSignature, label: (line) => rawLineLabel(line, 'item'),
+    identity: rawIdentity, amount: rawResolvedAmount, scope: soldScopeSignature, net: rawNetShape, label: (line) => rawLineLabel(line, 'item'),
   });
   const out = { work: [], gated: [], comped: [], conflicted: [...mappedCollapse.conflicted, ...rawCollapse.conflicted] };
   const rawGated = (line) => rowIsReviewGated(line) || raw.gatedIdentities.has(rawIdentity(line));
