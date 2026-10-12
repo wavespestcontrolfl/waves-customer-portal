@@ -713,7 +713,10 @@ describe('product facts for the pest writer', () => {
 
   test('an untagged application says so', () => {
     expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', [])])))
-      .toContain('mainly used for ants; tagged today for no pest.');
+      .toContain('mainly used for ants; not tagged today (its reason is not recorded here).');
+    // No tag is not proof of routine coverage (Codex r8).
+    expect(PEST_WRITER_ADAPTER).toContain('With no matching tag the reason is not recorded');
+    expect(PEST_WRITER_ADAPTER).not.toContain('routine coverage');
   });
 
   test('no reviewed product, or a lawn visit: no block', () => {
@@ -756,6 +759,9 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT TO EXPECT\nYou’re now fully protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYour home is completely protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYour home is currently protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYour home has been protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYour home was protected today.')).toBe('owner_phrase');
+    expect(screen('WHAT WE DID AND WHY\nThe bait was protected from rain by the station cover.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are in a protected area along the fence.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are protected from rain by their covers.')).toBeNull();

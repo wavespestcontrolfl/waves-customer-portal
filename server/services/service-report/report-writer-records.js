@@ -110,7 +110,7 @@ function productFactLines(applications) {
     const tagged = (Array.isArray(application.targets) ? application.targets : []).map(cleanText).filter(Boolean);
     const facts = [
       `mainly used for ${entry.mainPests.join(' and ')}`,
-      `tagged today for ${tagged.length ? tagged.join(', ') : 'no pest'}`,
+      tagged.length ? `tagged today for ${tagged.join(', ')}` : 'not tagged today (its reason is not recorded here)',
     ].filter(Boolean);
     const label = [application.role, application.methodLabel, application.applicationArea]
       .map(cleanText).filter(Boolean).join(', ');
