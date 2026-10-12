@@ -7343,17 +7343,23 @@ function structuredFragmentsOf(view, v2Extraction, { v2Proof = false } = {}) {
 // Objections and pain points on a V2 call are sentiment: "price" is not a
 // service. Only one that names a service family (or classifies to a service)
 // other than the pre-slab service is another ask and keeps the card.
+const TERMITE_INJECTION_WORK_RE = /\binject\w*\b/i;
 function objectionNamesOtherService(fragment) {
   if (isPretreatFragment(fragment)) return false;
+  // The current service family is not another ask ("termite treatment is too
+  // expensive"). Another ask is a non-termite family, a service the catalog
+  // names outside the termite family, or an explicit non-pre-treat termite cue.
+  if (familiesIn(fragment).some((f) => f.key !== 'termite')) return true;
   const label = canonicalWavesService(fragment);
-  return familiesIn(fragment).length > 0 || !!(label && label !== 'Pre-Slab Termidor');
+  if (label && !TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor') return true;
+  return hasNonPretreatTermiteCue(fragment) || TERMITE_INJECTION_WORK_RE.test(fragment);
 }
 function v2ObjectionFragments(view, v2Extraction) {
   const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
   return [...(Array.isArray(objections) ? objections : []), ...painPoints].flatMap(splitFragments);
 }
-const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|older?|already built)\b/i;
+const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|already built)\b/i;
 function isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction) {
   return TERMITE_WOOD_TREATMENT_CUE_RE.test(String(fragment || '').toLowerCase())
     && !EXISTING_WORK_WORDING_RE.test(fragment)

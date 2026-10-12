@@ -583,6 +583,18 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       expect(runV2(v2)).toBe(false);
     });
 
+    test('an objection about the current termite service is not a second ask; another ask is (codex r2)', () => {
+      const v2 = slabV2();
+      for (const objection of ['termite treatment is too expensive', 'termite service costs too much']) {
+        v2.sentiment_and_lead.objections_raised = [objection];
+        expect(runV2(v2)).toBe(true);
+      }
+      for (const objection of ['worried about ants', 'termite bait stations are too expensive', 'termiticide injection is too expensive']) {
+        v2.sentiment_and_lead.objections_raised = [objection];
+        expect(runV2(v2)).toBe(false);
+      }
+    });
+
     test('a real second service in the V2 service fields keeps the card', () => {
       const withName = slabV2();
       withName.service_request.specific_service_name = 'Slab Pre-Treat Termite Service plus general pest control';
@@ -620,6 +632,9 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       const existingFraming = slabV2();
       existingFraming.service_request.specific_service_name = 'Slab Pre-Treat Termite Service with Bora-Care on the existing framing';
       expect(runV2(existingFraming)).toBe(false);
+      const oldFraming = slabV2();
+      oldFraming.meta.call_summary = 'Caller wants Bora-Care on the old framing.';
+      expect(runV2(oldFraming)).toBe(false);
       const existing = slabV2();
       existing.meta.call_summary = 'Caller wants Bora-Care on the existing home.';
       expect(runV2(existing)).toBe(false);
