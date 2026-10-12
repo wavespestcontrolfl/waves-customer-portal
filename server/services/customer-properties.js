@@ -1037,18 +1037,19 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
   const settledVisitStatuses = require('./property-role-proposals').TERMINAL_VISIT_STATUSES.filter(status => status !== 'rescheduled');
   const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
   const { estimateQuotesCustomerAddress, parseEstimateAddress } = require('./estimate-property-linkage');
+  // Every estimate and every unsettled visit of the customer is read, and a
+  // row depends on this property when ANY of its pointers names it: the
+  // property link, its own address, or (a visit) its source estimate. A row
+  // linked to another property but carrying this address still blocks.
   const estimates = await conn('estimates').where({ customer_id: customerId })
-    .where(q => q.where('property_id', target.id).orWhereNull('property_id'))
     .orderBy('id').select('id', 'status', 'archived_at', 'property_id', 'address');
-  const quotesTarget = estimate => (estimate.property_id
-    ? estimate.property_id === target.id
-    : !!parseEstimateAddress(estimate.address) && estimateQuotesCustomerAddress(estimate.address, target));
+  const quotesTarget = estimate => estimate.property_id === target.id
+    || (!!parseEstimateAddress(estimate.address) && estimateQuotesCustomerAddress(estimate.address, target));
   const targetEstimateIds = new Set(estimates.filter(quotesTarget).map(estimate => estimate.id));
   const openEstimates = estimates.filter(estimate => targetEstimateIds.has(estimate.id)
     && !estimate.archived_at && !TERMINAL_ESTIMATE_STATUSES.includes(estimate.status));
   const visits = await conn('scheduled_services').where({ customer_id: customerId })
-    .where(q => q.where('property_id', target.id).orWhereNull('property_id'))
-    .where(q => q.whereNotIn('status', settledVisitStatuses)
+    .where(q => q.whereNull('status').orWhereNotIn('status', settledVisitStatuses)
       .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
     .orderBy('id')
     .select('id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
@@ -1056,7 +1057,7 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
   const openVisits = visits.filter(visit => visit.property_id === target.id
     || (visit.service_address_line1 && addressKey({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
       city: visit.service_address_city, zip: visit.service_address_zip }) === targetKey)
-    || (!visit.service_address_line1 && visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id)));
+    || (visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id)));
   if (openVisits.length || openEstimates.length) {
     const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
     const parts = [openVisits.length && count(openVisits.length, 'open or recurring visit'), openEstimates.length && count(openEstimates.length, 'open estimate')].filter(Boolean);
