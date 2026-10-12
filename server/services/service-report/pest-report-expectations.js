@@ -394,6 +394,10 @@ function hasExteriorApplicationEvidence(product = {}) {
 const PERIMETER_BAND_CHIPS = new Set(['Perimeter', 'Exterior perimeter', 'Property perimeter', 'Foundation', 'Foundation perimeter']
   .map(normalizeAreaChipText));
 
+// Every label duration sentence a report can carry (the edit review scopes
+// their words to WHAT TO EXPECT, as generation does).
+const IGR_LABEL_DURATION_SENTENCES = Object.freeze([...IGR_LABEL_DURATION.values()].map((entry) => entry.sentence));
+
 const hasRoachTarget = (product) => Array.isArray(product?.targets) && product.targets.some((t) => /roach/i.test(t));
 
 // The one label duration a visit's growth regulators may state. Tekko Pro's
@@ -580,6 +584,7 @@ module.exports = {
   buildPestExpectations,
   expectationWindowClasses,
   igrLabelDuration,
+  IGR_LABEL_DURATION_SENTENCES,
   toExpectationProduct,
   isExteriorApplicationArea,
 };

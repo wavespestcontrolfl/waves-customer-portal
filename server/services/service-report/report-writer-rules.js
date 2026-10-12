@@ -689,6 +689,21 @@ function withinAllowanceSections(copy, fn, sections = ALLOWANCE_SECTIONS) {
 // it states recorded re-entry instructions, timeframes, dates and the gauge
 // from the report's own facts. Every other rule, and every rule added later,
 // applies to it unchanged.
+// A section-scoped phrase (a label duration) passes once, and never in a
+// sentence that tells the customer when to contact us: a second use, or a
+// use as a contact time, is left for the timeframe screen.
+function maskOnceOutsideContact(phraseRe) {
+  let used = false;
+  return (part) => part.split(/(?<=[.!?])\s+/).map((sentence) => {
+    if (REACH_OUT_CONTACT_RE.test(sentence)) return sentence;
+    return sentence.replace(phraseRe, (found) => {
+      if (used) return found;
+      used = true;
+      return 'X';
+    });
+  }).join(' ');
+}
+
 function allowedPhraseEntry(entry) {
   const scoped = entry && typeof entry === 'object';
   const sections = scoped && Array.isArray(entry.sections) ? new Set(entry.sections) : ALLOWANCE_SECTIONS;
@@ -739,7 +754,8 @@ function writerRulesRejectionDetail(text, { activeIngredients = [], allowedPhras
     const pattern = allowedPhrasePattern(phrase);
     if (phrase.trim().length < 3 || !pattern) continue;
     const phraseRe = new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi');
-    copy = withinAllowanceSections(copy, (part) => part.replace(phraseRe, 'X'), sections);
+    const mask = sections === ALLOWANCE_SECTIONS ? (part) => part.replace(phraseRe, 'X') : maskOnceOutsideContact(phraseRe);
+    copy = withinAllowanceSections(copy, mask, sections);
   }
   const hit = WRITER_RULE_SCREENS.find(([check, reason]) => !skipped.has(reason)
     && (typeof check === 'function' ? check(copy) : check.test(copy)));

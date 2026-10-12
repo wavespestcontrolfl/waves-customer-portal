@@ -11,7 +11,7 @@
  * (nextSameServiceAppointment) and never enters this text (Codex #5500).
  */
 const {
-  buildWhatToExpect, expectationWindowClasses, igrLabelDuration, toExpectationProduct,
+  buildWhatToExpect, expectationWindowClasses, igrLabelDuration, IGR_LABEL_DURATION_SENTENCES, toExpectationProduct,
 } = require('./pest-report-expectations');
 const { findReportProductCopyEntry, labeledPestCountText } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
@@ -153,6 +153,17 @@ function reachOutDate(serviceYmd, days) {
   return { full: `${weekday}, ${monthDay}`, monthDay };
 }
 
+// A label duration's words pass in WHAT TO EXPECT only: in WHAT'S NEXT they
+// would read as a time to contact us. Used at generation and at the edit
+// review, which rebuilds its phrases from the generated draft.
+const LABEL_DURATION_PHRASES = new Set(groundedTimeframePhrases(IGR_LABEL_DURATION_SENTENCES).map((phrase) => phrase.toLowerCase()));
+function scopeLabelDurationPhrases(phrases) {
+  return (Array.isArray(phrases) ? phrases : []).map((phrase) => (
+    typeof phrase === 'string' && LABEL_DURATION_PHRASES.has(phrase.toLowerCase())
+      ? { phrase, sections: ['WHAT TO EXPECT'] }
+      : phrase));
+}
+
 function buildWriterRecords({
   serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [], promises = [],
 } = {}) {
@@ -183,11 +194,9 @@ function buildWriterRecords({
   }
   return {
     sections,
-    // A label duration's words pass in WHAT TO EXPECT only: in WHAT'S NEXT
-    // they would read as a time to contact us.
     allowedPhrases: [
       ...groundedTimeframePhrases(expectations.lines),
-      ...groundedTimeframePhrases(labelDuration ? [labelDuration] : []).map((phrase) => ({ phrase, sections: ['WHAT TO EXPECT'] })),
+      ...scopeLabelDurationPhrases(groundedTimeframePhrases(labelDuration ? [labelDuration] : [])),
     ],
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
     // How many marked promises reached the writer (the generate route's
@@ -197,6 +206,7 @@ function buildWriterRecords({
 }
 
 module.exports = {
+  scopeLabelDurationPhrases,
   SERVICE_EXPECTATIONS,
   EXPECTATION_WINDOW_DAYS,
   writerExpectations,

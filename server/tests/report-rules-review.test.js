@@ -54,6 +54,15 @@ describe('edit heads-up', () => {
     expect(reportRulesReviewBlockPayload(args({ technicianNotes: kept, reportDraftBase: base }))).toBeNull();
   });
 
+  test('a label duration kept in WHAT TO EXPECT passes; moved to WHAT\'S NEXT it is a finding (Codex #6299 r2)', () => {
+    const base = DRAFT.replace('You may see a few more ants for about 1–2 weeks.', 'The growth regulator keeps working for up to 4 months.');
+    const kept = base.replace('The growth regulator keeps working for up to 4 months.', 'The growth regulator stays active for up to 4 months.');
+    expect(reportRulesReviewBlockPayload(args({ technicianNotes: kept, reportDraftBase: base }))).toBeNull();
+    const moved = base.replace('Let us know if they keep trailing.', 'Let us know in up to 4 months if they keep trailing.');
+    const block = reportRulesReviewBlockPayload(args({ technicianNotes: moved, reportDraftBase: base }));
+    expect(block.payload.findings.map((finding) => finding.reason)).toContain('timeframe');
+  });
+
   test("this visit's own active ingredients are screened, as at generation", () => {
     const edited = DRAFT.replace('We placed bait along the counter, because ants carry it back to the colony.', 'We placed bait with azadirachtin.');
     const block = reportRulesReviewBlockPayload(args({ technicianNotes: edited, activeIngredients: ['Azadirachtin'] }));

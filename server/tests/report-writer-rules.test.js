@@ -705,6 +705,10 @@ describe('product facts for the pest writer', () => {
     expect(screen("WHAT'S NEXT\nContact us in up to 4 months.", records)).toBe('timeframe');
     expect(screen('Contact us in up to 4 months.', records)).toBe('timeframe');
     expect(OWNER_RULES).toContain('a LABEL DURATION supplied under PRODUCT FACTS may be said once, in WHAT TO EXPECT only');
+    // Once, and never as a contact time, even inside WHAT TO EXPECT (Codex r2).
+    expect(screen('WHAT TO EXPECT\nIt keeps working for up to 4 months. Yes, up to 4 months.', records)).toBe('timeframe');
+    expect(screen('WHAT TO EXPECT\nContact us in up to 4 months.', records)).toBe('timeframe');
+    expect(screen('WHAT TO EXPECT\nThe growth regulator keeps working for up to 4 months. Contact us if you see live roaches.', records)).toBeNull();
     const expectations = records.sections.find((section) => section.startsWith('EXPECTATIONS'));
     expect(expectations).not.toContain('4 months');
     const report = (line) => `WHAT TO EXPECT\n${line}`;
