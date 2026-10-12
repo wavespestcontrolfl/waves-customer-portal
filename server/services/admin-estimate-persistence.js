@@ -1446,6 +1446,26 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // returned object when the caller explicitly sent them — revise spreads these
 // fields over the existing row, so a save from a caller that never loaded the
 // linkage must leave the stored values untouched rather than null them.
+// resolveEstimatePropertyLinkage validates the selected property on an
+// unlocked read before the write transaction. Inside the transaction the row
+// is re-read FOR SHARE, active only, and the lock is held to commit: removing
+// a saved property (customer-properties.removeManualProperty) holds the row
+// FOR UPDATE across its dependency check, so either this save commits first
+// and the removal sees the estimate and refuses, or the removal commits
+// first and this save is refused.
+// Lock order is customers, then the property, the order the removal uses: the
+// estimate insert takes a key-share lock on the customer row anyway (its
+// foreign key), and taking it after the property lock would deadlock with a
+// removal that holds the customer row and waits for the property.
+async function lockSelectedEstimateProperty(trx, writeFields) {
+  if (!writeFields.property_id) return;
+  const owner = await trx('customer_properties').where({ id: writeFields.property_id }).first('customer_id');
+  if (!owner) throw errorWithStatus('Property not found', 404);
+  await trx.raw('SELECT 1 FROM customers WHERE id = ? FOR KEY SHARE', [owner.customer_id]);
+  const live = await trx('customer_properties').where({ id: writeFields.property_id, active: true }).forShare().first('id');
+  if (!live) throw errorWithStatus('Property not found', 404);
+}
+
 async function resolveEstimatePropertyLinkage(database, body) {
   const fields = {};
   if (body.propertyId !== undefined) {
@@ -2309,6 +2329,7 @@ async function createOrReuseAdminEstimate({
       const { contactPairLockKey } = require('./lead-address-unverified');
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['address-verdict', contactPairLockKey(writeFields.customer_email, writeFields.customer_phone)]);
     }
+    await lockSelectedEstimateProperty(trx, writeFields);
     // Reuse the estimate's primary identity for a retried create. The lock
     // serializes double submissions before the existing lead/group writers.
     if (clientDraftId) {
@@ -3377,6 +3398,7 @@ async function reviseAdminEstimate({
   // described the PREVIOUS quote (the public view falls back to live pricing
   // until the next send re-stamps a snapshot).
   const updated = await database.transaction(async (trx) => {
+    await lockSelectedEstimateProperty(trx, writeFields);
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
       await lockEstimateGroupAddressRevision(trx, writeFields.estimate_group_id);
@@ -3814,6 +3836,7 @@ module.exports = {
   createOrReuseAdminEstimate,
   ensureEstimateGroupId,
   resolveEstimatePropertyLinkage,
+  lockSelectedEstimateProperty,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS,
