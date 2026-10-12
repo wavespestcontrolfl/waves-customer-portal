@@ -206,6 +206,19 @@ describe('syncPoolPermits fetch + upsert', () => {
       .mockResolvedValueOnce(acaResponse({ text: '<html>login</html>' }));
     await expect(syncPoolPermits()).rejects.toThrow(/not CSV/);
   });
+
+  test('non-CSV report output names the page the county sent (its title, trimmed)', async () => {
+    process.env.GATE_PERMIT_SYNC = 'true';
+    useSingleWindowSync();
+    db.mockImplementation(() => builder({ n: '42' }));
+    db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
+      .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
+      .mockResolvedValueOnce(acaResponse({ text: '<html><head><title>\r\n\tReport "Service"\u00a0Unavailable\r\n</title></head><body>x</body></html>', contentType: 'text/html; charset=utf-8' }));
+    await expect(syncPoolPermits()).rejects.toThrow('report output is not CSV (text/html; charset=utf-8; page "Report Service Unavailable")');
+  });
 });
 
 // A request ACA accepts and never answers: rejects only when the caller's

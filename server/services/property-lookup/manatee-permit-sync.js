@@ -110,6 +110,12 @@ function hiddenValue(html, name) {
   return m ? m[1] : '';
 }
 
+/** Short plain-text <title> of an HTML page ('' when there is none). */
+function pageTitle(html) {
+  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? m[1].replace(/<[^>]*>/g, ' ').replace(/[^\x20-\x7E]+/g, ' ').replace(/["\s]+/g, ' ').trim().slice(0, 80) : '';
+}
+
 /** A request failure worth a fresh-session retry (vs. a report/schema break). */
 class TransientAcaError extends Error {}
 
@@ -194,7 +200,12 @@ async function fetchAcaReportCsvOnce({ reportId, dateFromField, dateToField }, f
   }
   const { res: report, text } = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer, step: 'report download' });
   const ctype = String(report.headers.get('content-type') || '');
-  if (!/csv/i.test(ctype)) throw new Error(`report output is not CSV (${ctype || 'no content-type'})`);
+  if (!/csv/i.test(ctype)) {
+    // Name the page ACA sent instead (its <title>: a county page heading,
+    // never record data) so job health says what the county answered.
+    const title = pageTitle(text);
+    throw new Error(`report output is not CSV (${ctype || 'no content-type'}${title ? `; page "${title}"` : ''})`);
+  }
   return text;
 }
 
@@ -752,6 +763,7 @@ module.exports = {
     parcelPinFromRaw,
     windowsSince,
     hiddenValue,
+    pageTitle,
     mdy,
     REPORTS,
     // Shared with manatee-permit-detail.js (one ACA HTTP/session helper).
