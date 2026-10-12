@@ -154,6 +154,9 @@ beforeEach(() => {
   };
   stamped = ['visit-1'];
   jest.spyOn(require('../services/intelligence-bar/start-program-marker'), 'stampedVisitIds').mockImplementation(async () => stamped);
+  jest.spyOn(require('../services/intelligence-bar/start-program-marker'), 'stampedIds').mockImplementation(async () => stamped);
+  // The new series as the Schedule screen leaves it: one live parent visit with recurring_ongoing (the bill step re-reads it).
+  tables.scheduled_services = [{ id: 'visit-1', status: 'scheduled', recurring_ongoing: true, recurring_parent_id: null }];
   contactState = contactStateFixture();
   jest.spyOn(BookingContact, 'bookingContactState').mockImplementation(async () => contactState);
   fakeDb();
@@ -1439,6 +1442,10 @@ describe('commit', () => {
     expect(executionOutcome(result)).toBe('partially_completed');
     expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
     expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+    // Round 17: the row stays booked_pending_bill (never abandoned) and the receipt says the bill step is owed.
+    const phases = writes.filter((w) => w.table === 'ib_action_phases' && w.op === 'update').map((w) => w.data.phase);
+    expect(phases).toEqual(['booked_pending_bill']);
+    expect(result.warning).toContain('The bill step is owed');
   });
 
   test('an overlap is shown on the card; a new overlap after the card refuses with preview_changed', async () => {
@@ -1573,6 +1580,61 @@ describe('commit', () => {
       expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
       const phases = rowUpdates().map((w) => w.data.phase);
       expect(phases).toEqual(['booked_pending_bill']);
+    });
+
+    test('a partial series (2 of 4 visits) keeps the row booked_pending_bill: the sweep rings the bell and a second start is refused (round 17)', async () => {
+      const AdminAlert = require('../services/admin-alert-compose');
+      const alert = jest.spyOn(AdminAlert, 'raiseAdminAlert').mockResolvedValue({ id: 'n1' });
+      const version = await approvedVersion();
+      createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 2, appointments: [{ date: '2099-03-03' }, { date: '2099-04-03' }] } });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result).toMatchObject({ partial: true });
+      expect(result.warning).toContain('booked 2 of the 4 visits on the card (2099-03-03, 2099-04-03)');
+      expect(result.warning).toContain('The bill step is owed');
+      const phases = rowUpdates().map((w) => w.data.phase);
+      expect(phases).toContain('booked_pending_bill');
+      expect(phases).not.toContain('abandoned');
+      expect(phases).not.toContain('billed');
+      expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+      // An old open row with stamped visits rings the bill-owed bell, and the next start is refused.
+      const Marker = require('../services/intelligence-bar/start-program-marker');
+      tables.ib_action_phases = [{
+        id: 'phase-1', tool: 'start_program', customer_id: CUSTOMER_ID, action_key: 'v1:phase-1', phase: 'booked_pending_bill',
+        created_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(), payload: JSON.stringify({ target: { customerName: 'Dana Example' } }),
+      }];
+      expect(await Marker.sweepStalePending()).toBe(1);
+      expect(alert.mock.calls[0][1].action).toBe('Program bill not set');
+      expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_bill_step_owed' });
+    });
+
+    test.each([
+      ['cancelled', [{ id: 'visit-1', status: 'cancelled', recurring_ongoing: false, recurring_parent_id: null }]],
+      ['recurring_ongoing cleared', [{ id: 'visit-1', status: 'scheduled', recurring_ongoing: false, recurring_parent_id: null }]],
+      ['a stamped visit deleted', []],
+    ])('the new series changed between the booking and the bill (%s): refused program_series_changed, no customer or ledger write, row stays booked_pending_bill (round 17)', async (_name, rows) => {
+      const version = await approvedVersion();
+      createScheduleBooking.mockImplementation(async () => {
+        tables.scheduled_services = rows;
+        return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+      });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result).toMatchObject({ partial: true });
+      expect(result.warning).toContain('The bill was not raised');
+      expect(result.warning).toContain('The visits are booked and the bill step is owed');
+      expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+      expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+      expect(rowUpdates().map((w) => w.data.phase)).toEqual(['booked_pending_bill']);
+    });
+
+    test('the bill step locks the stamped series rows FOR SHARE NOWAIT after the customer lock; a held lock is a refusal (round 17)', async () => {
+      const version = await approvedVersion();
+      createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      const seq = calls.filter((c) => (c.table === 'customers' && c.method === 'forUpdate') || (c.table === 'scheduled_services' && ['forShare', 'noWait'].includes(c.method))).map((c) => `${c.table}.${c.method}`);
+      expect(seq.slice(-3)).toEqual(['customers.forUpdate', 'scheduled_services.forShare', 'scheduled_services.noWait']);
+      const Marker2 = require('../services/intelligence-bar/start-program-marker');
+      const trx = () => { const b = {}; for (const m of ['whereIn', 'forShare', 'noWait']) b[m] = () => b; b.select = () => Promise.reject(Object.assign(new Error('lock'), { code: '55P03' })); return b; };
+      expect(await Marker2.seriesDrift('v1:x', trx)).toContain('being changed');
     });
 
     test('a refusal BEFORE any visit is booked still abandons the row', async () => {

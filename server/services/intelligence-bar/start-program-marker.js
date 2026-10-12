@@ -124,13 +124,53 @@ async function settle(id, phase, extra = {}) {
   }
 }
 
+// The visit ids this attempt's booking stamped (the stamp rows carry the action_key).
+async function stampedIds(actionKey, conn) {
+  const stamps = await conn('activity_log').where({ action: STAMP_ACTION }).whereRaw("metadata->>'action_key' = ?", [actionKey]).select('metadata');
+  return stamps.map((s) => (typeof s.metadata === 'string' ? JSON.parse(s.metadata) : s.metadata)?.scheduled_service_id).filter(Boolean).map(String);
+}
+
 // The visits this attempt's booking created: the stamp rows carry the action_key, and the visit must exist.
 async function stampedVisitIds(actionKey, conn = db) {
-  const stamps = await conn('activity_log').where({ action: STAMP_ACTION }).whereRaw("metadata->>'action_key' = ?", [actionKey]).select('metadata');
-  const ids = stamps.map((s) => (typeof s.metadata === 'string' ? JSON.parse(s.metadata) : s.metadata)?.scheduled_service_id).filter(Boolean).map(String);
+  const ids = await stampedIds(actionKey, conn);
   if (!ids.length) return [];
   const rows = await conn('scheduled_services').whereIn('id', ids).select('id');
   return rows.map((r) => String(r.id));
+}
+
+const SERIES_GONE_STATUSES = ['cancelled', 'canceled', 'rescheduled'];
+const SERIES_COLUMNS = ['id', 'status', 'recurring_ongoing', 'recurring_parent_id'];
+
+// Locks (FOR SHARE NOWAIT, so a cancel in flight is a refusal and never a wait) the stamped visits and the series
+// parent. Returns the rows, or null when a stamped visit is gone or the lock is held by another writer.
+async function lockSeriesRows(ids, conn) {
+  try {
+    const rows = await conn('scheduled_services').whereIn('id', ids).forShare().noWait().select(...SERIES_COLUMNS);
+    const parentId = rows.find((r) => r.recurring_parent_id)?.recurring_parent_id;
+    const hasRoot = rows.some((r) => !r.recurring_parent_id);
+    if (!parentId || hasRoot) return rows;
+    const parent = await conn('scheduled_services').where('id', parentId).forShare().noWait().first(...SERIES_COLUMNS);
+    return parent ? [...rows, parent] : rows;
+  } catch (err) {
+    if (err && err.code === '55P03') return null;
+    throw err;
+  }
+}
+
+// The series the booking created must still be a live series when the bill is raised: every stamped visit exists and is
+// not cancelled, and the parent still has recurring_ongoing. Called inside the bill transaction, after the customer
+// lock. Returns '' when the series is intact, else the reason.
+async function seriesDrift(actionKey, conn) {
+  const ids = await module.exports.stampedIds(actionKey, conn);
+  if (!ids.length) return 'No visit stamped with this program start could be found.';
+  const rows = await lockSeriesRows(ids, conn);
+  if (!rows) return 'A visit of the new series is being changed on the Schedule screen.';
+  const found = new Set(rows.map((r) => String(r.id)));
+  if (!ids.every((id) => found.has(id))) return 'A visit of the new series no longer exists.';
+  if (rows.some((r) => SERIES_GONE_STATUSES.includes(r.status))) return 'The new series was cancelled or rescheduled.';
+  const root = rows.find((r) => !r.recurring_parent_id);
+  if (!root || !root.recurring_ongoing) return 'The new series is no longer an ongoing recurring series.';
+  return '';
 }
 
 // After the booking returned: booked_pending_bill only when stamped visits exist. False = the booking reported success
@@ -334,5 +374,5 @@ async function sweepStalePending() {
 
 module.exports = {
   TOOL, STAMP_ACTION, ONE_OPEN_INDEX, ALERT_MINUTES, BOOKING_STALE_MINUTES, OWED_INSTRUCTION,
-  writeMarker, setPhase, settle, audit, markBooked, stampedVisitIds, readOpenMarker, findOpenMarker, sweepStalePending,
+  writeMarker, setPhase, settle, audit, markBooked, stampedVisitIds, stampedIds, seriesDrift, readOpenMarker, findOpenMarker, sweepStalePending,
 };

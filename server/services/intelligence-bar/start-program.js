@@ -974,6 +974,11 @@ async function applyTierAndBill(plan) {
     // path sets active=false and stage churned and keeps the tier, rate and ledger) must not get a new tier and charge.
     const inactive = inactiveCustomerRefusal(locked);
     if (inactive) throw Object.assign(new Error(INACTIVE_TEXT), { drift: true, code: inactive.code });
+    // The booking commit and this transaction are apart: an admin may have cancelled the new series in between
+    // (a cancel clears recurring_ongoing and leaves the customer and ledger as they were). Lock the series rows and
+    // check them before a bill is raised for a program that no longer exists.
+    const gone = plan.markerId ? await Marker.seriesDrift(plan.markerKey, trx) : '';
+    if (gone) throw Object.assign(new Error(`${gone} The bill was not raised.`), { drift: true, code: 'program_series_changed' });
     // The card refuses a commercial account; the bill step re-checks the canonical predicate on the locked row.
     if (require('../self-booking-plan-sync').isCommercialAccount(locked)) {
       throw Object.assign(new Error('The account became a commercial or business account after the card was shown.'), { drift: true, code: 'program_commercial_account' });
@@ -1230,10 +1235,12 @@ const COMMIT_PHASES = {
     const { plan, created, booked, warnings } = run;
     const createdCount = Number(created.recurringCreated) || 0;
     if (createdCount >= ONGOING_PRESEED) return { next: 'bill' };
-    await Marker.settle(plan.markerId, 'abandoned', { reason: 'fewer_visits' });
+    // The row stays booked_pending_bill (markBooked set it): the visits exist and the bill is not set, so the bell and the
+    // one-open-marker block hold until the office completes or cancels the series and settles the bill.
     const state = await customerStateAfterBooking(plan.customerId);
+    const dates = booked.dates && booked.dates.length ? ` (${booked.dates.join(', ')})` : '';
     return { result: partialReceipt(plan, booked, state,
-      `the Schedule screen booked ${createdCount} of the ${ONGOING_PRESEED} visits on the card${warnings.length ? ` (${warnings.join(' ')})` : ''}. Add the missing visits on the Schedule screen (check days off and blackout dates), then set the tier and bill with update_customer`) };
+      `the Schedule screen booked ${createdCount} of the ${ONGOING_PRESEED} visits on the card${dates}${warnings.length ? ` (${warnings.join(' ')})` : ''}. Add the missing visits on the Schedule screen (check days off and blackout dates), or cancel the series. The bill step is owed: the office is alerted, and another program start for this customer is refused until the series is complete or cancelled and the tier and bill are set by hand (update_customer), then the alert is marked done`) };
   },
 
   async bill(run) {

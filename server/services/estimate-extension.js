@@ -275,16 +275,19 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // concurrent sweep flip (status guard). Zero rows → 409, callers surface
   // retry/failure.
   await db.transaction(async (trx) => {
-    // Lock order customer -> estimate, like the merge (customer rows first, then the estimate repoint): the customer
-    // row share comes BEFORE any estimate row lock. The snapshot names the customer; the locked row is re-checked below
-    // (409 estimate_owner_changed on a change).
-    await require('../utils/customer-estimate-lock').lockCustomerRowsForEstimate(trx, estimate);
+    // Lock order: group (grouped only) -> customer -> estimate. The merge locks customer rows first and then repoints
+    // estimates, so the customer row share comes BEFORE any estimate row lock. A proposal save takes the
+    // `estimate-group-send` advisory lock first and then the customer, so a grouped extension takes the group lock
+    // before the customer as well (the other order is an AB-BA wait). The snapshot names the customer; the locked row
+    // is re-checked below (409 estimate_owner_changed on a change).
+    const CustomerLock = require('../utils/customer-estimate-lock');
     let anchor;
     if (estimate.estimate_group_id) {
       // Proposal saves and grouped sends take this lock before row locks.
       // Hold it through both writes so a new fixed hold cannot split the offer.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['estimate-group-send', String(estimate.estimate_group_id)]);
+      await CustomerLock.lockCustomerRowsForEstimate(trx, estimate);
       const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
         .orderBy('id').forUpdate().select('*');
       anchor = locked.find((row) => row.id === estimate.id);
@@ -292,6 +295,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       // A generic proposal save can add a fixed hold after public preflight.
       // Judge the locked row before the write so refusal keeps its public
       // FIXED_BID_VALIDITY / generic-404 classification.
+      await CustomerLock.lockCustomerRowsForEstimate(trx, estimate);
       anchor = await trx('estimates').where({ id: estimate.id }).whereNull('estimate_group_id')
         .forUpdate().first();
     }

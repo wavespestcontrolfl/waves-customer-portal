@@ -77,6 +77,46 @@ describe('customer estimate lock order (customer row, then estimate row, then th
     expect(src).toContain('lockCustomerEstimatesForEstimate(trx, { ...lockedEst, ...estFields })');
   });
 
+  // Round 17: a proposal save takes the `estimate-group-send` advisory lock and then the customer, so a grouped
+  // extension takes group -> customer -> estimate (the other order is an AB-BA wait); an ungrouped one is customer -> estimate.
+  describe('extendEstimate lock order (round 17)', () => {
+    const src = read('../services/estimate-extension');
+    const tx = src.indexOf('await db.transaction(async (trx) => {', src.indexOf('async function extendEstimate('));
+    const grouped = src.indexOf('if (estimate.estimate_group_id) {', tx);
+    const ungrouped = src.indexOf('} else {', grouped);
+    const groupedBody = src.slice(grouped, ungrouped);
+    const ungroupedBody = src.slice(ungrouped, src.indexOf('if (!anchor) {', ungrouped));
+
+    test('grouped: the group advisory lock, then the customer rows, then the estimate rows', () => {
+      const group = groupedBody.indexOf("'estimate-group-send'");
+      const customer = groupedBody.indexOf('lockCustomerRowsForEstimate(trx, estimate)');
+      const rows = groupedBody.indexOf('.forUpdate()');
+      expect(group).toBeGreaterThan(-1);
+      expect(customer).toBeGreaterThan(group);
+      expect(rows).toBeGreaterThan(customer);
+    });
+
+    test('ungrouped: the customer rows, then the estimate row', () => {
+      const customer = ungroupedBody.indexOf('lockCustomerRowsForEstimate(trx, estimate)');
+      const rows = ungroupedBody.indexOf('.forUpdate()');
+      expect(customer).toBeGreaterThan(-1);
+      expect(rows).toBeGreaterThan(customer);
+      expect(ungroupedBody).not.toContain('estimate-group-send');
+    });
+
+    test('nothing in the transaction takes the customer lock before the group branch', () => {
+      expect(src.slice(tx, grouped)).not.toContain('lockCustomerRowsForEstimate');
+    });
+
+    test('the proposal save (the other side of the pair) takes the group lock before the customer rows', () => {
+      const admin = read('../routes/admin-estimates');
+      const group = admin.indexOf("['estimate-group-send', String(groupId)]");
+      const customer = admin.indexOf('if (revivingBid) await require(\'../utils/customer-estimate-lock\').lockCustomerRowsForEstimate(trx, estimate)');
+      expect(group).toBeGreaterThan(-1);
+      expect(customer).toBeGreaterThan(group);
+    });
+  });
+
   test('the customer-row helper locks rows only (no advisory lock)', async () => {
     const RecurringCof = require('../services/recurring-card-on-file');
     const spy = jest.spyOn(RecurringCof, 'resolveProspectiveAcceptCustomer').mockResolvedValue({ customerId: 'c2', lookupFailed: false });
