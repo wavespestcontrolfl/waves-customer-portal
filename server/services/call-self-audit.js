@@ -72,7 +72,7 @@ function compactDirection(direction) {
     : 'INBOUND: the caller dialed Waves; the person who answered is staff.';
 }
 
-// Shadow: put the same call to TypeSafe Jev (call_judge.v3) and record its
+// Shadow: put the same call to TypeSafe Jev (call_judge.v4) and record its
 // answers beside production's and the deep judge's in decision_reviews. Dark
 // behind GATE_TYPED_DECISIONS. With GATE_TYPED_DECISIONS_CLEF also on, the
 // same package goes to Cloudflare Clef as a second leg and each provider's
@@ -105,7 +105,7 @@ async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   const bool = (v) => (typeof v === 'boolean' ? v : undefined);
   const judgeBaselines = { complaint: { deep_judge: bool(verdict.complaint) } };
   for (const f of JEV_SHARED_FIELDS) judgeBaselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
-  count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v3', baselines: judgeBaselines }, clef));
+  count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v4', baselines: judgeBaselines }, clef));
   // The dark call gates' own decisions beside the same providers' answers
   // (call_gate_checks.v1); tallied apart so call_judge's counts keep their meaning.
   // Asked only when the WHOLE transcript fits the span the models and the

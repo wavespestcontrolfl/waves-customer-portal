@@ -24,6 +24,10 @@ const crypto = require('crypto');
 // snapshot of auditAppointmentContract() taken when v3 was published. When the
 // production rules change, add call_judge.v4 with a new snapshot; never edit this file.
 const CALL_JUDGE_V3_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v3-appointment-contract.txt'), 'utf8');
+// call_judge.v4's contract: the same snapshot rule, taken 10-12 after the four V2-only
+// confirmation rules (bare time with no day, missing AM/PM, staff hedges, caller-proposed
+// time) moved into appointment-confirmed-rules.js. Never edit this file either.
+const CALL_JUDGE_V4_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v4-appointment-contract.txt'), 'utf8');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -78,6 +82,20 @@ const CALL_JUDGE_V3 = {
   questions: {
     ...CALL_JUDGE.questions,
     appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V3_APPOINTMENT_CONTRACT}`),
+  },
+};
+
+// v4 (10-12): appointment_agreed asks the same production rules plus the four V2-only
+// confirmation rules v3 lacked, so the auditor, the typed judge and production grade a
+// bare time, a missing AM/PM, a staff hedge and a caller-proposed time the same way.
+// Only the appointment_agreed wording changes; v3 stays registered for rows answered under it.
+const CALL_JUDGE_V4 = {
+  ...CALL_JUDGE,
+  id: 'call_judge.v4',
+  version: 4,
+  questions: {
+    ...CALL_JUDGE.questions,
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V4_APPOINTMENT_CONTRACT}`),
   },
 };
 
@@ -272,6 +290,7 @@ const PHOTO_PRIVACY = {
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_JUDGE_V3.id]: CALL_JUDGE_V3,
+  [CALL_JUDGE_V4.id]: CALL_JUDGE_V4,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
