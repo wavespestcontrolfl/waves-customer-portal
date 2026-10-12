@@ -259,20 +259,24 @@ describe('address check ledger', () => {
     expect(ledger.writeRefusal('add_customer_property', { address_line1: '100 17th St', city: 'Bradenton', state: 'FL', zip: '34205' })).toMatchObject(REQUIRED);
   });
 
-  test('a change that does not carry street, city and ZIP together is refused', async () => {
+  test('a street with no ZIP or a ZIP with no street is refused; a city alone is not held', async () => {
     const ledger = createAddressCheckLedger();
     await checked(ledger, { address: '100 Example Way', city: 'Sarasota', zip: '34236' });
     expect(ledger.writeRefusal('update_customer', { updates: { zip: '34999' } })).toMatchObject(REQUIRED);
-    expect(ledger.writeRefusal('update_customer', { updates: { city: 'Venice' } })).toMatchObject(REQUIRED);
     expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way' } })).toMatchObject(REQUIRED);
     expect(ledger.writeRefusal('update_lead_contact', { zip: '34999' })).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('bulk_update_customers', { customer_ids: ['c1'], updates: { zip: '34999' } })).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('bulk_update_customers', { customer_ids: ['c1'], updates: { address_line1: '9 Unchecked Rd', zip: '34236' } })).toMatchObject(REQUIRED);
+    expect(ledger.writeRefusal('update_customer', { updates: { city: 'Venice' } })).toBeNull();
+    expect(ledger.writeRefusal('update_customer', { updates: { address_line1: '100 Example Way', zip: '34236' } })).toBeNull();
     expect(ledger.writeRefusal('update_lead_contact', { first_name: 'Pat' })).toBeNull();
   });
 
   test('each address-writing tool is read through its own fields', () => {
-    expect(writtenAddress('update_lead_contact', { address: '100 Example Way', city: 'Sarasota', zip: '34236' })).toMatchObject({ zip: '34236', state: 'FL' });
+    expect(writtenAddress('update_lead_contact', { address: '100 Example Way', city: 'Sarasota', zip: '34236' })).toMatchObject({ zip: '34236', state: null });
     expect(writtenAddress('update_lead_contact', { first_name: 'Pat' })).toBeNull();
     expect(writtenAddress('correct_invoice_address', { address_line1: '100 Example Way' })).toEqual({ partial: true });
+    expect(writtenAddress('update_customer', { updates: { city: 'Venice', state: 'FL' } })).toBeNull();
   });
 });
 

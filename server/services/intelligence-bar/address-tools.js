@@ -165,12 +165,13 @@ function shape(result, given) {
 // address as given and, when Google answered, as normalized. An address
 // write whose street and ZIP are not in the ledger is refused with
 // address_check_required, so the model must check first and then save what
-// was checked: street, city, state and ZIP must all match one ledger entry.
+// was checked: the street and ZIP, and the city and state when sent, must match one ledger entry.
 const WRITE_ADDRESS_FIELDS = {
   add_customer_property: input => input,
   create_customer: input => input,
   correct_invoice_address: input => input,
   update_customer: input => input.updates,
+  bulk_update_customers: input => input.updates,
   update_lead_contact: input => ({ address_line1: input.address, zip: input.zip, city: input.city, state: input.state }),
 };
 const streetKey = line => compareKey(normalizeStreetLine(splitStreetLineUnit(cleanText(line)).street || cleanText(line)));
@@ -181,17 +182,22 @@ const addressKey = ({ street, city, state, zip }) => ({
 });
 
 // The address an address-writing call would save, as comparable keys; null
-// when the call touches no address field. A call must carry the street, the
-// city and the ZIP together (`partial` otherwise): a street saved over the
-// record's old city or ZIP, or a ZIP changed alone, cannot be matched to a
-// check, so the model must send the whole address it checked.
+// when the call needs no check. What this rule protects is the street
+// spelling and the ZIP, the two things a model guesses:
+//  - a street must come with its ZIP, and both (plus the city and state, when
+//    the call sends them) must equal one checked entry;
+//  - a ZIP with no street is `partial`: it cannot be matched to a check, so
+//    the model must send the street it checked with it;
+//  - a city or state change alone (filling a missing city) is not held: it
+//    carries neither a street nor a ZIP to verify.
 function writtenAddress(toolName, input) {
   const fields = WRITE_ADDRESS_FIELDS[toolName]?.(input || {});
   if (!fields) return null;
   const present = key => Boolean(cleanText(String(fields[key] ?? '')));
-  if (!['address_line1', 'city', 'state', 'zip'].some(present)) return null;
-  if (!present('address_line1') || !present('city') || !present('zip')) return { partial: true };
-  return addressKey({ street: fields.address_line1, city: fields.city, state: fields.state, zip: fields.zip });
+  if (!present('address_line1') && !present('zip')) return null;
+  if (!present('address_line1') || !present('zip')) return { partial: true };
+  const key = addressKey({ street: fields.address_line1, city: fields.city, state: fields.state, zip: fields.zip });
+  return { ...key, city: present('city') ? key.city : null, state: present('state') ? key.state : null };
 }
 
 const ADDRESS_CHECK_REQUIRED = Object.freeze({
@@ -199,13 +205,15 @@ const ADDRESS_CHECK_REQUIRED = Object.freeze({
   code: 'address_check_required',
 });
 const ADDRESS_PARTIAL = Object.freeze({
-  error: 'An address change must carry the street, the city and the ZIP together. Run check_address on the whole address first, then save what it returned.',
+  error: 'A street change must carry its ZIP, and a ZIP change must carry its street. Run check_address on the whole address first, then save the street and ZIP it returned together.',
   code: 'address_check_required',
 });
 
 function createAddressCheckLedger() {
   const checked = [];
-  const same = (a, b) => a.street === b.street && a.city === b.city && a.state === b.state && a.zip === b.zip;
+  // City and state are compared when the write sends them.
+  const same = (entry, written) => entry.street === written.street && entry.zip === written.zip
+    && (written.city === null || entry.city === written.city) && (written.state === null || entry.state === written.state);
   return {
     // Called with every tool result; only a finished check_address records:
     // the address as given and, when Google answered, as normalized.
