@@ -147,6 +147,9 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await db('estimates').where({ id: estimate }).update({ status: 'accepted' });
     await db('scheduled_services').where({ id: unstamped }).update({ status: 'pending', service_address_line1: null, service_address_zip: null, service_address_city: null, source_estimate_id: estimate });
     await blocked();
+    // The same visit stamped to the primary keeps its own location: the estimate no longer speaks for it.
+    await db('scheduled_services').where({ id: unstamped }).update({ property_id: primary.id });
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });
     await db('scheduled_services').where({ id: unstamped }).update({ status: 'cancelled' });
     await db('estimates').where({ id: estimate }).update({ status: 'declined', property_id: saved.propertyId });
     await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });

@@ -1051,9 +1051,9 @@ const VISIT_POINTER_COLUMNS = ['id', 'property_id', 'source_estimate_id', 'servi
 
 // Open rows that still depend on a saved property. Every estimate and every
 // unsettled visit of the customer is read, and a row depends on the property
-// when ANY of its pointers names it: the property link, its own address, or
-// (a visit) its source estimate. A row linked to another property but
-// carrying this address still counts.
+// when its property link or its own address names it, or (a visit with no
+// location of its own) its source estimate does. A row linked to another
+// property but carrying this address still counts.
 async function propertyRemovalDependents(conn, customerId, target) {
   // 'rescheduled' is NOT settled here: a customer reschedule request parks
   // the visit in that status with no replacement visit yet (routes/schedule.js),
@@ -1078,7 +1078,10 @@ async function propertyRemovalDependents(conn, customerId, target) {
   const visitNamesProperty = visit => visit.property_id === target.id
     || addressCanNameProperty({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
       city: visit.service_address_city, zip: visit.service_address_zip }, target)
-    || (!!visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id));
+    // The source estimate speaks only for a visit with no location of its
+    // own: a reused quote-wizard draft can later name another property, and
+    // a visit already stamped elsewhere must not follow it.
+    || (!visit.property_id && !visit.service_address_line1 && !!visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id));
   const openVisits = visits.filter(visitNamesProperty);
   // A grouped visit (service_visits) stays 'open' until closeout and 'closing'
   // while a submitted closeout is still processing, after its child
