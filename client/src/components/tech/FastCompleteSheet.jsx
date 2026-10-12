@@ -765,8 +765,6 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const dictating = useDictationSources(onDictationPending);
   const serviceId = service?.id;
   const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), []);
-  // What the tech tapped or said lifts the advice for it; never a pick.
-  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { pests: [...form.pests], note: form.note }), [tips, form.pests, form.note]);
 
   const chooseMethod = useCallback((next) => {
     setField('method', next);
@@ -898,8 +896,6 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               tipId={form.tipId}
               customTip={form.customTip}
               locked={formLocked}
-              priorityTipIds={liftedTipIds}
-              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={setCustomTip}
               mic={{ serviceId, onPendingChange: dictating.tip }}
@@ -2229,8 +2225,6 @@ function VisitStep({
   const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
   const dictating = useDictationSources(onDictationPending);
   const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), [setForm]);
-  // The pests the note names lift the advice for them; never a pick.
-  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { note: form.note }), [tips, form.note]);
   // Each dictated chunk joins what is already in the box (stable for the mic).
   const appendNote = useCallback(
     (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
@@ -2320,8 +2314,6 @@ function VisitStep({
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
-              priorityTipIds={liftedTipIds}
-              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={setCustomTip}
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip, onClip: tipClip.onClip, error: tipClip.error }}

@@ -86,7 +86,7 @@ function store(tables, down = new Set()) {
   return { knex, state };
 }
 
-const GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_LEAD'];
+const GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2'];
 const live = () => { for (const name of GATES) process.env[name] = 'true'; };
 afterEach(() => { for (const name of GATES) delete process.env[name]; jest.clearAllMocks(); });
 
