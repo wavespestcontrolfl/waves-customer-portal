@@ -744,7 +744,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
 // after the reconcile tail derives the lead.
 describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
   const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
-  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_SINCE_LAST', 'GATE_LAWN_REPORT_LEAD'];
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_SINCE_LAST'];
   const saved = {};
   beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); jest.clearAllMocks(); });
   afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
@@ -763,7 +763,7 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     gates.forEach((gate) => { process.env[gate] = 'true'; });
   };
-  const ALL = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_SINCE_LAST'];
+  const ALL = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_SINCE_LAST'];
   // What the public route does with the built payload before it serializes it.
   const served = async (recs, patch = {}, mode = 'live') => {
     const { knex } = withRecords({ ...fixtures(), ...patch }, recs);
@@ -772,9 +772,9 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
     return data;
   };
 
-  test('all three gates on with a prior: the lead carries the block, and no other key appears', async () => {
+  test('both gates on with a prior: the lead carries the block, and no other key appears', async () => {
     setHistory([PRIOR, CUR]);
-    live('GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD');
+    live('GATE_LAWN_VISIT_MEMORY');
     const without = JSON.parse(JSON.stringify(await served(records(), PHOTOS)));
     live(...ALL);
     const data = await served(records(), PHOTOS);
@@ -793,9 +793,8 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
   });
 
   test.each([
-    ['the since-last gate off', ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD']],
-    ['the memory gate off', ['GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_SINCE_LAST']],
-    ['the lead gate off', ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_SINCE_LAST']],
+    ['the since-last gate off', ['GATE_LAWN_VISIT_MEMORY']],
+    ['the memory gate off', ['GATE_LAWN_SINCE_LAST']],
   ])('%s: no block is built and nothing names it', async (_label, gates) => {
     setHistory([PRIOR, CUR]);
     live(...gates);
@@ -856,7 +855,7 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
 describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
   const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
   const { RAINFAST_WATCH_LINE } = require('../services/service-report/lawn-rainfast-watch');
-  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_RAINFAST_WATCH'];
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_RAINFAST_WATCH'];
   const saved = {};
   let fetchSpy;
   let nowSpy;
@@ -883,7 +882,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
   });
   const live = (...gates) => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-    ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD', ...gates].forEach((gate) => { process.env[gate] = 'true'; });
+    ['GATE_LAWN_VISIT_MEMORY', ...gates].forEach((gate) => { process.env[gate] = 'true'; });
   };
   // The facts completion froze for the visit's product (the only source of the interval the watch reads).
   const snapshotFor = (rainfast = 180) => ({
@@ -947,7 +946,6 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
   test('the visit memory off keeps the watch off even with its own gate on', async () => {
     setHistory([CUR]);
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-    process.env.GATE_LAWN_REPORT_LEAD = 'true';
     process.env.GATE_LAWN_RAINFAST_WATCH = 'true';
     const recs = records();
     await serve(recs, withProduct());

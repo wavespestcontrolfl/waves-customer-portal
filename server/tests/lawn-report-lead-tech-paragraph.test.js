@@ -61,9 +61,6 @@ describe('deriveLawnLead', () => {
 });
 
 describe('the hand-off never reaches the payload', () => {
-  const ENV = 'GATE_LAWN_REPORT_LEAD';
-  const saved = process.env[ENV];
-  afterEach(() => { if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved; });
   const dynamic = () => ({ reentry: { targets: [{ statusAtGeneratedAt: 'ready' }], petAdvisory: 'Keep pets off treated turf until dry.' } });
   const payload = (techParagraph) => {
     const reportV2 = reportOf();
@@ -72,17 +69,13 @@ describe('the hand-off never reaches the payload', () => {
   };
 
   test('the lead carries the text; reportV2 has no techParagraph key of its own', () => {
-    process.env[ENV] = 'true';
     const out = applyLawnReportReconciliation(payload(TEXT), dynamic());
     expect(out.reportV2.lead.techParagraph).toBe(TEXT);
     expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'techParagraph')).toBe(false);
     expect(JSON.stringify(out).split(TEXT).length - 1).toBe(1);
   });
 
-  test('no hand-off, or the lead gate off: nothing appears', () => {
-    process.env[ENV] = 'true';
+  test('no hand-off: nothing appears', () => {
     expect(applyLawnReportReconciliation(payload(null), dynamic()).reportV2.lead).not.toHaveProperty('techParagraph');
-    delete process.env[ENV];
-    expect(JSON.stringify(applyLawnReportReconciliation(payload(TEXT), dynamic()))).not.toContain(TEXT);
   });
 });

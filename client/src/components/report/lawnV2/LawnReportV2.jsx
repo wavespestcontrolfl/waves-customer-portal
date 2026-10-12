@@ -346,7 +346,7 @@ export function sinceLastLabel(sinceLast) {
   return day ? `Since your last visit, ${day}` : 'Since your last visit';
 }
 
-// ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
+// ── 1b. Lead ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
 // what we applied, the homeowner's part, and ONE next

@@ -411,3 +411,30 @@ describe('ops/agents/primary-property-backfill.js rollback guards (codex #4115 r
     expect(src).toMatch(/BEGIN; LOCK TABLE visual_service_moments IN SHARE ROW EXCLUSIVE MODE; `\s*\n\s*\+ `SELECT 1 FROM customer_properties WHERE id = ANY/);
   });
 });
+
+describe('addressCanNameProperty (saved-property removal dependency match)', () => {
+  const { addressCanNameProperty } = require('../services/customer-properties');
+  const target = { address_line1: '100 Example Dr E', address_line2: 'Apt 4', city: 'Bradenton', zip: '34201' };
+  test.each([
+    ['same address', { address_line1: '100 Example Dr E', address_line2: 'Apt 4', city: 'Bradenton', zip: '34201' }, true],
+    ['suffix and directional spelled out', { address_line1: '100 Example Drive East', address_line2: 'Unit 4', city: 'Bradenton', zip: '34201' }, true],
+    ['street only', { address_line1: '100 Example Dr E' }, true],
+    ['unit embedded in the street line', { address_line1: '100 Example Dr E Apt 4', zip: '34201' }, true],
+    ['mailing-city alias with the same ZIP', { address_line1: '100 Example Dr E', city: 'Lakewood Ranch', zip: '34201-1234' }, true],
+    ['unparsed one-line address', { address_line1: '100 Example Dr E Bradenton FL' }, true],
+    ['different unit', { address_line1: '100 Example Dr E', address_line2: 'Apt 5', zip: '34201' }, false],
+    ['unparsed one-line address with the same unit', { address_line1: '100 Example Dr E Apt 4 Bradenton FL 34201' }, true],
+    ['unparsed one-line address with another unit', { address_line1: '100 Example Dr E Apt 5 Bradenton FL 34201' }, false],
+    ['unit-first street line', { address_line1: 'Unit 4, 100 Example Dr E', zip: '34201' }, true],
+    ['unit-first street line with another unit', { address_line1: 'Apt 5, 100 Example Dr E', zip: '34201' }, false],
+    ['different unit on a street-only stamp', { address_line1: '100 Example Dr E', address_line2: 'Apt 5' }, false],
+    ['missing unit on a street-only stamp', { address_line1: '100 Example Drive East' }, true],
+    ['different ZIP', { address_line1: '100 Example Dr E', city: 'Bradenton', zip: '34239' }, false],
+    ['different city and no ZIP', { address_line1: '100 Example Dr E', city: 'Venice' }, false],
+    ['different directional', { address_line1: '100 Example Dr W', zip: '34201' }, false],
+    ['different street', { address_line1: '102 Example Dr E', zip: '34201' }, false],
+    ['no street', { city: 'Bradenton', zip: '34201' }, false],
+  ])('%s', (_name, address, expected) => {
+    expect(addressCanNameProperty(address, target)).toBe(expected);
+  });
+});
