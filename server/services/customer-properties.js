@@ -955,11 +955,15 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
       preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer, properties) };
     } else throw propertyActionError('Unknown property operation');
   }
-  preview._version = require('crypto').createHash('sha256').update(JSON.stringify([
-    kind, customerId, propertyId, changes, customer.row_version,
+  preview._version = manualPropertyPreviewVersion([kind, customerId, propertyId, changes], customer, properties, preview);
+  return preview;
+}
+
+function manualPropertyPreviewVersion(action, customer, properties, preview) {
+  return require('crypto').createHash('sha256').update(JSON.stringify([
+    ...action, customer.row_version,
     properties.map(p => [p.id, p.row_version]), preview._invoice_ids || [],
   ])).digest('hex');
-  return preview;
 }
 
 // Relationships that record the property as something other than the home
@@ -1040,6 +1044,8 @@ function addressCanNameProperty(address, target) {
   return !differs(normStreet(address.city), normStreet(target.city));
 }
 
+const VISIT_POINTER_COLUMNS = ['id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip'];
+
 // Open rows that still depend on a saved property. Every estimate and every
 // unsettled visit of the customer is read, and a row depends on the property
 // when ANY of its pointers names it: the property link, its own address, or
@@ -1065,12 +1071,24 @@ async function propertyRemovalDependents(conn, customerId, target) {
     .where(q => q.whereNull('status').orWhereNotIn('status', settledVisitStatuses)
       .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
     .orderBy('id')
-    .select('id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
-  const openVisits = visits.filter(visit => visit.property_id === target.id
+    .select(...VISIT_POINTER_COLUMNS);
+  const visitNamesProperty = visit => visit.property_id === target.id
     || addressCanNameProperty({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
       city: visit.service_address_city, zip: visit.service_address_zip }, target)
-    || (visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id)));
-  return { visits: openVisits.length, estimates: openEstimates.length };
+    || (!!visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id));
+  const openVisits = visits.filter(visitNamesProperty);
+  // A grouped visit (service_visits) stays 'open' until closeout and 'closing'
+  // while a submitted closeout is still processing, after its child
+  // scheduled_services rows are already completed. Either state at this
+  // property is an unfinished visit.
+  const groups = await conn('service_visits').where({ customer_id: customerId }).whereIn('status', ['open', 'closing'])
+    .orderBy('id').select('id', 'property_id');
+  const children = groups.length ? await conn('scheduled_services').where({ customer_id: customerId })
+    .whereIn('visit_id', groups.map(group => group.id)).select(...VISIT_POINTER_COLUMNS, 'visit_id') : [];
+  const openVisitIds = new Set(openVisits.map(visit => visit.id));
+  const openGroups = groups.filter(group => group.property_id === target.id
+    || children.some(child => child.visit_id === group.id && !openVisitIds.has(child.id) && visitNamesProperty(child)));
+  return { visits: openVisits.length + openGroups.length, estimates: openEstimates.length };
 }
 
 function assertNoRemovalDependents({ visits, estimates }) {
@@ -1088,7 +1106,9 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
   if (target.is_primary) {
     throw propertyActionError('This is the primary property. Make another saved property primary before removing it.', 409, 'primary_property');
   }
-  if (customer.address_line1 && addressKey(customer) === addressKey(target)) {
+  // Partial-tolerant like the visit and estimate checks: a legacy account
+  // address with the same street and no city or ZIP is still this property.
+  if (customer.address_line1 && addressCanNameProperty(customer, target)) {
     throw propertyActionError('This property is the account address. Change the account address before removing it.', 409, 'account_address');
   }
   assertNoRemovalDependents(await propertyRemovalDependents(conn, customerId, target));

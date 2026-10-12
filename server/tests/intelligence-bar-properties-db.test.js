@@ -150,6 +150,17 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await db('scheduled_services').where({ id: unstamped }).update({ status: 'cancelled' });
     await db('estimates').where({ id: estimate }).update({ status: 'declined', property_id: saved.propertyId });
     await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
+    // A grouped visit still closing at this property blocks, though its child row is completed.
+    const [group] = await db('service_visits').insert({ customer_id: customerA, property_id: saved.propertyId, scheduled_date: date,
+      stop_base_key: `fixture-${done}`, status: 'closing', created_by: 'fixture' }).returning('id');
+    await db('scheduled_services').where({ id: done }).update({ visit_id: group.id });
+    await blocked();
+    await db('service_visits').where({ id: group.id }).update({ status: 'closed', property_id: null });
+    // A legacy account address with this street and no city or ZIP is the account address.
+    const account = await db('customers').where({ id: customerA }).first('address_line1', 'address_line2', 'city', 'zip', 'updated_at');
+    await db('customers').where({ id: customerA }).update({ address_line1: '2100 Example Grove', address_line2: null, city: null, zip: null });
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).rejects.toMatchObject({ code: 'account_address' });
+    await db('customers').where({ id: customerA }).update(account);
 
     // The multi-home status is never cleared by a removal; the card says it stays on.
     const active = await db('customer_properties').where({ customer_id: customerA, active: true }).count('id as count').first();
