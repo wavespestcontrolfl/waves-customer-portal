@@ -37,7 +37,8 @@ export function useStopWrapUp({ pest, lawn, request, open, report, fieldsRef }) 
     gate: live && open, service, request, base: `/admin/dispatch/${pest.service.id}`,
     omitAutoTiming: true, noPayLink: true, noAdjustTime: true, noReentry: true, onChecking,
   });
-  fieldsRef.current = () => (wrapUp.touched ? stopWrapUpFields(wrapUp.fields({})) : null);
+  // null: not shown (the saved bodies go as saved); {}: shown at its defaults (the parts' own bodies go); else the choices.
+  fieldsRef.current = () => (wrapUp.enabled ? (wrapUp.touched ? stopWrapUpFields(wrapUp.fields({})) : {}) : null);
   const submit = async (send) => {
     if (wrapUp.needsCheck() && !(await wrapUp.check())) return;
     await send.submit();

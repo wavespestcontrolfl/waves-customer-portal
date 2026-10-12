@@ -19,6 +19,15 @@ import {
 
 const PERSIST_ERROR = 'Could not save this on this device. Free some storage and try again.';
 
+// A saved form: the body that goes, and (only when the stop's Wrap-up changed it) the body the part handed over, so
+// the section can always be re-applied to the original.
+const formOf = (entry, rest = {}) => ({ body: entry.body, ...(entry.base !== entry.body ? { base: entry.base } : {}), ...rest });
+// The keys a confirm added to a body (the refusal's own flag), laid onto the handed-over body as well.
+function withAdded(base, before, after) {
+  const added = Object.fromEntries(Object.entries(after || {}).filter(([key]) => before && !(key in before)));
+  return Object.keys(added).length ? { ...base, ...added } : base;
+}
+
 // A revoked part's body may still sit in the draft store (its write is pending, or failed). A small synchronous marker,
 // kept apart from the store, says so: a load never trusts a stored body whose revocation has not landed, even after a
 // crash. Cleared when a write that no longer holds the part lands.
@@ -70,7 +79,7 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     keyRef.current = draft.key;
     const revoked = readRevoked(scope, visitId);
     entries.current = Object.fromEntries(Object.entries(saved).filter(([id, form]) => form?.body && !revoked.includes(id))
-      .map(([id, form]) => [id, { body: form.body, seq: 0, noteAtSave: form.noteAtSave ?? noteRef.current }]));
+      .map(([id, form]) => [id, { body: form.body, base: form.base ?? form.body, seq: 0, noteAtSave: form.noteAtSave ?? noteRef.current }]));
     restoredRef.current = Object.keys(entries.current);
   }
 
@@ -83,7 +92,7 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
     while (w.dirty) {
       w.dirty = false;
       const batch = w.waiters.splice(0);
-      const forms = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, { body: e.body, noteAtSave: e.noteAtSave }]));
+      const forms = Object.fromEntries(Object.entries(entries.current).map(([id, e]) => [id, formOf(e, { noteAtSave: e.noteAtSave })]));
       let ok = false;
       try { ok = await putVisitCompletionDraft(draftId, { visitId, key: keyRef.current, note: noteRef.current, forms }, scope); } catch { ok = false; }
       if (ok) {
@@ -123,7 +132,7 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   const apply = useCallback((id, body, seq) => {
     if (!(seq > (lastSeq.current[id] ?? 0))) return Promise.resolve();
     lastSeq.current[id] = seq;
-    if (body) entries.current[id] = { body, seq, noteAtSave: noteRef.current }; else revoke(id);
+    if (body) entries.current[id] = { body, base: body, seq, noteAtSave: noteRef.current }; else revoke(id);
     bump();
     return persist(() => { if (entries.current[id]?.seq === seq) delete entries.current[id]; })
       .then(() => { if (body) writeRevoked(scope, visitId, readRevoked(scope, visitId).filter((x) => x !== id)); })
@@ -146,10 +155,12 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   }, [persist, bump]);
 
   // A confirmed or reopened draft from a send: bodies follow it (a reopened form has none: it is not ready).
-  const replaceFrom = useCallback((next) => {
+  // `previous`: the draft the send carried before a confirm was added to it; the confirm joins the part's handed-over
+  // body too, so a later send built from that body keeps it.
+  const replaceFrom = useCallback((next, previous = null) => {
     for (const id of Object.keys(entries.current)) {
       const form = next.forms[id];
-      if (form?.body) entries.current[id] = { ...entries.current[id], body: form.body }; else delete entries.current[id];
+      if (form?.body) entries.current[id] = { ...entries.current[id], body: form.body, base: withAdded(entries.current[id].base, previous?.forms?.[id]?.body, form.body) }; else delete entries.current[id];
     }
     bump();
     persist().catch((err) => setPersistError(err.message));
@@ -158,14 +169,21 @@ export function useStopReadiness({ visitId, scope, status, draft }) {
   const ready = (id) => !!entries.current[id] && entries.current[id].noteAtSave === noteRef.current;
   const stale = (id) => !!entries.current[id] && !ready(id);
   // The draft the packet request sends: ready parts only, from the map (never from the loaded draft).
-  const draftFor = (ids) => ({
+  const draftFor = (ids, fromBase = false) => ({
     visitId, key: keyRef.current, note: noteRef.current,
-    forms: Object.fromEntries(ids.filter(ready).map((id) => [id, { body: entries.current[id].body }])),
+    forms: Object.fromEntries(ids.filter(ready).map((id) => [id, fromBase ? { body: entries.current[id].base, base: entries.current[id].base } : formOf(entries.current[id])])),
   });
   return { note: noteRef.current, setNote, ready, stale, restored: restoredRef.current, apply, drop, replaceFrom, retryPersist, draftFor, persistError, draftId };
 }
 
-// `stopFields()`: the stop-level Wrap-up's choices when the tech changed any, else null (the stop's own bodies go as saved).
+// A send whose answer never came (no HTTP answer, and the server could not be re-read to see whether it kept the packet) may
+// have been recorded: a retry under the same key must then carry the same bodies. Any answer, or a re-read that finds no
+// packet, means the attempt did not happen.
+const outcomeUnknown = (err, outcome) => outcome.kind === 'error' && !outcome.found && typeof err.status !== 'number';
+
+// `stopFields()`: what the stop's Wrap-up asks of the bodies, read at each send: null while the section is not shown (the
+// saved bodies go as saved), {} while it is shown at its defaults (the parts' own handed-over bodies go, exactly), else the
+// choices to lay onto those handed-over bodies.
 export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, stopFields }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -174,6 +192,11 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
   // A part whose form was put back (a declined promise) starts a fresh sheet.
   const [fresh, setFresh] = useState({});
   const submitting = useRef(false);
+  // The Wrap-up's fields the last send used, and whether that send's outcome is unknown (see outcomeUnknown).
+  const lastFields = useRef(null);
+  const unknownRef = useRef(null);
+  const [replaying, setReplaying] = useState(false);
+  const remember = (unknown) => { unknownRef.current = unknown ? { fields: lastFields.current } : null; setReplaying(unknown); };
   const packet = load.detail?.packet;
   const display = packetDisplayState({ result, detail: load.detail, busy });
 
@@ -188,7 +211,8 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
   // Applies what resolveSendFailure decided, exactly as the long form does. Returns the draft to send again, or null.
   const failed = async (err, candidate) => {
     const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope, draftId: readiness.draftId });
-    if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft); return outcome.draft; }
+    remember(outcomeUnknown(err, outcome));
+    if (outcome.kind === 'resend') { readiness.replaceFrom(outcome.draft, candidate); return outcome.draft; }
     if (outcome.kind === 'reopened') {
       readiness.replaceFrom(outcome.draft);
       const kind = outcome.draft.forms[ids.pest]?.body === null ? 'pest' : 'lawn';
@@ -208,13 +232,16 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
     return null;
   };
 
-  // The draft this send carries. The Wrap-up's choices are laid onto both bodies here, once, in the saved map too
-  // (replaceFrom persists it), so the first send, a retry under the same key and a reload all carry the same bodies.
+  // The draft this send carries, so that it always matches the section as shown now. The Wrap-up's choices are laid onto
+  // the parts' handed-over bodies (never onto what an earlier send carried), so a choice put back to its default sends the
+  // original again, and are saved with the bodies (replaceFrom persists them), so a retry under the same key and a reload
+  // replay what was sent. The exception is an attempt whose outcome is unknown: its retry keeps that attempt's choices.
   const stopCandidate = () => {
-    const base = readiness.draftFor([ids.pest, ids.lawn]);
-    const fields = stopFields?.();
-    if (!fields || Object.keys(base.forms).length < 2) return base;
-    const next = overlayStopFields(base, fields);
+    const fields = unknownRef.current ? unknownRef.current.fields : stopFields?.();
+    lastFields.current = fields ?? null;
+    if (!fields || Object.keys(readiness.draftFor([ids.pest, ids.lawn]).forms).length < 2) return readiness.draftFor([ids.pest, ids.lawn]);
+    const base = readiness.draftFor([ids.pest, ids.lawn], true);
+    const next = Object.keys(fields).length ? overlayStopFields(base, fields) : base;
     readiness.replaceFrom(next);
     return next;
   };
@@ -226,12 +253,12 @@ export function useStopSend({ visitId, scope, load, readiness, ids, onSaved, sto
     setBusy(true);
     setError('');
     let again = null;
-    try { await send(candidate); } catch (err) { again = await failed(err, candidate); } finally {
+    try { await send(candidate); remember(false); } catch (err) { again = await failed(err, candidate); } finally {
       submitting.current = false;
       setBusy(false);
     }
     if (again) await submit(again);
   };
 
-  return { busy, error, refusal, setRefusal, result, display, started: !!packet, fresh, submit };
+  return { busy, error, refusal, setRefusal, result, display, started: !!packet, fresh, replaying, submit };
 }

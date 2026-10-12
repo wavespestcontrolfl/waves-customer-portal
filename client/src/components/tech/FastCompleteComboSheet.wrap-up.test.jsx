@@ -17,7 +17,7 @@ vi.setConfig({ testTimeout: 20000 });
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 vi.mock('../../pages/admin/SchedulePage', () => ({
   createCompletionIdempotencyKey: (id) => `key_${id}`,
-  completionReconcilePrompt: () => null,
+  completionReconcilePrompt: (error) => (error.code === 'report_reconcile' ? 'Confirm recorded values' : null),
   completionReportRulesPrompt: () => null,
   completionPromiseMarksPrompt: () => null,
 }));
@@ -251,6 +251,124 @@ describe('a retry and a reload replay what was first sent', () => {
     await screen.findByText(/Stop recorded/);
     expect(post.mock.calls[1][1].body).toBe(first.body);
     expect(post.mock.calls[1][1].headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key']);
+  });
+});
+
+// The packet a send posts always matches the section as shown at that send: the choices are laid onto the parts' handed-over
+// bodies each time, never onto what an earlier send carried. The idempotency key stays the draft's one key (the container's rule
+// for an edited part after a refusal): the server holds no packet after a refused first send, so a changed body under it is
+// accepted; only an attempt whose outcome is unknown replays unchanged, and the section is held while it does.
+describe('a new attempt after a rejection follows the screen', () => {
+  const refused = () => Object.assign(new Error('The server refused this closeout.'), { status: 422 });
+  const review = () => screen.getByRole('checkbox', { name: 'Send review request' });
+  const originals = () => ({ 'svc-pest': BODIES.pest, 'svc-lawn': BODIES.lawn });
+  const keyOf = (call) => post.mock.calls[call][1].headers['Idempotency-Key'];
+
+  it('a rejection, then the review back on: both bodies are the originals again (the lawn part\'s own auto included), same key', async () => {
+    post.mockRejectedValueOnce(refused());
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/The server refused/);
+    expect(postedBodies(0)['svc-pest'].requestReview).toBe(false);
+    fireEvent.click(review());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(postedBodies(1)).toEqual(originals());
+    expect(keyOf(1)).toBe(keyOf(0));
+  });
+
+  it('a rejection, then the timing back to Automatic: no stale delay or time, and the lawn body is what it first was', async () => {
+    post.mockRejectedValueOnce(refused());
+    mount();
+    await prepareBoth();
+    const select = await screen.findByLabelText('Review request timing');
+    fireEvent.change(select, { target: { value: 'tomorrow_8' } });
+    click('Complete stop');
+    await screen.findByText(/The server refused/);
+    expect(postedBodies(0)['svc-pest']).toMatchObject({ reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0 });
+    fireEvent.change(screen.getByLabelText('Review request timing'), { target: { value: 'auto' } });
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    const sent = postedBodies(1);
+    expect(sent).toEqual(originals());
+    for (const kind of ['svc-pest', 'svc-lawn']) for (const key of ['reviewDelayMinutes', 'reviewScheduledFor']) expect(sent[kind]).not.toHaveProperty(key);
+    expect(keyOf(1)).toBe(keyOf(0));
+  });
+
+  it('a declined confirmation, then the review back on: the defaults again', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    post.mockRejectedValueOnce(Object.assign(new Error('Recorded values differ'), { status: 409, code: 'report_reconcile', details: { serviceId: 'svc-pest' } }));
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+    await waitFor(() => expect(completeStop()).toBeEnabled());
+    fireEvent.click(review());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(postedBodies(1)).toEqual(originals());
+    expect(keyOf(1)).toBe(keyOf(0));
+  });
+
+  it('a confirmation that was accepted stays on the body through a later send built from the handed-over bodies', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    post.mockRejectedValueOnce(Object.assign(new Error('Recorded values differ'), { status: 409, code: 'report_reconcile', details: { serviceId: 'svc-pest' } }));
+    post.mockRejectedValueOnce(refused());
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/The server refused/);
+    // The flag rode the second send; a third, after the review goes back on, still carries it on that body only.
+    expect(postedBodies(1)['svc-pest'].reportReconcileConfirmed).toBe(true);
+    fireEvent.click(review());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(postedBodies(2)['svc-pest']).toEqual({ ...BODIES.pest, reportReconcileConfirmed: true });
+    expect(postedBodies(2)['svc-lawn']).toEqual(BODIES.lawn);
+  });
+
+  it('an attempt whose outcome is unknown (no answer, and the server cannot be re-read): the section is held and the retry replays the same bodies', async () => {
+    post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    adminFetch.mockImplementation(async (path, options) => {
+      if (options?.method === 'POST') return post(path, options);
+      throw new TypeError('Failed to fetch');
+    });
+    click('Complete stop');
+    await screen.findByText(/Connection interrupted/);
+    await waitFor(() => expect(review().matches(':disabled')).toBe(true));
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(post.mock.calls[1][1].body).toBe(post.mock.calls[0][1].body);
+    expect(keyOf(1)).toBe(keyOf(0));
+  });
+
+  it('after a reload one part is edited: the section shown at its defaults sends the restored part\'s original body too', async () => {
+    post.mockRejectedValueOnce(refused());
+    mount();
+    await prepareBoth();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Send review request' }));
+    click('Complete stop');
+    await screen.findByText(/The server refused/);
+    await waitFor(async () => expect((await store.getVisitCompletionDraft('combo:visit', 'op-1')).forms['svc-lawn'].base).toEqual(BODIES.lawn));
+    cleanup();
+    mount();
+    await screen.findAllByText('Saved earlier on this device. Edit it to change anything.');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit this part' })[0]);
+    await screen.findByTestId('pest-part');
+    await waitFor(() => expect(wrapUpSection()).toBeTruthy());
+    click('pest save');
+    await waitFor(() => expect(completeStop()).toBeEnabled());
+    click('Complete stop');
+    await screen.findByText(/Stop recorded/);
+    expect(postedBodies(1)).toEqual(originals());
   });
 });
 

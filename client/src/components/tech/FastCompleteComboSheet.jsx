@@ -234,7 +234,7 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
               />
               <ComboPart kind="pest" part={pest} shared={shared} />
               <ComboPart kind="lawn" part={lawn} shared={shared} />
-              <StopWrapUpSection stop={stopWrapUp} disabled={blocked} />
+              <StopWrapUpSection stop={stopWrapUp} disabled={[blocked, send.replaying].some(Boolean)} />
             </div>
           </PartBusyContext.Provider>
         )}
