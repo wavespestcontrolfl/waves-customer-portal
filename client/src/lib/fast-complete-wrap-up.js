@@ -87,6 +87,33 @@ export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview,
   };
 }
 
+// The member the packet enrolls the review from: the first by window_start (a member with no start last), then by id
+// (visit-completion-packets.js enrollVisitCompletionReviewOnce). `rows` are the stop's schedule rows.
+export function firstMemberId(rows) {
+  const keyOf = (row) => `${row.windowStart ? 0 : 1}|${row.windowStart || ''}|${row.id}`;
+  return [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : 1))[0]?.id ?? null;
+}
+
+// The grouped stop's Wrap-up (owner 2026-10-12): the three things the packet reads for the whole stop. One text
+// goes if ANY item asks for it, one review ask goes only if EVERY item allows it, and its delay comes from the
+// FIRST member, so each of these must be the same on every item. The stop keeps no pay-link row, no time
+// correction and no re-entry steppers (the packet records those per service: they stay on the full form).
+const STOP_TIMING_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor'];
+export function stopWrapUpFields(fields) {
+  const { sendCompletionSms, requestReview, ...rest } = fields;
+  return { sendCompletionSms, requestReview, ...Object.fromEntries(STOP_TIMING_KEYS.filter((key) => key in rest).map((key) => [key, rest[key]])) };
+}
+
+// The stop's saved draft with those fields laid onto EVERY item body, identically. The timing keys the stop owns
+// are cleared first, so a choice changed back to Automatic leaves none behind. Pure: the draft in is not changed.
+export function overlayStopFields(draft, fields) {
+  const forms = Object.fromEntries(Object.entries(draft.forms || {}).map(([id, form]) => {
+    const kept = Object.fromEntries(Object.entries(form.body || {}).filter(([key]) => !STOP_TIMING_KEYS.includes(key)));
+    return [id, { ...form, body: { ...kept, ...fields } }];
+  }));
+  return { ...draft, forms };
+}
+
 // Submit-time guards, in the full form's order. Each returns the problem in words, or null.
 // A typo in the override must never silently fall back to the inflated timer.
 export function adjustedTimeProblem({ isAdmin, adjusted }) {
