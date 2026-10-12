@@ -106,7 +106,8 @@ describe('the two-model rule for a call finding', () => {
     await incidentsMigration.up(database);
     await proposalsMigration.up(database);
     await database.raw(`CREATE TABLE ??.call_log (id uuid PRIMARY KEY, direction varchar(20), transcription text,
-      created_at timestamptz, ai_extraction_prompt_version varchar(80))`, [schema]);
+      created_at timestamptz, ai_extraction_prompt_version varchar(80),
+      ai_extraction jsonb, ai_extraction_enriched jsonb, v2_extraction_status varchar(40))`, [schema]);
     await database.raw(`CREATE TABLE ??.call_audit_findings (id uuid PRIMARY KEY, call_log_id uuid, audit_source varchar(40),
       category varchar(40), field varchar(40), old_value text, new_value text, transcript_excerpt text, detail jsonb, created_at timestamptz)`, [schema]);
     await database.raw(`CREATE TABLE ??.decision_reviews (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), subject_type varchar(30),

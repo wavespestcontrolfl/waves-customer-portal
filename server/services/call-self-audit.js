@@ -33,11 +33,15 @@ const DISPOSITION_MISMATCH_ALERT = 0.05;
 // a paraphrase here drifted from production twice (10-05, #5994).
 const { auditAppointmentContract } = require('./prompts/appointment-confirmed-rules');
 
-const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff, "Caller" = the external customer/contact). Judge ONLY from the transcript. Return ONLY JSON:
+const auditPromptWith = (contract) => `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff, "Caller" = the external customer/contact). Judge ONLY from the transcript. Return ONLY JSON:
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.
 appointment_agreed is production's appointment_confirmed field: answer it exactly as these production extraction rules decide it (the preferred_date_time and confirmed_start_at details do not apply to you):
-${auditAppointmentContract('the date the call took place')}`;
+${contract}`;
+// AUDIT_PROMPT grades an answer the V2 extractor wrote (its four V2-only confirmation rules
+// included); AUDIT_PROMPT_V1 grades an answer the V1 extractor wrote. auditPromptFor picks.
+const AUDIT_PROMPT = auditPromptWith(auditAppointmentContract('the date the call took place'));
+const AUDIT_PROMPT_V1 = auditPromptWith(auditAppointmentContract('the date the call took place', { v2OnlyRules: false }));
 
 
 const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
@@ -72,7 +76,8 @@ function compactDirection(direction) {
     : 'INBOUND: the caller dialed Waves; the person who answered is staff.';
 }
 
-// Shadow: put the same call to TypeSafe Jev (call_judge.v3) and record its
+// Shadow: put the same call to TypeSafe Jev (call_judge.v4 for an answer the V2 extractor wrote,
+// call_judge.v3 for one V1 wrote: each package carries its extractor's rules) and record its
 // answers beside production's and the deep judge's in decision_reviews. Dark
 // behind GATE_TYPED_DECISIONS. With GATE_TYPED_DECISIONS_CLEF also on, the
 // same package goes to Cloudflare Clef as a second leg and each provider's
@@ -95,7 +100,36 @@ function auditUserContent(call) {
 // instruction, direction or transcript (re-transcription, a replaced
 // recording) all change this hash.
 function auditInputHash(call) {
-  return require('crypto').createHash('sha256').update(`${AUDIT_PROMPT}\n\u0000\n${auditUserContent(call)}`).digest('hex').slice(0, 24);
+  return require('crypto').createHash('sha256').update(`${auditPromptFor(call)}\n\u0000\n${auditUserContent(call)}`).digest('hex').slice(0, 24);
+}
+
+// Which extractor wrote the stored appointment answer. The processor stamps it at processing
+// time: `v2_primary_adopted: true` on the stored extraction means adoptV2PrimaryFields ran for
+// this call (V2-primary mode was on and the V2 extraction was valid). Adoption is "v2-wins in
+// BOTH directions" for a DECISIVE scheduling status: 'confirmed' with a parseable start, or any
+// other status except 'ambiguous' (which leaves V1's answer alone). So V2 wrote the answer only
+// when the stamp is there, the status is decisive and the stored answer is the one adoption
+// writes; in every other case (a row from before the stamp, a shadow-mode run) V1's contract
+// grades it (Codex #6294 r2, r3, r4). Never the live environment: the sample spans deploys.
+function baselineFromV2(call) {
+  if (!call || call.v2_extraction_status !== 'valid') return false;
+  const stored = safeParse(call.ai_extraction);
+  const v2 = safeParse(call.ai_extraction_enriched);
+  if (!require('../utils/extraction-compat').isV2Extraction(v2)) return false;
+  const sched = v2.scheduling || {};
+  const status = typeof sched.status === 'string' ? sched.status.trim() : '';
+  // A second stamp, `v2_appointment_written: true`: an APPROVED V2 extraction wrote the answer
+  // outright (the processor's approved-booking block copies the flat view's value, whatever the
+  // status), also while V2-primary adoption is switched off.
+  if (stored.v2_appointment_written === true) return (status === 'confirmed') === (stored.appointment_confirmed === true);
+  if (stored.v2_primary_adopted !== true) return false;
+  if (!status || status === 'ambiguous') return false;
+  const confirmed = status === 'confirmed';
+  if (confirmed && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(sched.confirmed_start_at || '').trim())) return false;
+  return confirmed === (stored.appointment_confirmed === true);
+}
+function auditPromptFor(call) {
+  return baselineFromV2(call) ? AUDIT_PROMPT : AUDIT_PROMPT_V1;
 }
 
 const JEV_SHARED_FIELDS = ['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised'];
@@ -105,7 +139,7 @@ async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   const bool = (v) => (typeof v === 'boolean' ? v : undefined);
   const judgeBaselines = { complaint: { deep_judge: bool(verdict.complaint) } };
   for (const f of JEV_SHARED_FIELDS) judgeBaselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
-  count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v3', baselines: judgeBaselines }, clef));
+  count(tally, clef, await askAndRecord(call, { packageId: baselineFromV2(call) ? 'call_judge.v4' : 'call_judge.v3', baselines: judgeBaselines }, clef));
   // The dark call gates' own decisions beside the same providers' answers
   // (call_gate_checks.v1); tallied apart so call_judge's counts keep their meaning.
   // Asked only when the WHOLE transcript fits the span the models and the
@@ -506,7 +540,7 @@ async function runSelfAudit(depsIn = {}) {
       // status would bias the auditor toward the very label being audited.
       const res = await deps.createMessage({
         max_tokens: 4096,
-        system: AUDIT_PROMPT,
+        system: auditPromptFor(call),
         messages: [{ role: 'user', content: auditUserContent(call) }],
       });
       auditorModel = res?.model || null;
@@ -596,4 +630,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails, AUDIT_PROMPT, AUDIT_TRANSCRIPT_CHARS, auditUserContent, auditInputHash, productionAnswers };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails, AUDIT_PROMPT, AUDIT_PROMPT_V1, auditPromptFor, baselineFromV2, AUDIT_TRANSCRIPT_CHARS, auditUserContent, auditInputHash, productionAnswers };
