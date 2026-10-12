@@ -695,3 +695,14 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     expect(dropUnneededCallCards(['missing_unit_number'], ext).flags).toEqual(['missing_unit_number']);
   });
 });
+
+describe('enforce path wiring (source pin; codex #6289 r1)', () => {
+  test('the valid-V2 enforce branch passes the real v2Valid flag to the pre-treat proof, never a hard-coded false', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const gate = src.indexOf("const v2Valid = v2Result?.status === 'valid'");
+    expect(gate).toBeGreaterThan(-1);
+    const section = src.slice(gate, gate + 12000);
+    expect(section).toContain('extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,');
+    expect(src).not.toContain('v2Valid: false,');
+  });
+});

@@ -12320,7 +12320,7 @@ const CallRecordingProcessor = {
             canonicalStreet: extracted?.address_line1,
             preConstructionPretreat: finalFlags.includes('missing_unit_number')
               && callIsPreConstructionPretreat({
-                extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid: false,
+                extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
           }).dropped);
