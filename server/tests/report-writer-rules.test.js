@@ -749,6 +749,12 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT WE FOUND\nThis was your recurring service.')).toBe('owner_phrase');
     expect(screen('WHAT WE FOUND\nWe walked the exterior as part of our quarterly program.')).toBe('owner_phrase');
     expect(screen('WHAT WE DID AND WHY\nWe completed the outside part of your quarterly service.')).toBeNull();
+    // Any sentence that puts "recurring" before the plan, with words between (Codex r4).
+    expect(screen("WHAT'S NEXT\nToday's work continues your recurring pest program.")).toBe('owner_phrase');
+    expect(screen("WHAT'S NEXT\nThis is a recurring quarterly pest control visit.")).toBe('owner_phrase');
+    expect(screen("WHAT'S NEXT\nYour plan remains in place.")).toBe('owner_phrase');
+    // A recurring pest is a finding, not plan talk.
+    expect(screen('WHAT WE FOUND\nGhost ants are a recurring sight on the front door frame.')).toBeNull();
   });
 
   test('the customer card still gets the Gentrol duration', () => {
