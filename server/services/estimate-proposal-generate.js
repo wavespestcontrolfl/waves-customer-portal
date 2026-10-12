@@ -766,11 +766,11 @@ const roundCents = (v) => (v == null ? null : Math.round(v * 100) / 100);
 // ONE source that holds the most copies are kept as a multiset (the fullest
 // source; the first such source on a tie), object-deduped so a row shared by
 // two sources counts once. Every other source's copies are mirrors: a
-// dropped mirror whose resolved amount matches no kept clone is reported in
-// `conflicted` (by label). Filling a per-identity quota across the flattened
+// dropped mirror whose resolved amount and sold scope match no kept clone is
+// reported in `conflicted` (by label). Filling a per-identity quota across the flattened
 // sources instead kept the first source's single copy plus one engine row
 // and silently lost the second legitimate repeat (codex #6113 r30).
-function collapseMirroredRows(sources, { identity, amount, label }) {
+function collapseMirroredRows(sources, { identity, amount, label, scope }) {
   const seen = new Set();
   const tagged = [];
   sources.forEach((list, sourceIndex) => {
@@ -795,13 +795,17 @@ function collapseMirroredRows(sources, { identity, amount, label }) {
     fullestSource.set(key, best.sourceIndex);
   }
   const rows = tagged.filter((t) => t.sourceIndex === fullestSource.get(t.key)).map((t) => t.row);
-  const keptAmounts = new Map();
+  // A mirror is silent only when a kept clone matches it on the resolved
+  // amount AND the sold scope (package visits + detail): an equal-price
+  // mirror that sells a different scope is a conflict too (codex #6113 r31).
+  const signature = (row) => `${roundCents(amount(row))}|${scope ? scope(row) : ''}`;
+  const keptSignatures = new Map();
   for (const t of tagged) {
     if (t.sourceIndex !== fullestSource.get(t.key)) continue;
-    keptAmounts.set(t.key, [...(keptAmounts.get(t.key) || []), roundCents(amount(t.row))]);
+    keptSignatures.set(t.key, [...(keptSignatures.get(t.key) || []), signature(t.row)]);
   }
   const conflicted = tagged
-    .filter((t) => t.sourceIndex !== fullestSource.get(t.key) && !(keptAmounts.get(t.key) || []).some((kept) => kept === roundCents(amount(t.row))))
+    .filter((t) => t.sourceIndex !== fullestSource.get(t.key) && !(keptSignatures.get(t.key) || []).includes(signature(t.row)))
     .map((t) => label(t.row));
   return { rows, conflicted };
 }
@@ -918,6 +922,9 @@ const scopeIncludes = (...rows) => {
   const detail = rows.map((r) => r?.detail || r?.det).find(Boolean);
   return detail ? [String(detail).slice(0, 200)] : [];
 };
+// The scope a work line sells, as the mirror collapse compares it: the
+// package visit count and the detail the line's `includes` would carry.
+const soldScopeSignature = (row) => JSON.stringify([packageVisits(row.visits, row.visitsPerYear), scopeIncludes(row)]);
 // A mapped item CONSUMES its raw twin and merges the twin's authoritative
 // metadata (codex 1A-ii r17b P0): the twin's manualFinalOneTime outranks the
 // mapped gross, an explicit taxable flag on either row wins, and mirrors
@@ -1030,10 +1037,10 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   const mapped = mappedOneTimeSources(estimateData);
   const raw = rawLineItemSources(estimateData);
   const mappedCollapse = collapseMirroredRows(mapped.sourceLists, {
-    identity: oneTimeIdentity, amount: mappedResolvedAmount, label: (item) => String(item.label || item.name || item.service || 'item'),
+    identity: oneTimeIdentity, amount: mappedResolvedAmount, scope: soldScopeSignature, label: (item) => String(item.label || item.name || item.service || 'item'),
   });
   const rawCollapse = collapseMirroredRows(raw.rawContainers, {
-    identity: rawIdentity, amount: rawResolvedAmount, label: (line) => rawLineLabel(line, 'item'),
+    identity: rawIdentity, amount: rawResolvedAmount, scope: soldScopeSignature, label: (line) => rawLineLabel(line, 'item'),
   });
   const out = { work: [], gated: [], comped: [], conflicted: [...mappedCollapse.conflicted, ...rawCollapse.conflicted] };
   const rawGated = (line) => rowIsReviewGated(line) || raw.gatedIdentities.has(rawIdentity(line));
@@ -1044,7 +1051,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   if (out.conflicted.length) {
     return {
       correctiveWork: null,
-      warning: `One-time work was not generated: ${out.conflicted.join(', ')} has mirrored rows with disagreeing amounts and no accepted price — verify the price and author the corrective work manually.`,
+      warning: `One-time work was not generated: ${out.conflicted.join(', ')} has mirrored rows with disagreeing amounts or scope and no accepted price — verify the price and author the corrective work manually.`,
     };
   }
   installationRowsToWork(rawCollapse.rows.filter(carriesInstallationCharge), mappedCollapse.rows, taxabilityMap, out);

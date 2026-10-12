@@ -537,6 +537,20 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     expect(world.state.committed).toBe(1);
     release({ sent: true });
   });
+  test('round 31: equal-price mirrors that sell a different scope (one Kitchen visit vs three Whole-home visits) refuse, never first-wins', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { lineItems: [{ service: 'bed_bug', label: 'Bed Bug Treatment', price: 300, visits: 1, detail: 'Kitchen', billingCadence: 'one_time' }] },
+          engineResult: { lineItems: [{ service: 'bed_bug', label: 'Bed Bug Treatment', price: 300, visits: 3, detail: 'Whole home', billingCadence: 'one_time' }] },
+        }),
+      },
+    });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts or scope/) });
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

@@ -16,6 +16,7 @@
  *
  * Effects carry no clocks and no generated ids: a timestamp-valued column
  * reads as "<time>", rows the accept INSERTS are listed without their key,
+ * generated non-key ids are dropped,
  * and the estimate's JSON document is compared by the names of the top-level
  * keys that changed.
  */
@@ -27,7 +28,10 @@ const VOLATILE_COLUMNS = new Set(['updated_at', 'created_at']);
 // Every table the accept path writes inside its transaction. `scope` picks the
 // selector ('estimate' = the estimate id, 'customer' = the customer id);
 // `key` names a row across the two reads; `generatedKey` rows are listed
-// without it when they are new. `optional` tables are read through a savepoint
+// without it when they are new; `generatedColumns` are database-generated
+// non-key columns (gen_random_uuid ids) dropped before any comparison, so a
+// preview's rolled-back insert and the confirm's fresh insert fingerprint
+// the same (codex #6113 r31). `optional` tables are read through a savepoint
 // (the table may not exist on every database).
 const SNAPSHOT_TABLES = [
   {
@@ -39,11 +43,11 @@ const SNAPSHOT_TABLES = [
     select: (q, { customerId }) => q.where({ id: customerId }),
   },
   {
-    table: 'customer_plan_rates', scope: 'customer', key: ['family_key'], optional: true,
+    table: 'customer_plan_rates', scope: 'customer', key: ['family_key'], optional: true, generatedColumns: ['id'],
     select: (q, { customerId }) => q.where({ customer_id: customerId }),
   },
   {
-    table: 'customer_turf_profiles', scope: 'customer', key: ['customer_id'],
+    table: 'customer_turf_profiles', scope: 'customer', key: ['customer_id'], generatedColumns: ['id'],
     select: (q, { customerId }) => q.where({ customer_id: customerId }),
   },
   {
@@ -130,7 +134,7 @@ const hashOf = (value) => crypto.createHash('sha1').update(JSON.stringify(normal
 function shapeRow(spec, row) {
   const out = {};
   for (const column of Object.keys(row).sort()) {
-    if (VOLATILE_COLUMNS.has(column)) continue;
+    if (VOLATILE_COLUMNS.has(column) || (spec.generatedColumns || []).includes(column)) continue;
     const value = row[column];
     if ((spec.jsonKeysOnly || []).includes(column)) {
       const doc = parseJson(value);
@@ -239,4 +243,5 @@ module.exports = {
   diffTables,
   diffTable,
   normalize,
+  shapeRow,
 };
