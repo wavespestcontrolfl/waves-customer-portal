@@ -595,6 +595,31 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       }
     });
 
+    test('an objection naming non-pre-treat termite work is a second ask whatever the family label says (codex r3)', () => {
+      const v2 = slabV2();
+      for (const objection of ['drywood termite treatment is too expensive', 'tenting is too expensive', 'subterranean termite treatment costs too much', 'the no-tent option is too pricey', 'Termidor around the house is too expensive']) {
+        v2.sentiment_and_lead.objections_raised = [objection];
+        expect(runV2(v2)).toBe(false);
+      }
+      v2.sentiment_and_lead.objections_raised = ['termite treatment is too expensive'];
+      expect(runV2(v2)).toBe(true);
+    });
+
+    test('a Bora-Care sentence borrows the service name context only for the same job (codex r3)', () => {
+      const withSummary = (summary) => {
+        const v2 = slabV2();
+        v2.meta.call_summary = summary;
+        return runV2(v2);
+      };
+      expect(withSummary('Builder wants the slab pre-treat. They also want Bora-Care on another building.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. They also want Bora-Care at the sales office.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care in the garage too.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat and Bora-Care on building B.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care on the framing before the pour.')).toBe(true);
+      expect(withSummary('Builder wants the slab pre-treat. They also want Bora-Care on the new framing.')).toBe(true);
+      expect(withSummary('Builder wants the slab pre-treat and Bora-Care.')).toBe(true);
+    });
+
     test('a real second service in the V2 service fields keeps the card', () => {
       const withName = slabV2();
       withName.service_request.specific_service_name = 'Slab Pre-Treat Termite Service plus general pest control';

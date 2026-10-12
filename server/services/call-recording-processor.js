@@ -7235,6 +7235,7 @@ function existingStructureTermiteWork(words) {
 //  6. No unit, suite, bay or condo wording anywhere in the transcript.
 // Any doubt keeps the card. Do not add one regex per Codex round: add a cue
 // to the matching class above.
+const SERVICE_SENTENCE_SPLIT_RE = /[.!?;,]\s+/;
 const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
 // A pre-treat IS a soil treatment, so bare "soil treatment" is pre-treat wording
 // (existing-structure context still vetoes it when a building qualifier follows).
@@ -7265,9 +7266,16 @@ const NEW_CONSTRUCTION_CONTEXT_RE = /\bpre[-\s]?(?:slab|construction)\b|\bslab\s
 // Wood treatment / Bora-Care is a cue only without new-construction context
 // (the caller supplies it: the same fragment, or the call's service name).
 // Existing-structure context and a second service still veto on their own.
+// Termite treatments that are NOT a pre-construction pre-treat, named by what
+// they are rather than by the family label canonicalWavesService gives a generic
+// phrase: drywood work, tent / no-tent / fumigation, subterranean treatment or
+// control of an existing infestation, Termidor around or trenched at a building,
+// localized and injection work. One class for the objection check and every
+// service-word veto: a match is another ask whatever the family label says.
+const TERMITE_OTHER_TREATMENT_RE = /\bdry[-\s]?wood\b|\bno[-\s]tent\b|\btent(?:s|ing|ed)?\b|\bfumigat\w*|\bsubterranean\s+(?:termite\s+)?(?:treatment|control)\b|\btermidor\s+(?:around|trench\w*|foam\w*|perimeter)\b|\blocalized\b|\binject\w*/i;
 function hasNonPretreatTermiteCue(text, { woodTreatmentOk = false } = {}) {
   const value = String(text || '').toLowerCase();
-  return (!woodTreatmentOk && TERMITE_WOOD_TREATMENT_CUE_RE.test(value)) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+  return TERMITE_OTHER_TREATMENT_RE.test(value) || (!woodTreatmentOk && TERMITE_WOOD_TREATMENT_CUE_RE.test(value)) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
     || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
     || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
 }
@@ -7343,38 +7351,63 @@ function structuredFragmentsOf(view, v2Extraction, { v2Proof = false } = {}) {
 // Objections and pain points on a V2 call are sentiment: "price" is not a
 // service. Only one that names a service family (or classifies to a service)
 // other than the pre-slab service is another ask and keeps the card.
-const TERMITE_INJECTION_WORK_RE = /\binject\w*\b/i;
 function objectionNamesOtherService(fragment) {
+  // Any non-pre-treat termite treatment is another ask, pre-treat wording or not.
+  if (hasNonPretreatTermiteCue(fragment)) return true;
   if (isPretreatFragment(fragment)) return false;
   // The current service family is not another ask ("termite treatment is too
-  // expensive"). Another ask is a non-termite family, a service the catalog
-  // names outside the termite family, or an explicit non-pre-treat termite cue.
+  // expensive"). Another ask is a non-termite family or a catalog service
+  // outside the termite family.
   if (familiesIn(fragment).some((f) => f.key !== 'termite')) return true;
   const label = canonicalWavesService(fragment);
-  if (label && !TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor') return true;
-  return hasNonPretreatTermiteCue(fragment) || TERMITE_INJECTION_WORK_RE.test(fragment);
+  return !!(label && !TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor');
 }
-function v2ObjectionFragments(view, v2Extraction) {
+function v2ObjectionTexts(view, v2Extraction) {
   const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
-  return [...(Array.isArray(objections) ? objections : []), ...painPoints].flatMap(splitFragments);
+  return [...(Array.isArray(objections) ? objections : []), ...painPoints];
+}
+function v2ObjectionFragments(view, v2Extraction) {
+  return v2ObjectionTexts(view, v2Extraction).flatMap(splitFragments);
 }
 const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|already built)\b/i;
+// The service name's new-construction context may be borrowed only by a
+// sentence about the SAME job. A separate-job marker or a different location
+// ("also Bora-Care at the sales office") must carry its own context.
+const SEPARATE_JOB_MARKER_RE = /\b(?:also|another|other|second|separate|additional|as well|in addition|plus)\b/i;
+const DIFFERENT_LOCATION_RE = /\b(?:offices?|units?|suites?|garages?|sheds?|barns?|guest house|next door|across|their home|the house)\b/i;
+const DIFFERENT_BUILDING_RE = /\bbuilding\s+(?:[A-Z]|\d+)\b/i;
+function isSeparateJobSentence(text) {
+  return SEPARATE_JOB_MARKER_RE.test(text) || DIFFERENT_LOCATION_RE.test(text) || DIFFERENT_BUILDING_RE.test(text);
+}
 function isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction) {
-  return TERMITE_WOOD_TREATMENT_CUE_RE.test(String(fragment || '').toLowerCase())
-    && !EXISTING_WORK_WORDING_RE.test(fragment)
-    && (nameHasNewConstruction || NEW_CONSTRUCTION_CONTEXT_RE.test(fragment));
+  const text = String(fragment || '');
+  return TERMITE_WOOD_TREATMENT_CUE_RE.test(text.toLowerCase())
+    && !EXISTING_WORK_WORDING_RE.test(text)
+    && (NEW_CONSTRUCTION_CONTEXT_RE.test(text) || (nameHasNewConstruction && !isSeparateJobSentence(text)));
+}
+// The marker is read on the whole SENTENCE (splitting on "also" and "plus"
+// would drop it); the new-construction context on the conjunction FRAGMENT
+// ("slab pre-treat and Bora-Care on building B": the pre-treat half must not
+// vouch for the Bora-Care half).
+function woodSentenceNeedsOwnContext(texts, nameHasNewConstruction) {
+  return texts.flatMap((t) => String(t || '').split(SERVICE_SENTENCE_SPLIT_RE)).some((sentence) => {
+    const borrow = nameHasNewConstruction && !isSeparateJobSentence(sentence);
+    return splitFragments(sentence).some((fragment) => (
+      TERMITE_WOOD_TREATMENT_CUE_RE.test(fragment.toLowerCase()) && !isWoodTreatmentOnNewConstruction(fragment, borrow)
+    ));
+  });
 }
 function isPretreatFragment(fragment, nameHasNewConstruction = false) {
   return canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment)
     || isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction);
 }
-function narrativeNamesOtherTermite(narrative, nameHasNewConstruction) {
+// Wood treatment is judged per sentence (woodSentenceNeedsOwnContext).
+function narrativeNamesOtherTermite(narrative) {
   return narrative.some((fragment) => {
     const label = canonicalWavesService(fragment);
-    if (!label || !TERMITE_SERVICE_LABELS.has(label) || label === 'Pre-Slab Termidor') return false;
-    if (label === 'Termite Inspection') return !TERMITE_NEW_SLAB_WORDING_RE.test(fragment);
-    return !(label === 'Termite Wood Treatment' && isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction));
+    if (!label || !TERMITE_SERVICE_LABELS.has(label) || label === 'Pre-Slab Termidor' || label === 'Termite Wood Treatment') return false;
+    return label !== 'Termite Inspection' || !TERMITE_NEW_SLAB_WORDING_RE.test(fragment);
   });
 }
 function pretreatIsOnlyTermiteWork(view, v2Extraction = null, { v2Proof = false } = {}) {
@@ -7387,18 +7420,20 @@ function pretreatIsOnlyTermiteWork(view, v2Extraction = null, { v2Proof = false 
   const nameHasNewConstruction = NEW_CONSTRUCTION_CONTEXT_RE.test(
     [view.specific_service_name, v2Proof ? v2Extraction?.service_request?.specific_service_name : null].filter(Boolean).join(' '),
   );
-  const woodOk = (fragment, viaName) => isWoodTreatmentOnNewConstruction(fragment, viaName && nameHasNewConstruction);
   // The joined check skips the wood cue (a single-word cue judged per fragment).
   const joined = [...structured, ...narrative, ...objections].join('. ');
   if (hasNonPretreatTermiteCue(joined, { woodTreatmentOk: true })) return false;
-  if (structured.some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: woodOk(f, false) }))) return false;
-  if ([...narrative, ...objections].some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: woodOk(f, true) }))) return false;
+  // Wood treatment: a structured fragment carries its own context; narrative and
+  // objection sentences may borrow the service name's only for the same job.
+  if (structured.some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: isWoodTreatmentOnNewConstruction(f, false) }))) return false;
+  if ([...narrative, ...objections].some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: true }))) return false;
+  if (woodSentenceNeedsOwnContext([view.call_summary, ...(v2Proof ? v2ObjectionTexts(view, v2Extraction) : [])], nameHasNewConstruction)) return false;
   // Fail closed: a structured fragment that is not the pre-slab service (or
   // plain pre-treat wording) keeps the card, including one nothing classifies.
   if (!structured.every((f) => isPretreatFragment(f)) || objections.some(objectionNamesOtherService)) return false;
   // Narrative sentences may be anything without a cue, but none may be some
   // other termite service.
-  if (narrativeNamesOtherTermite(narrative, nameHasNewConstruction)) return false;
+  if (narrativeNamesOtherTermite(narrative)) return false;
   return [...structured, ...narrative].some((f) => isPretreatFragment(f));
 }
 
