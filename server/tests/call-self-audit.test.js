@@ -207,7 +207,9 @@ describe('Jev shadow', () => {
     expect(judgeAsks()).toHaveLength(1);
     const [packageId, state] = judgeAsks()[0];
     expect(packageId).toBe('call_judge.v4');
-    expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
+    // v4 is also told when the call started (Eastern date and clock): the bare-time rule needs it.
+    expect(Object.keys(state).sort()).toEqual(['call_direction', 'call_started_et', 'duration_seconds', 'transcript']);
+    expect(state.call_started_et).toMatch(/^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2} (AM|PM)$/);
     expect(state.duration_seconds).toBe(88);
     expect(state.call_direction).toMatch(/^INBOUND/);
     expect(state.transcript).toBe(prodCall.transcription.slice(0, 5000));
@@ -381,7 +383,10 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
 
     const [judge] = asksFor('call_judge.v4');
     const [gates] = asksFor('call_gate_checks.v1');
-    expect(gates[1]).toEqual(judge[1]); // identical call state
+    // The same call state, except the call start that only call_judge.v4's shape takes.
+    const { call_started_et: _started, ...shared } = judge[1];
+    expect(gates[1]).toEqual(shared);
+    expect(gates[1]).not.toHaveProperty('call_started_et');
     const [args] = recordsFor('call_gate_checks.v1')[0];
     expect(args).toMatchObject({ capability: 'call_gate_checks', provider: 'typesafe', subjectType: 'call_log', subjectId: 'call-7', result: JEV });
     expect(args.baselines).toEqual({ service_unclear: { production: true }, reschedule_committed: { production: true }, promise_open: { production: true } });
@@ -633,6 +638,20 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   test('a read failure is logged, never thrown', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
+  });
+});
+
+describe('the auditor is told when the call started', () => {
+  const { auditUserContent, auditInputHash } = require('../services/call-self-audit');
+  const base = { direction: 'inbound', transcription: 'Agent: Waves. Caller: hi.' };
+  test('an Eastern date and clock line sits between the direction and the transcript', () => {
+    const text = auditUserContent({ ...base, created_at: '2026-10-09T19:49:00Z' });
+    expect(text).toContain('Call started (Eastern Time): 2026-10-09 3:49 PM\n\nTranscript:\nAgent: Waves.');
+    expect(auditUserContent(base)).toContain('Call started (Eastern Time): unknown');
+    expect(auditUserContent({ ...base, created_at: 'not a date' })).toContain('Call started (Eastern Time): unknown');
+  });
+  test('the start time is part of the audited input', () => {
+    expect(auditInputHash({ ...base, created_at: '2026-10-09T19:49:00Z' })).not.toBe(auditInputHash({ ...base, created_at: '2026-10-09T23:49:00Z' }));
   });
 });
 

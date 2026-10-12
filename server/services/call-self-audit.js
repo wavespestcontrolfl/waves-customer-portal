@@ -85,8 +85,17 @@ function compactDirection(direction) {
 // first 5,000 characters of the transcript. One builder, so the audit and
 // any later second reading render exactly the same text.
 const AUDIT_TRANSCRIPT_CHARS = 5000;
+// When the call started, as an Eastern date and clock time ("2026-10-09 3:49 PM"), or 'unknown'.
+// The appointment rules resolve "today" and judge a bare hour against it, so every judge is
+// told it (Codex #6294 r1).
+function callStartedET(call) {
+  const at = call && call.created_at ? new Date(call.created_at) : null;
+  if (!at || Number.isNaN(at.getTime())) return 'unknown';
+  const { etDateString, formatETTime } = require('../utils/datetime-et');
+  return `${etDateString(at)} ${formatETTime(at)}`;
+}
 function auditUserContent(call) {
-  return `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
+  return `${callDirectionBlock(call.direction)}Call started (Eastern Time): ${callStartedET(call)}\n\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
 }
 
 // Identity of the COMPLETE input one audit ran on (system prompt + rendered
@@ -399,6 +408,8 @@ async function askAndRecord(call, { packageId, baselines, only = null, storedSib
       duration_seconds: call.duration_seconds ?? null,
       transcript: callTranscriptSpan(call.transcription),
     };
+    // Only a package whose state shape asks for it (call_judge.v4) is given the call's start.
+    if (packageFor(packageId).stateShape.includes('call_started_et')) state.call_started_et = callStartedET(call);
     const legs = await Promise.all(providers.map(async (provider) => {
       try {
         const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });

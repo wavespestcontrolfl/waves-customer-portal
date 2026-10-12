@@ -89,10 +89,14 @@ const CALL_JUDGE_V3 = {
 // confirmation rules v3 lacked, so the auditor, the typed judge and production grade a
 // bare time, a missing AM/PM, a staff hedge and a caller-proposed time the same way.
 // Only the appointment_agreed wording changes; v3 stays registered for rows answered under it.
+// v4 also takes `call_started_et` (the call's Eastern date and clock time): the bare-time rule
+// confirms only an hour still ahead of the call, which no judge can tell from the transcript
+// alone (Codex #6294 r1).
 const CALL_JUDGE_V4 = {
   ...CALL_JUDGE,
   id: 'call_judge.v4',
   version: 4,
+  stateShape: [...CALL_JUDGE.stateShape, 'call_started_et'],
   questions: {
     ...CALL_JUDGE.questions,
     appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V4_APPOINTMENT_CONTRACT}`),
