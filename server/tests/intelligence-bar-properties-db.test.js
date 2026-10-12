@@ -103,6 +103,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     const date = require('../utils/datetime-et').etDateString(new Date());
     const [stamped, unstamped, done, root, estimate] = [1, 2, 3, 4, 5].map(() => crypto.randomUUID());
     const visit = { customer_id: customerA, scheduled_date: date, service_type: 'General Pest Control' };
+    const old = '2020-01-06'; // completed fixtures sit outside the 7-day follow-up window
     const blocked = async () => {
       const refused = await propose('remove_customer_property', input, say);
       expect(refused.body.pendingActions || []).toHaveLength(0);
@@ -121,7 +122,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await db('scheduled_services').where({ id: stamped }).update({ scheduled_date: '2020-01-06' });
     await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });
     await db('scheduled_services').where({ id: stamped }).update({ scheduled_date: date });
-    await db('scheduled_services').where({ id: stamped }).update({ status: 'completed' });
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'completed', scheduled_date: old });
     // An open visit with no property link but this service address blocks.
     await db('scheduled_services').insert({ id: unstamped, ...visit, status: 'pending', service_address_line1: '2100 Example Grove',
       service_address_city: 'Sarasota', service_address_state: 'FL', service_address_zip: '34201' });
@@ -137,7 +138,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });
     await db('scheduled_services').where({ id: unstamped }).update({ status: 'cancelled' });
     // A completed root of an ongoing recurring series still blocks.
-    await db('scheduled_services').insert({ id: root, ...visit, status: 'completed', property_id: saved.propertyId, is_recurring: true, recurring_ongoing: true });
+    await db('scheduled_services').insert({ id: root, ...visit, scheduled_date: old, status: 'completed', property_id: saved.propertyId, is_recurring: true, recurring_ongoing: true });
     await blocked();
     await db('scheduled_services').where({ id: root }).update({ recurring_ongoing: false });
     // An open estimate linked to the property blocks; a declined one does not.
@@ -170,8 +171,15 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     await blocked();
     await db('annual_prepay_terms').where({ id: renewal.id }).update({ status: 'cancelled' });
     await db('annual_prepay_terms').where({ id: term.id }).update({ status: 'cancelled' });
+    // A plan cancelled to end at term keeps its paid coverage until term_end: still blocks.
+    await db('annual_prepay_terms').where({ id: term.id }).update({ cancel_disposition: 'end_at_term', term_start: date, term_end: date });
+    await blocked();
+    await db('annual_prepay_terms').where({ id: term.id }).update({ cancel_disposition: 'end_now_refund' });
     await db('estimates').where({ id: estimate }).update({ status: 'declined', property_id: saved.propertyId });
+    // A visit completed today can still get a follow-up booked from it: blocks for seven days.
     await db('scheduled_services').insert({ id: done, ...visit, status: 'completed', property_id: saved.propertyId, service_address_line1: '2100 Example Grove' });
+    await blocked();
+    await db('scheduled_services').where({ id: done }).update({ scheduled_date: old });
     // A grouped visit still closing at this property blocks, though its child row is completed.
     const [group] = await db('service_visits').insert({ customer_id: customerA, property_id: saved.propertyId, scheduled_date: date,
       stop_base_key: `fixture-${done}`, status: 'closing', created_by: 'fixture' }).returning('id');
@@ -197,11 +205,11 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect(card.contract.effects).toContainEqual(expect.objectContaining({ label: 'Remove property: 2100 Example Grove, Sarasota, FL, 34201 (Old rental)' }));
     expect((await db('customer_properties').where({ id: saved.propertyId }).first()).active).toBe(true);
     // A visit booked after the card was shown fails the confirmation.
-    await db('scheduled_services').where({ id: stamped }).update({ status: 'pending' });
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'pending', scheduled_date: date });
     const stale = await confirm(proposed);
     expect(stale.body.success).not.toBe(true);
     expect((await db('customer_properties').where({ id: saved.propertyId }).first()).active).toBe(true);
-    await db('scheduled_services').where({ id: stamped }).update({ status: 'completed' });
+    await db('scheduled_services').where({ id: stamped }).update({ status: 'completed', scheduled_date: old });
 
     const fresh = await propose('remove_customer_property', input, say);
     const removed = await confirm(fresh);

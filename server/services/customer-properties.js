@@ -1047,11 +1047,12 @@ function addressCanNameProperty(rawAddress, rawTarget) {
   const unparsed = street !== targetStreet && !address.city && !zip && street.startsWith(targetStreet);
   if (street !== targetStreet && !unparsed) return false;
   // A missing unit is a wildcard; a present, different unit is another
-  // address. An unparsed line's trailing text is locality, not a unit, so
-  // only its explicit line 2 is read.
+  // address. An unparsed line's trailing text is locality, so its unit is
+  // the designator found inside the line ("100 Main St Apt 5 Sarasota FL").
   const unitOf = (line1, line2) => unitKey(line2) || streetEmbeddedUnitKey(line1);
   const differs = (a, b) => !!a && !!b && a !== b;
-  const unit = unparsed ? unitKey(address.address_line2) : unitOf(address.address_line1, address.address_line2);
+  const inlineUnit = line => unitKey((String(line || '').match(/\s(?:apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+/i) || [''])[0]);
+  const unit = unparsed ? (unitKey(address.address_line2) || inlineUnit(address.address_line1)) : unitOf(address.address_line1, address.address_line2);
   if (differs(unit, unitOf(target.address_line1, target.address_line2))) return false;
   // ZIP first, like addressKey: mailing-city aliases (Bradenton / Lakewood
   // Ranch) name one address, so cities are compared only without two ZIPs.
@@ -1087,6 +1088,10 @@ async function propertyRemovalDependents(conn, customerId, target) {
   const visits = await conn('scheduled_services').where({ customer_id: customerId })
     .where(q => q.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES)
       .orWhere(parked => parked.where('status', 'rescheduled').where('scheduled_date', '>=', today))
+      // A completed visit can still get a follow-up booked from it for seven
+      // days (POST /admin/dispatch/:serviceId/schedule-followup copies its
+      // property link), so it stays a dependent for that window.
+      .orWhere(recent => recent.where('status', 'completed').whereRaw('scheduled_date >= (?::date - 7)', [today]))
       .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
     .orderBy('id')
     .select(...VISIT_POINTER_COLUMNS);
@@ -1117,13 +1122,13 @@ async function propertyRemovalDependents(conn, customerId, target) {
 // future coverage visits there, even while no visit is open. A renewal carries
 // no estimate of its own: annual-prepay-renewals termiteRenewalScope walks it
 // back to its first term's estimate, so each LIVE term is walked the same way.
-// Live = not cancelled or refunded, and inside its term (through term_end plus
+// Live = not refunded or cancelled (a cancel that ends at term stays live), and inside its term (through term_end plus
 // the 30-day renewal grace window); an ended term with no live successor is
 // history and blocks nothing.
 async function livePrepaidTermsOnEstimates(conn, customerId, estimateIds, today) {
   if (!estimateIds.size) return 0;
   const terms = await conn('annual_prepay_terms').where({ customer_id: customerId }).orderBy('id')
-    .select('id', 'status', 'source_estimate_id', 'renewed_from_term_id',
+    .select('id', 'status', 'cancel_disposition', 'source_estimate_id', 'renewed_from_term_id',
       conn.raw('(term_end IS NULL OR term_end >= (?::date - 30)) as in_term', [today]));
   const byId = new Map(terms.map(term => [term.id, term]));
   const namesEstimate = (term) => {
@@ -1134,15 +1139,19 @@ async function livePrepaidTermsOnEstimates(conn, customerId, estimateIds, today)
     }
     return false;
   };
-  return terms.filter(term => term.in_term && !['cancelled', 'canceled', 'refunded'].includes(term.status) && namesEstimate(term)).length;
+  // A plan cancelled 'end_at_term' keeps its paid coverage through term_end
+  // (keepEndAtTermLapseCoverage can reseed a visit), so it is still live.
+  const ended = term => term.status === 'refunded'
+    || (['cancelled', 'canceled'].includes(term.status) && term.cancel_disposition !== 'end_at_term');
+  return terms.filter(term => term.in_term && !ended(term) && namesEstimate(term)).length;
 }
 
 function assertNoRemovalDependents({ visits, estimates, prepaidTerms }) {
   if (!visits && !estimates && !prepaidTerms) return;
   const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
-  const parts = [visits && count(visits, 'open or recurring visit'), estimates && count(estimates, 'open estimate'),
+  const parts = [visits && count(visits, 'open, recurring or just-completed visit'), estimates && count(estimates, 'open estimate'),
     prepaidTerms && count(prepaidTerms, 'prepaid annual plan')].filter(Boolean);
-  throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it.`, 409, 'property_in_use');
+  throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it; a visit completed in the last 7 days blocks until its follow-up window ends.`, 409, 'property_in_use');
 }
 
 // Removal is a deactivation (active=false), never a row delete: visit history,
