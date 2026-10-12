@@ -7,7 +7,10 @@
 // (id + name columns) in Node, because pg_trgm / fuzzystrmatch are not
 // installed and a migration is not worth it for a rescue path.
 //
-// No dependencies, no I/O.
+// Accent / letter folding comes from the shared server/utils/name-match.js so
+// there is one folding policy. No I/O.
+
+const { foldNameLetters } = require('../../utils/name-match');
 
 const MAX_RESULTS = 5;
 const MIN_SCORE = 0.75; // mean token score a customer needs to be returned
@@ -18,10 +21,6 @@ const PHONETIC_PARTIAL = 0.85; // scaled by how close the sound keys are
 // Words that say nothing about who the customer is.
 const STOPWORDS = new Set(['llc', 'inc', 'co', 'corp', 'company', 'ltd', 'the', 'and', 'of']);
 
-function stripAccents(text) {
-  return String(text || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
-}
-
 // "S-I-V-I", "s i v i", "F.I.B.I" -> one word. Needs three or more single
 // letters in a row so "J R Smith" style initials are only joined when long.
 function collapseSpelledLetters(text) {
@@ -29,19 +28,20 @@ function collapseSpelledLetters(text) {
 }
 
 function tokenize(text) {
-  const lowered = stripAccents(text).toLowerCase();
+  const lowered = foldNameLetters(text).toLowerCase();
   const tokens = collapseSpelledLetters(lowered).split(/[^a-z0-9]+/).filter(Boolean);
   const meaningful = tokens.filter((t) => !STOPWORDS.has(t));
   return meaningful.length ? meaningful : tokens;
 }
 
 // True when the text looks like a name, not a phone, email or address.
+// Any digit rules it out: dictated person and company names almost never
+// carry one, and "123 Main St" has more letters than digits. The exact search
+// still serves a name that does.
 function isNameLikeSearch(search) {
   const text = String(search || '');
-  if (!text.trim() || text.includes('@')) return false;
-  const letters = (text.match(/[a-z]/gi) || []).length;
-  const digits = (text.match(/\d/g) || []).length;
-  return letters >= 2 && digits <= letters;
+  if (text.includes('@') || /\d/.test(text)) return false;
+  return (text.match(/[a-z]/gi) || []).length >= 2;
 }
 
 function levenshtein(a, b) {
@@ -76,7 +76,7 @@ const SOUND_RULES = [
 
 // Consonant skeleton: "Phoebe" and "Fybi" both become "fb".
 function phoneticKey(word) {
-  let w = stripAccents(word).toLowerCase().replace(/[^a-z]/g, '');
+  let w = foldNameLetters(word).toLowerCase().replace(/[^a-z]/g, '');
   for (const [pattern, replacement] of SOUND_RULES) w = w.replace(pattern, replacement);
   let key = '';
   for (let i = 0; i < w.length; i += 1) {
@@ -120,15 +120,27 @@ function customerTokens(candidate) {
   return tokenize([candidate.first_name, candidate.last_name, candidate.company_name].filter(Boolean).join(' '));
 }
 
+// One-to-one: a customer word can satisfy at most one search word, so a
+// short first name cannot also stand in for a longer last name that begins the
+// same way. Pairs are taken best first; any search word left unmatched fails
+// the customer.
 function scoreCandidate(searchTokens, tokens, keyOf) {
+  const pairs = [];
+  searchTokens.forEach((word, i) => tokens.forEach((token, j) => {
+    const score = wordSimilarity(word, token, keyOf);
+    if (score >= MIN_TOKEN_SCORE) pairs.push({ score, i, j });
+  }));
+  pairs.sort((a, b) => b.score - a.score);
+  const usedWords = new Set();
+  const usedTokens = new Set();
   let total = 0;
-  for (const word of searchTokens) {
-    let best = 0;
-    for (const token of tokens) best = Math.max(best, wordSimilarity(word, token, keyOf));
-    if (best < MIN_TOKEN_SCORE) return 0;
-    total += best;
+  for (const { score, i, j } of pairs) {
+    if (usedWords.has(i) || usedTokens.has(j)) continue;
+    usedWords.add(i);
+    usedTokens.add(j);
+    total += score;
   }
-  return total / searchTokens.length;
+  return usedWords.size === searchTokens.length ? total / searchTokens.length : 0;
 }
 
 // Rank candidates ({ id, first_name, last_name, company_name }) against a

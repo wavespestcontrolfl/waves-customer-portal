@@ -46,6 +46,9 @@ describe('name-match scorer', () => {
     expect(isNameLikeSearch('(555) 555-0100')).toBe(false);
     expect(isNameLikeSearch('someone@example.com')).toBe(false);
     expect(isNameLikeSearch('  ')).toBe(false);
+    // An address has more letters than digits; any digit still rules it out.
+    expect(isNameLikeSearch('123 Main St')).toBe(false);
+    expect(isNameLikeSearch('Main Street 12')).toBe(false);
   });
 
   test('two shared words plus one sound-alike word find the company, not the other lake company', () => {
@@ -109,6 +112,27 @@ describe('query_customers sound-alike fallback', () => {
     expect(candidateQuery.bindings).toContain('scoped-1');
   });
 
+  test('the fallback honors limit, skips later pages, and shows the company', async () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ id: `n${i}`, first_name: 'Fybi', last_name: `L${i}`, company_name: `Fybi Co ${i}` }));
+    db.__rows = (q) => {
+      if (q.sql.includes('count(*)')) return [{ count: '0' }];
+      if (q.sql.includes('"customers"."id" in')) return many.slice(0, 2).map(c => ({ ...c, company_name: 'Fybi Lake Rentals' }));
+      if (!q.sql.includes('"customers"."email"')) return many;
+      return [];
+    };
+    const limited = await executeTool('query_customers', { search: 'Phoebe', limit: 2 });
+    expect(limited).toMatchObject({ approximate: true, returned_count: 2, has_more: false, next_offset: null });
+    expect(limited.customers[0].company_name).toBe('Fybi Lake Rentals');
+    const inQuery = db.__queries.find(q => q.sql.includes('"customers"."id" in'));
+    expect(inQuery.bindings.filter(b => /^n\d$/.test(b))).toHaveLength(2);
+
+    db.__queries = [];
+    const paged = await executeTool('query_customers', { search: 'Phoebe', limit: 2, offset: 2 });
+    expect(paged.approximate).toBeUndefined();
+    expect(paged.returned_count).toBe(0);
+    expect(db.__queries.some(q => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"'))).toBe(false);
+  });
+
   test('exact hits keep the original shape with no approximate marker', async () => {
     db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '1' }] : [{ id: 'c-lake', first_name: 'Pat' }]);
     const result = await executeTool('query_customers', { search: 'Pat' });
@@ -149,4 +173,30 @@ test('a short first name finds the full one when the last name sounds the same',
   ];
   expect(rankNameMatches('Sam Braynard', candidates).map(r => r.id)).toEqual(['b']);
   expect(rankNameMatches('Sa Whitlock', candidates)).toEqual([]);
+});
+
+test('letters NFD cannot split are folded by the shared policy, in both directions', () => {
+  const candidates = [
+    { id: 'o', first_name: 'Søren', last_name: 'Example', company_name: null },
+    { id: 'l', first_name: 'Pat', last_name: null, company_name: 'Łukow Lake Rentals' },
+  ];
+  expect(tokenize('Søren Łukow')).toEqual(['soren', 'lukow']);
+  expect(rankNameMatches('Soren Example', candidates).map(r => r.id)).toEqual(['o']);
+  expect(rankNameMatches('Lukow Lake Rentals', candidates).map(r => r.id)).toEqual(['l']);
+  expect(rankNameMatches('Søren Example', [{ id: 'p', first_name: 'Soren', last_name: 'Example' }]).map(r => r.id)).toEqual(['p']);
+});
+
+test('one customer word satisfies at most one search word', () => {
+  const candidates = [
+    { id: 'only-first', first_name: 'Samuel', last_name: 'Zeller', company_name: null },
+    { id: 'both', first_name: 'Samuel', last_name: 'Samson', company_name: null },
+    { id: 'three', first_name: 'Pat', last_name: null, company_name: 'Fybi Lake Rentals' },
+  ];
+  expect(rankNameMatches('Sam Samson', candidates).map(r => r.id)).toEqual(['both']);
+  // A three-word company search still matches a three-word company, and a
+  // spelled-out run still counts as one word.
+  expect(rankNameMatches('Phoebe Lake Rentals', candidates).map(r => r.id)).toEqual(['three']);
+  expect(rankNameMatches('F-Y-B-I Lake', candidates).map(r => r.id)).toEqual(['three']);
+  // More search words than the customer has words: unmatched words fail it.
+  expect(rankNameMatches('Phoebe Lake Rentals Pat Extra Words', candidates)).toEqual([]);
 });
