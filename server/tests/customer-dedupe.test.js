@@ -31,7 +31,7 @@ const {
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
-    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
+    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNotExists', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'skipLocked', 'update', 'insert', 'del', 'count', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'limit',
   ];

@@ -1,4 +1,5 @@
 // Shared by claim, finalization, and provider-boundary checks.
+const crypto = require('crypto');
 const SEND_CLAIMABLE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
 
@@ -414,6 +415,106 @@ function isCollectionPendingFenceError(err) {
   return COLLECTION_PENDING_FENCE_CODES.includes(err.code) || err.reconciliationRequired === true;
 }
 
+// A digest of what a send would put in front of the customer: the gross total,
+// the credit applied, the amount due and the line items. The Intelligence Bar pins
+// it on its confirm card (with the row's updated_at) and claimInvoiceForSend
+// refuses a claim whose row no longer matches, so an edit or a partial credit
+// between the card and the claim cannot change the pay-link balance or the lines
+// while the gross total stays equal.
+function approvedInvoiceVersionDigest(invoice) {
+  let lines = invoice && invoice.line_items;
+  if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { /* keep raw */ } }
+  const payload = {
+    total_cents: Math.round((Number(invoice && invoice.total) || 0) * 100),
+    credit_cents: Math.round((Number(invoice && invoice.credit_applied) || 0) * 100),
+    due_cents: Math.round(invoiceAmountDue(invoice) * 100),
+    lines: lines === undefined ? null : lines,
+    // The operator's own words that reach the customer: the email's personal message and the notes on the invoice / PDF.
+    email_message: (invoice && invoice.email_message) || null,
+    notes: (invoice && invoice.notes) || null,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 32);
+}
+
+// The invoice's attached files, as the send reads them (the delivery email points to them): oldest first.
+async function loadInvoiceAttachmentRows(database, invoiceId) {
+  return database('invoice_attachments').where({ invoice_id: invoiceId })
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').select('id', 'file_name', 'file_size_bytes', 'updated_at');
+}
+// One string for a set of attachments: id, name, size and edit time of each ('none' for no files).
+function attachmentsFingerprint(rows) {
+  if (!rows || !rows.length) return 'none';
+  return rows.map((row) => [row.id, row.file_name, row.file_size_bytes, row.updated_at ? new Date(row.updated_at).getTime() : null].join('|')).join(';');
+}
+const digestOfFingerprint = (fingerprint) => crypto.createHash('sha256').update(String(fingerprint)).digest('hex').slice(0, 32);
+const attachmentsFingerprintDigest = (rows) => digestOfFingerprint(attachmentsFingerprint(rows));
+
+// An opaque digest of a set of lead ids (order-free), so an approval can pin the set without carrying the ids.
+function leadSetDigest(ids) {
+  return crypto.createHash('md5').update([...ids].map(String).sort().join(',')).digest('hex');
+}
+
+// The text of an invoice SMS as the Intelligence Bar pins it: the template that rendered and its body with the pay link replaced
+// by a fixed token (the real short link is minted at send, so it cannot be known on the card). One function for the card, the
+// claim and the text leg's handoff, so all three compare the same thing.
+const INVOICE_SMS_PAY_LINK_TOKEN = '[pay link]';
+function invoiceSmsDigest(rendered, payUrl) {
+  if (!rendered || !rendered.body) return 'none';
+  const normalized = payUrl ? String(rendered.body).split(String(payUrl)).join(INVOICE_SMS_PAY_LINK_TOKEN) : String(rendered.body);
+  return crypto.createHash('sha256').update(`${rendered.renderedTemplateKey || ''}\n${normalized}`).digest('hex').slice(0, 32);
+}
+
+// ── attachment upload reservations (Intelligence Bar send fence) ──
+// An upload writes to storage BEFORE it takes the invoice row lock to insert, so a send can claim, deliver and finalize in
+// between. The upload therefore writes a durable reservation (an audit row on the invoice, no new column) before its first
+// storage write. The Intelligence Bar's send claim refuses while a reservation is live, and the upload's insert refuses when the
+// invoice's send episode moved since the reservation. A reservation ends with a release row, or expires.
+const ATTACHMENT_UPLOAD_RESERVED = 'invoice.attachment_upload_reserved';
+const ATTACHMENT_UPLOAD_RELEASED = 'invoice.attachment_upload_released';
+const ATTACHMENT_UPLOAD_TTL_MS = 10 * 60 * 1000;
+
+// The invoice's send episode: its delivery stamps. A delivery moves it; a claim that delivered nothing does not.
+function invoiceDeliveryEpoch(invoice) {
+  const at = (value) => (value ? new Date(value).getTime() : '');
+  return [at(invoice && invoice.sent_at), at(invoice && invoice.sms_sent_at), at(invoice && invoice.email_sent_at)].join('|');
+}
+
+// Writes the reservation on the caller's handle (the upload's short transaction, invoice row locked).
+async function reserveAttachmentUpload(database, invoice, { uploadedByTechId = null } = {}) {
+  const reservationId = crypto.randomUUID();
+  const metadata = {
+    invoiceId: String(invoice.id), reservationId, epoch: invoiceDeliveryEpoch(invoice),
+    expiresAtMs: Date.now() + ATTACHMENT_UPLOAD_TTL_MS, uploadedByTechId: uploadedByTechId || null,
+  };
+  await require('./audit-log').recordAuditEvent({
+    actor_type: 'system', action: ATTACHMENT_UPLOAD_RESERVED, resource_type: 'invoices', resource_id: invoice.id, metadata, critical: true, trx: database,
+  });
+  return metadata;
+}
+
+async function releaseAttachmentUpload(database, reservation) {
+  if (!reservation) return;
+  await require('./audit-log').recordAuditEvent({
+    actor_type: 'system', action: ATTACHMENT_UPLOAD_RELEASED, resource_type: 'invoices', resource_id: reservation.invoiceId,
+    metadata: { invoiceId: reservation.invoiceId, reservationId: reservation.reservationId }, critical: true, trx: database,
+  });
+}
+
+// True when a reservation for this invoice is unreleased and not expired.
+async function attachmentUploadInFlight(database, invoiceId) {
+  const row = await database('audit_log as r')
+    .where({ 'r.resource_type': 'invoices', 'r.resource_id': invoiceId, 'r.action': ATTACHMENT_UPLOAD_RESERVED })
+    .where('r.created_at', '>', new Date(Date.now() - ATTACHMENT_UPLOAD_TTL_MS))
+    .whereNotExists(function released() {
+      this.select(database.raw('1')).from('audit_log as d')
+        .whereRaw('d.resource_id = r.resource_id')
+        .where('d.action', ATTACHMENT_UPLOAD_RELEASED)
+        .whereRaw("d.metadata->>'reservationId' = r.metadata->>'reservationId'");
+    })
+    .first('r.id');
+  return Boolean(row);
+}
+
 module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -445,6 +546,18 @@ module.exports = {
   isCollectibleOwnInvoice,
   hasCollectibleAmountDue,
   invoiceAmountDue,
+  approvedInvoiceVersionDigest,
+  loadInvoiceAttachmentRows,
+  attachmentsFingerprint,
+  attachmentsFingerprintDigest,
+  digestOfFingerprint,
+  leadSetDigest,
+  INVOICE_SMS_PAY_LINK_TOKEN,
+  invoiceSmsDigest,
+  invoiceDeliveryEpoch,
+  reserveAttachmentUpload,
+  releaseAttachmentUpload,
+  attachmentUploadInFlight,
   invoiceDepositCreditCents,
   invoicePrincipalCents,
   formatCardLine,

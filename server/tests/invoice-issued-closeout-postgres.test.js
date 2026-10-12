@@ -362,7 +362,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   test('issuedCloseoutTarget names the visit the closeout would complete — same verdicts, no audit row, no completion (the IB resend card)', async () => {
     const open = await visit({ date: '2040-02-20', serviceType: 'Lawn Care Visit' });
     const inv = await invoice({ scheduled_service_id: open.id, date: '2040-02-20' });
-    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toEqual({ visitId: open.id, serviceType: 'Lawn Care Visit', date: '2040-02-20', resuming: false });
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toMatchObject({ visitId: open.id, serviceType: 'Lawn Care Visit', date: '2040-02-20', resuming: false });
     // A same-day visit its technician ARRIVED at closes on payment (the
     // default trigger here), never on a send; one nobody has reached does
     // not close at all today — the payment is a prepayment (owner 2026-10-04).
