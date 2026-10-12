@@ -713,7 +713,7 @@ describe('agent-gap-reports', () => {
       expect(insertedRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'update_customer' });
       expect(insertedRows[0].summary).toMatch(/used all its steps/);
       const other = collectorFor();
-      other.toolResult('get_invoice', { rows: [] }, false, { round: 10 });
+      other.toolResult('get_invoice', { error: 'Database unavailable' }, true, { round: 10 });
       await other.flush({ reply: 'x', stepLimitReached: true });
       expect(insertedRows[1].fingerprint).toBe(insertedRows[0].fingerprint);
     });
@@ -736,9 +736,50 @@ describe('agent-gap-reports', () => {
 
     test('with no tool at all, running out of steps still records', async () => {
       const collector = collectorFor();
-      await collector.flush({ reply: 'x', stepLimitReached: true });
+      await collector.flush({ reply: 'x', stepLimitReached: true, noReply: true });
       expect(insertedRows).toHaveLength(1);
       expect(insertedRows[0].closest_tool).toBeNull();
+    });
+
+    test('a long request whose last tool round only succeeded is finished, not exhausted', async () => {
+      const collector = collectorFor();
+      collector.toolResult('get_invoice', { rows: [] }, false, { round: 10 });
+      await collector.flush({ reply: 'All done: the visit moved to Friday.', stepLimitReached: true, noReply: false });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('a long request whose last tool round committed or proposed a write is finished, not exhausted', async () => {
+      const collector = collectorFor();
+      collector.toolResult('get_invoice', { error: 'Database unavailable' }, true, { round: 10 });
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 10, wrote: true });
+      await collector.flush({ reply: 'Confirm the card.', stepLimitReached: true, noReply: false });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('with no final answer at all, exhaustion records even when the last round wrote', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 10, wrote: true });
+      await collector.flush({ reply: 'too many steps', stepLimitReached: true, noReply: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].summary).toMatch(/used all its steps/);
+    });
+
+    test('a write by one tool does not hide an unrelated refusal in the same parallel round', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 4, wrote: true });
+      collector.toolResult('reschedule_appointment', { error: 'x', code: 'dependency_unresolved' }, true, { round: 4 });
+      await collector.flush({ reply: 'Confirm the card; the move needs a step first.' });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ closest_tool: 'reschedule_appointment' });
+      expect(insertedRows[0].summary).toContain('dependency_unresolved');
+    });
+
+    test('a refusal and a write by the SAME tool in one round is not a gap', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 4 });
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 4, wrote: true });
+      await collector.flush({ reply: 'Confirm the card.' });
+      expect(insertedRows).toHaveLength(0);
     });
 
     test('a refusal the prose path already records as an unknown tool is not written twice', async () => {

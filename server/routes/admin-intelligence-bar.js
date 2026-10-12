@@ -3918,6 +3918,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     }
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
+    const noReply = !finalResponse; // no terminal answer: the loop ended on a tool call
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
@@ -3929,7 +3930,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // discover_capabilities loop there to gather signals from); the admin
     // platform collector already searches first, so passing it there too is
     // inert on every request that already gathered a signal.
-    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached });
+    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool

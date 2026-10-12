@@ -459,10 +459,11 @@ function searchAttempt(search) {
  */
 function createGapCollector({ source, isRegisteredTool = () => false, recordBlocked = source === 'intelligence-bar' }) {
   const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
-  // The tool round the request ended on: its coded refusals, and whether a
-  // write was proposed or committed in it. Earlier rounds are forgotten, so a
-  // refusal the model recovered from is never a gap.
-  let tail = { round: null, refusals: new Map(), wrote: false };
+  // The tool round the request ended on: its coded refusals, the tools that
+  // proposed or committed a write in it, and whether any call in it failed.
+  // Earlier rounds are forgotten, so a refusal the model recovered from is
+  // never a gap.
+  let tail = { round: null, refusals: new Map(), wroteTools: new Set(), failed: false };
   let lastTool = null;
   const unknownTools = new Set();
   const refusedCases = new Map(); // registered tool -> its own unsupported-case message
@@ -483,8 +484,9 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
 
   function trackTail(name, result, failed, meta = {}) {
     lastTool = cleanTool(name) || lastTool;
-    if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wrote: false };
-    if (meta.wrote === true) tail.wrote = true;
+    if (meta.round !== tail.round) tail = { round: meta.round, refusals: new Map(), wroteTools: new Set(), failed: false };
+    if (meta.wrote === true) tail.wroteTools.add(name);
+    if (failed) tail.failed = true;
     const code = failed ? recordableRefusalCode(result) : null;
     if (code) tail.refusals.set(`${name}|${code}`, { tool: name, code });
   }
@@ -522,18 +524,32 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     return signals;
   }
 
+  // Exhaustion is decided from what the last tool round did, not from the round
+  // number alone (the forced tool-less final round also runs for a request that
+  // finished on its last allowed step). Rule: the request used every step AND
+  // either never got a final answer (the model still wanted a tool in the
+  // tool-less round), or its last tool round was still failing with no write
+  // proposed or committed. A last round of only successful calls, or one that
+  // wrote, counts as finished: the forced report was just its summary.
+  function exhausted({ stepLimitReached, noReply }) {
+    if (stepLimitReached !== true) return false;
+    return noReply === true || (tail.failed && tail.wroteTools.size === 0);
+  }
+
   // Signals for a request that stopped without doing what was asked, whatever
   // the reply said: the tool loop ran out, or the last tool round ended on a
-  // recordable refusal with no write proposed or committed in it. A refusal the
-  // prose path already records (an unknown or case-limited tool) is left to it.
-  function blockedSignals({ declined, stepLimitReached }) {
+  // recordable refusal. A refusal is dropped only when its own tool also wrote
+  // in that round; an unrelated refusal in the same parallel round is kept. A
+  // refusal the prose path already records (an unknown or case-limited tool)
+  // is left to it.
+  function blockedSignals({ declined, stepLimitReached, noReply }) {
     if (!recordBlocked) return [];
     // Running out of steps is the one signal for the request: the refusal it
     // was stuck on is named by lastTool, and stays out of its own row.
-    if (stepLimitReached === true) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
-    if (tail.wrote) return [];
+    if (exhausted({ stepLimitReached, noReply })) return [blockedSignal({ source, code: LOOP_EXHAUSTED_CODE, lastTool })];
     const signals = [];
     for (const { tool, code } of tail.refusals.values()) {
+      if (tail.wroteTools.has(tool)) continue;
       const proseCovers = declined && code === 'capability_unimplemented' && (unknownTools.has(tool) || refusedCases.has(tool));
       if (!proseCovers) signals.push(blockedSignal({ source, tool, code }));
     }
@@ -556,16 +572,16 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       attempted: 'The bar declined; no capability search ran' }] : [];
   }
 
-  async function flush({ reply, ask, stepLimitReached } = {}) {
+  async function flush({ reply, ask, stepLimitReached, noReply } = {}) {
     try {
       if (!gapReportsEnabled()) return;
       const declined = DECLINE_RE.test(String(reply || ''));
-      const blocked = blockedSignals({ declined, stepLimitReached });
+      const blocked = blockedSignals({ declined, stepLimitReached, noReply });
       // Out of steps is ONE record: when the exhaustion row is written, a prose
       // decline in the same reply would add a second row with its own
       // fingerprint. The tech bar writes no exhaustion row, so its prose
       // record stays (pre-push P1s).
-      const exhaustionRecorded = Boolean(stepLimitReached) && blocked.length > 0;
+      const exhaustionRecorded = blocked.some((signal) => signal.code === LOOP_EXHAUSTED_CODE);
       const signals = [...blocked, ...(declined && !exhaustionRecorded ? declinedSignals({ reply, ask }) : [])];
       if (signals.length) await writeGapRows(signals);
     } catch (err) {

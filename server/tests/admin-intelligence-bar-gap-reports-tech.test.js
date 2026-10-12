@@ -141,6 +141,7 @@ describe('gap reports on /query', () => {
       reply: "Sorry, I can't do that from here.",
       ask: 'add a note to my next stop',
       stepLimitReached: false,
+      noReply: false,
     });
   });
 
