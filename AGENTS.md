@@ -128,13 +128,13 @@ execute the workflows they describe.
   `reportEventLimiter`. Contract e-signature tokens burn when signed. The
   estimate `ask` and `find-slots` routes keep the estimate token gate, the
   short-lived signed `askToken`, terminal/expired rejection, their rate
-  limits, no raw question/query logging, and never book. Re-run gates and
-  eligibility refusals on the locked row at commit, not just on the
-  preflight read (`reserveSlot`, `validateBookingSlotGeometry` vs
-  `customerWindowAdmits`); skipping it is P0 unless that route's entry
-  records the exception (a certified hold, a committed-booking retry). Any
-  change to a listed route's auth, gate, payload, or headers that the
-  document does not describe is P0.
+  limits, no raw question/query logging, and never book. The commit path
+  re-checks the preflight read: a live gate re-read there (no row lock
+  stabilizes an env flip — `validateBookingSlotGeometry` vs
+  `customerWindowAdmits`), row-derived eligibility on the locked row
+  (`reserveSlot`). Skipping either is P0 unless the entry records the
+  exception. Any change to a listed route's auth, gate, payload, or
+  headers that the document does not describe is P0.
 - **`/receipt/:token` permanence.** The receipt token is `invoices.token`
   and is intentionally permanent — customers re-share receipt links with
   bookkeepers months later. A `used` / `viewed_count` / `expires_at` gate

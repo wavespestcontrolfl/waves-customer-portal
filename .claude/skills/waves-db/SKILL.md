@@ -259,7 +259,13 @@ stored row "replay".
   `new_lead`, so a deliberately broad "any active stage" query can be the
   correct one — `call-booking-miss-watchdog.js:286-294` keeps the wide
   namesake scope on purpose and applies `whereLiveCustomer` only to the
-  stricter likely-account hint. Narrow the hint, not the evidence.
+  stricter likely-account hint. Narrow the hint, not the evidence. The
+  helper emits UNQUALIFIED `active` / `deleted_at` / `pipeline_stage`, so
+  in a joined query it raises ambiguous-column SQL: there, mirror it
+  COMPLETELY with alias-qualified columns, as
+  `irrigation-weekly-email.js:1032-1038` does and documents. An
+  alias-qualified mirror is correct; an INCOMPLETE one (dropping
+  `pipeline_stage`) is the bug.
   `customers.status` does not exist. `member_since` is canonical;
   `customer_since` is dead.
 - Eligibility and scope predicates are shared so they can't drift — reuse
