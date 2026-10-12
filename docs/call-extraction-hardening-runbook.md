@@ -124,7 +124,7 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   phone lock instead of taking row locks in opposite orders. **Which lines:** a call can hold several lines. The
   panel sends `line_e164` with the request: only that line is released, on the call and on every other call that holds
   it, and a line the call does not actively hold is a 409 `NO_TEXT_LINE_NOT_HELD`. The inbox card sends no line and
-  releases EVERY line the call holds (each under its own phone lock, sorted), never "the newest"; for the usual
+  releases EVERY line the call ACTIVELY holds (each under its own phone lock, sorted), never "the newest" and never a line the call already released (that line may have been re-held by another call); with none active the card still resolves and `lines_released` is empty; for the usual
   one-line call that is the same single line. The reply lists `lines_released`.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):

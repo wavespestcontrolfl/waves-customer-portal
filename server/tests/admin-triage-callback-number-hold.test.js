@@ -863,6 +863,27 @@ describe('line_e164: release the selected line, across calls', () => {
     expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
   });
 
+  test('the inbox card skips a line this call already released: a fresh hold another call placed on it stays (codex r2 P1)', async () => {
+    const fx = multiLine();
+    // X was released from the panel on call-1 (its row is cleared); call-2 re-held X since; call-1 still holds Y.
+    fx.tables.disclaimed_number_holds.find((h) => h.id === 'c1x').cleared_at = new Date();
+    const out = await release({});
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [Y] });
+    expect(active(fx.tables)).toEqual(['c2x']); // Y cleared on call-1 and call-3; the fresh X hold stays
+    expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${Y}`]);
+  });
+
+  test('when the call holds no active line the card still resolves, nothing is locked or propagated', async () => {
+    const fx = multiLine();
+    for (const id of ['c1x', 'c1y']) fx.tables.disclaimed_number_holds.find((h) => h.id === id).cleared_at = new Date();
+    const out = await release({});
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number.lines_released).toEqual([]);
+    expect(fx.events).toEqual([]);
+    expect(active(fx.tables)).toEqual(['c2x', 'c3y']);
+  });
+
   test.each([['closed', 'resolved'], ['open', 'open']])('the inbox card (no line_e164) on a two-line call releases BOTH lines on every call, each under its own lock, sorted (%s card)', async (_n, status) => {
     const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
     const out = await release({});

@@ -677,8 +677,8 @@ function HeldLinesPanel({ lines, loading, actioning, onRelease }) {
   return (
     <Card>
       <CardBody>
-        <div className="px-3 pt-3 text-13 font-medium text-zinc-900">Held lines</div>
-        <p className="px-3 text-12 text-ink-tertiary mb-2">
+        <div className="px-3 pt-3 text-14 font-medium text-zinc-900">Held lines</div>
+        <p className="px-3 text-14 text-ink-tertiary mb-2">
           Lines where the caller said texts cannot arrive. They stay blocked until someone confirms the line can get texts.
         </p>
         {loading && lines === null ? (
@@ -691,15 +691,15 @@ function HeldLinesPanel({ lines, loading, actioning, onRelease }) {
               <div key={phone} className="py-3 px-3 flex flex-wrap items-start justify-between gap-2" data-testid="held-line">
                 <div className="min-w-0">
                   <div className="text-14 font-medium text-zinc-900">{phone}</div>
-                  <div className="text-12 text-ink-secondary">
+                  <div className="text-14 text-ink-secondary">
                     Held since {heldDate(since)} · call of {heldDate(primary.call_created_at)} · {callerName(primary)}
                   </div>
-                  <div className="text-12 text-ink-tertiary">
+                  <div className="text-14 text-ink-tertiary">
                     Card {CARD_STATE_LABELS[primary.card_status] || primary.card_status}, updated {heldDate(primary.card_updated_at)}
                     {others > 0 && ` · ${others} more call${others === 1 ? "" : "s"} hold this line`}
                   </div>
                   {primary.blocked_by_ownership_card && (
-                    <div className="text-12 text-alert-fg">This call also has an open "not my number" card. Resolve that card first.</div>
+                    <div className="text-14 text-alert-fg">This call also has an open "not my number" card. Resolve that card first.</div>
                   )}
                 </div>
                 <Button size="sm" variant="secondary" disabled={actioning === primary.card_id} onClick={() => onRelease(heldLineItem(primary))}>

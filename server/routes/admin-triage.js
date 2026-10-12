@@ -217,8 +217,8 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // WHICH LINES: a call can hold several lines. The held-lines panel names one (`line_e164`): only that line
 // is released, on this call and on every other call that holds it; a line this call does not actively hold
 // is a 409 (NO_TEXT_LINE_NOT_HELD) and nothing changes. The inbox card names none: it releases EVERY line
-// the call holds (each under its own phone lock), never "the newest" by guess; for the usual one-line call
-// that is the same single line as before.
+// the call ACTIVELY holds (each under its own phone lock), never "the newest" by guess and never a line the
+// call already released; with none active the card still resolves and no line is touched (lines_released: []).
 function lineNotHeldError() {
   const err = new Error('That line is no longer held by this call. Reload the held lines and review the latest.');
   err.statusCode = 409;
@@ -234,7 +234,9 @@ async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
   const Holds = require('../services/disclaimed-number-holds');
   const VERIFIED = CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER;
   const rows = await Holds.callLineRows(trx, callLogId);
-  let lines = rows.map((r) => r.key);
+  // Only lines the call STILL actively holds: a line this call already released (say from the panel) may
+  // have been re-held by another call since, and an inbox release must not clear that fresh hold.
+  let lines = rows.filter((r) => r.active).map((r) => r.key);
   if (lineE164 != null) {
     const key = Holds.holdPhoneKey(lineE164);
     if (!key || !rows.some((r) => r.key === key && r.active)) throw lineNotHeldError();
@@ -244,7 +246,7 @@ async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
   // of one shared line serialize on the phone lock instead of crossing row locks (A->B / B->A, #6112 r15).
   await Holds.lockNoTextLines(trx, lines);
   const cleared = await clearCallbackNumberHold(trx, callLogId, {
-    clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: lineE164 != null ? lines : null,
+    clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: lines,
   });
   for (const key of lines) {
     const otherCalls = await Holds.clearNoTextHoldsForPhone({ phoneE164: key, exceptCallLogId: callLogId, clearedBy: assignedTo, reason: VERIFIED, conn: trx });
