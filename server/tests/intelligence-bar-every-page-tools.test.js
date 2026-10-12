@@ -24,6 +24,8 @@ const CORE = [
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
   'offer_choices', 'check_address',
+  'create_appointment', 'reschedule_appointment', 'cancel_appointment',
+  'update_customer', 'get_call_log',
 ];
 // Property writes run only through the registry (executePropertyTool refuses
 // unless GATE_IB_PLATFORM), so the legacy list cannot offer them.
@@ -56,9 +58,14 @@ test('tech portal and technician tokens get none of the core tools on either pat
     registry.initialTools('customers', { role: 'technician', context: 'customers' }),
     getToolsForContext('tech', false, false),
     getToolsForContext('tech', true, false),
-    getToolsForContext('customers', false, false),
   ];
   for (const list of lists) for (const name of CORE) expect(names(list)).not.toContain(name);
+  // The legacy base list (BASE_TOOLS) has always carried these five on a
+  // non-tech context whatever the role; the route forces a technician token
+  // to the tech context, and the registry path above refuses them outright.
+  const LEGACY_BASE = new Set(['create_appointment', 'reschedule_appointment', 'cancel_appointment', 'update_customer', 'get_call_log']);
+  const legacyNonAdmin = names(getToolsForContext('customers', false, false));
+  for (const name of CORE.filter(n => !LEGACY_BASE.has(n))) expect(legacyNonAdmin).not.toContain(name);
 });
 
 test('the agent-estimate rail keeps its own fixed list', () => {

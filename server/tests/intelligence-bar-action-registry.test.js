@@ -456,3 +456,22 @@ test('every tool with a non-none scope is a PII tool, every reviewed PII tool is
   expect(validScope({ kind: 'read', scope: 'route_wide' })).toBe(false);
   expect(validScope({ kind: 'external_action', scope: 'broad' })).toBe(false);
 });
+
+// Owner IB history 10-12: on the dashboard the bar searched the "schedule"
+// domain for a booking tool, got only schedule-domain tools back and told the
+// operator it could not book. Booking is filed under "customers".
+test('a domain is a ranking hint, so a schedule search still finds the booking tool', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  const found = registry.discover({ query: 'create a new appointment', domain: 'schedule' }, scope);
+  expect(found.result.capabilities.map(c => c.id)).toContain('create_appointment');
+  expect(found.definitions.some(tool => tool.name === 'create_appointment')).toBe(true);
+  // An unknown domain no longer hides every match.
+  expect(registry.discover({ query: 'create a new appointment', domain: 'scheduling' }, scope)
+    .result.capabilities.map(c => c.id)).toContain('create_appointment');
+});
+
+test('a tool in the named domain outranks an equal match from another domain', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  const ids = registry.discover({ query: 'switch appointment property', domain: 'schedule' }, scope).result.capabilities.map(c => c.id);
+  expect(ids[0]).toBe('switch_appointment_property');
+});

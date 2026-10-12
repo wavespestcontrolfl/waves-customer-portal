@@ -70,7 +70,7 @@ const REASON_LABELS = {
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
-  family_account_candidates: "Family caller named an account — confirm, then link",
+  family_account_candidates: "Caller may match an account — confirm, then link",
   name_spelling_differs: "Caller spelled their name — check it",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
