@@ -615,6 +615,10 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       expect(withSummary('Builder wants the slab pre-treat. They also want Bora-Care at the sales office.')).toBe(false);
       expect(withSummary('Builder wants the slab pre-treat. Bora-Care in the garage too.')).toBe(false);
       expect(withSummary('Builder wants the slab pre-treat and Bora-Care on building B.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat and Bora-Care on building beta.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care on building annex.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat and Bora-Care on building 12.')).toBe(false);
+      expect(withSummary('Builder wants the slab pre-treat. Bora-Care on the building before the pour.')).toBe(true);
       expect(withSummary('Builder wants the slab pre-treat. Bora-Care on the framing before the pour.')).toBe(true);
       expect(withSummary('Builder wants the slab pre-treat. They also want Bora-Care on the new framing.')).toBe(true);
       expect(withSummary('Builder wants the slab pre-treat and Bora-Care.')).toBe(true);

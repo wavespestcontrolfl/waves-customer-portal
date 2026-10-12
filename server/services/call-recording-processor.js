@@ -7376,7 +7376,10 @@ const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|alrea
 // ("also Bora-Care at the sales office") must carry its own context.
 const SEPARATE_JOB_MARKER_RE = /\b(?:also|another|other|second|separate|additional|as well|in addition|plus)\b/i;
 const DIFFERENT_LOCATION_RE = /\b(?:offices?|units?|suites?|garages?|sheds?|barns?|guest house|next door|across|their home|the house)\b/i;
-const DIFFERENT_BUILDING_RE = /\bbuilding\s+(?:[A-Z]|\d+)\b/i;
+// "building <identifier>" names a distinct building (B, 2, beta, annex); a
+// function or construction word after "building" ("the building before the
+// pour", "building permit") is the same job (codex #6289 r4).
+const DIFFERENT_BUILDING_RE = /\bbuilding\s+(?!(?:is|was|are|were|be|being|been|has|have|had|will|would|can|that|which|and|or|but|so|under|before|after|once|when|while|for|to|on|in|at|with|by|from|of|the|a|an|this|it|its|site|pad|slab|footprint|permit|inspector|department|code|codes|plans|next|now|too|also|as|we|they|he|she|i|you)\b)[A-Za-z0-9][\w-]*\b/i;
 function isSeparateJobSentence(text) {
   return SEPARATE_JOB_MARKER_RE.test(text) || DIFFERENT_LOCATION_RE.test(text) || DIFFERENT_BUILDING_RE.test(text);
 }
