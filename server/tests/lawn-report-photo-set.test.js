@@ -629,3 +629,22 @@ describe('carriesShotListMarker', () => {
     expect(shots.carriesShotListMarker([{ photoVocabulary: 'something_else' }])).toBe(false);
   });
 });
+
+describe('GATE_LAWN_PHOTO_LABEL_PICK on the photo set labels', () => {
+  const rows = [
+    { url: 'https://example.test/a.jpg', zone: 'shade', photoOrder: 0, pickedLabel: 'Close-up' },
+    { url: 'https://example.test/b.jpg', zone: 'front', photoOrder: 1 },
+  ];
+
+  test('a picked label replaces the slot wording but the photo keeps its slot and its place in shot order', () => {
+    expect(buildLawnPhotoSet(rows)).toEqual([
+      { url: 'https://example.test/b.jpg', shot: 'front', label: 'Front yard' },
+      { url: 'https://example.test/a.jpg', shot: 'shade', label: 'Close-up' },
+    ]);
+  });
+
+  test('no pickedLabel key: the set is exactly what it has always been', () => {
+    const plain = rows.map(({ pickedLabel: _drop, ...row }) => row);
+    expect(buildLawnPhotoSet(plain).map((p) => p.label)).toEqual(['Front yard', 'Shaded area']);
+  });
+});

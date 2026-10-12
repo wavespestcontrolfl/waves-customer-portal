@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn((name) => mockGates[name] === true),
+  lawnPhotoLabelPickLive: jest.fn(() => mockGates.GATE_LAWN_PHOTO_LABEL_PICK === true),
 }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
@@ -147,5 +148,16 @@ describe('GET /service/:serviceId tells the drawer whether the shot list is live
     mockGates = { GATE_LAWN_SHOT_LIST: true };
     const on = await withServer(async (base) => (await call(base, 'GET', '/service/svc-1')).json());
     expect(on).toEqual({ shotListEnabled: true, assessment: null });
+  });
+
+  test('GATE_LAWN_PHOTO_LABEL_PICK adds labelPickEnabled only with the pick gate AND the shot list on', async () => {
+    lookup(null);
+    const get = () => withServer(async (base) => (await call(base, 'GET', '/service/svc-1')).json());
+    mockGates = { GATE_LAWN_PHOTO_LABEL_PICK: true };
+    expect(await get()).toEqual({ assessment: null });
+    mockGates = { GATE_LAWN_SHOT_LIST: true, GATE_LAWN_PHOTO_LABEL_PICK: true };
+    expect(await get()).toEqual({ shotListEnabled: true, labelPickEnabled: true, assessment: null });
+    mockGates = { GATE_LAWN_SHOT_LIST: true };
+    expect(await get()).toEqual({ shotListEnabled: true, assessment: null });
   });
 });

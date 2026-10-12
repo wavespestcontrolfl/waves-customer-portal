@@ -128,6 +128,8 @@ function makeEstimate(estimateData, rowOverrides = {}) {
 // The OTHER refusal / shortcut each condition stands for.
 const CONDITIONS = {
   bermuda: () => makeEstimate({ engineRequest: { options: { bermudaSuppression: true } } }),
+  // A persisted area add-on (GATE_AREA_ADDONS off in this harness): same rail as the Bermuda shape, its own code.
+  areaAddOn: () => makeEstimate({ engineInputs: { services: { areaAddOns: [{ key: 'web_sweep', visitContext: 'standalone' }] } } }),
   commercial: () => makeEstimate({ commercialEstimatedPricing: true }),
   // a one-time-only renewal whose only line is the rodent guarantee (no recurring totals, no recurring snapshot)
   guarantee: () => makeEstimate({ result: GUARANTEE_RESULT, sendSnapshot: undefined }, { monthly_total: 0, annual_total: 0, onetime_total: 199 }),
@@ -136,6 +138,7 @@ const CONDITIONS = {
 };
 
 const BERMUDA_409 = { error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.', code: 'BERMUDA_SUPPRESSION_GATED' };
+const AREA_ADDON_409 = { error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.', code: 'AREA_ADDONS_GATED' };
 const INACTIVE_409 = { error: 'Estimate is no longer active' };
 const TRENCH_409 = { error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit — this quote can’t be booked online.', reviewBeforeBooking: true, reason: 'termite_trenching_review' };
 const TRENCH_BROWSE = { primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true, message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.' };
@@ -189,33 +192,39 @@ const proceeds = (spy) => (r) => { expect(r.status).toBeLessThan(300); expect(sp
 const SLOT_CELLS = [
   // available-slots / find-slots (browse shapes)
   ['available-slots', 'bermuda', like(200, PARK_BROWSE), is(409, BERMUDA_409)],
+  ['available-slots', 'areaAddOn', like(200, PARK_BROWSE), is(409, AREA_ADDON_409)],
   ['available-slots', 'commercial', like(200, PARK_BROWSE), is(200, COMMERCIAL_BROWSE)],
   ['available-slots', 'guarantee', like(200, PARK_BROWSE), is(200, GUARANTEE_BROWSE)],
   ['available-slots', 'trenching', is(200, TRENCH_BROWSE), is(200, TRENCH_BROWSE)],
   ['available-slots', 'quote', is(409, INACTIVE_409), proceeds(mockGetAvailableSlots)],
   ['find-slots', 'bermuda', like(200, PARK_BROWSE), is(409, BERMUDA_409)],
+  ['find-slots', 'areaAddOn', like(200, PARK_BROWSE), is(409, AREA_ADDON_409)],
   ['find-slots', 'commercial', like(200, PARK_BROWSE), is(200, COMMERCIAL_BROWSE)],
   ['find-slots', 'guarantee', like(200, PARK_BROWSE), is(200, GUARANTEE_BROWSE)],
   ['find-slots', 'trenching', is(200, TRENCH_BROWSE), is(200, TRENCH_BROWSE)],
   ['find-slots', 'quote', is(409, INACTIVE_409), proceeds(mockFindEstimateSlots)],
   // reserve / extend (write shapes)
   ['reserve', 'bermuda', like(409, PARK_WRITE), is(409, BERMUDA_409)],
+  ['reserve', 'areaAddOn', like(409, PARK_WRITE), is(409, AREA_ADDON_409)],
   ['reserve', 'commercial', like(409, PARK_WRITE), is(409, COMMERCIAL_409)],
   ['reserve', 'guarantee', like(409, PARK_WRITE), is(409, GUARANTEE_409)],
   ['reserve', 'trenching', is(409, TRENCH_409), is(409, TRENCH_409)],
   ['reserve', 'quote', is(409, INACTIVE_409), (r) => { expect(r.status).toBe(201); expect(mockReserveSlot).toHaveBeenCalled(); }],
   ['extend', 'bermuda', like(409, PARK_WRITE), is(409, BERMUDA_409)],
+  ['extend', 'areaAddOn', like(409, PARK_WRITE), is(409, AREA_ADDON_409)],
   ['extend', 'commercial', like(409, PARK_WRITE), is(409, COMMERCIAL_409)],
   ['extend', 'guarantee', like(409, PARK_WRITE), is(409, GUARANTEE_409)],
   ['extend', 'trenching', is(409, TRENCH_409), is(409, TRENCH_409)],
   ['extend', 'quote', is(409, INACTIVE_409), (r) => { expect(r.status).toBe(200); expect(mockExtendReservation).toHaveBeenCalled(); }],
   // the card intents (their commercial / guarantee-only answers are policy EXEMPTIONS, not refusals: only the parked cells apply)
   ['card-hold-intent', 'bermuda', like(409, PARK_WRITE), is(409, BERMUDA_409)],
+  ['card-hold-intent', 'areaAddOn', like(409, PARK_WRITE), is(409, AREA_ADDON_409)],
   ['card-hold-intent', 'commercial', like(409, PARK_WRITE), null],
   ['card-hold-intent', 'guarantee', like(409, PARK_WRITE), null],
   ['card-hold-intent', 'trenching', is(409, TRENCH_409), is(409, TRENCH_409)],
   ['card-hold-intent', 'quote', is(409, INACTIVE_409), is(409, INACTIVE_409)],
   ['recurring-card-intent', 'bermuda', like(409, PARK_WRITE), is(409, BERMUDA_409)],
+  ['recurring-card-intent', 'areaAddOn', like(409, PARK_WRITE), is(409, AREA_ADDON_409)],
   ['recurring-card-intent', 'commercial', like(409, PARK_WRITE), null],
   ['recurring-card-intent', 'guarantee', like(409, PARK_WRITE), null],
   ['recurring-card-intent', 'trenching', is(409, TRENCH_409), is(409, TRENCH_409)],
@@ -319,6 +328,7 @@ describe('blocking-state precedence matrix: endpoint x condition x parked / not 
     const reasonOf = (r) => r.body.cta.reviewReason;
     test.each([
       ['bermuda', 'contact_review'],
+      ['areaAddOn', 'contact_review'],
       ['commercial', 'contact_review'],
       ['guarantee', 'contact_review'],
       ['trenching', 'termite_trenching_review'], // trenching outranks the park
@@ -366,7 +376,7 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     const guard = route.indexOf('slotBlockingRefusal(estimate');
     expect(guard).toBeGreaterThan(0);
     // Every shortcut / alternative payload comes after it.
-    for (const needle of ['rejectGatedSuppressionEstimate(res, estimate)', 'isCommercialAutoEstimate(estimate)', 'isRodentGuaranteeOnlyEstimate(estimate']) {
+    for (const needle of ['rejectGatedSuppressionEstimate(res, estimate', 'isCommercialAutoEstimate(estimate)', 'isRodentGuaranteeOnlyEstimate(estimate']) {
       expect([needle, route.indexOf(needle) > guard]).toEqual([needle, true]);
     }
     // ... and only viewability refusals precede it.
@@ -391,7 +401,7 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     const predicate = route.slice(route.indexOf('const noBookingRefusal ='));
     const guard = predicate.indexOf('lockedContactReviewRefusal(row, trx');
     expect(guard).toBeGreaterThan(0);
-    for (const needle of ['estimateDataCarriesBermudaSuppression(row', 'isCommercialAutoEstimate(row)', 'isRodentGuaranteeOnlyEstimate(row']) {
+    for (const needle of ['gatedAddOnRefusal(row)', 'isCommercialAutoEstimate(row)', 'isRodentGuaranteeOnlyEstimate(row']) {
       expect([needle, predicate.indexOf(needle) > guard]).toEqual([needle, true]);
     }
     expect(route.slice(0, route.indexOf('const noBookingRefusal =')))
@@ -419,9 +429,9 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     const estSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     const accept = estSrc.slice(estSrc.indexOf("res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));\n    }\n    // ORDER (the same as /data"));
     const at = (needle) => accept.indexOf(needle);
-    const park = at("estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated })");
+    const park = at("estimatePublicBlockingState(estimate, { suppressionGated: !!gatedAddOn })");
     expect(park).toBeGreaterThan(0);
-    for (const needle of ["code: 'BERMUDA_SUPPRESSION_GATED'", 'contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)']) {
+    for (const needle of ['if (gatedAddOn) return res.status(409).json(gatedAddOn);', 'contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)']) {
       expect([needle, at(needle) > park]).toEqual([needle, true]);
     }
     // The Bermuda gate no longer answers ahead of the accepted / inactive refusals.

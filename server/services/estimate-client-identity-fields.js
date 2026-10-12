@@ -17,6 +17,7 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'isRecurringCustomer',
   'treeShrubPricingKnobs',
   'termitePricingKnobs',
+  'areaAddOnPricingKnobs',
   'palmAnnualRounding',
   'commercialFloorsArmedServices',
   'commercialFloorsArmed',

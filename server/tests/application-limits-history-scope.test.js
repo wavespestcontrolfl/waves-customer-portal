@@ -115,3 +115,69 @@ describe('checkLimits: the product history honors the treated property and the p
     expect(clear.allowed).toBe(true);
   });
 });
+
+// A visit that recorded the same product twice (a Tree & Shrub host row and an area add-on row of that product) made two
+// applications of it (Codex round 9 on #6135): the yearly count judges the visit's first against the others, and each
+// further row of the visit adds to what is used.
+describe('auditAnnualCount counts a visit\'s second row of the product as another application', () => {
+  const others = (n) => () => chain({ rows: Array.from({ length: n }, (_, i) => ({ id: i })) });
+  const product = { name: 'Arena 50 WDG' };
+
+  test('one row on the visit: unchanged (others at the cap block, below it do not)', async () => {
+    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, undefined, 0)).toBeNull();
+    expect(await applicationLimits.auditAnnualCount(others(2), product, '2026-10-09', 2, undefined, 0)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2 });
+  });
+
+  test('two rows on the visit with one other application: used 2 of 2, reached', async () => {
+    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, undefined, 1)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2, message: expect.stringContaining('2/2') });
+    expect(await applicationLimits.auditAnnualCount(others(0), product, '2026-10-09', 2, undefined, 1)).toBeNull();
+  });
+
+  test('two rows of the product on one visit are a zero-day gap for the spacing rule, with no other application on record', async () => {
+    const none = () => { throw new Error('the same-visit gap needs no history read'); };
+    expect(await applicationLimits.auditInterval(none, product, '2026-10-09', 56, 1))
+      .toMatchObject({ type: 'min_interval_days', current: 0, max: 56, message: 'Arena 50 WDG: applied 2 times on this visit (min 56 days between applications).' });
+    // One row on the visit: the audit reads the other visits as before.
+    const empty = () => ({ where() { return this; }, orderBy() { return this; }, first: async () => undefined });
+    expect(await applicationLimits.auditInterval(empty, product, '2026-10-09', 56, 0)).toBeNull();
+  });
+
+  // Codex round 11 P1 on #6135: a visit booked while the gate was on is completed after it is turned off; the audit returned 0
+  // with the gate off, so the host application plus the attached add-on of the same product counted once and the hard limit
+  // finding and the office alert were missed. The audit reads the data, never the sale gate.
+  test('the visit\'s extra rows are counted from its own ledger rows, minus the first, with the sale gate on OR off; no visit named, nothing extra', async () => {
+    const saved = process.env.GATE_AREA_ADDONS;
+    try {
+      for (const gate of ['true', undefined, 'false']) {
+        if (gate === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = gate;
+        const database = jest.fn(() => chain({ first: { n: '2' } }));
+        expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(1);
+        expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', {})).toBe(0);
+        expect(database).toHaveBeenCalledTimes(2);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = saved;
+    }
+    const one = jest.fn(() => chain({ first: { n: '1' } }));
+    expect(await applicationLimits.ownApplicationsBeyondFirst(one, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
+    const none = jest.fn(() => chain({ first: undefined }));
+    expect(await applicationLimits.ownApplicationsBeyondFirst(none, 'c', 'p', { excludeScheduledServiceId: 'v' })).toBe(0);
+  });
+
+  test('a caller that knows the visit has no add-on row reads nothing extra (the ordinary lawn closeout, gate off, keeps its single audit)', async () => {
+    delete process.env.GATE_AREA_ADDONS;
+    const database = jest.fn(() => chain({ first: { n: '3' } }));
+    expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', { excludeScheduledServiceId: 'v', addOnRows: false })).toBe(0);
+    expect(database).not.toHaveBeenCalled();
+    expect(await applicationLimits.ownApplicationsBeyondFirst(database, 'c', 'p', { excludeScheduledServiceId: 'v', addOnRows: true })).toBe(2);
+  });
+
+  test('the module no longer reads the sale gate, and the completion passes whether the closeout has an add-on row', () => {
+    const fs = require('fs');
+    const path = require('path');
+    expect(fs.readFileSync(path.join(__dirname, '..', 'services', 'application-limits.js'), 'utf8')).not.toContain('GATE_AREA_ADDONS');
+    const completion = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    expect(completion).toContain('addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags)');
+    expect(completion).toContain('excludeScheduledServiceId: svc.id, addOnRows,');
+  });
+});

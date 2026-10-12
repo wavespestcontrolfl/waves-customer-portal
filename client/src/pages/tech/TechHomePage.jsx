@@ -57,6 +57,9 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
+import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
+import { onSiteTimeOf } from '../../lib/on-site-time';
+import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import MobileAppointmentDetailSheet from '../../components/schedule/MobileAppointmentDetailSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -112,6 +115,7 @@ const API = import.meta.env.VITE_API_URL || '';
 // Gate off, or any other service, is byte-identical to today's routing.
 function isReserviceFastCompleteEligible(service) {
   return service?.reserviceFastCompleteEnabled === true
+    && !carriesAreaAddOnWork(service)
     && service?.completionProfile?.serviceKey === 'pest_re_service'
     // A completed (or otherwise closed) re-service stays on the recap
     // editor, which updates an existing record; /complete would only
@@ -972,6 +976,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteSheet
           key={fastCompleteService.id}
           service={{
+            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            ...wrapUpSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
             serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
@@ -1049,6 +1055,10 @@ export default function TechHomePage({ section = 'today' }) {
             serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
             address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || '',
             timeLabel: serviceWindowLabel(treeShrubFastService) || '',
+            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
+            ...completionBillingFacts(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
@@ -1081,6 +1091,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteLawnReserviceSheet
           key={lawnReserviceFastService.id}
           service={{
+            // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+            ...wrapUpSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
             serviceType: lawnReserviceFastService.service_type || lawnReserviceFastService.serviceType,

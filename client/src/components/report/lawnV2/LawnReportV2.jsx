@@ -346,7 +346,7 @@ export function sinceLastLabel(sinceLast) {
   return day ? `Since your last visit, ${day}` : 'Since your last visit';
 }
 
-// ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
+// ── 1b. Lead ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
 // what we applied, the homeowner's part, and ONE next
@@ -410,7 +410,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
           </div>
         ) : null}
 
-        {/* GATE_LAWN_REPORT_COPY_V6: approved expectation sentences (selected, never
+        {/* Lawn v6 copy: approved expectation sentences (selected, never
             model-written) and the short guarded "watching" line. Absent keys render nothing. */}
         {lead.whatToExpect ? (
           <div data-testid="lawn-lead-expect" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>

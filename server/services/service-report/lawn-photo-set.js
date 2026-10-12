@@ -42,7 +42,8 @@ function buildLawnPhotoSet(rows) {
     .map(({ row, shot }) => ({
       url: row.url,
       shot,
-      label: (shot && shotList.SHOT_REPORT_LABELS[shot]) || UNTAGGED_LABEL,
+      // GATE_LAWN_PHOTO_LABEL_PICK: the caller adds pickedLabel (already customer wording) only for a live gate and a real pick.
+      label: row.pickedLabel || (shot && shotList.SHOT_REPORT_LABELS[shot]) || UNTAGGED_LABEL,
     }));
 }
 

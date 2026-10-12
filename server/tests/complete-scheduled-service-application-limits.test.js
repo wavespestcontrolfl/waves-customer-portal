@@ -276,6 +276,75 @@ describe('the findings path never goes quiet', () => {
   });
 });
 
+// Codex round 18 P1 on #6135: a Tree & Shrub or pest host that carries a chemical area add-on was never audited (the audit returned
+// early for a non-lawn host and needed GATE_LAWN_V13). When a row of the closeout is tagged to an add-on the audit runs for the
+// products of the tagged rows whatever the host's line and the gate; a host with no add-on row behaves exactly as before.
+describe('closeout: an add-on row on a non-lawn host (or with GATE_LAWN_V13 off) is audited', () => {
+  const OTHER_ID = '00000000-0000-4000-8000-000000000303';
+  // The ledger lookup and the tagged-row lookup the recorded path adds, ahead of the module's own catalog and limit mocks.
+  const withLedger = (ledgerIds, taggedIds, queries = []) => (table) => {
+    queries.push(table);
+    if (table === 'property_application_history') {
+      return { where: () => ({ whereNull: () => ({ whereNotNull: () => ({ distinct: async () => ledgerIds.map((id) => ({ product_id: id })) }) }) }) };
+    }
+    if (table === 'service_products') {
+      return {
+        columnInfo: async () => ({ area_addon_key: {} }),
+        where: () => ({ whereNotNull: () => ({ whereNotNull: () => ({ select: async () => taggedIds.map((id) => ({ product_id: id })) }) }) }),
+      };
+    }
+    return db(table);
+  };
+  const record = { id: 'record-1', service_date: etDateString() };
+  beforeEach(() => { limitedIds.add(OTHER_ID); catalogRows.push({ id: OTHER_ID, name: 'Other limited' }); });
+
+  test.each([
+    ['a Tree & Shrub host', 'Tree & Shrub Care', true],
+    ['a pest host', 'Quarterly Pest Control', true],
+    ['a lawn host with GATE_LAWN_V13 off', 'Every 6 Weeks Lawn Care Service', false],
+  ])('%s: the tagged row\'s product is audited', async (_label, serviceType, gate) => {
+    if (!gate) delete process.env.GATE_LAWN_V13;
+    service.service_type = serviceType;
+    const out = await submittedProductLimitFindings({ svc: service, productIds: [CELSIUS_ID], database: db, addOnRows: true });
+    expect(out).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productId: CELSIUS_ID, limitType: 'annual_max_apps' })]);
+    expect(checkLimits).toHaveBeenCalledTimes(1);
+  });
+
+  test('with no add-on row (addOnRows false or absent) a non-lawn host reads nothing, exactly as before', async () => {
+    service.service_type = 'Tree & Shrub Care';
+    for (const addOnRows of [false, undefined]) {
+      expect(await submittedProductLimitFindings({ svc: service, productIds: [CELSIUS_ID], database: db, addOnRows })).toEqual([]);
+    }
+    expect(queried).toEqual([]);
+    expect(checkLimits).not.toHaveBeenCalled();
+  });
+
+  test('recorded path on a non-lawn host: only the products of the TAGGED rows are audited, a host program row is not', async () => {
+    service.service_type = 'Tree & Shrub Care';
+    const queries = [];
+    // The host's own limited product (OTHER) and the add-on's product (CELSIUS) are both in the ledger; only CELSIUS is tagged.
+    const out = await recordedProductLimitFindings({ svc: service, record, database: withLedger([CELSIUS_ID, OTHER_ID], [CELSIUS_ID], queries), addOnRows: true });
+    expect(out).toEqual([expect.objectContaining({ productId: CELSIUS_ID })]);
+    expect(checkLimits).toHaveBeenCalledTimes(1);
+    expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.anything(), expect.anything(), expect.objectContaining({ addOnRows: true }));
+    expect(queries).toContain('service_products');
+  });
+
+  test('recorded path on a non-lawn host with no add-on row: no ledger query at all', async () => {
+    service.service_type = 'Quarterly Pest Control';
+    const queries = [];
+    expect(await recordedProductLimitFindings({ svc: service, record, database: withLedger([CELSIUS_ID], [], queries), addOnRows: false })).toEqual([]);
+    expect(queries).toEqual([]);
+  });
+
+  test('a lawn host under the gate keeps auditing every product it recorded (the tagged lookup is not made)', async () => {
+    const queries = [];
+    const out = await recordedProductLimitFindings({ svc: service, record, database: withLedger([CELSIUS_ID], [], queries), addOnRows: false });
+    expect(out).toEqual([expect.objectContaining({ productId: CELSIUS_ID })]);
+    expect(queries).not.toContain('service_products');
+  });
+});
+
 describe('the raw products array is capped at the closeout entry', () => {
   test('more than 200 entries is a 400 before the claim, a lookup or any write; 200 is fine', async () => {
     const many = Array.from({ length: 201 }, () => applied(DEFAULT_ID));
@@ -341,6 +410,21 @@ describe('the office notification for a finding (raised through the admin alert 
       expect(call[1].length).toBeLessThanOrEqual(60);
       expect(call[2].length).toBeLessThanOrEqual(110);
     }
+  });
+
+  test('an add-on\'s own yearly limit finding obeys the notification rule too and names the add-on\'s limit in its detail', async () => {
+    const notify = notifyFor();
+    const logger = require('../services/logger');
+    const detail = 'Snapshot 2.5TG was applied or booked 1 time at this property in the 12 months up to 2026-10-09 (limit 4 in 12 months, at least 60 days apart). Last on 2026-09-19. The next one is allowed on 2026-11-18.';
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [
+      { code: 'application_limit_exceeded', productId: 'p-snap', productName: 'LESCO Snapshot 2.5TG Specialty Herbicide Granular Plus', limitType: 'area_addon_yearly_limit', current: 1, max: 4, detail, message: `Recorded. The office will review: ${detail}` },
+    ] });
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringMatching(/notification failed/));
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][1].length).toBeLessThanOrEqual(60);
+    expect(notify.mock.calls[0][2]).toMatch(/^LESCO Snapshot 2\.5TG[^.]* is over its add-on yearly limit: 1 before it in 12 months, limit 4\.$/);
+    expect(notify.mock.calls[0][2].length).toBeLessThanOrEqual(110);
+    expect(notify.mock.calls[0][3].detail).toContain("is over the add-on's yearly limit. Snapshot 2.5TG was applied or booked 1 time");
   });
 
   test('a bell that is not recorded (null) is logged, a failure never throws', async () => {

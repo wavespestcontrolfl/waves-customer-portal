@@ -455,6 +455,22 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "remove_customer_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_invoice": {
+    "module": "invoice-action-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "remove_saved_payment_method": {
     "module": "billing-write-tools.js",
     "domain": "customers",
@@ -1512,6 +1528,14 @@
     "scope": "scoped"
   },
   "merge_customers": {
+    "module": "customer-lifecycle-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "delete_duplicate_customer": {
     "module": "customer-lifecycle-tools.js",
     "domain": "customers",
     "kind": "internal_write",

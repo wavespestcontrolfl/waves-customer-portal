@@ -192,14 +192,26 @@ function routeCost(otherStops, visit) {
       routeTimeWithMinutes: routeTimeWithoutMinutes,
     };
   }
-  const driveWithMinutes = chainDriveMinutes(chainWithVisit(sequence, visit).map((s) => s.geo));
+  const chain = chainWithVisit(sequence, visit);
+  const driveWithMinutes = chainDriveMinutes(chain.map((s) => s.geo));
   // The moving unit: the visit plus any co-located group members moving with it.
   const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
   const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
   return {
     driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
+    neighbours: neighboursOf(chain, visit),
   };
+}
+
+// The located stops the van drives from and to around the visit in `chain`
+// (HQ at either end of the day): the three legs the detour is made of, so a
+// caller can price the same detour on another estimator (road-check.js).
+function neighboursOf(chain, visit) {
+  const located = chain.filter((s) => s.geo);
+  const at = located.findIndex((s) => s.id === visit.id || (s.memberIds || []).includes(visit.id));
+  if (at < 0) return null;
+  return { prev: (located[at - 1] || { geo: HQ }).geo, stop: located[at].geo, next: (located[at + 1] || { geo: HQ }).geo };
 }
 
 /**

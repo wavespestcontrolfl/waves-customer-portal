@@ -391,7 +391,7 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
     const predicate = guardBlock.slice(guardBlock.indexOf('const noBookingRefusal ='));
     const idx = (needle) => predicate.indexOf(needle);
     expect(idx('lockedContactReviewRefusal(row, trx')).toBeGreaterThan(0);
-    expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('estimateDataCarriesBermudaSuppression(row'));
+    expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('gatedAddOnRefusal(row)'));
     expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('isCommercialAutoEstimate(row)'));
     expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('isRodentGuaranteeOnlyEstimate(row'));
   });
@@ -494,9 +494,18 @@ describe('the locked recheck includes the suppression gate', () => {
   const pred = route.slice(route.indexOf('const noBookingRefusal'), route.indexOf('const preTxnRefusal'));
 
   test('a Bermuda-suppression reshape is refused with the same body', () => {
-    expect(pred).toContain('estimateDataCarriesBermudaSuppression(row.estimate_data)');
-    expect(pred).toContain("gateEnvValue('GATE_BERMUDA_SUPPRESSION')");
-    expect(pred).toContain("code: 'BERMUDA_SUPPRESSION_GATED',");
+    expect(pred).toContain('gatedAddOnRefusal(row)');
+    // The shared helper holds the Bermuda predicate, the gate and the body (mapper gatedAddOnCustomerRefusal).
+    const { gatedAddOnCustomerRefusal } = require('../services/pricing-engine/v1-legacy-mapper');
+    const prior = process.env.GATE_BERMUDA_SUPPRESSION;
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    try {
+      expect(gatedAddOnCustomerRefusal({ engineRequest: { options: { bermudaSuppression: true } } })).toEqual({
+        error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
+        code: 'BERMUDA_SUPPRESSION_GATED',
+      });
+    } finally { if (prior !== undefined) process.env.GATE_BERMUDA_SUPPRESSION = prior; }
+    expect(pred).toContain('return { status: 409, body: gatedAddOn };');
   });
 });
 

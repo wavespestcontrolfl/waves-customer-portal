@@ -8,6 +8,7 @@
 const {
   normalizeNamePart,
   normalizeNameFolded,
+  foldNameLetters,
   firstNameVariants,
   sameFirstName,
   payerNameCorroborates,
@@ -150,4 +151,9 @@ describe('payerNameCorroborates', () => {
     expect(payerNameCorroborates('Robert Doe', { last_name: 'Doe' })).toBe(false);
     expect(payerNameCorroborates('', customer)).toBe(false);
   });
+});
+
+test('foldNameLetters folds accents and table letters but keeps word boundaries', () => {
+  expect(foldNameLetters('Søren Łukow-Næs, José')).toBe('Soren Lukow-Naes, Jose');
+  expect(normalizeNameFolded('Søren Łukow')).toBe('sorenlukow');
 });

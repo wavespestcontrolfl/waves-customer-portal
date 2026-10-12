@@ -18,6 +18,37 @@ export function shotLabel(key) {
   return BY_KEY.get(key)?.label || "";
 }
 
+// GATE_LAWN_PHOTO_LABEL_PICK: the customer wording of each shot ("Front yard",
+// "Close-up", "Shaded area"...), the options of the "Shown to the customer as"
+// chooser. The picked value is a shot key; the photo's own slot is the default.
+export function pickOptions() {
+  return SHOTS.map((shot) => ({ value: shot.key, label: shot.reportLabel }));
+}
+
+// The chooser's current value for a photo: its pick, else its slot.
+export function pickedKey(photo) {
+  return (photo?.labelKey && BY_KEY.has(photo.labelKey) ? photo.labelKey : photo?.zone) || "";
+}
+
+// Set (or clear, when it equals the slot) the pick on photo `index`.
+export function setLabelPick(photos, index, key) {
+  return photos.map((photo, i) => {
+    if (i !== index) return photo;
+    const { labelKey: _drop, ...rest } = photo;
+    return key && key !== photo.zone && BY_KEY.has(key) ? { ...rest, labelKey: key } : rest;
+  });
+}
+
+// A pick belongs to the slot it was made under: when a photo's slot changes
+// (or a slot move clears another photo), its pick is dropped.
+export function dropStalePicks(before, after) {
+  return after.map((photo, i) => {
+    if (!photo.labelKey || before[i]?.zone === photo.zone) return photo;
+    const { labelKey: _drop, ...rest } = photo;
+    return rest;
+  });
+}
+
 function maxFor(key) {
   return BY_KEY.get(key)?.max || 1;
 }

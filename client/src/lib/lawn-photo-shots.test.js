@@ -3,7 +3,7 @@
 // admin drawer builds on.
 import { describe, expect, it } from "vitest";
 import DEFINITION from "../../../shared/lawn-photo-shots.json";
-import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, addPhotos, assignShotZone, decodedBytes, describeAddResult, planFileReads, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
+import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, addPhotos, assignShotZone, decodedBytes, describeAddResult, dropStalePicks, pickOptions, pickedKey, planFileReads, setLabelPick, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
 
 const photos = (...zones) => zones.map((zone, i) => ({ name: `p${i}`, zone }));
 const zonesOf = (list) => list.map((p) => p.zone);
@@ -229,3 +229,40 @@ describe("planFileReads (bound the batch before decoding)", () => {
     expect(describeAddResult({ rejected: plan.skipped.slice(0, 1) })).toBe('f2.jpg was not read: Back overview takes one photo and has room for 1. Use "Add turf photos" for the rest.');
   });
 });
+
+describe("customer label pick (GATE_LAWN_PHOTO_LABEL_PICK helpers)", () => {
+  it("offers the eight customer wordings in shot list order, keyed by shot", () => {
+    expect(pickOptions().map((o) => o.value)).toEqual(SHOTS.map((s) => s.key));
+    expect(pickOptions().map((o) => o.label)).toEqual(["Front yard", "Back yard", "Side yard", "Close-up", "Blade close-up", "Sunny edge", "Shaded area", "Trouble spot"]);
+  });
+
+  it("defaults to the slot, shows a pick when there is one, and ignores a pick that is not a shot", () => {
+    expect(pickedKey({ zone: "shade" })).toBe("shade");
+    expect(pickedKey({ zone: "shade", labelKey: "close_up" })).toBe("close_up");
+    expect(pickedKey({ zone: "shade", labelKey: "garage" })).toBe("shade");
+    expect(pickedKey({})).toBe("");
+  });
+
+  it("sets a pick on one photo, clears it when it equals the slot, and leaves the others alone", () => {
+    const held = photos("shade", "front");
+    const picked = setLabelPick(held, 0, "close_up");
+    expect(picked[0].labelKey).toBe("close_up");
+    expect(picked[1]).toBe(held[1]);
+    expect(Object.prototype.hasOwnProperty.call(setLabelPick(picked, 0, "shade")[0], "labelKey")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(setLabelPick(held, 0, "garage")[0], "labelKey")).toBe(false);
+  });
+
+  it("drops a pick when its photo changes slot, and changes nothing when no pick exists", () => {
+    const before = [{ ...photos("shade")[0], labelKey: "close_up" }, ...photos("front")];
+    const moved = dropStalePicks(before, assignShotZone(before, 0, "hot_edge"));
+    expect(moved[0].zone).toBe("hot_edge");
+    expect(Object.prototype.hasOwnProperty.call(moved[0], "labelKey")).toBe(false);
+    const plain = photos("shade", "front");
+    const after = assignShotZone(plain, 0, "hot_edge");
+    expect(dropStalePicks(plain, after)).toEqual(after);
+    // A pick on a photo whose slot did not change survives.
+    const kept = dropStalePicks(before, assignShotZone(before, 1, "back"));
+    expect(kept[0].labelKey).toBe("close_up");
+  });
+});
+

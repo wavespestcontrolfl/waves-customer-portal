@@ -119,4 +119,24 @@ describe('day-move drive floor and conflict moves (owner 2026-10-09)', () => {
     process.env.GATE_AUTO_DISPATCH_CONFLICT_MOVES = 'true';
     expect(getAutoDispatchConfig().conflictMovesEnabled).toBe(true);
   });
+
+  test('the road check is off unless the gate is set; its leg cap defaults to 600', () => {
+    const prev = { gate: process.env.GATE_AUTO_DISPATCH_ROAD_CHECK, cap: process.env.AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS, model: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
+    try {
+      delete process.env.GATE_AUTO_DISPATCH_ROAD_CHECK;
+      delete process.env.AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS;
+      process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+      expect(getAutoDispatchConfig()).toMatchObject({ roadCheckEnabled: false, roadCheckMaxElements: 600 });
+      process.env.GATE_AUTO_DISPATCH_ROAD_CHECK = 'true';
+      process.env.AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS = '120';
+      expect(getAutoDispatchConfig()).toMatchObject({ roadCheckEnabled: true, roadCheckMaxElements: 120 });
+      // The legs it measures come from the shared model: without that gate it stays off.
+      delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      expect(getAutoDispatchConfig().roadCheckEnabled).toBe(false);
+    } finally {
+      for (const [key, value] of [['GATE_AUTO_DISPATCH_ROAD_CHECK', prev.gate], ['AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS', prev.cap], ['GATE_AUTO_DISPATCH_SHARED_MODEL', prev.model]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
 });

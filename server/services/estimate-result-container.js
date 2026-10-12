@@ -26,6 +26,55 @@ function authoritativeEstimateResult(data, { pricingAuthority = null, hasPricedL
   return result;
 }
 
+const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+const parseStoredData = (raw) => {
+  if (typeof raw !== 'string') return isRecord(raw) ? raw : null;
+  try { const parsed = JSON.parse(raw); return isRecord(parsed) ? parsed : null; } catch { return null; }
+};
+
+// The container a stored estimate's rows are read from, for the readers that look at ONE container (the
+// area add-on readers and the one-time breakdown normalizer): the authoritative pick above, or null when
+// the data carries neither `result` nor `engineResult`. Authority is the row's `pricing_authority`, or the
+// one the blob froze at the price lock (`pricingAuthorityAtLock`), so a reader holding only the blob still
+// sees a server reprice. `hasPricedLines` is the audit's own detector, required at call time (the audit
+// module is not a load-time dependency of this file).
+function storedEstimateContainer(estimateData, { pricingAuthority = null } = {}) {
+  const data = parseStoredData(estimateData);
+  const result = data && isRecord(data.result) ? data.result : null;
+  const engineResult = data && isRecord(data.engineResult) ? data.engineResult : null;
+  if (!result && !engineResult) return null;
+  const serverPriced = [pricingAuthority, data.pricingAuthorityAtLock].some((value) => String(value || '').toUpperCase() === 'SERVER');
+  return authoritativeEstimateResult({ result, engineResult }, {
+    pricingAuthority: serverPriced ? 'SERVER' : null,
+    hasPricedLines: (container) => require('./estimate-pricing-audit').hasPricedLines(container),
+  });
+}
+
+// THE answer to "which area add-on rows does this stored estimate hold": every row of an area add-on in the
+// authoritative container (storedEstimateContainer; the bare data itself when it holds neither container, a
+// caller holding the bare mapped shape), under every shape a row rides in (mapped one-time items and spec
+// items, the nested results.oneTime copy, top-level spec items, quote-required items, and the raw engine line
+// items). A stale `engineResult` left behind by a revision is never read while the revision's own `result`
+// prices something; an estimate whose only container is `engineResult` is read from it. Callers apply their
+// own predicate (sold, priced, carried) to the rows.
+const isAreaAddOnRow = (row) => isRecord(row) && row.service === 'area_addon';
+function areaAddOnRowsIn(container) {
+  const nested = container.results && container.results.oneTime;
+  return [
+    container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
+    nested && nested.items, nested && nested.specItems,
+    container.specItems, container.quoteRequiredItems, container.lineItems,
+  ].filter(Array.isArray).flat().filter(isAreaAddOnRow);
+}
+function storedAreaAddOnRows(estimateData, options = {}) {
+  const data = parseStoredData(estimateData);
+  if (!data) return [];
+  const containers = [data.result, data.engineResult].filter(isRecord);
+  // No row in either container: nothing to pick between (and the audit's detector is never loaded).
+  if (containers.length && !containers.some((container) => areaAddOnRowsIn(container).length)) return [];
+  return areaAddOnRowsIn(storedEstimateContainer(data, options) || data);
+}
+
 // The commercial engine ids and their residential label-mapped twins are the SAME charge in two
 // spellings: canonicalized for the duplicate key only (each line keeps its own serviceKey).
 const DEDUPE_FAMILY = {
@@ -138,4 +187,6 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 // is what the customer agreed to. One test for every reader that must not look behind it.
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
-module.exports = { proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything };
+module.exports = {
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows,
+};

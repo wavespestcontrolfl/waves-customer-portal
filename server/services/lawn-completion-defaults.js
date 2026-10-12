@@ -120,7 +120,19 @@ function targetRange(text) {
   return [Math.min(low, high), Math.max(low, high)];
 }
 
-function archivedRateMatches(product, mix) {
+const nutrientOfUnit = (unit) => (unit === 'lb_n' ? ['target_n_analysis', 'targetN', 'targetNPer1000']
+  : unit.startsWith('lb_k') ? ['target_k_analysis', 'targetK', 'targetKPer1000'] : null);
+const targetInRange = (range, target) => target >= range[0] - 1e-6 && target <= range[1] + 1e-6;
+// Only a nitrogen row, only the exact target the plan cut to, and only when the stored row still admits the visit's
+// own normal target (`from`): a row that drifted from the recipe is rejected with or without the cut. null = no cut.
+const isCutTarget = (unit, range, target, nitrogenCut) => unit === 'lb_n' && nitrogenCut != null
+  && target === Number(nitrogenCut.to) && targetInRange(range, Number(nitrogenCut.from));
+
+// `nitrogenCut` is `{ from, to }`: the visit's normal nitrogen target and the reduced one the plan applied to THIS visit
+// (GATE_LAWN_NOV_LARGE_PATCH_N: the decision visitNutrientTargets returned, never re-derived here), else null. A lb_n row
+// whose stored range admits `from` then also admits a mix sized for exactly `to`, because the stored row keeps the program's own range (gates.targetN) and the cut is the plan's override of it. No other
+// row, unit or value is loosened.
+function archivedRateMatches(product, mix, nitrogenCut = null) {
   if (product.ratePer1000 != null) {
     // Protocol rows and the catalog spell the same unit differently ('fl oz'
     // vs 'fl_oz'); only a different physical unit is recipe drift.
@@ -128,25 +140,24 @@ function archivedRateMatches(product, mix) {
       && normalizeInventoryUnit(product.rateUnit) === normalizeInventoryUnit(mix?.rateUnit);
   }
   const unit = String(product.rateUnit || '').toLowerCase();
-  const nutrient = unit === 'lb_n' ? ['target_n_analysis', 'targetN', 'targetNPer1000']
-    : unit.startsWith('lb_k') ? ['target_k_analysis', 'targetK', 'targetKPer1000'] : null;
+  const nutrient = nutrientOfUnit(unit);
   if (!nutrient) return false;
   if (mix?.rateSource === 'missing_rate') return true;
   const [source, gateKey, mixKey] = nutrient;
   const range = targetRange(product.gates?.[gateKey]);
   const target = Number(mix?.[mixKey]);
   return mix?.rateSource === source && Number(mix.ratePer1000) > 0 && !!range
-    && Number.isFinite(target) && target >= range[0] - 1e-6 && target <= range[1] + 1e-6;
+    && Number.isFinite(target) && (targetInRange(range, target) || isCutTarget(unit, range, target, nitrogenCut));
 }
 
-function archivedLawnRecipeMatches(protocol, items) {
+function archivedLawnRecipeMatches(protocol, items, nitrogenCut = null) {
   if (protocol?.status !== 'archived') return true;
   const selected = items.filter(item => item.selected && item.product);
   const products = protocol.products || [];
   return products.filter(product => product.defaultInPlan).every(product => selected.some(item => item.product.id === product.productId))
     && selected.every(item => {
       const product = products.find(row => row.productId === item.product.id);
-      return !!product && !item.substitution && archivedRateMatches(product, item.mix)
+      return !!product && !item.substitution && archivedRateMatches(product, item.mix, nitrogenCut)
         && product.applicationMode === (item.scope?.includes('SPOT') ? 'spot' : 'broadcast');
     });
 }

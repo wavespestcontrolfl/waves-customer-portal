@@ -458,27 +458,25 @@ describe('the bulk hold release is judged on the estimate as it is now, under th
     expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
-  test('a Bermuda-suppression estimate (gate off) is rechecked with suppressionGated, so its hold is released without any pricing work', async () => {
+  test.each([
+    ['a Bermuda-suppression estimate (gate off)', 'BERMUDA_SUPPRESSION_GATED'],
+    ['an area add-on estimate (GATE_AREA_ADDONS off)', 'AREA_ADDONS_GATED'],
+  ])('%s is rechecked with suppressionGated, so its hold is released without any pricing work', async (_label, code) => {
     const mapper = require('../services/pricing-engine/v1-legacy-mapper');
-    const gates = require('../config/feature-gates');
-    const carries = jest.spyOn(mapper, 'estimateDataCarriesBermudaSuppression').mockReturnValue(true);
-    const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
-    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    const gated = jest.spyOn(mapper, 'gatedAddOnCustomerRefusal').mockReturnValue({ error: 'unavailable', code });
     try {
-      expect(gates.gateEnvValue('GATE_BERMUDA_SUPPRESSION')).toBeFalsy();
       phoneCandidates = [BOB];
       const est = makeEstimate();
       estimateRow = est;
       await refuseParkedWrite(est, 'cust-bob');
-      expect(carries).toHaveBeenCalled();
+      expect(gated).toHaveBeenCalled();
       expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
       // The recheck passes the suppression flag (source pin: the release must not take the pricing path for it).
       const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
       const fn = src.slice(src.indexOf('async function releaseHoldsIfStillParked'), src.indexOf('async function refuseParkedWrite'));
       expect(fn).toMatch(/estimatePublicBlockingState\(row, \{ database: trx, lock: true, fresh: true, suppressionGated \}\)/);
     } finally {
-      carries.mockRestore();
-      if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION; else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+      gated.mockRestore();
     }
   });
 

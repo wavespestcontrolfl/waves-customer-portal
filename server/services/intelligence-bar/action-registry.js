@@ -11,7 +11,8 @@ const {
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
-const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
+const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
+const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
@@ -65,6 +66,7 @@ const MODULES = [
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
+  ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
 ];
 
@@ -118,14 +120,21 @@ const DISCOVERY_TOOL = {
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
 const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
+// Actions offered only while their own gate reads on (read at call time).
+const GATED_ACTIONS = {
+  reprice_future_visits: () => repriceVisitsLive(),
+  search_ib_history: () => threadsEnabled(),
+  merge_customers: () => mergeCustomersEnabled(),
+  delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
+  send_invoice: () => invoiceActionsLive(),
+};
+
 function allowed(action, { role, context, fullAccess } = {}) {
   if (!action) return false;
   if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
-  if (action.id === 'reprice_future_visits' && !repriceVisitsLive()) return false;
-  if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
-  if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
+  if (GATED_ACTIONS[action.id] && !GATED_ACTIONS[action.id]()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
   if (action.id === 'create_agent_estimate_draft' && context !== 'agent_estimate') return false;
@@ -158,11 +167,18 @@ function discover(input, scope) {
   if (failure) return { result: failure, definitions: [] };
   const terms = [...new Set(input.query.toLowerCase().match(/[a-z0-9]+/g) || [])]
     .filter(term => !DISCOVERY_STOPWORDS.has(term));
-  const ranked = [...actions.values()].filter(a => allowed(a, scope) && (!input.domain || a.domain === input.domain))
+  // The model's domain is a ranking hint, never a filter: booking lives under
+  // "customers", so a "schedule" search used to return every schedule tool
+  // and not the one that books (owner IB history 10-12). A matching tool in
+  // the named domain ranks one point higher and wins ties.
+  const inDomain = a => (input.domain && a.domain === input.domain ? 1 : 0);
+  const ranked = [...actions.values()].filter(a => allowed(a, scope))
     .map(a => {
       const words = new Set(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase().match(/[a-z0-9]+/g) || []);
       return { action: a, score: terms.reduce((n, word) => n + (words.has(word) ? 1 : 0), 0) };
-    }).filter(r => r.score > 0).sort((a, b) => b.score - a.score || a.action.id.localeCompare(b.action.id));
+    }).filter(r => r.score > 0)
+    .sort((a, b) => (b.score + inDomain(b.action)) - (a.score + inDomain(a.action))
+      || inDomain(b.action) - inDomain(a.action) || a.action.id.localeCompare(b.action.id));
   const selected = ranked.slice(0, 12).map(r => r.action);
   return {
     definitions: selected.filter(a => a.approval !== 'confirmed_endpoint').map(a => a.definition),
@@ -183,18 +199,26 @@ function discover(input, scope) {
 // the Customers page or dashboard). Only the OFFERED list widens: allowed()
 // still applies role/context, and every write keeps its ui_confirm card.
 const EVERY_PAGE_TOOL_NAMES = Object.freeze([
-  'add_customer_property', 'set_primary_property', 'update_customer_property',
+  'add_customer_property', 'set_primary_property', 'update_customer_property', 'remove_customer_property',
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
   // Tap-to-answer buttons for a "which value?" question (choice-tools.js):
   // display only, reads and writes nothing.
   'offer_choices',
+  // Owner IB history 10-12: on the dashboard the bar answered "no
+  // appointment-creation tool" (booking is filed under customers, and its
+  // schedule-domain search missed it), and a "fix the address from the last
+  // call" ask spent its rounds discovering the call log and the customer edit.
+  'create_appointment', 'reschedule_appointment', 'cancel_appointment',
+  'update_customer', 'get_call_log',
 ]);
 
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
+  // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
+  if (context === 'revenue' || context === 'dashboard') common.add('send_invoice');
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');

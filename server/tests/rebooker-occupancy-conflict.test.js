@@ -600,12 +600,29 @@ describe('reschedule — shared occupancy conflict gate', () => {
   });
 
   test('a move that CHANGES the technician probes the DESTINATION technician, the one it writes', async () => {
+    jest.spyOn(require('../services/scheduling/blackout-dates'), 'isBlackoutDate').mockResolvedValue(false);
     const { trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
     await SmartRebooker.reschedule(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch', { technicianId: 'tech-2' },
     );
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ technicianId: 'tech-2' }));
     expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ technician_id: 'tech-2' }));
+  });
+
+  test('the commit-time closed-day check is strict for auto-dispatch only: an unreadable list blocks its move, not a customer\'s', async () => {
+    const isBlackoutDate = jest.spyOn(require('../services/scheduling/blackout-dates'), 'isBlackoutDate').mockResolvedValue(false);
+    wireRescheduleMocks(service());
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch');
+    expect(isBlackoutDate).toHaveBeenLastCalledWith(TARGET, undefined, { strict: true });
+    wireRescheduleMocks(service());
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms');
+    expect(isBlackoutDate).toHaveBeenLastCalledWith(TARGET, undefined, { strict: false });
+
+    isBlackoutDate.mockRejectedValue(new Error('blackout list unreadable'));
+    wireRescheduleMocks(service());
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch'))
+      .rejects.toThrow('blackout list unreadable');
+    isBlackoutDate.mockRestore();
   });
 
   test('a move that UNASSIGNS the row, or a techless row, stays tech-blind', async () => {

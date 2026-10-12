@@ -291,6 +291,28 @@ describe('buildLawnFastContext', () => {
     expect(ctx.plannedProducts.month).toBe(10);
   });
 
+  test('GATE_LAWN_NOV_LARGE_PATCH_N: a planned nitrogen line keeps the plan\'s reduced amount and its fungus note on the sheet; no other planned row gains a note', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [
+          {
+            product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+            mix: { amount: 20.833, amountUnit: 'lb', ratePer1000: 2.0833, rateUnit: 'lb', treatedSqft: 10000 },
+            gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'activeFungusNitrogen', severity: 'note', text: NOTE }],
+          },
+          { product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' }, gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }] },
+        ],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    const [feed, spray] = ctx.plannedProducts.items;
+    expect(feed).toMatchObject({ productId: P_GRAN, amount: 20.833, amountUnit: 'lb', ratePer1000: 2.0833, rateUnit: 'lb', treatedSqft: 10000, gateNotes: [NOTE] });
+    expect(spray).not.toHaveProperty('gateNotes');
+  });
+
   describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
     const removal = require('../services/lawn-bermuda-removal');
     let offered;
@@ -395,6 +417,29 @@ describe('buildLawnFastContext', () => {
       expect(ctx.visitType).toBe('recurring');
       expect(buildPlanForService).toHaveBeenCalledTimes(1);
       expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [], addOns: [], month: 10 });
+    });
+  });
+
+  describe('Wrap-up (GATE_FAST_COMPLETE_WRAP_UP)', () => {
+    afterEach(() => { delete process.env.GATE_FAST_COMPLETE_WRAP_UP; });
+    const read = () => buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
+
+    test('gate off: the context carries no wrapUp key', async () => {
+      delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+      expect('wrapUp' in await read()).toBe(false);
+    });
+
+    test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+      expect((await read()).wrapUp).toBe(true);
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = '1';
+      expect('wrapUp' in await read()).toBe(false);
+    });
+
+    test('an ineligible visit carries no wrapUp even with the gate on', async () => {
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
+      expect('wrapUp' in await read()).toBe(false);
     });
   });
 
@@ -750,13 +795,11 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     });
 
     test('lawnReportTies (the sheet records the standing chinch tap as a find) exists only while the report ties are live', async () => {
-      const TIE_GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+      const TIE_GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2'];
       try {
         live();
         expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
-        for (const name of TIE_GATES.slice(0, 3)) process.env[name] = 'true';
-        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
-        process.env.GATE_LAWN_REPORT_LEAD = 'true';
+        for (const name of TIE_GATES) process.env[name] = 'true';
         expect((await context(tablesFor())).lawnReportTies).toBe(true);
         delete process.env.GATE_LAWN_REPORT_FACTS;
         expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);

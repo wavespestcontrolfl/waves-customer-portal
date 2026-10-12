@@ -206,6 +206,27 @@ describe('syncPoolPermits fetch + upsert', () => {
       .mockResolvedValueOnce(acaResponse({ text: '<html>login</html>' }));
     await expect(syncPoolPermits()).rejects.toThrow(/not CSV/);
   });
+
+  test('the non-CSV error names the page file and size, never the page text', async () => {
+    process.env.GATE_PERMIT_SYNC = 'true';
+    useSingleWindowSync();
+    db.mockImplementation(() => builder(1));
+    db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
+    const body = '<html><title>100 Example St</title><body>Pat Sample, 100 Example St</body></html>';
+    const page = (url) => {
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
+        .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
+        .mockResolvedValueOnce({ ...acaResponse({ text: body, contentType: 'text/html; charset=utf-8' }), url });
+      return syncPoolPermits().then(() => null, (err) => err.message);
+    };
+    const redirected = await page('https://aca-prod.accela.com/MANATEE/Error.aspx?id=100%20Example%20St');
+    expect(redirected).toBe(`report output is not CSV (text/html; charset=utf-8; Error.aspx, ${body.length} chars)`);
+    expect(redirected).not.toMatch(/Example|Sample/);
+    // No final URL on the response: the size alone.
+    expect(await page(undefined)).toBe(`report output is not CSV (text/html; charset=utf-8; ${body.length} chars)`);
+  });
 });
 
 // A request ACA accepts and never answers: rejects only when the caller's

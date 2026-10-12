@@ -587,7 +587,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
   const eligible = (over = {}) => ({ id: 's2', service_type: 'Lawn Fertilization', is_recurring: true, recurring_parent_id: 'p2', status: 'confirmed', scheduled_date: FAR, auto_dispatch_locked: false, auto_dispatch_excluded: false, customer_active: true, customer_latitude: 27.5, customer_longitude: -82.4, ...over });
   // `capsByTech` answers the capability read per technician_id (the fence's
   // where clause); plain `caps` answers regardless of tech.
-  const fakeTrx = ({ siblings = [], caps = [], capsByTech = null, seriesClash = null, planAlert = null } = {}) => {
+  const fakeTrx = ({ siblings = [], caps = [], capsByTech = null, seriesClash = null, planAlert = null, moveRows = [] } = {}) => {
     const calls = [];
     let ssCalls = 0;
     const trx = jest.fn((table) => {
@@ -601,7 +601,9 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
         whereIn: (column, values) => { if (column === 'technician_id') [techFilter] = values; return api; },
         whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
         forShare: () => api,
-        select: async () => (isSS ? siblings : (capsByTech ? (capsByTech[techFilter] || []) : caps)),
+        // move-limit.js: the durable move-log count (reschedule_log), grouped per visit
+        whereRaw: () => api, groupBy: () => api, count: () => api,
+        select: async () => (table === 'reschedule_log' ? moveRows : (isSS ? siblings : (capsByTech ? (capsByTech[techFilter] || []) : caps))),
         first: async () => (table === 'recurring_plan_alerts' ? planAlert : (probe ? seriesClash : null)),
       };
       return api;
@@ -772,6 +774,31 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     } finally {
       read.mockRestore();
     }
+  });
+
+  test('move limit: the tapped row is refused at the limit, counted on the move transaction; under it, or with the limit off, it passes', async () => {
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const guard = (max) => makeMoveGuard({ service: SERVICE, best: BEST, config: { maxAutoMovesPerVisit: max } });
+    const row = { scheduled_service_id: 's1', moves: '2' };
+    let trx = fakeTrx({ moveRows: [row] });
+    await expect(guard(2)({ trx, technicianId: 't1', service: SERVICE }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('moved automatically 2 times') });
+    expect(trx.__calls).toEqual(['reschedule_log']);
+    trx = fakeTrx({ moveRows: [{ scheduled_service_id: 's1', moves: '1' }] });
+    await expect(guard(2)({ trx, technicianId: 't1', service: SERVICE })).resolves.toBeUndefined();
+    // 0 turns the limit off: no count is read at all.
+    trx = fakeTrx({ moveRows: [{ scheduled_service_id: 's1', moves: '9' }] });
+    await expect(guard(0)({ trx, technicianId: 't1', service: SERVICE })).resolves.toBeUndefined();
+    expect(trx.__calls).not.toContain('reschedule_log');
+  });
+
+  test('move limit: a grouped unit moves only if every member is under the limit', async () => {
+    const members = [primary, { id: 's2', status: 'confirmed' }, { id: 's3', status: 'confirmed' }];
+    const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: { maxAutoMovesPerVisit: 2 }, techChanged: false });
+    const siblings = [eligible(), eligible({ id: 's3' })];
+    await expect(guard({ trx: fakeTrx({ siblings, moveRows: [{ scheduled_service_id: 's3', moves: '2' }] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('moved automatically 2 times') });
+    await expect(guard({ trx: fakeTrx({ siblings, moveRows: [{ scheduled_service_id: 's3', moves: '1' }] }), members })).resolves.toBeUndefined();
   });
 
   test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {

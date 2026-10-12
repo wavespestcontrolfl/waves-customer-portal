@@ -5,7 +5,7 @@ const { irrigationRateOptions, storedRateTable, liveRateTable } = require('../ir
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
-const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
+const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker, labelPicksFromStored, pickedReportLabel } = require('../lawn-photo-shots');
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
 const { frozenCoverageDefaultsOnly, coverageVerdictStamp } = require('./lawn-coverage-verdict');
 const reportFacts = require('./lawn-report-facts');
@@ -24,10 +24,11 @@ const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { lawnLayoutPayload } = require('./lawn-report-layout');
 const { lawnPolishPayload, polishPdfStamp, polishWaterContext, prefsInchesFor } = require('./lawn-report-polish');
+const { stage1PayloadFlag, stage1KeyStamp, stage1TechTips } = require('./lawn-report-stage1');
 const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
-const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { buildLawnReportV2 } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
@@ -38,7 +39,6 @@ const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const {
   techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
 } = require('./tree-shrub-tech-findings');
-const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
@@ -51,6 +51,7 @@ const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule, validateRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
+const lawnWaterInRain = require('./lawn-water-in-rain');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2652,6 +2653,11 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
     .filter(Boolean);
 }
 
+// GATE_LAWN_PHOTO_LABEL_PICK, guarded like its neighbors so a test double of feature-gates without the reader reads it as off.
+function lawnPhotoLabelPickLive() {
+  return typeof featureGates.lawnPhotoLabelPickLive === 'function' && featureGates.lawnPhotoLabelPickLive();
+}
+
 // Read at call time; a partial feature-gates mock (or a missing export) means off.
 function lawnReportPhotoSetLive() {
   return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
@@ -2872,26 +2878,31 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // those rules ride the stamp: an owner correcting a product's rule re-keys the
   // cached PDF. A frozen visit replays its snapshot and keeps the constant.
   if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
-  // The report lead (GATE_LAWN_REPORT_LEAD) changes what the lawn web report
-  // and its PDF render (lead-mode findings, stock sentences left out), so a PDF
-  // cached before a flip must never be served after it, nor the reverse. The
-  // stamp rides only while the gate is live: gate off leaves every signature,
-  // and so every cached PDF key, byte-identical to before.
-  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
-  // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
-  // its PDF key moves with it; the stamp rides only while the gate is live.
-  // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
-  // so a PDF never depends on the customer's bookings and needs no key for them.
-  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // GATE_LAWN_WATER_IN_RAIN: rain since the visit can change a frozen water-in banner, so the key follows what it will say. Empty while dark.
+  irrigationStamp += await lawnWaterInRainStamp(service, knex);
+  // The report lead changes what the lawn web report and its PDF render
+  // (lead-mode findings, stock sentences left out) and the v6 copy writer changes
+  // the lead's words. The gates that used to add this stamp are gone, but it stays
+  // a CONSTANT: every PDF cached while they were live keeps its key, and a PDF
+  // cached before they went live must never be served again. The by-next-visit
+  // sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields), so a PDF never
+  // depends on the customer's bookings and needs no key for them.
+  irrigationStamp += ':lead=1:copyv6=1';
   // The copy fixes (GATE_LAWN_REPORT_COPY_FIXES) change the lawn report's words, labels and charts,
   // so its PDF key moves with it; the part is empty while the gate is off.
   irrigationStamp += copyFixesPdfStamp();
   // The lawn report polish (GATE_LAWN_REPORT_POLISH) derives weekly inches from the owner's rate table, so its PDF key moves with it.
   irrigationStamp += polishPdfStamp();
+  // The lawn report stage 1 fixes (GATE_LAWN_REPORT_STAGE1_FIXES) change the damage finding and "What to expect", so its PDF key moves with it
+  // (and follows a frozen v6 entry that carries the second line, whatever the gate says now).
+  irrigationStamp += await stage1KeyStamp(service, knex);
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
+  // GATE_LAWN_PHOTO_LABEL_PICK prints the label the technician chose under a photo (stored per assessment, so the
+  // assessment id already moves the key); the stamp rides only while the gate is live, so gate off leaves every key unchanged.
+  if (lawnPhotoLabelPickLive()) irrigationStamp += ':labelpick=1';
   // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES drops the PDF's coverage list, map and
   // zone legend for a lawn visit whose coverage verdict, frozen at completion
   // (structured_notes.lawnCoverageVerdict), says defaults only. The key reads
@@ -3339,12 +3350,18 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .limit(shotListLive || photoSetEligible ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
     .catch(() => { photoReadFailed = true; return []; });
+  // GATE_LAWN_PHOTO_LABEL_PICK: the label the technician chose for a photo, stored beside it at capture
+  // (lawn_assessments.photos[photo_order].labelKey). Read only while the gate is live; a stored value that is not
+  // a shot key falls back to the slot's own label. Off = no read and no key below.
+  const labelPicks = lawnPhotoLabelPickLive() ? labelPicksFromStored(assessment.photos) : [];
+  const pickedLabelFor = (photo) => pickedReportLabel(labelPicks[Number(photo.photo_order)]);
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),
     type: photo.photo_type || 'general',
     zone: photo.zone || null,
     ...(shotListLive ? { zoneLabel: photoZoneLabel(photo.zone) } : {}),
+    ...(pickedLabelFor(photo) ? { labelPicked: pickedLabelFor(photo) } : {}),
     isBest: !!photo.is_best_photo,
     qualityScore: photo.quality_score ?? null,
     scores: {
@@ -3369,7 +3386,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // partial set would hide the one photo whose second signing may succeed in the
   // gallery copy the document suppresses.
   const photoSetRows = photoSetEligible
-    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order }))
+    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order, ...(pickedLabelFor(photo) ? { pickedLabel: pickedLabelFor(photo) } : {}) }))
     : [];
   const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length + (photoSetEligible && photoReadFailed ? 1 : 0);
   const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);
@@ -3937,6 +3954,66 @@ function applyAfterHoldOverlay(waterContext, instruction) {
   return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
 }
 
+// GATE_LAWN_WATER_IN_RAIN, READ TIME ONLY: the frozen water-in instruction as this render says it. Rain measured since the
+// completion that reaches the water-in amount turns it into "water_in_by_rain" (the rain did the watering in); before
+// that a generic spray-and-rotor figure pair reads as an amount first. Only a REPLAY of a frozen instruction is touched
+// (the completion build, its freeze and its text never see this), and any miss in the rain read leaves it as frozen.
+async function waterInRainInstruction(instruction, { products, service, now = new Date() }) {
+  if (!lawnWaterInRain.appliesTo(instruction)) return instruction;
+  try {
+    const coverage = await lawnWaterInRain.resolveRainCoverage({
+      instruction,
+      products,
+      now,
+      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+      fetchForecast: require('./application-conditions').fetchPropertyForecast,
+    });
+    return lawnWaterInRain.applyWaterInRain(instruction, coverage);
+  // read-failure-exempt: the rain read is an optional improvement of a frozen banner; a miss leaves the banner as frozen.
+  } catch {
+    return instruction;
+  }
+}
+
+// The PDF key part for the same decision, from the record alone (a cache-lookup caller's row is partial): '' while the gate is
+// dark or the visit has no frozen water-in instruction; ':wir=c' once rain has covered it; ':wir=a' for the amount line. An
+// unreadable record stamps random (re-render, never a stale hit).
+async function lawnWaterInRainStamp(service, knex) {
+  if (typeof featureGates.lawnWaterInRainLive !== 'function' || !featureGates.lawnWaterInRainLive() || !featureGates.lawnWateringRuleLive() || !service?.id) return '';
+  try {
+    const row = await knex('service_records')
+      .where({ 'service_records.id': service.id })
+      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
+      .first(
+        'service_records.structured_notes',
+        'service_records.service_data',
+        knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+      );
+    const instruction = readFrozenWateringInstruction(parseJsonObject(row?.structured_notes));
+    if (!lawnWaterInRain.appliesTo(instruction)) return '';
+    const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
+    const products = await attachApprovedReportProductFacts(knex, rawProducts, {
+      frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
+    });
+    // The render reads the location through the frozen identity (its map center wins over the live join), so the key does too.
+    const located = applyReportIdentitySnapshot({ ...row });
+    const coverage = await lawnWaterInRain.resolveRainCoverage({
+      instruction,
+      products,
+      now: new Date(),
+      latitude: located.customer_latitude,
+      longitude: located.customer_longitude,
+      fetchForecast: require('./application-conditions').fetchPropertyForecast,
+    });
+    return lawnWaterInRain.waterInRainStamp(instruction, coverage);
+  } catch {
+    return `:wir=err${crypto.randomBytes(4).toString('hex')}`;
+  }
+}
+
 // GATE_LAWN_WATERING_FORECAST: the water-in sentence frozen with the instruction,
 // as the banner's extra key (empty when the gate is off or nothing was frozen).
 function bannerForecastExtras(instruction) {
@@ -3995,10 +4072,10 @@ function buildWateringBanner(instruction, weekPlan = null) {
   };
 }
 
-// The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
+// The v6 copy carrier for a render with no copy.
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null });
 
-// The next lawn visit AT THIS REPORT'S PROPERTY (GATE_LAWN_REPORT_COPY_V6):
+// The next lawn visit AT THIS REPORT'S PROPERTY (live with the report lead):
 // what the report's "Next visit" line shows and what the v6 copy's "by your
 // next visit" sentence is timed from, so the two can never disagree. On a
 // multi-property account a booking at another home is skipped, not taken
@@ -5687,6 +5764,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // A failed product read means the rules were unknown, not absent.
           opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || rulesUnknown;
         }
+        // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
+        // freeze and the completion text never see it). A replay only.
+        if (wateringInstruction && !opts.wateringInstructionOut && opts.lawnWaterInRain === true && typeof featureGates.lawnWaterInRainLive === 'function' && featureGates.lawnWaterInRainLive() && readFrozenWateringInstruction(structured)) {
+          wateringInstruction = await waterInRainInstruction(wateringInstruction, { products, service });
+        }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
@@ -5746,6 +5828,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         wateringInstruction,
         mowingHeight,
         applications,
+        // GATE_LAWN_REPORT_STAGE1_FIXES: the visit's frozen finding-to-product ties (what was found), read from the record.
+        frozenTies: reportFacts.frozenTies(service.structured_notes, lawnAssessment.assessmentId),
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
@@ -5974,47 +6058,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // same way svcIso does above before slicing, or String(Date) yields
           // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
           const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
-          // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
-          // (lawnNextVisitAtProperty); the same visit times the v6 copy's
-          // by-next-visit sentence. Gate off: the customer-wide query, as before.
-          const copyV6Next = featureGates.lawnReportCopyV6Live();
-          // The Visit Summary's write gate (programVisitOut) needs the PROPERTY-scoped answer with
-          // copy v6 off too: the legacy query below is customer-wide. A failed read leaves it unset.
+          // The next lawn visit at THIS property (lawnNextVisitAtProperty); the same
+          // visit times the v6 copy's by-next-visit sentence.
+          const propertyNext = await lawnNextVisitAtProperty(service, afterIso, knex, readFailures);
+          // The Visit Summary's write gate (programVisitOut) needs the PROPERTY-scoped answer.
           const visitSummaryOut = opts.programVisitOut && typeof opts.programVisitOut === 'object' ? opts.programVisitOut : null;
-          const propertyNext = copyV6Next || visitSummaryOut
-            ? await lawnNextVisitAtProperty(service, afterIso, knex, readFailures)
-            : null;
-          if (visitSummaryOut && propertyNext) visitSummaryOut.nextVisitBooked = propertyNext.state === 'scheduled';
-          const scopedNext = copyV6Next ? propertyNext : null;
-          const legacyNextRow = async () => {
-            return knex('scheduled_services')
-              .where('customer_id', service.customer_id)
-              .andWhere('scheduled_date', '>', afterIso)
-              // NO 'rescheduled': phantom placeholders hold the OLD date until the
-              // office rebooks — publishing one shows a stale time as still real
-              // (same rule as the tree-shrub and nextAppointment queries below).
-              .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-              // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
-              // Grouped OR so it stays ANDed with the customer/date/status predicates.
-              .andWhere((qb) => qb
-                .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
-                .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
-              .orderBy('scheduled_date', 'asc')
-              .first('scheduled_date')
-              .catch(() => null);
-          };
-          const nextRow = scopedNext
-            ? (scopedNext.state === 'scheduled' ? scopedNext.row : null)
-            : await legacyNextRow();
+          if (visitSummaryOut) visitSummaryOut.nextVisitBooked = propertyNext.state === 'scheduled';
+          const nextRow = propertyNext.state === 'scheduled' ? propertyNext.row : null;
           let nextVisit = null;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
-            if (scopedNext) {
-              const raw = nextRow.scheduled_date;
-              lawnCopyNextVisitIso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
-              lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
-            }
-          } else if (svcIso && !(scopedNext && scopedNext.state === 'unknown')) {
+            const raw = nextRow.scheduled_date;
+            lawnCopyNextVisitIso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
+            lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
+          } else if (svcIso && propertyNext.state !== 'unknown') {
             // An unknown property match shows nothing: a cadence estimate beside
             // a real booking we could not place would be a second, wrong date.
             const weeks = lawnCadenceWeeks(service.service_type);
@@ -6028,25 +6085,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
                 // No booking at this property: the SHOWN estimate times the
                 // copy, counted from the selected assessment's date.
-                if (scopedNext) {
-                  lawnCopyNextVisitIso = est.toISOString().slice(0, 10);
-                  lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
-                }
+                lawnCopyNextVisitIso = est.toISOString().slice(0, 10);
+                lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
               }
             }
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
         } catch {
-          // Best-effort for the label; under the v6 gate it is also an input
-          // the copy must not freeze without.
-          if (featureGates.lawnReportCopyV6Live()) readFailures.add('next_visit');
+          // Best-effort for the label; it is also an input the v6 copy must not
+          // freeze without.
+          readFailures.add('next_visit');
         }
       }
 
-      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
-        // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
-        // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
-        // read while this is live). Fixed sentences from this visit's facts, no
+      if (reportV2) {
+        // The v6 copy (P14): the structural writer replaced the old narrative
+        // overlay (env LAWN_REPORT_V2_NARRATIVE is not read). Fixed sentences from this visit's facts, no
         // model (owner 2026-10-02); frozen copy replays; a degraded read or an
         // unverifiable treatment ships the lead's own copy. The fields ride the
         // in-process report as `copyV6` for the lead derivation (a non-enumerable
@@ -6095,51 +6149,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
           lawnAssessment.weekWeatherUncacheable = true;
           lawnAssessment.lawnCopyV6Unfrozen = true;
-        }
-      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
-        // The overlay rewrites customer-facing prose and validates only
-        // banned-copy + rain-window rules — it can reintroduce advice that
-        // contradicts today's applications (codex P1 r28). Skip it entirely
-        // when treatment data is unverifiable, and reconcile its output
-        // against the guard otherwise, restoring the deterministic string
-        // for any field it contradicted.
-        if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
-          console.warn('[report-data] lawn narrative overlay skipped — treatment data unverifiable');
-        } else {
-          const preOverlay = JSON.parse(JSON.stringify(reportV2));
-          reportV2 = await applyLawnReportNarrative(reportV2, {
-            grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
-            observations: lawnAssessment?.observations || '',
-            customerConcern: structuredCustomerConcern(structured),
-          }).catch(() => reportV2);
-          if (lawnTreatmentGuard?.guardProducts?.length) {
-            const { treatmentGuard: tg, guardProducts: gp } = lawnTreatmentGuard;
-            const bad = (text) => tg.contradictsAppliedProducts(text, gp);
-            const restore = (host, prev, key) => {
-              if (host && prev && typeof host[key] === 'string' && bad(host[key])) host[key] = prev[key];
-            };
-            restore(reportV2.snapshot, preOverlay.snapshot, 'statusHeadline');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'mainWatch');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'customerAction');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'rootCause');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'wavesNext');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'treatmentSummary');
-            restore(reportV2.water, preOverlay.water, 'explanation');
-            restore(reportV2.mowing, preOverlay.mowing, 'recommendation');
-            restore(reportV2.treatment, preOverlay.treatment, 'summary');
-            restore(reportV2, preOverlay, 'todaysResult');
-            restore(reportV2, preOverlay, 'smsSummary');
-            (reportV2.diagnosis || []).forEach((d, i) => {
-              const prev = preOverlay.diagnosis?.[i];
-              restore(d, prev, 'explanation');
-              restore(d, prev, 'customerExplanation');
-            });
-            (reportV2.insights || []).forEach((ins, i) => {
-              const prev = preOverlay.insights?.[i];
-              ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'].forEach((k) => restore(ins, prev, k));
-            });
-            if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
-          }
         }
       }
       // GATE_LAWN_TECH_PARAGRAPH: the "From your technician" paragraph written
@@ -7124,7 +7133,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   if (
     serviceLine !== 'rodent'
     // Lawn and tree & shrub have their own specialized narrative layers
-    // (applyLawnReportNarrative / the T&S V2 composition) — a second
+    // (the lawn v6 copy / the T&S V2 composition) — a second
     // generic summary would duplicate or conflict with them, and this
     // engine's guards don't ground agronomic claims (codex P2 #3007 r6).
     && serviceLine !== 'lawn'
@@ -7357,9 +7366,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the record froze tips. The technician's first name comes from the
     // visit's frozen technician row (owner: first name only, no sign-off);
     // the client composes the greeting from customerName.
-    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (protocol.techTips || []).length
+    // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): a frozen "add your irrigation settings" tip is left off beside a schedule on
+    // file (the same array comes back while the gate is off).
+    techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (stage1TechTips(protocol.techTips, { serviceLine, reportV2 }) || []).length
       ? {
-        tips: protocol.techTips,
+        tips: stage1TechTips(protocol.techTips, { serviceLine, reportV2 }),
         technicianFirstName: String(service.technician_first_name || '').trim()
           || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
       }
@@ -7489,6 +7500,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...lawnLayoutPayload({ serviceLine, reportV2, lawnAssessment, mowingHeight }),
     // GATE_LAWN_REPORT_POLISH (lawn only): the key the page reads for the status card and the hero. Absent = byte-identical payload.
     ...lawnPolishPayload({ serviceLine, reportV2 }),
+    // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): the key the web page reads for the applied card and the hero contact lines. Absent = byte-identical payload.
+    ...stage1PayloadFlag(serviceLine),
     // GATE_LAWN_NEW_SOD_REPORT_CARD (lawn only): the New sod card, built from the block frozen at completion. Absent = byte-identical payload.
     ...lawnNewSodPayload({ serviceLine, structuredNotes: service.structured_notes }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,

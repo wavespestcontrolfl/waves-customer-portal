@@ -47,3 +47,32 @@ describe('blackout-dates: strict option', () => {
     expect([...dates].sort()).toEqual(['2026-12-02', '2026-12-06']);
   });
 });
+
+describe('find-time: strictBlackout reaches the destination-day filter', () => {
+  const chain = (rows) => {
+    const c = new Proxy({}, {
+      get: (_t, prop) => {
+        if (prop === 'then') return (resolve) => resolve(rows);
+        return () => c;
+      },
+    });
+    return c;
+  };
+
+  test('the search throws when the strict closed-day read fails, and passes the option through', async () => {
+    const spy = jest.spyOn(blackout, 'getBlackoutDates').mockRejectedValue(new Error('blackout list unreadable'));
+    db.raw = jest.fn((sql) => ({ sql }));
+    db.mockImplementation((table) => chain(table === 'technicians' ? [{ id: 't1', name: 'A' }] : []));
+    const { findAvailableSlots } = require('../services/scheduling/find-time');
+    const opts = {
+      lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: '2026-12-01', dateTo: '2026-12-07', includeWeekends: true,
+    };
+    await expect(findAvailableSlots({ ...opts, strictBlackout: true })).rejects.toThrow('blackout list unreadable');
+    expect(spy).toHaveBeenLastCalledWith('2026-12-01', '2026-12-07', undefined, { strict: true });
+    // Without the option the call is the old fail-open one.
+    spy.mockResolvedValue(new Set());
+    await findAvailableSlots(opts).catch(() => {});
+    expect(spy).toHaveBeenLastCalledWith(expect.any(String), expect.any(String), undefined, { strict: false });
+    spy.mockRestore();
+  });
+});

@@ -17,6 +17,7 @@ const logger = require('../logger');
 const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
+const moveLimit = require('./move-limit');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
@@ -337,6 +338,9 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
+    // At most N automatic moves per visit, counted on this transaction so a
+    // move another run landed minutes ago is seen (move-limit.js).
+    await moveLimit.assertUnderLimit(trx, [row], config, refuse);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
@@ -500,6 +504,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     const { guardMode } = config;
     const eligCtx = buildMemberEligCtx(guardMode, config, today);
     await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
+    // A grouped unit moves only if every member is under the move limit.
+    await moveLimit.assertUnderLimit(trx, rows, config, refuse);
     if (isSaturday(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);

@@ -9,10 +9,13 @@
 // owner 2026-10-01). An open tree & shrub visit then opens the one-screen
 // sheet instead of the full typed completion form. Flag off, a terminal
 // status, or any other service routes exactly as before.
+import { carriesAreaAddOnWork } from './areaAddOns';
+
 const TERMINAL_SERVICE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 
 export function isTreeShrubFastCompleteEligible(service) {
   return service?.treeShrubFastCompleteEnabled === true
+    && !carriesAreaAddOnWork(service)
     && service?.completionProfile?.findingsType === 'tree_shrub'
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }

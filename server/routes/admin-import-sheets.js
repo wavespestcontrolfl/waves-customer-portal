@@ -200,6 +200,69 @@ router.post('/calls', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const UNIT_SIZE_VENDORS = new Set(['gal', 'oz', 'lb', 'qt', 'pt', 'fl oz', 'l', 'ml', 'g', 'stations', 'case']);
+const VALID_CATEGORIES = new Set(['insecticide', 'herbicide', 'fertilizer', 'fungicide', 'micronutrient fertilizer', 'adjuvant', 'soil amendment / biostimulant', 'plant growth regulator', 'insect growth regulator', 'soil surfactant', 'termite monitoring', 'soil moisture management aid', 'termiticide / insecticide', 'rodent control', 'soils, mulch & amendments']);
+
+// One CSV row read the way the importer uses it: the vendor column that holds
+// a unit size moves into the size, an ITM- code in the category column
+// becomes the SKU, and a category the catalog does not list falls back to the
+// category section. null = the row is not imported (no product, or TruGreen).
+function readPricingRow(row) {
+  const cell = (...names) => String(names.map((name) => row[name]).find(Boolean) || '').trim();
+  const product = cell('Product');
+  let category = cell('Category');
+  const subcategory = cell('Subcategory');
+  const categorySection = cell('Category Section');
+  let sku = cell('SKU');
+  let vendor = cell('Vendor');
+  let size = cell('Size');
+  if (!product || vendor.toLowerCase() === 'trugreen') return null;
+  if (UNIT_SIZE_VENDORS.has(vendor.toLowerCase())) {
+    size = size ? `${size} ${vendor}` : vendor;
+    vendor = '';
+  }
+  if (category.startsWith('ITM-')) {
+    sku = category;
+    category = subcategory || categorySection || 'Uncategorized';
+  }
+  if (!VALID_CATEGORIES.has(category.toLowerCase()) && !category.startsWith('ITM')
+    && categorySection && VALID_CATEGORIES.has(categorySection.toLowerCase())) {
+    category = categorySection;
+  }
+  return {
+    product,
+    activeIngredient: cell('Active Ingredient / Descriptor', 'Active Ingredient'),
+    epaRegNumber: cell('EPA Reg #', 'EPA Reg', 'EPA Registration', 'EPA Registration Number'),
+    category,
+    subcategory,
+    sku,
+    vendor,
+    size,
+    sourceUrl: cell('Source URL', 'URL'),
+    priceStr: cell('Price').replace(/[$,]/g, ''),
+  };
+}
+
+// The lines the pricing import writes: the FIRST line of each product + vendor
+// wins and every later line of the same pair is a duplicate that never
+// imports. A price change for a listed product + vendor is made on that
+// product's own line, never as a second line further down the file.
+function selectPricingRows(rows) {
+  const seen = new Set();
+  const lines = [];
+  let skipped = 0;
+  let duplicates = 0;
+  for (const row of rows) {
+    const line = readPricingRow(row);
+    if (!line) { skipped++; continue; }
+    const key = `${line.product.toLowerCase()}|${line.vendor.toLowerCase()}`;
+    if (seen.has(key)) { duplicates++; continue; }
+    seen.add(key);
+    lines.push(line);
+  }
+  return { lines, skipped, duplicates };
+}
+
 // POST /api/admin/import/pricing — import pricing data from CSV in Downloads
 router.post('/pricing', async (req, res, next) => {
   try {
@@ -243,58 +306,14 @@ router.post('/pricing', async (req, res, next) => {
 
     const rows = parse(csvText, { columns: true, skip_empty_lines: true, relax_column_count: true });
 
-    // Valid vendor names (not unit sizes)
-    const validVendors = new Set(['siteone', 'amazon', 'solutions pest & lawn', 'domyown', 'forestry distributing', 'chemical warehouse', 'seed world', 'seed world usa', 'intermountain turf', 'keystone', 'keystone pest solutions', 'veseris', 'ewing outdoor supply', 'gci turf academy', 'diy pest control']);
-    const unitSizes = new Set(['gal', 'oz', 'lb', 'qt', 'pt', 'fl oz', 'l', 'ml', 'g', 'stations', 'case']);
+    // Which lines import, and the one line that stands for each product +
+    // vendor, is selectPricingRows (module level, so a test can run it on
+    // server/data/pricing.csv).
+    const { lines, skipped, duplicates } = selectPricingRows(rows);
+    let imported = 0;
 
-    // Valid categories
-    const validCategories = new Set(['insecticide', 'herbicide', 'fertilizer', 'fungicide', 'micronutrient fertilizer', 'adjuvant', 'soil amendment / biostimulant', 'plant growth regulator', 'insect growth regulator', 'soil surfactant', 'termite monitoring', 'soil moisture management aid', 'termiticide / insecticide', 'rodent control', 'soils, mulch & amendments']);
-
-    let imported = 0, skipped = 0, duplicates = 0;
-    const seen = new Set();
-
-    for (const row of rows) {
-      const product = (row['Product'] || '').trim();
-      const activeIngredient = (row['Active Ingredient / Descriptor'] || row['Active Ingredient'] || '').trim();
-      const epaRegNumber = (row['EPA Reg #'] || row['EPA Reg'] || row['EPA Registration'] || row['EPA Registration Number'] || '').trim();
-      let category = (row['Category'] || '').trim();
-      const subcategory = (row['Subcategory'] || '').trim();
-      const categorySection = (row['Category Section'] || '').trim();
-      let sku = (row['SKU'] || '').trim();
-      let vendor = (row['Vendor'] || '').trim();
-      let size = (row['Size'] || '').trim();
-      const sourceUrl = (row['Source URL'] || row['URL'] || '').trim();
-      const priceStr = (row['Price'] || '').replace(/[$,]/g, '').trim();
-      const unitPriceStr = (row['Unit Price'] || '').replace(/[$,]/g, '').trim();
-
-      if (!product) { skipped++; continue; }
-
-      // Skip TruGreen
-      if (vendor.toLowerCase() === 'trugreen') { skipped++; continue; }
-
-      // Fix vendor column containing unit sizes
-      if (unitSizes.has(vendor.toLowerCase())) {
-        size = size ? `${size} ${vendor}` : vendor;
-        vendor = '';
-      }
-
-      // Fix category column containing ITM codes
-      if (category.startsWith('ITM-')) {
-        sku = category;
-        category = subcategory || categorySection || 'Uncategorized';
-      }
-
-      // Validate category
-      if (!validCategories.has(category.toLowerCase()) && !category.startsWith('ITM')) {
-        if (categorySection && validCategories.has(categorySection.toLowerCase())) {
-          category = categorySection;
-        }
-      }
-
-      // Deduplicate by product name + vendor
-      const dupeKey = `${product.toLowerCase()}|${vendor.toLowerCase()}`;
-      if (seen.has(dupeKey)) { duplicates++; continue; }
-      seen.add(dupeKey);
+    for (const line of lines) {
+      const { product, activeIngredient, epaRegNumber, category, subcategory, sku, vendor, size, sourceUrl, priceStr } = line;
 
       // Strict numeric price, validated BEFORE any catalog mutation (codex
       // r19-push P1 + GH r3 P1; same contract as the price worker's
@@ -446,5 +465,7 @@ router.post('/pricing', async (req, res, next) => {
     next(err);
   }
 });
+
+router.selectPricingRows = selectPricingRows;
 
 module.exports = router;

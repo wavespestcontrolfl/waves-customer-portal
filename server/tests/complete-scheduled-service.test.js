@@ -22,6 +22,11 @@ jest.mock('../services/service-completion-profiles', () => ({
 jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}), stopBaseKey: jest.fn(() => 'fixture-stop') }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(async () => null) }));
+// The visit's area add-on rows: none in these fixtures (the suite's db fake has no scheduled_service_addons join).
+jest.mock('../services/area-addon-visit-rows', () => ({
+  ...jest.requireActual('../services/area-addon-visit-rows'),
+  areaAddOnKeysByVisit: jest.fn(async () => new Map()),
+}));
 
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');
@@ -930,6 +935,22 @@ describe('quiet-hours completion SMS deferral clears the pre-send uncertainty ma
     expect(deferredDeltaAt).toBeGreaterThan(-1);
     expect(txAt).toBeGreaterThan(deferredDeltaAt);
     expect(mergeAt).toBeGreaterThan(txAt);
+  });
+
+  // The scheduled-SMS replay rebuilds appointmentId only from
+  // metadata.scheduled_service_id. Without it a held completion text's App
+  // push has no visit to resolve, and opens Documents instead of the report.
+  test('the deferred completion row carries the visit id the replay turns into appointmentId', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const entryAt = source.indexOf("entry_point: 'dispatch_completion_deferred'");
+    const blockCodeAt = source.indexOf('original_block_code: smsResult.code', entryAt);
+    expect(entryAt).toBeGreaterThan(-1);
+    expect(blockCodeAt).toBeGreaterThan(entryAt);
+    expect(source.slice(entryAt, blockCodeAt)).toMatch(/scheduled_service_id: svc\.id,/);
+    const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toMatch(/claimMeta\.scheduled_service_id \? \{ appointmentId: claimMeta\.scheduled_service_id \}/);
   });
 });
 

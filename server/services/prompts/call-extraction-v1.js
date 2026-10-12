@@ -1,5 +1,12 @@
 const crypto = require('crypto');
-const { EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE } = require('./appointment-confirmed-rules');
+const {
+  EXISTING_APPOINTMENT_RULE,
+  RESCHEDULE_RULE,
+  bareTimeNoDayRule,
+  MISSING_AMPM_RULE,
+  STAFF_HEDGE_RULE,
+  CALLER_PROPOSED_TIME_RULE,
+} = require('./appointment-confirmed-rules');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
 // v7: ordinal street recovery changes routing outcomes even when extraction
@@ -152,7 +159,20 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // gate-on replay of 2026-10-09: with the rules sent first (the system layout) the model
 // missed that promise on a reviewed call in 6 of 11 runs, and in 0 of 8 with this
 // sentence, in both layouts. New instruction: a new cohort.
-const PROMPT_VERSION = 'v28';
+// v29: caller.ani_cannot_text + caller.text_phone_e164 (schema 1.28.0; owner rulings
+// 2026-10-07 and 2026-10-08): a caller who says the line they called from cannot get texts
+// (a deaf relay service, an office landline) sets ani_cannot_text WITH or WITHOUT naming
+// another number for texts; text_phone_e164 carries the other number when one was given.
+// caller_id_disclaimed stays out of it (that field means the number is NOT the caller's own).
+// New field and instruction: a new cohort. (Cut as v25/v26 on the branch; main took v25–v28.)
+// v31: a time the CALLER proposed and STAFF accepted is confirmed once staff
+// also gave a closing commitment (2026-10-10 call audit: "How about, like, one
+// o'clock?", "We could probably do that... I'll see you then" came back
+// ambiguous and the visit was booked by hand 2.5 hours later). v22 covered a
+// time STAFF offered; its "caller hedged" exclusion is about the caller's
+// answer to that offer, not the caller's own softened proposal. New
+// instruction: a new cohort.
+const PROMPT_VERSION = 'v31';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -265,9 +285,10 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
   - ARRIVAL WINDOW: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES qualify as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set confirmed_start_at to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") IS a specific day here; the vague examples in the rule above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed from that reading: set confirmed_start_at from that reading and agreed_slot_words.period to null. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so status stays "requested"/"offered" as appropriate, confirmed_start_at null. The same applies to an offer staff did not commit to — "we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time" — which stays NOT confirmed.
   - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${todayRef}. Do not invent dates or use the model's training date.
-  - BARE TIME WITH NO DAY (prompt v22, owner direction 2026-10-06; audited call: a technician said "I'll be there at three", the caller said "Yeah, it's fine", and nothing was booked): when staff COMMITTED to ONE exact on-the-hour time and the caller ACCEPTED it ("okay", "yeah, it's fine", "sure"), and NO day was named anywhere on the call, the day is TODAY (${todayRef}) provided the hour, read by the BUSINESS-HOURS READING rule above, is still ahead of the call time given at the top. Set status "confirmed", confirmed_start_at to today at that hour, agreed_slot_words.day null and selected_day_words null. When the hour has already passed on the call date, or a different day was named, do not guess a day: the normal day rules apply. Being an existing customer does NOT turn a call into coordination: the EXISTING APPOINTMENT rule applies only when the call itself refers to a visit that already exists ("are we still on for Tuesday", "my appointment", "can we move it"). Staff saying when they will arrive, with nothing on the call pointing to an earlier booking, is a NEW visit.
-  - A MISSING AM/PM IS NEVER A REASON TO HOLD A SETTLED HOUR (prompt v22; audited call: the caller asked for "today between 1:30 and 3:30", staff asked "can we plan on 2 o'clock?", the caller said "Sure.", staff said "we'll see you then", and the extraction answered "no AM/PM was stated"): read the period from the caller's OWN window or day-part when they gave one ("between 1:30 and 3:30" is the afternoon), otherwise from the BUSINESS-HOURS READING rule, and confirm. A day said in an earlier turn ("today") is the day. Staff's "we'll see you then" after the caller's "Sure." is the staff commitment. Never write "no AM/PM was stated" as the reason a status is not confirmed.
-  - STAFF HEDGES DO NOT UNCONFIRM A NEW BOOKING (prompt v22, owner ruling 2026-10-06; audited call: a relative arranging service for her mother heard staff say "I'm thinking tomorrow afternoon, like around four, I could probably make it out there" and answered "Okay, great. Thank you very much."): for a NEW booking, when STAFF named one specific day (a relative day counts) and one on-the-hour time (its period from a day-part word, an explicit AM/PM or the BUSINESS-HOURS READING rule) and the CALLER ACCEPTED it, the status is "confirmed" even though staff phrased it softly: "I'm thinking", "I think", "probably", "I could probably make it", "should work", "around four", "like around four". Those words soften how staff talk; they do not leave the slot open. This paragraph overrides the approximation exclusion above for a hedge in STAFF's words only: "around four" next to a named day is hour four (record agreed_slot_words.hour "four"); a bare "around two" with no day, or one the CALLER hedged, stays not confirmed. Keep the status NOT confirmed when: the CALLER hedges, declines or defers ("maybe", "let me ask my husband", "I'll call you back"); a condition is left open on either side ("I'll check the schedule and call you back", "if I can get a tech out", "pending approval"); staff offered alternatives and none was chosen; the caller never answered; or the time is not on the hour. definite_commitment may stay false here: it only gates a RESCHEDULE, which keeps its own rule above.
+${bareTimeNoDayRule(todayRef)}
+${MISSING_AMPM_RULE}
+${STAFF_HEDGE_RULE}
+${CALLER_PROPOSED_TIME_RULE}
 ${EXISTING_APPOINTMENT_RULE}
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.
@@ -318,6 +339,8 @@ PHONE:
 - caller_id_disclaimed: set true, with an evidence quote, ONLY when the caller explicitly says the number reaching us is NOT their own — a shared office line, a front-desk phone, a coworker's or spouse's phone they're borrowing ("this is our office line, they route it to me", "I'm calling from the shop phone", "this is my husband's cell"). Do not infer it from silence or from a business name alone — it takes an explicit statement that THIS number isn't theirs. Leave null when nothing was said about whose number it is.
 - phone_note: when caller_id_disclaimed is true, capture the caller's own explanation in their words (trimmed, <=160 chars) — e.g. "office line, routes to me, I text back from my cell". null otherwise.
 - A disclaimed caller ID with no spoken callback number (phone_source stays "caller_id"/"unknown") means we have NO verified way to text this caller back — that is exactly the case phone_note and caller_id_disclaimed exist to flag; do not silently fall back to treating the ANI as good enough once you've heard the caller say otherwise.
+- ani_cannot_text: set true whenever the caller says the line they are calling from cannot receive text messages — a relay service for deaf callers, an office landline, "you can't text this one", "this phone doesn't get texts" — WITH or WITHOUT naming another number to text. This flag is about texting only and is independent of caller_id_disclaimed: when the caller ALSO says the line is not their own (a borrowed or shared line that cannot get texts), set BOTH caller_id_disclaimed and ani_cannot_text; when they own the line but it cannot get texts, set only ani_cannot_text. Leave null when nothing like that was said; never set false.
+- text_phone_e164: only when ani_cannot_text is true AND the caller actually gives a separate number for texts, put it here in E.164 (+1XXXXXXXXXX); otherwise null (ani_cannot_text stays true with no number). A number for TEXTS goes here, not into phone_e164 (that is the callback number for calls). A caller who gives one number for everything and says nothing about the line not getting texts leaves both fields null. Never copy the incoming Twilio ANI here.
 
 EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.

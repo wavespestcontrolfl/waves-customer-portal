@@ -17,10 +17,10 @@ function rank(scored, { current = CURRENT, service = SERVICE, threshold = 15, cu
 }
 
 describe('moveGain', () => {
-  test('a same-day re-time keeps the default time window in its gain', () => {
+  test('a same-day re-time leaves the default time window out of its gain too (owner 2026-10-09)', () => {
     expect(moveGain({
       service: SERVICE, current: CURRENT, currentScore: score(60, 0), cand: sameDay(), candScore: score(75, 12.5),
-    })).toBe(15);
+    })).toBe(2.5);
   });
 
   test('a day move leaves the default time window out on both sides', () => {
@@ -47,11 +47,12 @@ describe('moveGain', () => {
 });
 
 describe('drive floor', () => {
-  test('a day move needs the configured drive saving; a same-day re-time does not', () => {
+  test('a day move and a same-day re-time both need the configured drive saving', () => {
     expect(driveSavingMinutes(CURRENT, dayMove({ detour_minutes: 7 }))).toBe(5);
     expect(meetsDriveFloor({ current: CURRENT, cand: dayMove({ detour_minutes: 7 }), config: CONFIG })).toBe(false);
     expect(meetsDriveFloor({ current: CURRENT, cand: dayMove({ detour_minutes: 6 }), config: CONFIG })).toBe(true);
-    expect(meetsDriveFloor({ current: CURRENT, cand: sameDay({ detour_minutes: 12 }), config: CONFIG })).toBe(true);
+    expect(meetsDriveFloor({ current: CURRENT, cand: sameDay({ detour_minutes: 12 }), config: CONFIG })).toBe(false);
+    expect(meetsDriveFloor({ current: CURRENT, cand: sameDay({ detour_minutes: 6 }), config: CONFIG })).toBe(true);
   });
 
   test('0 turns the floor off', () => {
@@ -63,6 +64,7 @@ describe('drive floor', () => {
   test('a legacy grouped current placement has no detour to test, so the floor does not apply (Codex #6207 r1 P1)', () => {
     const blind = { ...CURRENT, detour_minutes: 0, detour_group_blind: true };
     expect(meetsDriveFloor({ current: blind, cand: dayMove({ detour_minutes: 3 }), config: CONFIG })).toBe(true);
+    expect(meetsDriveFloor({ current: blind, cand: sameDay({ detour_minutes: 3 }), config: CONFIG })).toBe(true);
     expect(meetsDriveFloor({ current: { ...blind, detour_group_blind: undefined }, cand: dayMove({ detour_minutes: 3 }), config: CONFIG })).toBe(false);
   });
 });
@@ -84,10 +86,20 @@ describe('rankCandidates', () => {
     expect(result).toMatchObject({ qualifies: true, best: cand, gain: 17.5, floorFailed: false });
   });
 
-  test('a qualifying same-day re-time wins over a day move the floor refuses', () => {
+  test('a same-day re-time with no drive saved no longer qualifies on the default window alone', () => {
+    // A 2 PM pest visit re-timed to 8 AM: +12.5 default window, +5 elsewhere, no drive saved.
+    const retime = sameDay({ detour_minutes: 12 });
+    const result = rank([{ cand: retime, sc: score(77.5, 12.5) }]);
+    expect(result).toMatchObject({ qualifies: false, gain: 5, floorFailed: false });
+    // Even with a gain over the bar, the floor refuses it.
+    const big = rank([{ cand: retime, sc: score(90, 0) }]);
+    expect(big).toMatchObject({ qualifies: false, floorFailed: true });
+  });
+
+  test('a same-day re-time that saves the floor and clears the bar without the default window moves', () => {
+    const retime = sameDay({ detour_minutes: 5 });
     const refused = dayMove({ detour_minutes: 10 });
-    const retime = sameDay();
-    const result = rank([{ cand: refused, sc: score(95, 12.5) }, { cand: retime, sc: score(76, 12.5) }]);
+    const result = rank([{ cand: refused, sc: score(95, 12.5) }, { cand: retime, sc: score(80, 0) }]);
     expect(result.best).toBe(retime);
     expect(result.ranked).toEqual([retime]);
   });

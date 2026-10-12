@@ -255,6 +255,63 @@ async function refreshHasMultiHome(customerId, database = db) {
 }
 
 /**
+ * The reference writes of linkAcceptedEstimateProperty: the estimate's
+ * property link and the address stamp on the visits the acceptance booked.
+ * Returns false, writing nothing, when the property is no longer active.
+ */
+async function writeAcceptedEstimateLink(conn, { estimate, estimateId, customerId, propertyId, scopeToActivation }) {
+  const property = await conn('customer_properties').where({ id: propertyId, customer_id: customerId, active: true }).forShare().first();
+  if (!property) return false;
+  if (!estimate.property_id || estimate.property_id !== propertyId) {
+    await conn('estimates').where({ id: estimateId }).update({ property_id: propertyId });
+  }
+
+  // Stamp the visits this acceptance booked (converter inserts + slot
+  // commits carry source_estimate_id). Only unstamped, non-terminal rows —
+  // a stamp already present was agreed at booking time and wins.
+  {
+    await conn('scheduled_services')
+      .where({ source_estimate_id: estimateId }).modify(scopeToActivation)
+      .whereNull('property_id')
+      .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+      .update({
+        property_id: propertyId,
+        service_address_line1: property.address_line1,
+        service_address_line2: property.address_line2 || null,
+        service_address_city: property.city || null,
+        service_address_state: property.state || 'FL',
+        service_address_zip: property.zip || null,
+        // The property row's own coords replace anything the visit
+        // inherited at booking; null when unknown so dispatch geocodes
+        // the stamped address instead of trusting stale primary coords
+        // (codex #3244 r7).
+        lat: property.latitude != null ? property.latitude : null,
+        lng: property.longitude != null ? property.longitude : null,
+      });
+    // ID-MATCHED but address-less rows too (codex #3431 r13 P1): the
+    // pid-first adoption predicate can adopt a row that already carries
+    // this property_id with NO service address — the whereNull above
+    // skips it, and dispatch would fall back to the customer's PRIMARY
+    // address. Fill the missing address from the property row; rows
+    // stamped with an address (any property) stay untouched.
+    await conn('scheduled_services')
+      .where({ source_estimate_id: estimateId, property_id: propertyId })
+      .whereNull('service_address_line1')
+      .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+      .update({
+        service_address_line1: property.address_line1,
+        service_address_line2: property.address_line2 || null,
+        service_address_city: property.city || null,
+        service_address_state: property.state || 'FL',
+        service_address_zip: property.zip || null,
+        lat: property.latitude != null ? property.latitude : null,
+        lng: property.longitude != null ? property.longitude : null,
+      });
+  }
+  return true;
+}
+
+/**
  * Post-accept linkage: resolve/create the customer_properties row for the
  * accepted estimate's address, link estimates.property_id, stamp the booked
  * visits, refresh has_multi_home. Runs POST-COMMIT on the global pool.
@@ -560,52 +617,17 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     }
     if (!propertyId) return null;
 
-    if (!estimate.property_id || estimate.property_id !== propertyId) {
-      await database('estimates').where({ id: estimateId }).update({ property_id: propertyId });
-    }
-
-    // Stamp the visits this acceptance booked (converter inserts + slot
-    // commits carry source_estimate_id). Only unstamped, non-terminal rows —
-    // a stamp already present was agreed at booking time and wins.
-    const property = await database('customer_properties').where({ id: propertyId }).first();
-    if (property) {
-      await database('scheduled_services')
-        .where({ source_estimate_id: estimateId }).modify(scopeToActivation)
-        .whereNull('property_id')
-        .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
-        .update({
-          property_id: propertyId,
-          service_address_line1: property.address_line1,
-          service_address_line2: property.address_line2 || null,
-          service_address_city: property.city || null,
-          service_address_state: property.state || 'FL',
-          service_address_zip: property.zip || null,
-          // The property row's own coords replace anything the visit
-          // inherited at booking; null when unknown so dispatch geocodes
-          // the stamped address instead of trusting stale primary coords
-          // (codex #3244 r7).
-          lat: property.latitude != null ? property.latitude : null,
-          lng: property.longitude != null ? property.longitude : null,
-        });
-      // ID-MATCHED but address-less rows too (codex #3431 r13 P1): the
-      // pid-first adoption predicate can adopt a row that already carries
-      // this property_id with NO service address — the whereNull above
-      // skips it, and dispatch would fall back to the customer's PRIMARY
-      // address. Fill the missing address from the property row; rows
-      // stamped with an address (any property) stay untouched.
-      await database('scheduled_services')
-        .where({ source_estimate_id: estimateId, property_id: propertyId })
-        .whereNull('service_address_line1')
-        .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
-        .update({
-          service_address_line1: property.address_line1,
-          service_address_line2: property.address_line2 || null,
-          service_address_city: property.city || null,
-          service_address_state: property.state || 'FL',
-          service_address_zip: property.zip || null,
-          lat: property.latitude != null ? property.latitude : null,
-          lng: property.longitude != null ? property.longitude : null,
-        });
+    // The reference writes run under a SHARED lock on the property row, held
+    // to commit, and only while the row is still active: removing a saved
+    // property (customer-properties.removeManualProperty) holds the row FOR
+    // UPDATE across its dependency check, so either this link commits first
+    // and the removal sees it and refuses, or the removal commits first and
+    // this link finds the row inactive and writes nothing.
+    const writeLink = conn => writeAcceptedEstimateLink(conn, { estimate, estimateId, customerId, propertyId, scopeToActivation });
+    const linkedNow = await (database.isTransaction ? writeLink(database) : database.transaction(writeLink));
+    if (!linkedNow) {
+      logger.info(`[estimate-property-linkage] estimate ${estimateId}: property ${propertyId} is no longer active, not linked`);
+      return null;
     }
 
     const hasMultiHome = await refreshHasMultiHome(customerId, database);

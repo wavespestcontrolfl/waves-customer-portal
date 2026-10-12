@@ -205,6 +205,29 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     }
   });
 
+  test('GATE_LAWN_PHOTO_LABEL_PICK: a pick differing from the slot is stored beside its photo; same-as-slot and unknown picks are dropped; gate off stores none', async () => {
+    const pickPhotos = [
+      { ...photo('YQ==', 'front'), labelKey: 'garage' },
+      { ...photo('Yg==', 'shade'), labelKey: 'close_up' },
+      { ...photo('Yw==', 'close_up'), labelKey: 'close_up' },
+    ];
+    const run = async () => {
+      dispatch.mockResolvedValue({ ok: true, json: { ...complete(), photo_quality: pickPhotos.map((_, i) => ({ photo: i + 1, quality: 'adequate', issue: '' })) }, provider: 'gemini', model: 'fixture-model', usage: {}, failures: [] });
+      const { body } = await request({ customerId: await customer(), photos: pickPhotos });
+      const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
+      return stored.photos.map((meta) => meta.labelKey ?? null);
+    };
+    process.env.GATE_LAWN_SHOT_LIST = 'true';
+    try {
+      expect(await run()).toEqual([null, null, null]);
+      process.env.GATE_LAWN_PHOTO_LABEL_PICK = 'true';
+      expect(await run()).toEqual([null, 'close_up', null]);
+    } finally {
+      delete process.env.GATE_LAWN_SHOT_LIST;
+      delete process.env.GATE_LAWN_PHOTO_LABEL_PICK;
+    }
+  });
+
   test('shot list off: nothing new is stored beside the photos, and the replay is the legacy one', async () => {
     const evalLib = require('../services/eval/lawn-visit-assessment-eval');
     const { body } = await request({ customerId: await customer(), photos });

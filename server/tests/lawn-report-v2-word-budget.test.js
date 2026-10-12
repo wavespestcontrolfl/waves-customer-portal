@@ -1,5 +1,5 @@
 // Word budget + one-owner-per-fact guard for the lawn report LEAD (lawn report
-// rebuild P7, GATE_LAWN_REPORT_LEAD). Builds real reportV2 payloads across the
+// rebuild P7). Builds real reportV2 payloads across the
 // consistency fixtures x weekly plan x watering banner, runs the reconcile tail
 // with the gate ON, and asserts the lead stays inside the ~250 visible-word
 // contract, never restates a banner or itself, and never talks about watering
@@ -166,13 +166,6 @@ for (const caseName of Object.keys(CASES)) {
 }
 
 describe('lawn report lead word budget', () => {
-  let previous;
-  beforeAll(() => { previous = process.env.GATE_LAWN_REPORT_LEAD; process.env.GATE_LAWN_REPORT_LEAD = 'true'; });
-  afterAll(() => {
-    if (previous === undefined) delete process.env.GATE_LAWN_REPORT_LEAD;
-    else process.env.GATE_LAWN_REPORT_LEAD = previous;
-  });
-
   test('the grid really exercises banner, plan and no-banner paths', () => {
     expect(GRID.length).toBe(4 * 2 * 4);
     const hold = build('healthy', RUN_PLAN, 'hold');

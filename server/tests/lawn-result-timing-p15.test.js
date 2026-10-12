@@ -1,7 +1,7 @@
-// Lawn result timing (lawn report rebuild P15, rides GATE_LAWN_REPORT_COPY_V6):
+// Lawn result timing (lawn report rebuild P15, rides the lawn v6 copy):
 // the lawn technician writer gets the RESULT TIMING rule, and the lawn "What
 // we applied today" paragraph states no timing (own prompt version, timing
-// backstop). Gate off: both byte-identical to before. Pure, no network.
+// backstop). Lead off: both byte-identical to before. Pure, no network.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
@@ -15,43 +15,27 @@ const SHARED = '# SHARED\n## HARD CONSTRAINTS\nShared safety.\n## ANTI-TEMPLATE 
 const LAWN = { serviceKey: 'lawn_care_recurring', findingsType: null };
 const PRODUCTS = [{ name: 'Test Herbicide B', kind: 'herbicide', activeIngredient: 'Testazone', method: 'spot', targets: ['broadleaf weeds'] }];
 
-const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
-const saved = {};
-beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); });
-afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
-const live = () => { process.env.GATE_LAWN_REPORT_COPY_V6 = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
 
 describe('lawn technician writer: RESULT TIMING rule', () => {
-  test('gate live: the lawn prompt is the old one plus the rule, appended last', () => {
-    const off = selectReportCopyPrompt(SHARED, 'Lawn Care', LAWN);
-    live();
+  test('the lawn prompt carries the rule, appended last', () => {
     const on = selectReportCopyPrompt(SHARED, 'Lawn Care', LAWN);
-    expect(on).toBe(`${off}\n\n${LAWN_RESULT_TIMING_RULE}`);
+    expect(on.endsWith(`\n\n${LAWN_RESULT_TIMING_RULE}`)).toBe(true);
     expect(on).toMatch(/never say when a result will show/);
   });
 
-  test('gate live never touches another writer', () => {
+  test('the rule never touches another writer', () => {
     const pest = { serviceKey: 'pest_general_quarterly', findingsType: null };
-    const off = selectReportCopyPrompt(SHARED, 'Pest', pest);
-    live();
-    expect(selectReportCopyPrompt(SHARED, 'Pest', pest)).toBe(off);
+    expect(selectReportCopyPrompt(SHARED, 'Pest', pest)).not.toContain(LAWN_RESULT_TIMING_RULE);
   });
 });
 
 describe('lawn treatment paragraph: no timing', () => {
-  test('gate off: the v5 prompt asks for "roughly when", as before', () => {
-    const prompt = buildTreatmentNarrativePrompt({ serviceLine: 'lawn', products: PRODUCTS });
-    expect(prompt).toMatch(/and roughly when/);
-    expect(prompt).toMatch(/within days/);
-  });
-
-  test('gate live: the lawn prompt drops all timing asks; pest keeps its prompt', () => {
-    const pestOff = buildTreatmentNarrativePrompt({ serviceLine: 'pest', products: PRODUCTS });
-    live();
+  test('the lawn prompt drops all timing asks; pest keeps its v5 prompt', () => {
+    const pest = buildTreatmentNarrativePrompt({ serviceLine: 'pest', products: PRODUCTS });
     const lawn = buildTreatmentNarrativePrompt({ serviceLine: 'lawn', products: PRODUCTS });
     expect(lawn).not.toMatch(/roughly when|within days|over the coming weeks, and/);
     expect(lawn).toMatch(/Do NOT say when/);
-    expect(buildTreatmentNarrativePrompt({ serviceLine: 'pest', products: PRODUCTS })).toBe(pestOff);
+    expect(pest).toMatch(/and roughly when/);
   });
 
   test('the backstop: time language fails a no-timing paragraph (deterministic summary served), not a v5 one', () => {
@@ -75,7 +59,7 @@ describe('lawn treatment paragraph: no timing', () => {
     }
   });
 
-  test('with the record\'s line, the PDF signature reads only that line\'s active version (either toggle order)', async () => {
+  test('with the record\'s line, the PDF signature reads only that line\'s active version ', async () => {
     const seen = [];
     const c = {
       where() { return c; },
@@ -83,12 +67,9 @@ describe('lawn treatment paragraph: no timing', () => {
       orderBy() { return c; },
       first: async () => ({ status: 'ready', generated_at: '2026-10-02T12:00:00Z' }),
     };
-    live();
     await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'lawn' });
     await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'tree_shrub' });
-    delete process.env.GATE_LAWN_REPORT_COPY_V6;
-    await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'lawn' });
-    expect(seen).toEqual([[LAWN_NO_TIMING_PROMPT_VERSION], [PROMPT_VERSION], [PROMPT_VERSION]]);
+    expect(seen).toEqual([[LAWN_NO_TIMING_PROMPT_VERSION], [PROMPT_VERSION]]);
   });
 
   test('both PDF-signature callers pass the record\'s line, resolved as report-data resolves it', () => {
@@ -100,20 +81,6 @@ describe('lawn treatment paragraph: no timing', () => {
 
   test('its own prompt version, and the PDF signature reads only the versions a render can read', async () => {
     expect(LAWN_NO_TIMING_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
-    const sigCalls = async () => {
-      const seen = [];
-      const c = {
-        where() { return c; },
-        whereIn(col, vals) { seen.push([col, vals]); return c; },
-        orderBy() { return c; },
-        first: async () => ({ status: 'ready', generated_at: '2026-10-02T12:00:00Z' }),
-      };
-      await treatmentNarrativePdfSignature('svc-1', () => c);
-      return seen;
-    };
-    // Gate off: a newer lawn no-timing row is inactive, so only v5 keys the PDF.
-    expect(await sigCalls()).toEqual([['prompt_version', [PROMPT_VERSION]]]);
-    live();
     const calls = [];
     const chain = {
       where(w) { calls.push(['where', w]); return chain; },
@@ -230,9 +197,7 @@ describe('buildTreatmentNarrative claims its cache row under the line\'s version
     return inserted[0] && inserted[0].prompt_version;
   };
 
-  test('gate off: v5 for lawn; gate live: the no-timing version for lawn, v5 for tree & shrub', async () => {
-    expect(await claimVersion('lawn')).toBe(PROMPT_VERSION);
-    live();
+  test('the no-timing version for lawn, v5 for tree & shrub', async () => {
     expect(await claimVersion('lawn')).toBe(LAWN_NO_TIMING_PROMPT_VERSION);
     expect(await claimVersion('tree_shrub')).toBe(PROMPT_VERSION);
   });

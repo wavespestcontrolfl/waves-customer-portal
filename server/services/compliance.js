@@ -317,6 +317,12 @@ const ComplianceService = {
     const existingRows = await k('property_application_history')
       .where({ service_record_id: serviceRecordId })
       .select('service_product_id', 'product_id');
+    // The add-on a product row belongs to rides the ledger (migration 20261010210000): a host row and an add-on row of the
+    // SAME product on one record are two applications and two ledger rows. Asked once, only when a row carries a tag.
+    let ledgerKeepsAddOn = false;
+    if (products.some((sp) => sp.area_addon_key)) {
+      try { ledgerKeepsAddOn = !!(await k.schema.hasColumn('property_application_history', 'area_addon_key')); } catch { ledgerKeepsAddOn = false; }
+    }
     const ledgeredServiceProductIds = new Set(
       existingRows.map((r) => r.service_product_id).filter(Boolean)
     );
@@ -392,6 +398,7 @@ const ComplianceService = {
         // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, frozen on the ledger beside its property. Present only when
         // the product record carries one (the completion writes it while the gate is live), so every other row inserts as before.
         ...require('./lawn-trouble-areas').ledgerPlace(sp),
+        ...(ledgerKeepsAddOn && sp.area_addon_key ? { area_addon_key: sp.area_addon_key } : {}),
       };
 
       // Catch-all DO NOTHING (no conflict target): a race can conflict on

@@ -345,19 +345,31 @@ function protocolCostLine(v) {
   return '  Materials: inventory/rate-based (see admin protocols for product detail)';
 }
 
+// A one-time program (area add-on treatments) is not a yearly cycle and carries no legacy costs or
+// tiers: list its treatments, not "Visits/Year".
+function oneTimeTreatmentLines(track) {
+  return [
+    `**${track.visits.length} one-time treatments (each sold on an estimate; not a yearly cycle):**\n`,
+    ...track.visits.map((v) => `Treatment ${v.visit}: ${v.visit_type || v.primary?.split('\n')[0] || ''}`),
+  ];
+}
+
+function yearlyVisitLines(track) {
+  const lines = [`**${track.visits.length} Visits/Year:**\n`];
+  for (const v of track.visits) {
+    const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
+    lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
+    lines.push(`${protocolCostLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
+    if (v.notes) lines.push(`  Notes: ${v.notes}`);
+  }
+  return lines;
+}
+
 function protocolEntry(programKey, track, tags) {
   if (!track || typeof track !== 'object') return null;
   const lines = [`**${track.name || programKey}**\n`];
   if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
-  if (track.visits?.length) {
-    lines.push(`**${track.visits.length} Visits/Year:**\n`);
-    for (const v of track.visits) {
-      const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
-      lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-      lines.push(`${protocolCostLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
-      if (v.notes) lines.push(`  Notes: ${v.notes}`);
-    }
-  }
+  if (track.visits?.length) lines.push(...(track.one_time === true ? oneTimeTreatmentLines(track) : yearlyVisitLines(track)));
   return { slug: `protocol-${slugify(programKey)}`, title: track.name || programKey, content: lines.join('\n'), category: 'protocols', tags };
 }
 
@@ -1108,4 +1120,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };
+module.exports._internals = { protocolEntry, auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };

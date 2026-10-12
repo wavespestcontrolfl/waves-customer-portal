@@ -209,6 +209,12 @@ const DEFAULTS = Object.freeze({
   // alone 10/13 right, 1 wrong; Opus 5.5 alone 10/13, 2 wrong. A route so a
   // second model can be added later. Shadow only behind GATE_SMS_SCHEDULING_DECIDE.
   SMS_SCHEDULING_DECIDE: 'claude-sonnet-5-5',
+  // Auto-dispatch move proofreader (owner 2026-10-09, "proofreader yes";
+  // services/auto-dispatch/proofreader): reads the customer record before an
+  // automatic move and answers allow / hold / unknown. The replay over past
+  // moves (scripts/auto-dispatch-proofreader-replay.js) picks the model from
+  // measured errors; Sonnet 5.5 is the starting point, not a finding.
+  AUTO_DISPATCH_PROOFREADER: 'claude-sonnet-5-5',
   // Service report "Ask Waves" answer writer (owner 2026-10-05, "use sonnet
   // 5.5"): writes the answer to a customer's typed question from the report's
   // own facts. Customer-facing generated text, so it rides the two-provider
@@ -353,6 +359,7 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 // SMS scheduling decide step (owner ruling 2026-10-02) — its own selector.
 const SMS_SCHEDULING_DECIDE = process.env.MODEL_SMS_SCHEDULING_DECIDE || DEFAULTS.SMS_SCHEDULING_DECIDE;
+const AUTO_DISPATCH_PROOFREADER = process.env.MODEL_AUTO_DISPATCH_PROOFREADER || DEFAULTS.AUTO_DISPATCH_PROOFREADER;
 // Service report Ask Waves answer writer (owner 2026-10-05) — its own selector.
 const REPORT_ASK           = process.env.MODEL_REPORT_ASK          || DEFAULTS.REPORT_ASK;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
@@ -508,6 +515,11 @@ const ROUTES = Object.freeze({
   // single leg, no automatic fallback — a miss records an error row and the
   // text stays with staff, exactly as today. Shadow behind GATE_SMS_SCHEDULING_DECIDE.
   smsSchedulingDecide: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SCHEDULING_DECIDE, effort: 'high' }),
+  // Auto-dispatch move proofreader (owner 2026-10-09,
+  // auto-dispatch/proofreader/index.js): single leg, no automatic fallback —
+  // a miss is the verdict "unknown" and the visit stays where it is. No
+  // nightly call site yet; the replay script is the only caller.
+  autoDispatchProofreader: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: AUTO_DISPATCH_PROOFREADER, effort: 'high' }),
   // Lawn visit assessment name referee (owner ruling 2026-09-29,
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
   // miss leaves Gemini's read exactly as it was.
@@ -781,6 +793,7 @@ module.exports = {
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
   SMS_SCHEDULING_DECIDE,
+  AUTO_DISPATCH_PROOFREADER,
   REPORT_ASK,
   TYPESAFE_JEV,
   CLOUDFLARE_CLEF,
@@ -815,9 +828,11 @@ module.exports = {
 // tiers. Listed here only as a breadcrumb so they're discoverable:
 //
 //   OPENAI_TRANSCRIPTION_MODEL     primary call transcription/diarization
-//                                  default: gpt-4o-transcribe-diarize
+//                                  default: gpt-4o-transcribe-diarize (production sets
+//                                  gpt-transcribe, no diarization: the Agent/Caller labels
+//                                  then come from OPENAI_TRANSCRIPT_LABEL_MODEL)
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
-//                                  default: gemini-2.5-flash
+//                                  default: gemini-3.5-flash (call-recording-processor.js)
 //   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
 //                                  (services/fast-complete-voice-fill.js; goes through
 //                                  call-recording-processor's transcribeWithOpenAI)

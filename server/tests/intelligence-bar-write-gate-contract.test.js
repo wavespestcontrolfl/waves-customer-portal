@@ -75,9 +75,14 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
+  process.env.GATE_IB_INVOICE_ACTIONS = 'true';
+  process.env.GATE_IB_DELETE_CUSTOMER = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -91,7 +96,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'tier-upgrade-email.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -138,6 +143,7 @@ const WRITE_TWO_STEP = [
   'add_customer_property',
   'update_customer_property',
   'set_primary_property',
+  'remove_customer_property',
   'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
@@ -153,10 +159,12 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'delete_duplicate_customer',
   'repair_closeout',
   'resend_receipt',
   'remove_saved_payment_method',
   'correct_invoice_address',
+  'send_invoice',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
@@ -556,6 +564,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       address_line1: '2 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' }, propertySeed],
     ['property-tools', 'executePropertyTool', 'update_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved', label: 'Family' }, propertySeed],
     ['property-tools', 'executePropertyTool', 'set_primary_property', { customer_id: 'cust-property', property_id: 'prop-saved' }, propertySeed],
+    ['property-tools', 'executePropertyTool', 'remove_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved' }, propertySeed],
     ['schedule-tools', 'executeScheduleTool', 'switch_appointment_property', {
       appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002',
     }, {
@@ -607,6 +616,17 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       customers: [
         { id: '00000000-0000-0000-0000-00000000a001', first_name: 'Real', last_name: 'Winner', phone: '9415550100', email: 'winner@example.com', deleted_at: null },
         { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
+      ],
+    }],
+    // delete_duplicate_customer reads the stub (its own seed) and the merge
+    // engine's emptiness readers and pair verdicts (spied below — their SQL is covered by
+    // customer-dedupe.test.js).
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'delete_duplicate_customer', {
+      customer_id: '00000000-0000-0000-0000-00000000e001',
+    }, {
+      customers: [
+        { id: '00000000-0000-0000-0000-00000000e001', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null, version: 'v1', created_at: '2026-10-01T15:00:00Z' },
+        { id: '00000000-0000-0000-0000-00000000e002', first_name: 'Real', last_name: 'Keeper', phone: '9415550100', email: null, deleted_at: null, created_at: '2025-01-01T15:00:00Z' },
       ],
     }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
@@ -665,6 +685,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         customer_address_snapshot: { address_line1: '1 Old Street', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' },
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }],
+    }],
+    // send_invoice reads the invoice, the hold, the payer ownership and the recipients (the route helpers
+    // are spied below — their own paths are covered by intelligence-bar-invoice-actions.test.js). It writes nothing.
+    ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
@@ -853,6 +879,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    const invoiceActionSpies = toolName === 'send_invoice'
+      ? [
+        jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveMessagingHoldChecked').mockResolvedValue(false),
+        jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
+          .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
+        // The invoice text as sendViaSMS renders it (the real renderer needs the template tables).
+        jest.spyOn(require('../services/invoice'), 'renderInvoiceSmsBody').mockResolvedValue({ body: 'Hi Pat, your invoice is ready: [pay link]', renderedTemplateKey: 'invoice_sent' }),
+        // The effects plan's own reads (invoice-action-effects.js) answer "nothing else happens" on this generic stand-in.
+        jest.spyOn(require('../services/invoice-payer-ownership'), 'invoicePayerOwnership').mockResolvedValue(null),
+        jest.spyOn(require('../services/invoice-followups'), 'planFollowupSequence').mockResolvedValue({ arms: false, state: 'not_schedulable', cadence: [3, 7, 14, 30] }),
+        jest.spyOn(require('../services/lead-estimate-link'), 'invoiceSentConversionTargets').mockResolvedValue({ leadIds: [] }),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     const receiptResolvers = toolName === 'resend_receipt'
@@ -865,6 +903,24 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // DB — install this row's token env vars + a fetch mock that answers its
     // calls in order, and restore both afterward so nothing leaks to the
     // next row (or to another suite requiring the same cached module).
+    const dedupeReaders = toolName === 'delete_duplicate_customer'
+      ? [
+        jest.spyOn(require('../services/customer-dedupe'), 'loserAutoBlockers').mockResolvedValue([]),
+        jest.spyOn(require('../services/customer-dedupe'), 'previewMergeEffects').mockResolvedValue({ moving: { total_rows: 0 } }),
+        jest.spyOn(require('../services/customer-dedupe'), 'nonFkMergeRewrites').mockResolvedValue({}),
+        jest.spyOn(require('../services/customer-dedupe'), 'duplicateWinnerFor').mockResolvedValue({ winnerId: '00000000-0000-0000-0000-00000000e002', eligible: true, code: 'eligible', reason: null, candidate: {} }),
+      ] : [];
+    if (toolName === 'delete_duplicate_customer') {
+      // The field check reads the customers columns and the self-reference
+      // scan reads the constraint list from information_schema.
+      require('../services/customer-empty-loser')._resetCaches();
+      const recordingRaw = dbMock.raw.getMockImplementation();
+      dbMock.raw.mockImplementation((sql, ...rest) => {
+        if (String(sql).includes('is_generated')) return Promise.resolve({ rows: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at'].map((column_name) => ({ column_name, column_default: null, is_generated: 'NEVER' })) });
+        if (String(sql).includes('constraint_type')) return Promise.resolve({ rows: [] });
+        return recordingRaw(sql, ...rest);
+      });
+    }
     const outsideFixture = OUTSIDE_WRITE_FIXTURES[toolName];
     const savedEnv = {};
     const savedFetch = global.fetch;
@@ -882,6 +938,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      invoiceActionSpies.forEach((spy) => spy.mockRestore());
+      dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
@@ -1025,6 +1083,7 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // explicitly opts out of live smoke; its preview is exercised above. So does
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt']);
+    // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'send_invoice']);
   });
 });

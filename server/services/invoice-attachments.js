@@ -5,6 +5,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
+const Helpers = require('./invoice-helpers');
 
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_ATTACHMENT_TOTAL_BYTES = 25 * 1024 * 1024;
@@ -26,6 +27,19 @@ const s3 = new S3Client({
     ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
     : undefined,
 });
+
+// A live send claim (invoices.status 'sending') owns the invoice's attachments: the email counts and points to them at
+// the provider handoff, and the Intelligence Bar's send approved a fixed list. Checked on the row locked FOR UPDATE, so it
+// serializes with the claim's own UPDATE. Any live send claim (page, queue worker or bar) trips it: the claim marker does not
+// say which sender holds it.
+const INVOICE_SENDING_MESSAGE = 'This invoice is being sent right now; try again in a minute';
+function assertNotBeingSent(lockedInvoice) {
+  if (lockedInvoice && lockedInvoice.status === 'sending') {
+    const err = attachmentError(INVOICE_SENDING_MESSAGE, 409);
+    err.code = 'invoice_sending';
+    throw err;
+  }
+}
 
 function attachmentError(message, statusCode = 400) {
   const err = new Error(message);
@@ -164,6 +178,17 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
     contentType: validateAttachmentFile(file),
   }));
 
+  // The reservation comes BEFORE the first storage write: the Intelligence Bar's send claim refuses while it is live, and the
+  // insert below refuses when the invoice's send episode moved since. Taken under the invoice row lock, so it is serialized
+  // with a send claim (a claim that already holds the row refuses the upload here).
+  const reservation = await db.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoice.id }).forUpdate()
+      .first('id', 'status', 'sent_at', 'sms_sent_at', 'email_sent_at');
+    if (!locked) throw attachmentError('Invoice not found', 404);
+    assertNotBeingSent(locked);
+    return Helpers.reserveAttachmentUpload(trx, locked, { uploadedByTechId });
+  });
+  let reservationReleased = false;
   const uploadedObjects = [];
   try {
     for (const { file, contentType } of validatedFiles) {
@@ -187,18 +212,27 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
       });
     }
 
-    return await db.transaction(async (trx) => {
+    const insertedRows = await db.transaction(async (trx) => {
       // customer_id comes from the LOCKED row, never the pre-lock read
       // (Codex #3109 r25): a merge-undo can repoint the invoice while this
       // upload waits on the FOR UPDATE — inserting the stale pre-lock
       // owner would split the attachment from the invoice it belongs to.
-      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first('id', 'customer_id');
+      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate()
+        .first('id', 'customer_id', 'status', 'sent_at', 'sms_sent_at', 'email_sent_at');
       if (!lockedInvoice) throw attachmentError('Invoice not found', 404);
+      assertNotBeingSent(lockedInvoice);
+      // The send episode moved since the reservation (a delivery landed while the files were being stored), or the
+      // reservation ran out: the files are not part of anything a send approved. Nothing is inserted; the objects are removed.
+      if (Helpers.invoiceDeliveryEpoch(lockedInvoice) !== reservation.epoch || Date.now() > reservation.expiresAtMs) {
+        const err = attachmentError('This invoice was sent while the files were uploading; upload them again', 409);
+        err.code = 'invoice_sent_during_upload';
+        throw err;
+      }
 
       const lockedExisting = await attachmentUsage(invoice.id, trx);
       assertAttachmentBudget(lockedExisting, uploadedObjects.map((object) => object.file));
 
-      return trx('invoice_attachments').insert(uploadedObjects.map((object) => ({
+      const inserted = await trx('invoice_attachments').insert(uploadedObjects.map((object) => ({
         invoice_id: invoice.id,
         customer_id: lockedInvoice.customer_id || null,
         file_name: object.fileName,
@@ -207,9 +241,18 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
         s3_key: object.key,
         uploaded_by_tech_id: uploadedByTechId || null,
       }))).returning(['id', 'invoice_id', 'file_name', 'mime_type', 'file_size_bytes', 'created_at']);
+      await Helpers.releaseAttachmentUpload(trx, reservation);
+      return inserted;
     });
+    reservationReleased = true;
+    return insertedRows;
   } catch (err) {
     await cleanupUploadedObjects(uploadedObjects);
+    if (!reservationReleased) {
+      try { await Helpers.releaseAttachmentUpload(db, reservation); } catch (releaseErr) {
+        logger.warn(`[invoice-attachments] upload reservation release failed for invoice ${invoice.id}: ${releaseErr.message}`);
+      }
+    }
     throw err;
   }
 }
@@ -240,25 +283,32 @@ function isMissingS3ObjectError(err) {
   return statusCode === 404 || ['NoSuchKey', 'NotFound'].includes(err?.name || err?.Code || err?.code);
 }
 
-async function remove(invoiceId, attachmentId) {
-  const attachment = await getForInvoice(invoiceId, attachmentId);
-  if (!attachment) {
-    throw attachmentError('Attachment not found', 404);
-  }
-
-  if (config.s3?.bucket && attachment.s3_key) {
-    try {
-      await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: attachment.s3_key }));
-    } catch (err) {
-      if (!isMissingS3ObjectError(err)) {
-        logger.warn(`[invoice-attachments] failed to delete object ${attachment.id}: ${err.message}`);
-        throw attachmentError('Could not delete attachment from storage. Please retry.', 502);
-      }
+async function deleteStoredObject(attachment) {
+  if (!(config.s3?.bucket && attachment.s3_key)) return;
+  try {
+    await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: attachment.s3_key }));
+  } catch (err) {
+    if (!isMissingS3ObjectError(err)) {
+      logger.warn(`[invoice-attachments] failed to delete object ${attachment.id}: ${err.message}`);
+      throw attachmentError('Could not delete attachment from storage. Please retry.', 502);
     }
   }
+}
 
-  await db('invoice_attachments').where({ id: attachmentId, invoice_id: invoiceId }).del();
-  return attachment;
+async function remove(invoiceId, attachmentId) {
+  // The invoice row is locked first (the send claim's UPDATE waits on it, and this waits on a claim), so the
+  // sending check, the storage delete and the row delete are one decision. A storage failure rolls it all back.
+  return db.transaction(async (trx) => {
+    const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'status');
+    assertNotBeingSent(lockedInvoice);
+    const attachment = await trx('invoice_attachments').where({ id: attachmentId, invoice_id: invoiceId }).first();
+    if (!attachment) {
+      throw attachmentError('Attachment not found', 404);
+    }
+    await deleteStoredObject(attachment);
+    await trx('invoice_attachments').where({ id: attachmentId, invoice_id: invoiceId }).del();
+    return attachment;
+  });
 }
 
 module.exports = {

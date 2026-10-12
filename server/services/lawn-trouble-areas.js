@@ -58,11 +58,13 @@ const live = () => require('../config/feature-gates').lawnTroubleAreasLive();
 // or the customer's sole property (property-service-areas resolveVisitPropertyId: the one shared resolver). null = the gate is off or the
 // property cannot be resolved: the places are OFF for that visit (no place asked, none stored or judged), as if the gate were off.
 // A visit that has its own property_id uses it as is (that is the resolver's first evidence); only the nullable case reads. Read once per svc.
+// `strict` (a reader that stores its answer): a resolution that FAILS rejects, so the caller does not read an outage as "no property".
 const resolved = new WeakMap();
-async function propertyOf(knex, svc) {
+async function propertyOf(knex, svc, { strict = false } = {}) {
   if (!live() || !svc) return null;
   if (svc.property_id) return svc.property_id;
   if (!svc.customer_id) return null;
+  if (strict) return require('./property-service-areas').resolveVisitPropertyId(svc, knex);
   if (!resolved.has(svc)) {
     resolved.set(svc, require('./property-service-areas').resolveVisitPropertyId(svc, knex).catch((err) => {
       logger.warn(`[lawn-trouble-areas] visit property unresolved for ${svc.id}: ${err?.code || err?.name || 'Error'}`);

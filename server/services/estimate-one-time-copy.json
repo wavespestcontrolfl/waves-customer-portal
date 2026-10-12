@@ -470,5 +470,95 @@
       "h1": "Hello {first}, your tree & shrub visit quote is ready!",
       "sub": "One targeted visit for the measured beds and ornamentals — approve online and pick a day. Licensed & insured, 30-day callback included."
     }
+  },
+  "area_addon_bed_pre_emergent": {
+    "outcome": "One pre-emergent weed-control application to your landscape beds.",
+    "includes": [
+      "Pre-emergent applied to your landscape beds, up to {Area}",
+      "{Visit}",
+      "Treatment documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "One application. Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your bed pre-emergent weed control",
+      "h1": "Hello {first}, your bed pre-emergent weed control quote is ready!",
+      "sub": "One pre-emergent application to your landscape beds, priced from the bed area — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "area_addon_lawn_insect_spot": {
+    "outcome": "One insect spot treatment on damaged St. Augustine turf and the green edge around it.",
+    "includes": [
+      "Insect treatment applied to the affected turf and its edge, up to {Area}",
+      "{Visit}",
+      "Treatment documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "One application. Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your lawn insect spot treatment",
+      "h1": "Hello {first}, your lawn insect spot treatment quote is ready!",
+      "sub": "One insect spot treatment on the affected turf, priced from the treated area — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "area_addon_fire_ant_yard": {
+    "outcome": "One fire ant treatment broadcast across your lawn.",
+    "includes": [
+      "Treatment broadcast across the lawn, up to {Area}",
+      "{Visit}",
+      "Treatment documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "One application. Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your fire ant yard treatment",
+      "h1": "Hello {first}, your fire ant yard treatment quote is ready!",
+      "sub": "One fire ant treatment across your lawn, priced from the treated area — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "area_addon_lawn_insect_preventive": {
+    "outcome": "One yearly preventive insect treatment across your lawn.",
+    "includes": [
+      "Preventive insect treatment applied across the lawn, up to {Area}",
+      "{Visit}",
+      "Treatment documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "One application. Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your yearly lawn insect preventive",
+      "h1": "Hello {first}, your yearly lawn insect preventive quote is ready!",
+      "sub": "One preventive insect treatment across your lawn, priced from the treated area — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "area_addon_hardscape_weed": {
+    "outcome": "One weed-control application to shell, rock beds, pavers and fence lines.",
+    "includes": [
+      "Weed control applied to hard surfaces and bare ground (not lawn or planted beds), up to {Area}",
+      "{Visit}",
+      "Treatment documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "One application. Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your shell, rock and paver weed control",
+      "h1": "Hello {first}, your shell, rock and paver weed control quote is ready!",
+      "sub": "One weed-control application to shell, rock and paver areas, priced from the treated area — approve online and pick a day. Licensed & insured."
+    }
+  },
+  "area_addon_web_sweep": {
+    "outcome": "One web sweep of your pool cage, lanai and eaves.",
+    "includes": [
+      "Webs swept from the pool cage, lanai and eaves",
+      "{Visit}",
+      "Service documented in your service report"
+    ],
+    "assurance": null,
+    "terms": "One application. Pay on service day. No recurring schedule, no tier discount.",
+    "hero": {
+      "eyebrow": "Your web sweep",
+      "h1": "Hello {first}, your web sweep quote is ready!",
+      "sub": "One web sweep of your pool cage, lanai and eaves — approve online and pick a day. Licensed & insured."
+    }
   }
 }

@@ -604,35 +604,9 @@ export function WritingView({ sources }) {
 
 // "Heard from you": the record facts read from the note (where product
 // went down, the pests named), fixed by talking again and writing again.
-// Shown once the note was read; why a read holds the send is the footer's.
+// Shown once the note was read; it never holds the send.
 const joinAnd = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items[0] || '');
 const FACTS_READ = new Set(['read', 'empty_note']);
-
-// Why the note's read holds Complete & send, or '': where product went down
-// decides the customer's re-entry wait, so it must have been heard.
-export function factsHold(facts) {
-  if (facts?.status === 'too_long') return 'Your note is too long to read where you treated. Shorten it, then write it again.';
-  if (!FACTS_READ.has(facts?.status)) return 'Couldn’t read where you treated from your note. Write it again to retry.';
-  // Heard, but the note also denies it: never recorded, never dropped.
-  const unclear = facts.unclearAreas || [];
-  if (unclear.length) {
-    return `It isn’t clear whether you treated ${joinAnd(unclear.map((area) => area.toLowerCase()))}. Say plainly where you treated, then write it again.`;
-  }
-  // A spray heard but not held up: never recorded as spot spraying.
-  if (facts.unclearSpray) {
-    return 'It isn’t clear how you sprayed. Say plainly whether you sprayed around the house, sprayed spots, or didn’t spray, then write it again.';
-  }
-  // A pest the note treats for that was not heard: never left off the
-  // products' targets (Codex #5538).
-  const unclearPests = facts.unclearPests || [];
-  if (unclearPests.length) {
-    return `It isn’t clear whether you treated for ${joinAnd(unclearPests)}. Say plainly which pests you treated for, then write it again.`;
-  }
-  if (!facts.areas.length) return 'Say where you treated (inside, outside or garage) in your note, then write it again.';
-  // Every product goes on the record with the pests it was for, as the
-  // re-service sheet requires a pest; none heard means none would be recorded.
-  return facts.pests?.length ? '' : 'Say what pest you treated for (ants, roaches, spiders…) in your note, then write it again.';
-}
 
 const SPRAY_HEARD = { perimeter: 'perimeter spray', spot: 'spot spraying' };
 
@@ -989,9 +963,9 @@ export function TypedRecordCard({ schema, record, unclear = [], scoreUnclear = f
   );
 }
 
-// The sweep chip (owner 2026-10-08): the note fills it and one tap corrects
-// it. On: "Swept eaves and webs ✕" (tap to take it off). Off: "+ Swept eaves"
-// (tap to add it). It is one chip beside the report, not a section of its own.
+// The sweep chip on the older short form, which has no note read: one tap
+// records the sweep. The report flow has none (owner 2026-10-09: the tech
+// says it in the note or it is not on the record).
 export function SweepChip({ on, locked, onToggle }) {
   return (
     <Chip
@@ -1004,7 +978,7 @@ export function SweepChip({ on, locked, onToggle }) {
 }
 
 export function ReportCard({
-  draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, sweep = null, onEdit, onDoneEditing, onChangeText, onWriteAgain,
+  draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
   const textId = useId();
   const edited = draft.text.trim() !== draft.base.trim();
@@ -1040,7 +1014,6 @@ export function ReportCard({
       {blogPost && <p className="tech-visit-muted">At the bottom, from the Waves blog: {blogPost.title}</p>}
       {pestHeard && <HeardLine facts={draft.facts} />}
       <div className="tech-visit-tile-grid">
-        {sweep && <SweepChip on={sweep.on} locked={locked} onToggle={sweep.onToggle} />}
         <Chip disabled={locked} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />
         <Chip disabled={locked} label="Write again" onClick={onWriteAgain} />
       </div>

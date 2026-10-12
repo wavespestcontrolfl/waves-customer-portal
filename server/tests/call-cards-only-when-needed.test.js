@@ -5,6 +5,8 @@
 const {
   dropUnneededCallCards,
   callMakesNoServiceAsk,
+  callEndedWithNothingToDo,
+  noActionCallCards,
   spelledEmailSettled,
 } = require('../services/call-triage-flags');
 
@@ -29,6 +31,20 @@ describe('dropUnneededCallCards', () => {
   test('a reschedule keeps reschedule_or_cancel and drops the coordination duplicate', () => {
     const r = dropUnneededCallCards(['reschedule_or_cancel', 'existing_appointment_coordination'], ext({ status: 'reschedule_requested' }));
     expect(r.flags).toEqual(['reschedule_or_cancel']);
+  });
+
+  test('no address given: one address card, not missing_service_address plus address_unverifiable', () => {
+    // A quote request with a street named elsewhere would keep both, but here
+    // the call stated no address at all, so the model's flag repeats the
+    // deterministic one.
+    const r = dropUnneededCallCards(['address_unverifiable', 'missing_service_address', 'low_confidence_address'], ext({ status: 'requested', intent: 'new_service', quoteRequested: true }));
+    expect(r.flags).toEqual(['missing_service_address', 'low_confidence_address']);
+    expect(r.dropped).toEqual(['address_unverifiable']);
+  });
+
+  test('address_unverifiable alone (a street was named but could not be verified) keeps its card', () => {
+    const r = dropUnneededCallCards(['address_unverifiable'], ext({ status: 'requested', intent: 'new_service' }));
+    expect(r.flags).toEqual(['address_unverifiable']);
   });
 
   test('coordination with no change asked files no card', () => {
@@ -64,13 +80,13 @@ describe('dropUnneededCallCards', () => {
     expect(dropUnneededCallCards(flags, e).flags).toEqual(flags);
   });
 
-  test('address cards stay on a new-service ask, a quote, or any time asked', () => {
+  test('address cards stay on a new-service ask, a quote, or any time asked (one card when no street was stated)', () => {
     const flags = ['address_unverifiable', 'missing_service_address'];
-    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'active_infestation_treatment' })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'follow_up_existing_service', quoteRequested: true })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: null, quotePromised: true })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'requested', intent: 'follow_up_existing_service' })).flags).toEqual(flags);
-    expect(dropUnneededCallCards(flags, ext({ status: 'offered', intent: null })).flags).toEqual(flags);
+    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'active_infestation_treatment' })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: 'follow_up_existing_service', quoteRequested: true })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'none', intent: null, quotePromised: true })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'requested', intent: 'follow_up_existing_service' })).flags).toEqual(['missing_service_address']);
+    expect(dropUnneededCallCards(flags, ext({ status: 'offered', intent: null })).flags).toEqual(['missing_service_address']);
   });
 
   test('out_of_service_area is never dropped', () => {
@@ -113,6 +129,85 @@ describe('dropUnneededCallCards', () => {
   test('tolerates a missing extraction', () => {
     expect(dropUnneededCallCards(['missing_service_address'], null).flags).toEqual([]);
     expect(dropUnneededCallCards(null, null)).toEqual({ flags: [], dropped: [] });
+  });
+});
+
+// 2026-10-10 call audit: a caller who heard the fee and said no, and a caller
+// outside the service area, each left blocking cards with nothing to do.
+describe('noActionCallCards: a call that ended with nothing to do', () => {
+  const done = (over = {}) => ({
+    recommended_disposition: 'no_action_needed',
+    meta: { is_voicemail: false },
+    scheduling: { status: 'none' },
+    service_request: { quote_requested: true, quote_promised: false },
+    property: { service_address: { city: 'Sampleton' } },
+    ...over,
+  });
+
+  test('no time agreed and no street stated: no booking-hold card and no address card', () => {
+    expect(noActionCallCards(done()).sort()).toEqual([
+      'address_unverifiable', 'address_unverified', 'ambiguous_scheduling', 'low_confidence_address', 'missing_service_address', 'not_confirmed',
+    ]);
+  });
+
+  test('a caller who asked for a visit and then dropped it (declined the price, or no appointment needed) files no not_confirmed card', () => {
+    const declined = { quote_promised: false, price: { amount_usd: 75, caller_response: 'declined', accepted: false } };
+    expect(noActionCallCards(done({ scheduling: { status: 'requested' }, service_request: declined }))).toContain('not_confirmed');
+    expect(noActionCallCards(done({ scheduling: { status: 'requested' }, service_request: { urgency: 'no_appointment_needed' } }))).toContain('not_confirmed');
+  });
+
+  // Codex r1: 'requested' says the caller wanted a visit, not that the caller dropped it.
+  test('a requested visit with no evidence that it ended keeps every card', () => {
+    const stillOpen = [
+      {},
+      { urgency: 'within_48_hours' },
+      { price: { amount_usd: 75, caller_response: 'no_response' } },
+      { price: { amount_usd: 75, caller_response: 'not_at_issue' } },
+      { price: { amount_usd: 75, caller_response: 'accepted', accepted: true } },
+      { price: { amount_usd: 250, caller_response: 'declined' }, prices: [{ amount_usd: 250, caller_response: 'declined' }, { amount_usd: 200, caller_response: 'accepted' }] },
+    ];
+    for (const sr of stillOpen) {
+      expect(noActionCallCards(done({ scheduling: { status: 'requested' }, service_request: sr }))).toEqual([]);
+    }
+  });
+
+  test('a stated street keeps every address card (from the extraction or the merged record)', () => {
+    const heard = done({ property: { service_address: { street_line_1: '1234 Sample Palm Dr' } } });
+    expect(noActionCallCards(heard)).toEqual(['not_confirmed', 'ambiguous_scheduling']);
+    expect(noActionCallCards(done(), { canonicalStreet: '1234 Sample Palm Dr' })).toEqual(['not_confirmed', 'ambiguous_scheduling']);
+  });
+
+  test('any other verdict keeps every card', () => {
+    for (const rec of ['callback_task_created', 'lead_response_flow_triggered', 'estimate_send', 'existing_customer_routed', 'booked', undefined, null]) {
+      expect(noActionCallCards(done({ recommended_disposition: rec }))).toEqual([]);
+    }
+    expect(noActionCallCards(null)).toEqual([]);
+  });
+
+  test('an open thread keeps every card: a time confirmed, offered, accepted or still unclear, a promised callback, follow-up or quote, a voicemail', () => {
+    const open = [
+      { scheduling: { status: 'confirmed' } },
+      { scheduling: { status: 'offered' } },
+      { scheduling: { status: 'ambiguous' } },
+      { scheduling: { status: 'reschedule_requested' } },
+      { scheduling: { status: 'canceled' } },
+      { scheduling: { status: 'none', confirmed_start_at: '2026-10-12T11:00:00-04:00' } },
+      { scheduling: { status: 'requested', agent_committed_booking: true } },
+      { scheduling: { status: 'requested', caller_accepted_slot: true } },
+      { scheduling: { status: 'none', follow_up_mentioned: true } },
+      { scheduling: { status: 'none', callback_window_start: '2026-10-09T15:23' } },
+      { scheduling: { status: 'none', callback_window_end: '2026-10-09T16:23' } },
+      { service_request: { quote_promised: true } },
+      { meta: { is_voicemail: true } },
+    ];
+    for (const over of open) {
+      expect(callEndedWithNothingToDo(done(over))).toBe(false);
+      expect(noActionCallCards(done(over))).toEqual([]);
+    }
+  });
+
+  test('a missing scheduling block reads as no time asked', () => {
+    expect(callEndedWithNothingToDo({ recommended_disposition: 'no_action_needed' })).toBe(true);
   });
 });
 

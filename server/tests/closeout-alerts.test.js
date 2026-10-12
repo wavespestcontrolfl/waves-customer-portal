@@ -30,6 +30,21 @@ describe('closeoutIssuesForVisit', () => {
     expect(closeoutIssuesForVisit(base({ completion: fact('pending', 'completion_running'), report: fact('pending', 'awaiting_completion') }))).toEqual([]);
     expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'recap_sms_in_flight') }))).toEqual([]);
   });
+  test('an application issue on a visit with chemical area add-ons names the add-ons with no record (Codex round 8)', () => {
+    const summary = (application) => closeoutIssuesForVisit(base({ application }))[0].summary;
+    expect(summary(fact('pending', 'addon_application_rows_missing', { missingAddOns: ['area_addon_lawn_insect_preventive'] })))
+      .toBe('Completed job has no application record for Yearly Lawn Insect Preventive.');
+    expect(summary(fact('pending', 'addon_application_rows_missing', { missingAddOns: ['area_addon_lawn_insect_spot', 'area_addon_bed_pre_emergent'], missingHostApplication: true })))
+      .toBe('Completed job has no application record for Lawn Insect Spot Treatment, Bed Pre-Emergent Weed Control, the visit’s own service.');
+    expect(summary(fact('pending', 'addon_application_rows_missing', { missingAddOns: [], missingHostApplication: true })))
+      .toBe('Completed job has no application record for the visit’s own service.');
+    expect(summary(fact('failed', 'addon_application_rows_retracted', { missingAddOns: ['area_addon_fire_ant_yard'] })))
+      .toBe('The application record for Fire Ant Yard Treatment was retracted.');
+    // Every row retracted keeps its sentence, and an ordinary missing record keeps its own.
+    expect(summary(fact('failed', 'all_application_rows_retracted', { missingAddOns: ['area_addon_fire_ant_yard'] })))
+      .toBe('Every application row on this job was retracted — the required material log is empty.');
+    expect(summary(fact('pending', 'no_application_rows'))).toBe('Completed job is missing the required chemical or material application record.');
+  });
   test('stuck completion (no record / failed / resumable) is ONE issue on the report type', () => {
     for (const c of [fact('pending', 'completed_visit_without_record'), fact('failed', 'completion_attempt_failed'), fact('pending', 'completion_side_effects_resumable')]) {
       const issues = closeoutIssuesForVisit(base({ completion: c, report: fact('pending', 'awaiting_completion'), application: fact('pending', 'awaiting_completion') }));

@@ -73,7 +73,7 @@ function waterAdviceBlock(prefs, visitDate) {
 
 // A banner states a post-treatment watering step while it holds watering back or asks for a water-in. The state "none"
 // ("No watering change from today's treatment.") and a mow-hold-only banner (state null) ask for nothing.
-const WATERING_BANNER_STATES = Object.freeze(['hold', 'hold_then_water_in', 'water_in']);
+const WATERING_BANNER_STATES = Object.freeze(['hold', 'hold_then_water_in', 'water_in', 'water_in_by_rain']);
 
 const aftercareAsksForWatering = (aftercare) => !!(aftercare && hasText(aftercare.watering) && aftercare.neutral !== true);
 

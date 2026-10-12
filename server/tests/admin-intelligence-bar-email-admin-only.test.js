@@ -133,6 +133,22 @@ describe('email tools are admin-only in the intelligence bar', () => {
     });
   });
 
+  test('GATE_IB_DELETE_CUSTOMER on: delete_duplicate_customer reaches admin lists (customers, dashboard) and never a technician token', async () => {
+    process.env.GATE_IB_DELETE_CUSTOMER = 'true';
+    try {
+      await withServer(async (baseUrl) => {
+        for (const context of ['customers', 'dashboard']) {
+          expect(await queryToolNames(baseUrl, 'admin', context)).toContain('delete_duplicate_customer');
+        }
+        for (const context of ['dispatch', 'comms', 'customers']) {
+          expect(await queryToolNames(baseUrl, 'tech', context)).not.toContain('delete_duplicate_customer');
+        }
+      });
+    } finally {
+      delete process.env.GATE_IB_DELETE_CUSTOMER;
+    }
+  });
+
   test('admin tool lists include the shared email subset (but not email-page-only tools outside the email context)', async () => {
     await withServer(async (baseUrl) => {
       const dispatch = await queryToolNames(baseUrl, 'admin', 'dispatch');

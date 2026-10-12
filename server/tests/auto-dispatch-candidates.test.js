@@ -93,6 +93,7 @@ describe('findValidCandidateSlots', () => {
     const args = findAvailableSlots.mock.calls[0][0];
     expect(args.excludeServiceIds).toEqual(['s1']);
     expect(args.slotStepMinutes).toBe(60); // on-the-hour starts
+    expect(args.strictBlackout).toBe(true); // an unreadable closed-day list stops the search (owner 2026-10-09)
     // search window is bounded to ±7 days of the visit's date (2026-08-04),
     // not the whole horizon — so cadence isn't collapsed.
     expect(args.dateFrom).toBe('2026-07-28');

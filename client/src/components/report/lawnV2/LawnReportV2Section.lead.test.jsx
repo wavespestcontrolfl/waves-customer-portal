@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The lawn report LEAD layout (lawn report rebuild P7, GATE_LAWN_REPORT_LEAD):
+// The lawn report LEAD layout (lawn report rebuild P7):
 // ReportViewPage mounts LawnLeadCard under the watering banner; the lawn section
 // then drops the snapshot hero and the follow-up card and opens with the photo
 // strip. A payload without `lead` renders the legacy layout.

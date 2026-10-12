@@ -458,6 +458,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text.split(line2)).toHaveLength(2);
   });
 
+  it('rain has watered it in (GATE_LAWN_WATER_IN_RAIN): the banner sentences print once, not again in the hero task', () => {
+    const line1 = 'Rain since your visit has watered today’s treatment in.';
+    const line2 = 'No extra sprinkler run is needed for it.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'water_in_by_rain', lines: [line1, line2], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2}`, waterInRequired: false, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line1 }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.split(line1)).toHaveLength(2);
+    expect(text.split(line2)).toHaveLength(2);
+  });
+
   it('partial credit: the frozen any-day sentence inside an action is stripped even though the banner composed a longer line', () => {
     const line1 = 'Water in today’s treatment by Thu 2 PM.';
     const line2 = 'Run each zone about 40 minutes.';
@@ -483,7 +502,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Water the front strip by hand.');
   });
 
-  it('prints the lawn lead "What to expect" sentences (GATE_LAWN_REPORT_COPY_V6) and nothing when the key is absent', () => {
+  it('prints the lawn lead "What to expect" sentences (lawn v6 copy) and nothing when the key is absent', () => {
     const expectLine = 'By your next visit, most treated weeds should be yellowing, browning or both.';
     const snapshot = { overallScore: 86, statusHeadline: 'Looking healthy' };
     const withKey = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy', whatToExpect: expectLine } } };
@@ -2036,7 +2055,7 @@ describe('ServiceReportDocument: the four-section report', () => {
 });
 
 // Lawn PDF diet (lawn report rebuild P8): a payload carrying `lead`
-// (GATE_LAWN_REPORT_LEAD) prints the lead's reason as the status detail, finding
+// prints the lead's reason as the status detail, finding
 // bullets as headline + what we saw (+ why it matters only for needs_attention),
 // never the "What Waves did" line, and not the follow-up's stock no-action line.
 // The same payload without `lead`, and tree & shrub, print exactly as before.

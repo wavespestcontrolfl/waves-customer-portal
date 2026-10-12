@@ -33,6 +33,7 @@ const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
+const featureGates = require('../config/feature-gates');
 const { tsPestCheckLive } = require('./tree-shrub-pest-check');
 const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
@@ -85,6 +86,8 @@ function treeShrubProductFlags(row, { serviceDate, zone }) {
 // cover: companion sections (the retired lawn+T&S combo) and grouped visits.
 async function treeShrubFastIneligibleReason(svc, profile, knex) {
   if (!profile) return 'profile_unavailable';
+  // An attached area add-on row is work this sheet cannot record (product and treated area).
+  if (svc.hasAreaAddOnRows) return 'area_addon_attached';
   if (!isTreeShrubFastProfile(profile)) return 'not_tree_shrub';
   if (profile.projectBacked || profile.requiresProject) return 'project_backed';
   if (Array.isArray(profile.companions) && profile.companions.length) return 'has_companions';
@@ -534,6 +537,8 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
     ...await neonicCapKey(svc, catalog, knex),
+    // GATE_FAST_COMPLETE_WRAP_UP: the sheet shows its Wrap-up section. Gate off = no key at all.
+    ...(featureGates.fastCompleteWrapUpLive() && { wrapUp: true }),
   };
 }
 

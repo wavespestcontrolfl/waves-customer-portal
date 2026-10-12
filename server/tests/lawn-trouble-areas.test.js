@@ -159,6 +159,18 @@ describe('propertyOf: the property the places work on (the shared visit-property
     expect(await areas.propertyOf({}, { id: 'v4', customer_id: 'c1', property_id: null })).toBeNull();
     spy.mockRestore();
   });
+
+  // Codex #6256 r6 P1: a reader that stores its answer must not read a resolver outage as "no property".
+  test('strict: a failed resolution REJECTS (also after a non-strict call cached null for the same visit); a good one resolves', async () => {
+    const spy = jest.spyOn(resolver, 'resolveVisitPropertyId').mockRejectedValue(new Error('boom'));
+    const visit = { id: 'v5', customer_id: 'c1', property_id: null };
+    expect(await areas.propertyOf({}, visit)).toBeNull();
+    await expect(areas.propertyOf({}, visit, { strict: true })).rejects.toThrow('boom');
+    spy.mockResolvedValue('prop-9');
+    expect(await areas.propertyOf({}, { id: 'v6', customer_id: 'c1', property_id: null }, { strict: true })).toBe('prop-9');
+    expect(await areas.propertyOf({}, { id: 'v7', customer_id: 'c1', property_id: 'prop-1' }, { strict: true })).toBe('prop-1');
+    spy.mockRestore();
+  });
 });
 
 describe('take_all is never created by the hint alone', () => {

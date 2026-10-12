@@ -373,7 +373,8 @@ describe('slot reservation helpers', () => {
       expect(refused.insertBuilder.insert).not.toHaveBeenCalled();
       // It was handed the LOCKED row (the one this transaction read FOR UPDATE), before the insert.
       // ...plus the reservation TRANSACTION as the second argument, for reads that must be locked with it.
-      expect(revalidate).toHaveBeenCalledWith(expect.objectContaining({ id: 'estimate-456', customer_phone: '(941) 555-0123' }), expect.anything());
+      // ...and the selected slot's day as the third (the add-on yearly limits are judged on the day the visit would happen).
+      expect(revalidate).toHaveBeenCalledWith(expect.objectContaining({ id: 'estimate-456', customer_phone: '(941) 555-0123' }), expect.anything(), { date: '2027-05-20' });
       expect(revalidate.mock.calls[0][1]).toBe(refused.trx);
       expect(refused.estimateBuilder.forUpdate).toHaveBeenCalled();
 

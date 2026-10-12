@@ -22,3 +22,15 @@ describe('trace saves bound to the loaded property', () => {
     expect(read('../../pages/tech/TechHomePage.jsx')).toContain(binding('zoneTarget'));
   });
 });
+
+describe('lawn trace-step hint', () => {
+  test('the lawn tracer (not the yard or perimeter modes) tells the technician to leave the house, driveway and pool out', () => {
+    const modal = read('./TechTreatmentZoneModal.jsx');
+    const at = modal.indexOf('Trace the grass only — leave the house, driveway and pool out.');
+    expect(at).toBeGreaterThan(-1);
+    // Shown on the trace step, only for a lawn visit's own outline (lawnMode without yardMode).
+    expect(modal.slice(Math.max(0, at - 260), at)).toContain('{lawnMode && !yardMode ? (');
+    expect(modal.split('Trace the grass only').length - 1).toBe(1);
+  });
+});
+

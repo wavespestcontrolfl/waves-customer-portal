@@ -85,6 +85,18 @@ function isCustomerRecurringDispatchEnabled() {
     && !config.requirePortalPreferences;
 }
 
+// GATE_AUTO_DISPATCH_ROAD_CHECK: same call-time, fail-closed convention.
+function isRoadCheckEnabled() {
+  const { gateEnvValue, autoDispatchSharedModelLive } = require('../../config/feature-gates');
+  try {
+    // The road legs are the shared model's own (candidate-slots.js builds
+    // them only on that path), so without that gate there is nothing to measure.
+    return gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK') && autoDispatchSharedModelLive();
+  } catch (_) {
+    return false;
+  }
+}
+
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
 function moveRuleConfig(overrides) {
@@ -92,7 +104,7 @@ function moveRuleConfig(overrides) {
     // A DAY move must save at least this many modeled drive minutes on the
     // visit's own detour (owner 2026-10-09: 16 of 50 moves in a week cleared
     // the score bar on the default time window and a lighter day alone, some
-    // with no drive saved). A same-day re-time is not held to it. 0 = off.
+    // with no drive saved). A same-day re-time is held to it too. 0 = off.
     minDayMoveDriveSavingMinutes: overrides.minDayMoveDriveSavingMinutes
       ?? intEnv('AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES', 6, { min: 0, max: 120 }),
     // CONFLICT MOVES (GATE_AUTO_DISPATCH_CONFLICT_MOVES): a visit that overlaps
@@ -105,6 +117,18 @@ function moveRuleConfig(overrides) {
     // closed-day move too. Owner decision pending on the number.
     conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
       ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
+    // The most automatic moves one visit may have (owner 2026-10-09: "at most
+    // two"), counted from the durable reschedule_log (move-limit.js). Day
+    // moves, same-day re-times and forced moves all count. 0 = no limit.
+    maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
+      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 2, { min: 0, max: 20 }),
+    // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
+    // move's drive saving is measured again on Google's traffic-aware roads
+    // before the visit moves. The cap is the most route-matrix legs one run
+    // may buy; past it a move is judged on the model alone.
+    roadCheckEnabled: overrides.roadCheckEnabled ?? isRoadCheckEnabled(),
+    roadCheckMaxElements: overrides.roadCheckMaxElements
+      ?? intEnv('AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS', 600, { min: 0, max: 5000 }),
   };
 }
 
@@ -179,5 +203,5 @@ function getAutoDispatchConfig(overrides = {}) {
 }
 
 module.exports = {
-  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isConflictMovesEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
+  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isConflictMovesEnabled, isRoadCheckEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
 };

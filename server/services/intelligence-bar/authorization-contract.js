@@ -48,11 +48,14 @@ const PREVIEW_NOISE_KEYS = new Set([
 const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|took_ms|_ms$|latency|request_id|trace)/i;
 const PREVIEW_EFFECT_LINES = 12;
 const PREVIEW_EFFECT_CHARS = 200;
-const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property']);
+const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property', 'remove_customer_property']);
 
 // Tools whose commit cannot be undone from the portal (a message leaves,
 // money moves, a public reply posts). Everything else is editable after.
 const IRREVERSIBLE_TOOL_NAMES = new Set([
+  // A removed saved property has no restore in the portal or the bar, and the
+  // same address cannot be added again (the add path dedups against it).
+  'remove_customer_property',
   'send_sms',
   'reply_via_sms',
   'send_email_reply',
@@ -89,11 +92,13 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // The Stripe detach cannot be undone, and an Auto Pay-off the customer
   // is emailed about is only reversible by the customer's own consent.
   'remove_saved_payment_method',
+  // An invoice sent to the customer cannot be unsent.
+  'send_invoice',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
 // generic one-line-per-preview-key dump.
-const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address']);
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'delete_duplicate_customer']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -112,7 +117,13 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
   'resend_receipt',
+  // The invoice text (one text with the pay link; the bar sends no email).
+  'send_invoice',
 ]);
+
+// send_invoice: its card lines come from its own preview
+// (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
+CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -144,6 +155,7 @@ const BILLING_TOOL_NAMES = new Set([
   'create_pending_estimate',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
+  'send_invoice',
 ]);
 
 const ACTION_LABELS = {
@@ -156,9 +168,11 @@ const ACTION_LABELS = {
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
   merge_customers: 'Merge duplicate customer',
+  delete_duplicate_customer: 'Delete empty duplicate customer',
   add_customer_property: 'Add saved property',
   update_customer_property: 'Update saved property',
   set_primary_property: 'Change primary property',
+  remove_customer_property: 'Remove saved property',
   create_appointment: 'Book an appointment',
   reschedule_appointment: 'Move an appointment',
   cancel_appointment: 'Cancel an appointment',
@@ -173,6 +187,7 @@ const ACTION_LABELS = {
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
+  send_invoice: 'Send an invoice to the customer',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -356,6 +371,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview?.customer?.name) push('customer', preview.customer.name);
     if (preview?.address) push('customer', `Save property: ${preview.address}`);
     if (preview?.property?.address) push('customer', preview.property.address);
+    if (preview?.removed_property?.address) push('customer', `Remove property: ${preview.removed_property.address}${preview.removed_property.label ? ` (${preview.removed_property.label})` : ''}`);
     if (preview?.previous_primary?.address) push('customer', `Previous primary: ${preview.previous_primary.address}`);
     if (preview?.primary_property?.address) push('customer', `New primary: ${preview.primary_property.address}`);
     for (const [field, value] of Object.entries(preview?.changes || {})) {
@@ -789,6 +805,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview.autopay_note) push('billing', preview.autopay_note);
     if (preview.customer_emails?.summary) push('comms', String(preview.customer_emails.summary));
   }
+  // send_invoice: invoice, money and who is contacted.
+  if (toolName === 'send_invoice' && preview?.preview === true) {
+    // Lines flagged `more` (every invoice line past the first few) ride in full under "Show more".
+    for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
+  }
   // correct_invoice_address: what the rewrite does and does not touch.
   if (toolName === 'correct_invoice_address' && preview?.does) {
     push('billing', String(preview.does));
@@ -905,6 +929,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // card must not also say that no notice goes.
     if (!preview.tier_upgrade_email) push('billing', 'No price-change notice is sent to the customer');
   }
+  // Billing type + per-application fee (owner D5 2026-10-06,
+  // billing-mode-change.js): before -> after in words, what the next visits
+  // are charged, and that no customer message is sent.
+  if (toolName === 'update_customer' && preview?.billing_change) {
+    const bc = preview.billing_change;
+    if (bc.billing_type) push('billing', `Billing type: ${bc.billing_type.before} → ${bc.billing_type.after}`, bc.billing_type);
+    if (bc.fee) push('billing', `Per-application fee: ${bc.fee.before} → ${bc.fee.after}`, bc.fee);
+    for (const line of bc.next_visits || []) push('billing', line);
+    push('billing', 'No customer message is sent');
+  }
   // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): decided
   // at proposal time by tier-upgrade-email.js and pinned on the stored params;
   // absent whenever the gate is off or the card does not qualify.
@@ -931,6 +965,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', params?.updates?.phone !== undefined
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
+  }
+  // The shared-phone mark clear is a server-derived effect of a phone edit,
+  // single or bulk (codex #6268 r8/r9): bound into the contract so Confirm covers it.
+  if ((toolName === 'update_customer' || toolName === 'bulk_update_customers') && params?.updates?.phone !== undefined) {
+    push('customer', require('../shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
   }
 
   // Grouped-visit ripple of a reschedule (GH r12 P1): a pinned visit_id

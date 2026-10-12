@@ -967,11 +967,12 @@ function packedEndsStarts({ prevIsStop, nextIsStop, earliestFloor, latestStartFl
 // double loop, and has no reason to share a function scope with the
 // date/tech enumeration around it.
 // `params`: { services, geo, excludeSet, wantsPackedEnds,
-//   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose }.
+//   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose,
+//   everyStepStart }.
 function candidatesForDay(date, tech, params) {
   const {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
-    slotStepMinutes, durationMinutes, dayOpen, dayClose,
+    durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
     tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
@@ -997,16 +998,28 @@ function candidatesForDay(date, tech, params) {
       continue;
     }
 
-    // Legacy single-candidate path: earliest-feasible minute only, snapped
-    // to slotStepMinutes (default 1 = exact minute).
-    const startMin = slotStepMinutes > 1
-      ? Math.ceil(gap.earliestFloor / slotStepMinutes) * slotStepMinutes
-      : gap.earliestFloor;
-    if (startMin > gap.latestStartFloor) continue; // doesn't fit
-    if (startMin + durationMinutes > dayClose) continue; // past end of day
-    found.push(gap.makeCandidate(startMin));
+    for (const startMin of legacyGapStarts(gap, params)) found.push(gap.makeCandidate(startMin));
   }
   return { candidates: found, evaluatedGaps };
+}
+
+// Legacy path: the starts one gap offers. By default ONE, the earliest
+// feasible minute snapped up to slotStepMinutes (default 1 = exact minute);
+// none when it does not fit the gap or ends past the day's close. With
+// `everyStepStart` (and a step above 1) every later step inside the SAME
+// gap bounds follows, so each start still has the drive in from the stop
+// before it and the drive out to the stop after it.
+function legacyGapStarts(gap, { slotStepMinutes, durationMinutes, dayClose, everyStepStart }) {
+  const first = slotStepMinutes > 1
+    ? Math.ceil(gap.earliestFloor / slotStepMinutes) * slotStepMinutes
+    : gap.earliestFloor;
+  const fits = (startMin) => startMin <= gap.latestStartFloor && startMin + durationMinutes <= dayClose;
+  if (!fits(first)) return [];
+  const starts = [first];
+  if (everyStepStart === true && slotStepMinutes > 1) {
+    for (let startMin = first + slotStepMinutes; fits(startMin); startMin += slotStepMinutes) starts.push(startMin);
+  }
+  return starts;
 }
 
 // Normalizes findAvailableSlots' raw opts: applies every default, and
@@ -1033,6 +1046,12 @@ function candidatesForDay(date, tech, params) {
 //   a stop blocking the slot it's being moved out of. Default [] = identical legacy behavior.
 // @param {number} [opts.slotStepMinutes=1] Snap proposed start times up to this minute
 //   granularity (e.g. 60 = on the hour). Default 1 = exact earliest-feasible minute.
+// @param {boolean} [opts.everyStepStart=false] Legacy path only, with slotStepMinutes > 1:
+//   a gap offers EVERY step-aligned start that fits it, not only the earliest. Each start
+//   passes the same gap bounds (drive in, drive out, the day's close). Auto-dispatch asks
+//   this for one technician and one date, for a visit that overlaps another stop. Capacity
+//   mode already lists every start the route accepts and ignores it. Default false =
+//   identical legacy behavior.
 // @param {number} [opts.earliestStartMin=0] Lower bound (minutes from midnight) on a
 //   proposed start time. Used to honor a HARD customer time-window preference: each route
 //   gap emits only its earliest-feasible start, so without this an empty/early gap
@@ -1089,6 +1108,7 @@ function normalizeFindTimeOptions(opts) {
     packEnds = false,
     serviceKey = null,
     expectedMinutes = null,
+    everyStepStart = false,
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const wantsPackedEnds = packEnds === true;
@@ -1110,7 +1130,7 @@ function normalizeFindTimeOptions(opts) {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
     earliestStartMin, startFloorByDate, packEnds, serviceKey, expectedMinutes,
-    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet, everyStepStart,
   };
 }
 
@@ -1129,7 +1149,7 @@ function startFloorFor(date, earliestStartMin, startFloorByDate) {
 // empty techs array short-circuits (no services/dates query) — the caller
 // still owns the "no assignable technicians" early return, since that
 // shape is a findAvailableSlots response contract, not a loading concern.
-async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates }) {
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout }) {
   // Only assignable techs (active employment AND field-dispatchable). Every
   // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
@@ -1195,11 +1215,12 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   // commits consume the same shared helper.) Admin manual scheduling stays
   // unblocked by design — staff callers (the dispatch Find-best-times tool)
   // pass includeBlackoutDates:true to keep their recommendations complete.
-  // The helper fails open.
+  // The helper fails open, unless the caller passes strictBlackout (the
+  // nightly auto-dispatch search): then an unreadable list throws.
   let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
   if (dates.length && !includeBlackoutDates) {
     const { getBlackoutDates } = require('./blackout-dates');
-    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
+    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1], undefined, { strict: strictBlackout === true });
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
   return { techs, services, dates, absentDays };
@@ -1216,7 +1237,7 @@ async function findAvailableSlots(opts) {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
     earliestStartMin, startFloorByDate, serviceKey, expectedMinutes,
-    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
+    stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet, everyStepStart,
   } = normalizeFindTimeOptions(opts);
   // The requesting estimate's OWN uncommitted holds are not route stops for
   // itself (codex r17 P1). The collision filter downstream already excludes
@@ -1251,7 +1272,7 @@ async function findAvailableSlots(opts) {
   const dayClose = dayEndHour * 60;
 
   const { techs, services, dates, absentDays } = await loadFindTimeContext({
-    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates,
+    dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
   });
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
@@ -1282,7 +1303,7 @@ async function findAvailableSlots(opts) {
 
   const dayParams = {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
-    slotStepMinutes, durationMinutes, dayOpen, dayClose,
+    slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
   };
   for (const date of dates) {
     for (const tech of techs) {
@@ -1311,6 +1332,7 @@ module.exports = {
   DAY_START_HOUR,
   DAY_END_HOUR,
   _internals: {
+    legacyGapStarts,
     capacityLegs,
     enumerateDates,
     packCapacityEnds,

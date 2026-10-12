@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// Tree & Shrub Fast Complete: tips written for a watch item the tech marked
-// Seen lead the tip picker under "For what you saw today". With nothing seen,
-// no watch list (gate off) or a search, the picker is exactly today's. A pick
-// is always the tech's. Synthetic data only.
+// Tree & Shrub Fast Complete: the tip picker lists no tip until the tech
+// searches (owner 2026-10-12, the way the blog post is found). A watch item
+// marked Seen lists nothing by itself; a search reads every tip, and a pick is
+// always the tech's. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -81,61 +81,42 @@ const seen = (label) => {
   fireEvent.click(screen.getByRole('button', { name: label }));
 };
 
-describe('tip ranking by seen watch items', () => {
-  test('no watch list: the picker is the library order with its four-tip preview', async () => {
+describe('the tip picker lists tips only for a search', () => {
+  test('no watch list: no tip, no heading and no "Show all" until the tech searches', async () => {
     await openSheet(BASE_CONTEXT);
+    expect(tipButtons()).toEqual([]);
     expect(screen.queryByText('For what you saw today')).toBeNull();
-    expect(tipButtons()).toEqual(['Mulch tip', 'Water tip', 'Black film tip', 'Bloom tip']);
-    fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
-    expect(tipButtons()).toEqual(['Mulch tip', 'Water tip', 'Black film tip', 'Bloom tip', 'Fresh mulch weeds tip', 'Cold tip']);
+    expect(screen.queryByRole('button', { name: 'Show all' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'tip' } });
+    expect(tipButtons()).toEqual(['Black film tip', 'Bloom tip', 'Cold tip', 'Fresh mulch weeds tip', 'Mulch tip', 'Water tip']);
   });
 
-  test('a watch list with nothing seen changes nothing', async () => {
+  test('a watch item marked Seen lists no tip by itself', async () => {
     await openSheet({ ...BASE_CONTEXT, watchList: WATCH_LIST });
-    expect(screen.queryByText('For what you saw today')).toBeNull();
-    expect(tipButtons()).toEqual(['Mulch tip', 'Water tip', 'Black film tip', 'Bloom tip']);
-  });
-
-  test('seen items float the matching tips to the top under the heading, in library order, and select nothing', async () => {
-    const request = await openSheet({ ...BASE_CONTEXT, watchList: WATCH_LIST });
     seen('Bed weeds');
     seen('Scale');
-    const heading = await screen.findByText('For what you saw today');
-    expect(heading.tagName).toBe('H4');
-    expect(tipButtons()).toEqual(['Black film tip', 'Fresh mulch weeds tip', 'Mulch tip', 'Water tip', 'Bloom tip', 'Cold tip']);
-    // nothing is picked for the tech
-    expect(document.querySelectorAll('.tech-visit-tip[aria-pressed="true"]')).toHaveLength(0);
-    // No pick, so no count line (the quiet section shows none until a pick).
-    expect(screen.queryByText('1 picked')).toBeNull();
-    expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(false);
-  });
-
-  test('a seen item with no matching tip adds no heading', async () => {
-    await openSheet({ ...BASE_CONTEXT, watchList: [{ key: 'whitefly', label: 'Whitefly', signal: 'Possible whitefly', referOnly: false }] });
-    seen('Whitefly');
+    expect(tipButtons()).toEqual([]);
     expect(screen.queryByText('For what you saw today')).toBeNull();
-    expect(tipButtons()).toEqual(['Mulch tip', 'Water tip', 'Black film tip', 'Bloom tip']);
   });
 
-  test('search still finds every tip, floated or not', async () => {
+  test('a search finds a tip by its label or keyword, a tip for a seen item included', async () => {
     await openSheet({ ...BASE_CONTEXT, watchList: WATCH_LIST });
     seen('Scale');
-    expect(screen.getByText('For what you saw today')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'cold' } });
     expect(tipButtons()).toEqual(['Cold tip']);
-    expect(screen.queryByText('For what you saw today')).toBeNull();
     fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'sooty' } });
     expect(tipButtons()).toEqual(['Black film tip']);
   });
 
-  test('the tech picks a floated tip; taking the item off the list puts the tip back in order and keeps the pick', async () => {
+  test('the tech picks a found tip: it shows alone, and taking the seen item off the list keeps the pick', async () => {
     const request = await openSheet({ ...BASE_CONTEXT, watchList: WATCH_LIST });
     seen('Scale');
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'film' } });
     fireEvent.click(within(document.body).getByRole('button', { name: /^Black film tip/ }));
     expect(screen.getByText('1 picked')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Remove Scale' }));
-    await waitFor(() => expect(screen.queryByText('For what you saw today')).toBeNull());
-    expect(tipButtons()).toEqual(['Mulch tip', 'Water tip', 'Black film tip', 'Bloom tip']);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove Scale' })).toBeNull());
+    expect(tipButtons()).toEqual(['Black film tip']);
     expect(document.querySelector('.tech-visit-tip[aria-pressed="true"]').textContent).toMatch(/^Black film tip/);
     expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(false);
   });
