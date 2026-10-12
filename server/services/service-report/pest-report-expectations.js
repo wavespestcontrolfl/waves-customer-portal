@@ -315,9 +315,11 @@ const EXPECTATION_TEXT = {
     + 'several days as the colony is exposed, then a steady decline over the next couple of weeks.',
   // Same class without both an ant tag and an exterior record — no band,
   // no ant claim (codex P1 2026-09-28 round 4).
-  non_repellent_general: (ai) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'}. Insects can't `
+  // `timeframe: false`: Alpine WSG on a roach job. Its label states no roach
+  // die-off time, so the line gives none (owner 2026-10-12).
+  non_repellent_general: (ai, { timeframe = true } = {}) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'}. Insects can't `
     + 'detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their '
-    + 'harborage. Activity can spike for a few days, then declines over the next couple of weeks.',
+    + `harborage.${timeframe ? ' Activity can spike for a few days, then declines over the next couple of weeks.' : ''}`,
   // The closing instruction to the customer is left out of the writer's plain
   // version: the writer's rule 7 bans aftercare instructions (codex #5523 P2).
   // No placement claim: the builders read no application area or method,
@@ -392,6 +394,33 @@ function hasExteriorApplicationEvidence(product = {}) {
 const PERIMETER_BAND_CHIPS = new Set(['Perimeter', 'Exterior perimeter', 'Property perimeter', 'Foundation', 'Foundation perimeter']
   .map(normalizeAreaChipText));
 
+const hasRoachTarget = (product) => Array.isArray(product?.targets) && product.targets.some((t) => /roach/i.test(t));
+
+// The one label duration a visit's growth regulators may state. Tekko Pro's
+// figure needs a roach-tagged application (it also covers fleas, flies and
+// mosquitoes); Gentrol's applies to every listed pest. Two growth regulators
+// on one visit share one line, so no single label's duration can speak for
+// it: a duration only when one product's applies (Codex P2 #5982).
+function igrLabelDuration(products) {
+  const igrs = (Array.isArray(products) ? products : []).filter((p) => classifyProductExpectation(p) === 'igr');
+  const durations = [...new Set(igrs
+    .map((p) => {
+      const entry = IGR_LABEL_DURATION.get(normalizeProductName(p?.name));
+      return entry && (!entry.needsRoachTarget || hasRoachTarget(p)) ? entry.sentence : null;
+    })
+    .filter(Boolean))];
+  const names = new Set(igrs.map((p) => normalizeProductName(p?.name)));
+  return durations.length === 1 && names.size === 1 ? durations[0] : '';
+}
+
+// Alpine WSG put down for roaches and not for ants: the label gives no time
+// for roaches, so no timeframe is stated for it (owner 2026-10-12).
+const NO_ROACH_TIMEFRAME_PRODUCTS = new Set(['alpine wsg'].map(normalizeProductName));
+function noLabelRoachTimeframe(product) {
+  return NO_ROACH_TIMEFRAME_PRODUCTS.has(normalizeProductName(product?.name))
+    && hasRoachTarget(product) && !hasAntTargetEvidence(product);
+}
+
 function hasPerimeterBandEvidence(product = {}) {
   if (product.methodInferred !== true && String(product.method || '') === 'perimeter_spray') return true;
   return applicationAreaChips(product.applicationArea).some((chip) => PERIMETER_BAND_CHIPS.has(chip));
@@ -438,7 +467,9 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
       if (cls === 'pyrethroid') {
         return EXPECTATION_TEXT.pyrethroid(ingredients(classProducts.filter(hasExteriorApplicationEvidence)));
       }
-      if (cls === 'non_repellent' && !nonRepellentAntBand) return EXPECTATION_TEXT.non_repellent_general(ai);
+      if (cls === 'non_repellent' && !nonRepellentAntBand) {
+        return EXPECTATION_TEXT.non_repellent_general(ai, { timeframe: !classProducts.every(noLabelRoachTimeframe) });
+      }
       // The band sentence places the product outside for ants, so it names
       // only the applications that earned it.
       if (cls === 'non_repellent') {
@@ -447,22 +478,10 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
         )), { footage: !plain });
       }
       if (cls === 'igr') {
-        // A label duration never reaches the writer (plain). Tekko Pro's
-        // figure needs a roach-tagged application (it also covers fleas,
-        // flies and mosquitoes); Gentrol's applies to every listed pest.
-        // Two growth regulators on one visit share one line, so no single
-        // label's duration can speak for it: state a duration only when one
-        // product's applies (Codex P2 #5982).
-        const durations = plain ? [] : [...new Set(classProducts
-          .map((p) => {
-            const entry = IGR_LABEL_DURATION.get(normalizeProductName(p?.name));
-            if (!entry) return null;
-            if (entry.needsRoachTarget && !(Array.isArray(p?.targets) && p.targets.some((t) => /roach/i.test(t)))) return null;
-            return entry.sentence;
-          })
-          .filter(Boolean))];
-        const igrProducts = new Set(classProducts.map((p) => normalizeProductName(p?.name)));
-        return EXPECTATION_TEXT.igr(ai, { labelDuration: durations.length === 1 && igrProducts.size === 1 ? durations[0] : '' });
+        // The writer's plain line carries no duration: an EXPECTATIONS
+        // timeframe reads as a contact window. The writer gets it as a
+        // PRODUCT FACTS label duration instead (report-writer-records.js).
+        return EXPECTATION_TEXT.igr(ai, { labelDuration: plain ? '' : igrLabelDuration(classProducts) });
       }
       return EXPECTATION_TEXT[cls](ai, { aftercare: !plain, labelDuration: !plain });
     })
@@ -550,6 +569,7 @@ module.exports = {
   buildWhatToExpect,
   whatToExpectClasses,
   buildPestExpectations,
+  igrLabelDuration,
   toExpectationProduct,
   isExteriorApplicationArea,
 };

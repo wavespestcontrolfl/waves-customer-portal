@@ -18,6 +18,12 @@
  *                    granular bait, IGRs) and the LESCO surfactant — see
  *                    `alsoLabeledForPestCount` absent below.
  *   petsKids       — re-entry / pets-and-kids guidance in plain language.
+ *   mainPests      — what we mainly use the product for (owner 2026-10-12:
+ *                    "if we use Taurus it should know it is focused on
+ *                    ants; Alpine and Gentrol, roaches"). Read only by the
+ *                    AI report writer's PRODUCT FACTS block
+ *                    (report-writer-records.js); never printed as a list.
+ *                    Absent = the writer gets no main-pest fact.
  *
  * Matched PRIMARILY by EPA registration number (the number printed on the
  * label itself, so it survives any catalog display-name spelling), read off
@@ -97,6 +103,7 @@ const REPORT_PRODUCT_COPY = [
   {
     epaReg: '53883-279',
     names: ['taurus sc'],
+    mainPests: ['ants'],
     howItWorks: 'Pests can’t detect it, so they walk right through the treated band along your foundation and carry it back to the nest — reaching ants you never see.',
     // 35 distinct pests — Control Solutions Inc. current specimen label,
     // cross-checked against the EPA PPLS supplemental label accepted
@@ -111,6 +118,7 @@ const REPORT_PRODUCT_COPY = [
     // wording page's longer "Atticus Talak 7.9 F" display spelling is kept
     // as a second alias for any hand-entered row using it.
     names: ['atticus talak', 'atticus talak 7.9 f'],
+    mainPests: ['spiders', 'crawling insects'],
     howItWorks: 'A long-lasting barrier on soil, walls and eaves. Insects that crawl across or rest on treated surfaces pick up a dose — our main barrier against spiders and crawling invaders.',
     // 88 distinct pests — Atticus, LLC current specimen label (Talak 7.9 F,
     // EPA Reg. No. 91234-145), read in full 2026-09-29. -> floors to 75+.
@@ -120,6 +128,7 @@ const REPORT_PRODUCT_COPY = [
   {
     epaReg: '499-561',
     names: ['alpine wsg'],
+    mainPests: ['ants', 'roaches'],
     howItWorks: 'A fast-acting non-repellent. Pests don’t avoid it, so we use it on ant trails, entry points and the cracks where roaches hide.',
     // 30 distinct pests — EPA PPLS, accepted 05/01/2019 (BASF Alpine WSG,
     // EPA Reg. No. 499-561; no later PPLS version found). -> floors to 25+.
@@ -149,6 +158,7 @@ const REPORT_PRODUCT_COPY = [
   {
     epaReg: '100-1484',
     names: ['advion evolution cockroach gel bait'],
+    mainPests: ['roaches'],
     howItWorks: 'Roaches eat the gel and share it back where they hide, so it reaches roaches we never see. The placements stay attractive for weeks.',
     // Narrow bait product (owner ruling 2026-09-29): no "also labeled for"
     // line at all — alsoLabeledForPestCount intentionally absent.
@@ -171,6 +181,7 @@ const REPORT_PRODUCT_COPY = [
   {
     epaReg: '2724-351',
     names: ['gentrol igr'],
+    mainPests: ['roaches'],
     howItWorks: 'An insect growth regulator: young roaches can’t mature or reproduce, so it breaks the breeding cycle. Results build over the following weeks.',
     // Narrow IGR product (owner ruling 2026-09-29): no line.
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
@@ -262,8 +273,15 @@ function reportProductCopyFor({ epaReg, name, city } = {}) {
   };
 }
 
+// The label's reach as the writer may say it: the floored count, no city.
+function labeledPestCountText(entry) {
+  const floored = floorToMultipleOf25(entry?.alsoLabeledForPestCount);
+  return floored ? `${floored}+ pests` : null;
+}
+
 module.exports = {
   REPORT_PRODUCT_COPY,
+  labeledPestCountText,
   findReportProductCopyEntry,
   reportProductCopyFor,
   floorToMultipleOf25,

@@ -10,8 +10,10 @@
  * written, so the next visit renders live on the report itself
  * (nextSameServiceAppointment) and never enters this text (Codex #5500).
  */
-const { buildWhatToExpect, toExpectationProduct, whatToExpectClasses } = require('./pest-report-expectations');
-const { findReportProductCopyEntry } = require('../../config/report-product-copy');
+const {
+  buildWhatToExpect, igrLabelDuration, toExpectationProduct, whatToExpectClasses,
+} = require('./pest-report-expectations');
+const { findReportProductCopyEntry, labeledPestCountText } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
 const { writerPromiseLines } = require('./visit-promises');
@@ -95,6 +97,36 @@ function writerExpectations({ line = null, findingsType = null, applications = [
 // (config/report-product-copy.js, owner-approved 2026-09-28; owner "ok go"
 // 2026-10-01 lets the writer use it too), labeled with the recorded job,
 // method and area so the writer ties each line to the right piece of work.
+// What each recorded treatment is for (owner 2026-10-12: the writer should
+// know Taurus is for ants, Alpine and Gentrol for roaches, and how many pests
+// a label covers). One line per job, never a product name. Reviewed config
+// only: config/report-product-copy.js.
+function productFactLines(applications) {
+  const seen = new Set();
+  return (Array.isArray(applications) ? applications : []).flatMap((application) => {
+    const entry = findReportProductCopyEntry({ epaReg: application?.epaReg, name: application?.name });
+    if (!entry?.mainPests?.length) return [];
+    const count = labeledPestCountText(entry);
+    const facts = [`mainly used for ${entry.mainPests.join(' and ')}`, count ? `labeled for ${count}` : null].filter(Boolean);
+    const label = [application.role, application.methodLabel, application.applicationArea]
+      .map(cleanText).filter(Boolean).join(', ');
+    const lineText = `- ${label ? `${label}: ` : ''}${facts.join('; ')}.`;
+    if (seen.has(lineText)) return [];
+    seen.add(lineText);
+    return [lineText];
+  });
+}
+
+function productFactsSection(applications, labelDuration) {
+  const lines = productFactLines(applications);
+  if (!lines.length && !labelDuration) return null;
+  const duration = labelDuration
+    ? `\nLABEL DURATION (the growth regulator recorded today): ${labelDuration} Say it at most once, in WHAT TO EXPECT, in these words; it is how long the product keeps working, never a time to contact us.`
+    : '';
+  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Labeled for" is how many pests the label covers: say it only when the customer asked about a pest other than the main one, and say nothing else about the label):'
+    + `${lines.length ? `\n${lines.join('\n')}` : ''}${duration}`;
+}
+
 function howItWorksLines(applications) {
   const seen = new Set();
   return (Array.isArray(applications) ? applications : []).flatMap((application) => {
@@ -133,6 +165,9 @@ function buildWriterRecords({
   if (howItWorks.length) {
     sections.push(`HOW IT WORKS (approved product wording for the work recorded today; use it only to say why the work fits what was found, never for where or how anything was applied):\n${howItWorks.join('\n')}`);
   }
+  const labelDuration = line === 'pest' ? igrLabelDuration(expectationProducts(applications)) : '';
+  const productFacts = line === 'pest' ? productFactsSection(applications, labelDuration) : null;
+  if (productFacts) sections.push(productFacts);
   if (SERVICE_KIND_LABELS[serviceKind]) sections.push(`SERVICE TYPE: ${SERVICE_KIND_LABELS[serviceKind]}.`);
   const reach = (serviceKind === 'one_time' || serviceKind === 're_service')
     ? reachOutDate(serviceYmd, expectations.windowDays)
@@ -148,7 +183,7 @@ function buildWriterRecords({
   }
   return {
     sections,
-    allowedPhrases: groundedTimeframePhrases(expectations.lines),
+    allowedPhrases: groundedTimeframePhrases([...expectations.lines, ...(labelDuration ? [labelDuration] : [])]),
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
     // How many marked promises reached the writer (the generate route's
     // promise-only grounding check).
