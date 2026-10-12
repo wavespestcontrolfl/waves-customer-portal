@@ -64,76 +64,88 @@ postgres('held lines SQL against PostgreSQL', () => {
   });
 
   const T = (iso) => new Date(iso);
-  async function seedHold(callId, phone, heldAt, extra = {}) {
+  const HELD = '2030-02-01T10:00:00.123456Z'; // microseconds: the stamp must survive full precision
+  async function insertHold(callId, phone, heldAt, extra = {}) {
     await database.raw('INSERT INTO call_log (id) VALUES (?) ON CONFLICT DO NOTHING', [callId]);
     await database('disclaimed_number_holds').insert({ phone_e164: phone, source_call_log_id: callId, held_at: heldAt, ...extra });
   }
-  async function seedCard(callId, createdAt, { status = 'resolved', ani = X, reason = 'text_number_differs', payload = {} } = {}) {
+  async function insertCard(callId, createdAt, { status = 'open', ani = X, reason = 'text_number_differs', payload = {} } = {}) {
     const id = randomUUID();
     await database('triage_items').insert({ id, call_log_id: callId, reason_code: reason, status, created_at: createdAt, updated_at: createdAt,
       payload: JSON.stringify({ ani_phone: ani, ...payload }) });
     return id;
   }
+  // The processor's real order: the card is BUILT first (its created_at is earlier), the hold row is armed
+  // after (held_at later), then the card is stamped in the same transaction; staff close the card later.
+  async function armNoText(callId, phone = X, { cardAt = '2030-02-01T09:59:59Z', heldAt = HELD, close = 'resolved' } = {}) {
+    const cardId = await insertCard(callId, cardAt, { ani: phone });
+    await insertHold(callId, phone, heldAt);
+    await Holds.stampOpenNoTextCards(database, callId);
+    if (close) await database('triage_items').where({ id: cardId }).update({ status: close });
+    return cardId;
+  }
   const listed = async () => (await (await fetch(`${baseUrl}/admin/triage/held-lines`)).json()).lines;
 
-  test('a card filed BEFORE the hold was last armed does not make it a no-text hold; one filed after does', async () => {
-    const stale = randomUUID();
-    const fresh = randomUUID();
-    await seedHold(stale, X, T('2030-02-01T10:00:00Z'));
-    await seedCard(stale, T('2030-01-01T10:00:00Z')); // closed card from an earlier no-text arming
-    await seedHold(fresh, X, T('2030-02-01T10:00:00Z'));
-    const cardId = await seedCard(fresh, T('2030-02-01T10:00:05Z'));
+  test('the normal order (card first, hold after) binds, and the CLOSED card still binds', async () => {
+    const callId = randomUUID();
+    const cardId = await armNoText(callId);
+    const stamped = (await database('triage_items').where({ id: cardId }).first()).payload.hold_held_at;
+    expect(stamped).toBeTruthy();
     const lines = await listed();
-    expect(lines.map((l) => l.source_call_log_id)).toEqual([fresh]);
-    expect(lines[0].card_id).toBe(cardId);
+    expect(lines.map((l) => [l.source_call_log_id, l.card_id, l.card_status])).toEqual([[callId, cardId, 'resolved']]);
+    const other = randomUUID();
+    await insertHold(other, X, T('2030-03-01T10:00:00Z'));
+    await insertCard(other, T('2030-03-01T09:59:00Z'), { status: 'resolved' });
+    // an unrelated call's hold with an unstamped card binds by line (legacy), and the release reaches both
+    expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: randomUUID(), clearedBy: 't', reason: 'verified_same_number', conn: database })).toHaveLength(2);
   });
 
-  test('a card in the SAME instant as the hold (one arming transaction) counts; an OPEN older card counts', async () => {
-    const same = randomUUID();
-    const open = randomUUID();
-    await seedHold(same, X, T('2030-02-01T10:00:00Z'));
-    await seedCard(same, T('2030-02-01T10:00:00Z'));
-    await seedHold(open, Y, T('2030-02-02T10:00:00Z'));
-    await seedCard(open, T('2030-02-01T10:00:00Z'), { status: 'open', ani: Y });
-    expect((await listed()).map((l) => l.source_call_log_id).sort()).toEqual([same, open].sort());
+  test('a hold released and re-armed later for an ownership-only reason is not listed and not cleared', async () => {
+    const callId = randomUUID();
+    await armNoText(callId);
+    await database('disclaimed_number_holds').where({ source_call_log_id: callId }).update({ cleared_at: new Date() }); // released
+    await Holds.recordDisclaimedNumberHold({ phone: X, callLogId: callId, conn: database }); // ownership re-arm: new held_at = now()
+    expect(await listed()).toEqual([]);
+    const cleared = await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: randomUUID(), clearedBy: 't', reason: 'verified_same_number', conn: database });
+    expect(cleared).toEqual([]);
+    expect((await database('disclaimed_number_holds').where({ source_call_log_id: callId }).first()).cleared_at).toBeNull();
+  });
+
+  test('a later no-text re-arm with its card open re-stamps the card, and it binds again after it is closed', async () => {
+    const callId = randomUUID();
+    const cardId = await armNoText(callId, X, { close: null });
+    await database('disclaimed_number_holds').where({ source_call_log_id: callId }).update({ cleared_at: new Date() });
+    await Holds.recordDisclaimedNumberHold({ phone: X, callLogId: callId, conn: database }); // re-armed while the card is still open
+    await Holds.stampOpenNoTextCards(database, callId);
+    await database('triage_items').where({ id: cardId }).update({ status: 'dismissed' });
+    expect((await listed()).map((l) => l.card_id)).toEqual([cardId]);
   });
 
   test('a card for a different line does not bind to the hold (ani_phone compared on its digits)', async () => {
     const callId = randomUUID();
-    await seedHold(callId, X, T('2030-02-01T10:00:00Z'));
-    await seedCard(callId, T('2030-02-01T10:00:05Z'), { ani: Y });
+    await insertHold(callId, X, T('2030-02-01T10:00:00Z'));
+    await insertCard(callId, T('2030-02-01T10:00:05Z'), { ani: Y, status: 'resolved' });
     expect(await listed()).toEqual([]);
-    await seedCard(callId, T('2030-02-01T10:00:06Z'), { ani: '(941) 555-1234' });
+    await insertCard(callId, T('2030-02-01T10:00:06Z'), { ani: '(941) 555-1234', status: 'resolved' });
     expect((await listed()).map((l) => l.source_call_log_id)).toEqual([callId]);
   });
 
-  test('clearNoTextHoldsForPhone and linesBlockedByOwnershipCard use the same binding', async () => {
-    const real = randomUUID();
-    const reArmed = randomUUID();
-    const source = randomUUID();
-    await seedHold(real, X, T('2030-02-01T10:00:00Z'));
-    await seedCard(real, T('2030-02-01T10:00:05Z'));
-    await seedHold(reArmed, X, T('2030-03-01T10:00:00Z')); // re-armed later, ownership-only
-    await seedCard(reArmed, T('2030-01-01T10:00:00Z'));
-    await seedCard(reArmed, T('2030-03-01T10:00:00Z'), { reason: 'callback_number_needed', status: 'open', payload: { ownership_disclaimed: true } });
-    expect((await Holds.linesBlockedByOwnershipCard(database, [X, Y])).size).toBe(0); // no bound text card on that call
-    const cleared = await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: source, clearedBy: 'tech-1', reason: 'verified_same_number', conn: database });
-    expect(cleared).toEqual([real]);
-    const rows = await database('disclaimed_number_holds').where({ source_call_log_id: reArmed });
-    expect(rows[0].cleared_at).toBeNull(); // the ownership-only hold stays
+  test('a call with two lines and a card for each lists each line with its own card', async () => {
+    const callId = randomUUID();
+    const cx = await armNoText(callId, X);
+    const cy = await armNoText(callId, Y, { heldAt: '2030-02-02T10:00:00.5Z', cardAt: '2030-02-02T09:59:59Z' });
+    const byPhone = Object.fromEntries((await listed()).map((l) => [l.phone_e164, l.card_id]));
+    expect(byPhone).toEqual({ [X]: cx, [Y]: cy });
   });
 
-  test('a bound no-text hold whose call has an open ownership card blocks the whole line', async () => {
+  test('a call that only disclaimed the same number (no text card) blocks the line; resolved, it does not', async () => {
     const a = randomUUID();
     const b = randomUUID();
-    await seedHold(a, X, T('2030-02-01T10:00:00Z'));
-    await seedCard(a, T('2030-02-01T10:00:05Z'));
-    await seedHold(b, X, T('2030-02-02T10:00:00Z'));
-    await seedCard(b, T('2030-02-02T10:00:05Z'));
-    await seedCard(b, T('2030-02-02T10:00:05Z'), { reason: 'callback_number_needed', status: 'open', payload: {} });
+    await armNoText(a);
+    await insertHold(b, X, T('2030-02-02T10:00:00Z'));
+    const cb = await insertCard(b, T('2030-02-02T10:00:00Z'), { reason: 'callback_number_needed', payload: {} });
     expect([...await Holds.linesBlockedByOwnershipCard(database, [X, Y])]).toEqual([X]);
-    // the same card, resolved, no longer blocks
-    await database('triage_items').where({ reason_code: 'callback_number_needed' }).update({ status: 'resolved' });
+    await database('triage_items').where({ id: cb }).update({ status: 'resolved' });
     expect((await Holds.linesBlockedByOwnershipCard(database, [X])).size).toBe(0);
   });
 });

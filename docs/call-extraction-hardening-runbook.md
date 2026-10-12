@@ -126,6 +126,22 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   it, and a line the call does not actively hold is a 409 `NO_TEXT_LINE_NOT_HELD`. The inbox card sends no line and
   releases EVERY line the call ACTIVELY holds (each under its own phone lock, sorted), never "the newest" and never a line the call already released (that line may have been re-held by another call); with none active the card still resolves and `lines_released` is empty; for the usual
   one-line call that is the same single line. The reply lists `lines_released`.
+  **Visits:** releasing some lines of a call stamps the call-wide clearance (`call_sms_cleared_at`) only on visits whose
+  customer phone is not a line the call still actively holds (the visit evidence helper reads "stamped, not cleared,
+  active hold on the customer's phone" as held); those visits clear when their line is released. **Shared lines:** the
+  release checks the LINE, not only the clicked call: if ANY active hold on the line (a no-text hold, or a call that
+  only disclaimed the number) belongs to a call with an unresolved "not my number" card, that line is not released on
+  any call, the card still resolves, and the reply says `release: 'deferred'` with `lines_blocked`. The panel shows
+  the same warning when any call on the line is blocked.
+  **What counts as a no-text hold:** a hold row with a `text_number_differs` card for the same line (`ani_phone`) that
+  belongs to the hold's current arming. The binding is durable provenance on the card: `payload.hold_held_at` is the
+  hold row's `held_at`, stamped by `stampOpenNoTextCards` in the same transaction that files or refreshes the card (the
+  card is built before the hold row gets `held_at = now()`, so a timestamp comparison cannot bind them). A hold
+  released and re-armed later for an ownership-only reason has a new `held_at`, so the older closed card no longer
+  binds: the hold is not listed and "Line can get texts" does not clear it. A card with no stamp predates the binding
+  and binds by line alone. One predicate (`NO_TEXT_CARD_FOR_HOLD_SQL`) drives the list and the cross-call release. The
+  closed-card version check is per line: a card is superseded only by a newer card for the same line. The Postgres
+  suite `no-text-held-lines-postgres.test.js` pins all of it with the processor's real order (card first, hold after).
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner

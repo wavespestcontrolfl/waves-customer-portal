@@ -327,7 +327,9 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})");
     const bound = require('../services/disclaimed-number-holds').NO_TEXT_CARD_FOR_HOLD_SQL;
     expect(bound).toContain("t.reason_code = 'text_number_differs'");
-    expect(bound).toContain('t.created_at >= h.held_at'); // the card belongs to the hold's current arming
+    // the card belongs to the hold's current arming: durable provenance on the card, not a timestamp comparison
+    expect(bound).toContain("(t.payload->>'hold_held_at')::timestamptz = h.held_at");
+    expect(bound).not.toContain('created_at');
     expect(bound).toContain("t.payload->>'ani_phone'"); // and to the held line
     expect(fn).toContain("AND NOT EXISTS (SELECT 1 FROM triage_items d");
     expect(fn).toContain("OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')");
@@ -430,5 +432,16 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(triage.slice(ownResolveAt, ownResolveAt + 400)).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval'");
     expect(triage).toContain('text_number_differs: \'This card is a no-text line');
     expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'text_number_differs'/);
+  });
+});
+
+describe('card-to-hold binding is stamped where the card is filed', () => {
+  test('writeTextNumberCard stamps the open card with the hold arming after the card write, before the review-status sync', () => {
+    const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = processor.indexOf('const writeTextNumberCard = async (trx, item');
+    const section = processor.slice(at, at + 3200);
+    const stamp = section.indexOf("stampOpenNoTextCards(trx, call.id)");
+    expect(stamp).toBeGreaterThan(section.indexOf('.onConflict('));
+    expect(stamp).toBeLessThan(section.indexOf('await syncCallReviewStatus(trx, call.id);'));
   });
 });

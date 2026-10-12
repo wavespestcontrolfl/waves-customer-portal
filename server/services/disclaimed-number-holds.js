@@ -196,17 +196,42 @@ async function callLineRows(conn, callLogId) {
 }
 
 // A text_number_differs card (alias `t`) that stands for THIS hold row (alias `h`), not merely any card the
-// call ever had (codex #6292 r3 P3): it is for the same line (its ani_phone, compared on the last 10 digits)
-// and it belongs to the hold's CURRENT arming, so a card filed before the hold was last (re-)armed does not
-// count, unless it is still open (an open card is idempotently kept across a re-arm). A no-text hold that was
-// released and later re-armed for an ownership-only reason therefore has no card here.
+// call ever had (codex #6292 r3/r4). It is for the same line (its ani_phone, compared on the last 10 digits)
+// and it belongs to the hold's CURRENT arming. The arming identity is durable provenance on the card:
+// payload.hold_held_at is the hold row's held_at, written by stampOpenNoTextCards in the same transaction
+// that files the card (the card is BUILT before the hold row gets its held_at = now(), so no created_at
+// comparison can bind them). A hold released and re-armed later (ownership-only, or a new no-text pass) has a
+// new held_at, so the older closed card no longer matches. A card with no stamp predates this binding
+// (filed by #6112 before the stamp existed): it binds by line alone, as it did before.
 const NO_TEXT_CARD_FOR_HOLD_SQL = `t.call_log_id = h.source_call_log_id AND t.reason_code = 'text_number_differs'
-  AND (t.created_at >= h.held_at OR t.status IN ('open', 'in_progress'))
+  AND (t.payload->>'hold_held_at' IS NULL OR (t.payload->>'hold_held_at')::timestamptz = h.held_at)
   AND right(regexp_replace(COALESCE(t.payload->>'ani_phone', ''), '\\D', '', 'g'), 10)
     = right(regexp_replace(h.phone_e164, '\\D', '', 'g'), 10)`;
 
 /**
- * Which of these lines are held by a call whose "not my number" card is still unresolved. A shared line
+ * Stamps the call's OPEN text_number_differs card(s) with the arming of the active hold on the card's line
+ * (payload.hold_held_at = that hold's held_at, full precision). Call in the transaction that files or
+ * refreshes the card, after the hold row exists, under the per-call lock. Idempotent, and it also re-stamps an
+ * open card that survived a re-arm (the card insert is a no-op while one is open).
+ */
+async function stampOpenNoTextCards(conn, callLogId) {
+  if (!callLogId) return;
+  await conn.raw(
+    `UPDATE triage_items t
+        SET payload = COALESCE(t.payload, '{}'::jsonb) || jsonb_build_object('hold_held_at', h.held_at::text)
+       FROM ${TABLE} h
+      WHERE t.call_log_id = ? AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
+        AND h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL
+        AND right(regexp_replace(COALESCE(t.payload->>'ani_phone', ''), '\\D', '', 'g'), 10)
+          = right(regexp_replace(h.phone_e164, '\\D', '', 'g'), 10)`,
+    [callLogId],
+  );
+}
+
+/**
+ * Which of these lines are held by a call whose "not my number" card is still unresolved. EVERY active hold on
+ * the line counts, with or without a no-text card: a call that only disclaimed the same number (an ownership
+ * hold and a callback_number_needed card, no text_number_differs) keeps its row too (#6292 r4 P1). A shared line
  * has one hold row per call; "Line can get texts" proves the line takes SMS, never who owns it, so a call
  * with an open ownership card keeps its row, and the line as a whole stays blocked. The release asks this
  * of the LINE (every call that holds it), never only of the call whose card was clicked (#6292 r3 P1).
@@ -217,7 +242,6 @@ async function linesBlockedByOwnershipCard(conn, phoneKeys) {
     `SELECT DISTINCT h.phone_e164 FROM ${TABLE} h
       WHERE h.phone_e164 IN (${phoneKeys.map(() => '?').join(', ')})
         AND h.cleared_at IS NULL
-        AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})
         AND EXISTS (SELECT 1 FROM triage_items d
                      WHERE d.call_log_id = h.source_call_log_id AND d.reason_code = 'callback_number_needed'
                        AND d.status <> 'resolved'
@@ -458,6 +482,7 @@ module.exports = {
   clearNoTextHoldsForPhone,
   lockNoTextLines,
   linesBlockedByOwnershipCard,
+  stampOpenNoTextCards,
   NO_TEXT_CARD_FOR_HOLD_SQL,
   callLineRows,
   NO_TEXT_LINE_LOCK_PREFIX,

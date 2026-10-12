@@ -107,7 +107,7 @@ describe('clearNoTextHoldsForPhone', () => {
     // a plain disclaimer card OR a dual-signal card marked ownership_disclaimed keeps that call's hold
     expect(sql).toContain("(COALESCE(d.payload->>'no_text_hold', '') <> 'true' OR COALESCE(d.payload->>'ownership_disclaimed', '') = 'true')");
     expect(sql).toContain('AND h.source_call_log_id <> ?');
-    expect(sql).not.toContain('IS NULL OR');
+    expect(sql).not.toContain('? IS NULL'); // no untyped null binding
     expect(sql).toContain("d.status <> 'resolved'"); // a RESOLVED ownership card verified the number: that call joins the release
     expect(params).toEqual(['office', 'verified_same_number', '+19415551234', 7]);
   });
@@ -182,5 +182,34 @@ describe('lockNoTextLines / callLineRows', () => {
     calls.length = 0;
     await Holds.clearDisclaimedNumberHoldsForCall({ callLogId: 7, reason: 'r', conn });
     expect(calls).toEqual([]);
+  });
+});
+
+describe('stampOpenNoTextCards', () => {
+  test('one UPDATE stamps the call\'s open text card with the active hold\'s held_at for the same line', async () => {
+    const raw = jest.fn(async () => ({ rows: [] }));
+    await Holds.stampOpenNoTextCards({ raw }, 'call-1');
+    const [sql, params] = raw.mock.calls[0];
+    expect(sql).toContain("'hold_held_at', h.held_at::text");
+    expect(sql).toContain("t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')");
+    expect(sql).toContain('h.cleared_at IS NULL');
+    expect(sql).toContain("t.payload->>'ani_phone'");
+    expect(params).toEqual(['call-1']);
+  });
+
+  test('no call: nothing runs', async () => {
+    const raw = jest.fn();
+    await Holds.stampOpenNoTextCards({ raw }, null);
+    expect(raw).not.toHaveBeenCalled();
+  });
+
+  test('the line-blocked check looks at every active hold on the line, not only calls with a no-text card', async () => {
+    const raw = jest.fn(async () => ({ rows: [{ phone_e164: '+19415551234' }] }));
+    const out = await Holds.linesBlockedByOwnershipCard({ raw }, ['+19415551234', '+19415557777']);
+    expect([...out]).toEqual(['+19415551234']);
+    const [sql, params] = raw.mock.calls[0];
+    expect(sql).not.toContain('text_number_differs');
+    expect(sql).toContain("d.reason_code = 'callback_number_needed'");
+    expect(params).toEqual(['+19415551234', '+19415557777']);
   });
 });

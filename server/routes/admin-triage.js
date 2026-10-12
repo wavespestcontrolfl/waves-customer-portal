@@ -138,10 +138,12 @@ const CALLBACK_CARD_VERDICT = Object.freeze({
 // marked payload.no_text_hold on both of its cards (call-routing-gates payload stamp). Exactly ONE thing
 // clears that hold: the explicit "Line can get texts" action on the text_number_differs card. Closing
 // callback_number_needed never does, in either close order, whatever the other card's state.
+function parsePayload(payload) {
+  if (typeof payload !== 'string') return payload || null;
+  try { return JSON.parse(payload); } catch { return null; }
+}
 function cardCarriesNoTextHold(item) {
-  let payload = item?.payload;
-  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
-  return payload?.no_text_hold === true;
+  return parsePayload(item?.payload)?.no_text_hold === true;
 }
 
 // A callback_number_needed card still OPEN on the call that stands for "that is not my number": filed
@@ -328,10 +330,17 @@ async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo, line
     if (!live || !expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
       return { outcome: 'stale_version' };
     }
-    // Only the NEWEST text_number_differs card of the call may release: a reprocess that re-armed the hold
-    // filed a newer card, and an older closed one must not clear what that card still asks the office to review.
-    const newest = await trx('triage_items').where({ call_log_id: item.call_log_id, reason_code: 'text_number_differs' })
-      .orderBy('created_at', 'desc').first('id');
+    // Only the NEWEST text_number_differs card FOR THIS LINE may release: a reprocess that re-armed the line
+    // filed a newer card for it, and an older closed one must not clear what that card still asks the office
+    // to review. A call can hold several lines, each with its own card, so the check is per line (the line
+    // the panel names, else the clicked card's own line), never "newest card of the whole call".
+    const Holds = require('../services/disclaimed-number-holds');
+    const lineOf = (card) => Holds.holdPhoneKey(parsePayload(card.payload)?.ani_phone);
+    const cards = await trx('triage_items').where({ call_log_id: item.call_log_id, reason_code: 'text_number_differs' })
+      .orderBy('created_at', 'desc').select('id', 'payload');
+    const wanted = lineE164 != null ? Holds.holdPhoneKey(lineE164) : lineOf(item);
+    // A card with no recorded line (an older shape) cannot be tied to one line, so it counts for any line.
+    const newest = cards.find((card) => lineOf(card) === wanted || lineOf(card) === null);
     if (!newest || String(newest.id) !== String(id)) return { outcome: 'stale_version' };
     const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true, lineE164);
     return { outcome: 'ok', callbackNumber: reply, status: item.status };
@@ -949,35 +958,29 @@ function sendTransitionResult(res, result, id, nextStatus) {
 
 async function transition(req, res, nextStatus) {
   const { id } = req.params;
-  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
-  // property_role_confirm cards are admin-territory end to end (codex
-  // #3418 r5): hiding them from the tech list is not enforcement — a tech
-  // holding the UUID must not be able to resolve/dismiss a pending admin
-  // property correction through these shared transitions either.
+  const body = req.body || {};
+  const note = typeof body.note === 'string' ? body.note.slice(0, 500) : null;
+  // property_role_confirm cards are admin-territory end to end (codex #3418 r5): hiding them from the tech
+  // list is not enforcement, so a tech holding the UUID must not resolve/dismiss one through these shared
+  // transitions either. A missing first name is settled on the customer record, which only an admin edits:
+  // its Resolve is admin-only (Dismiss stays open to the office).
   if (req.techRole !== 'admin') {
-    const guarded = await db('triage_items').where({ id }).first('reason_code');
-    if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-    // A missing first name is settled on the customer record, which only an admin edits:
-    // Resolve is admin-only (Dismiss stays open to the office).
-    if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
+    const reason = (await db('triage_items').where({ id }).first('reason_code'))?.reason_code;
+    if (ADMIN_ONLY_REASONS.includes(reason) || (reason === 'missing_first_name' && nextStatus === 'resolved')) {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
-  // The held-lines panel names the line it is releasing; the inbox card names none (see releaseNoTextHold).
-  const lineE164 = typeof req.body?.line_e164 === 'string' && req.body.line_e164.trim() ? req.body.line_e164.trim().slice(0, 40) : null;
-  if (nextStatus === 'resolved' && req.body?.line_can_get_texts === true) {
-    const closed = await releaseClosedNoTextHold({ id, expectedUpdatedAt: req.body?.expected_updated_at || null, assignedTo: req.technicianId, lineE164 });
-    if (closed) return sendTransitionResult(res, closed, id, closed.status);
-  }
-  const result = await transitionCore({
-    id, nextStatus, note, assignedTo: req.technicianId,
-    expectedUpdatedAt: req.body?.expected_updated_at || null,
-    lineCanGetTexts: req.body?.line_can_get_texts === true,
-    lineE164,
-  });
-  return sendTransitionResult(res, result, id, nextStatus);
+  // "Line can get texts": on a card that is already closed it is its own version-checked release (null =
+  // not that case, fall through to the ordinary transition). The held-lines panel names the line it
+  // releases (line_e164); the inbox card names none (see releaseNoTextHold).
+  const lineCanGetTexts = body.line_can_get_texts === true;
+  const lineE164 = (typeof body.line_e164 === 'string' && body.line_e164.trim().slice(0, 40)) || null;
+  const expectedUpdatedAt = body.expected_updated_at || null;
+  const closed = lineCanGetTexts && nextStatus === 'resolved'
+    ? await releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo: req.technicianId, lineE164 })
+    : null;
+  const result = closed || await transitionCore({ id, nextStatus, note, assignedTo: req.technicianId, expectedUpdatedAt, lineCanGetTexts, lineE164 });
+  return sendTransitionResult(res, result, id, closed ? closed.status : nextStatus);
 }
 
 // PUT /api/admin/triage/:id/resolve   { note? }

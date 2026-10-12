@@ -806,10 +806,9 @@ describe('line_e164: release the selected line, across calls', () => {
     conn.raw = (sql, bindings) => {
       if (sql === 'SELECT pg_advisory_xact_lock(hashtext(?))') { events.push(`lock:${bindings[0]}`); return {}; }
       if (/SELECT DISTINCT h\.phone_e164/.test(sql)) {
-        // linesBlockedByOwnershipCard: an active no-text hold whose call has an unresolved ownership card
+        // linesBlockedByOwnershipCard: ANY active hold on the line whose call has an unresolved ownership card
         const cards = fx.tables.triage_items;
         const rows = fx.tables.disclaimed_number_holds.filter((h) => bindings.includes(h.phone_e164) && h.cleared_at == null
-          && cards.some((t) => t.call_log_id === h.source_call_log_id && t.reason_code === 'text_number_differs')
           && cards.some((d) => d.call_log_id === h.source_call_log_id && d.reason_code === 'callback_number_needed' && d.status !== 'resolved'
             && (d.payload?.no_text_hold !== true || d.payload?.ownership_disclaimed === true)));
         return { rows: [...new Set(rows.map((h) => h.phone_e164))].map((phone_e164) => ({ phone_e164 })) };
@@ -940,11 +939,45 @@ describe('line_e164: release the selected line, across calls', () => {
       expect(active(fx.tables)).toEqual(['c1x', 'c2x']); // Y cleared on call-1 and call-3; X kept everywhere
     });
 
+    test('a call that only disclaimed the same number (ownership hold, no text card) still blocks the line', async () => {
+      const fx = multiLine({
+        triage_items: [text(CARD_ID, CALL_ID), { id: 'card-b', call_log_id: 'call-b', reason_code: 'callback_number_needed', payload: {}, ...base, status: 'open' }],
+        disclaimed_number_holds: [hold('c1x', X, CALL_ID, '2030-01-01T10:00:00Z'), hold('cbx', X, 'call-b', '2030-01-03T10:00:00Z')],
+      });
+      const out = await release({ line_e164: X });
+      expect(out.json.callback_number).toMatchObject({ release: 'deferred', lines_blocked: [X], lines_released: [] });
+      expect(active(fx.tables)).toEqual(['c1x', 'cbx']); // nothing cleared, B's hold untouched
+    });
+
     test('once that ownership card is resolved the line releases normally', async () => {
       const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID), text('card-2', 'call-2'), text('card-3', 'call-3'), { ...ownershipCard, status: 'resolved' }] });
       const out = await release({ line_e164: X });
       expect(out.json.callback_number.release).toBeUndefined();
       expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
+    });
+  });
+
+  describe('the supersession check is per line (codex r4 P1)', () => {
+    const lineCard = (id, line, createdAt, over = {}) => text(id, CALL_ID, { payload: { no_text_hold: true, ani_phone: line }, created_at: createdAt, ...over });
+
+    test('an older closed card for line X still releases X when a newer card exists for line Y', async () => {
+      const fx = multiLine({ triage_items: [lineCard('card-x', X, '2030-01-01T10:00:00Z'), lineCard('card-y', Y, '2030-01-05T10:00:00Z'), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+      const out = await release({ line_e164: X }, 'card-x');
+      expect(out.status).toBe(200);
+      expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
+    });
+
+    test('the inbox path from the older X card also releases (its own line\'s newest card is itself)', async () => {
+      const fx = multiLine({ triage_items: [lineCard('card-x', X, '2030-01-01T10:00:00Z'), lineCard('card-y', Y, '2030-01-05T10:00:00Z'), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+      expect((await release({}, 'card-x')).status).toBe(200);
+      expect(active(fx.tables)).toEqual([]);
+    });
+
+    test('a newer card for the SAME line still supersedes the older one (409 stale), and a card cannot release another line', async () => {
+      const fx = multiLine({ triage_items: [lineCard('card-x1', X, '2030-01-01T10:00:00Z'), lineCard('card-x2', X, '2030-01-05T10:00:00Z'), lineCard('card-y', Y, '2030-01-03T10:00:00Z'), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+      expect((await release({ line_e164: X }, 'card-x1')).status).toBe(409);
+      expect((await release({ line_e164: Y }, 'card-x2')).status).toBe(409); // card-x2 is not line Y's newest card
+      expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
     });
   });
 

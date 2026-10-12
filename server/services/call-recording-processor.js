@@ -11199,6 +11199,8 @@ const CallRecordingProcessor = {
       }
       // The call-level aggregate follows the card in the same locked transaction: the tech follow-up
       // and voicemail branches return before the pass's usual review-status write (codex r14 P2).
+      // Durable card-to-hold binding: the open card carries the arming (held_at) of the hold it releases.
+      await require('./disclaimed-number-holds').stampOpenNoTextCards(trx, call.id);
       await syncCallReviewStatus(trx, call.id);
     };
     const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {

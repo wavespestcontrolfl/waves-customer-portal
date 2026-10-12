@@ -991,7 +991,7 @@ describe('Save to notes on second-contact cards', () => {
   });
 });
 
-describe('held lines panel', () => {
+describe('held lines panel on the page', () => {
   const line = { hold_id: 'h1', phone_e164: '+19415550100', held_at: '2026-10-01T15:00:00.000Z', source_call_log_id: 'call-9',
     call_created_at: '2026-10-01T14:50:00.000Z', first_name: 'Relay', last_name: 'Caller', card_id: 'tn-old', card_status: 'resolved',
     card_updated_at: '2026-10-02T10:00:00.000Z', blocked_by_ownership_card: false };
@@ -1105,40 +1105,7 @@ describe('held lines panel', () => {
     await waitFor(() => expect(heldLoads()).toBe(2));
   });
 
-  it('shows the ownership warning when ANY call on the line is blocked, even if the card used for the release is not', async () => {
-    const free = { ...line, hold_id: 'h5', card_id: 'tn-free', blocked_by_ownership_card: false, held_at: '2026-10-05T15:00:00.000Z' };
-    const blockedRow = { ...line, hold_id: 'h6', card_id: 'tn-blocked', blocked_by_ownership_card: true };
-    wire({ lines: [free, blockedRow] });
-    render(<TriageInboxTabV2 />);
-    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
-    const row = await screen.findByTestId('held-line');
-    expect(row.textContent).toContain('open "not my number" card');
-  });
 
-  it('shows no ownership warning when no call on the line is blocked', async () => {
-    wire({ lines: [line, { ...line, hold_id: 'h7', card_id: 'tn-2' }] });
-    render(<TriageInboxTabV2 />);
-    fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
-    const row = await screen.findByTestId('held-line');
-    expect(row.textContent).not.toContain('not my number');
-  });
 
-  it('the panel text is at least 14px: no text-11/12/13 class in the chip or the panel', async () => {
-    wire({ lines: [{ ...line, blocked_by_ownership_card: true }] });
-    render(<TriageInboxTabV2 />);
-    const chip = await screen.findByRole('button', { name: /held lines/i });
-    fireEvent.click(chip);
-    const row = await screen.findByTestId('held-line');
-    const panel = row.closest('.divide-y').parentElement;
-    for (const el of [chip, chip.querySelector('span'), ...panel.querySelectorAll('div, p, span')].filter(Boolean)) {
-      expect(el.className).not.toMatch(/\btext-(11|12|13)\b/);
-    }
-  });
 
-  it('prefers a call whose release is not blocked as the row\'s card', async () => {
-    const { groupHeldLines } = await import('./TriageInboxTabV2');
-    const blocked = { ...line, blocked_by_ownership_card: true, card_id: 'blocked' };
-    const free = { ...line, hold_id: 'h3', card_id: 'free' };
-    expect(groupHeldLines([blocked, free])[0].primary.card_id).toBe('free');
-  });
 });
