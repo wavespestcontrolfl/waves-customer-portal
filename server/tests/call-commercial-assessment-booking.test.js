@@ -1331,7 +1331,7 @@ describe('codex #6046 round 11', () => {
 
     test('schema field: optional nullable boolean in both schemas, version 1.24.0, mirrored flat, in the prompt and the replay watch lists', () => {
       const { SCHEMA_VERSION } = require('../schemas/validate-extraction');
-      expect(SCHEMA_VERSION).toBe('1.27.0');
+      expect(SCHEMA_VERSION).toBe('1.28.0');
       for (const f of ['model-output', 'persisted']) {
         const schema = JSON.parse(fs.readFileSync(path.join(__dirname, `../schemas/call-extraction.${f}.schema.json`), 'utf8'));
         const field = schema.properties.service_request.properties.price_discussed;

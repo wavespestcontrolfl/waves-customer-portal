@@ -5220,5 +5220,92 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  // The grouped stop's Wrap-up (owner 2026-10-12; client-only, FastCompleteComboSheet): the container lays the stop's text,
+  // review and timing choices onto BOTH item bodies. What the packet does with them, per server rules the container relies on:
+  // one stop text goes if ANY item asks for it, one review ask goes only if EVERY item allows it, and its delay comes from the
+  // FIRST member (window_start order). Free services, so no invoice holds the ask.
+  describe('the stop-level Wrap-up fields (the packet reads them from the item bodies)', () => {
+    const itemBody = (extra = {}) => ({ ...submission().items[0].body, includePayLink: true, ...extra });
+    const stopSubmission = (extra) => submission({ items: fixture.serviceIds.map((serviceId) => ({ serviceId, body: itemBody(extra) })) });
+    const stopTexts = () => sendCustomerMessage.mock.calls.map(([input]) => input);
+    async function runStop(extra, { delay = false } = {}) {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ estimated_price: 0, create_invoice_on_complete: false, is_callback: true });
+      const ReviewService = require('../services/review-request');
+      if (delay) ReviewService.completionReviewDelay.mockImplementation(jest.requireActual('../services/review-request').completionReviewDelay);
+      else ReviewService.completionReviewDelay.mockImplementation(() => undefined);
+      ReviewService.enrollPostService.mockClear();
+      sendCustomerMessage.mockClear();
+      const saved = await saveVisitCompletionPacket(stopSubmission(extra));
+      expect(saved.status).toBeLessThan(300);
+      const ran = await runVisitCompletionPacketEffects(saved.body.packetId);
+      return { saved, ran, ReviewService };
+    }
+
+    test('untouched (the bodies the parts hand over): one stop text and one review ask', async () => {
+      const { ran, ReviewService } = await runStop({});
+      expect(ran).toMatchObject({ status: 200, body: { state: 'done' } });
+      expect(stopTexts()).toHaveLength(1);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+    });
+
+    test('text off on BOTH bodies: no stop text (the review ask is a separate choice and still goes)', async () => {
+      const { ran, ReviewService } = await runStop({ sendCompletionSms: false });
+      expect(ran).toMatchObject({ status: 200, body: { state: 'done' } });
+      expect(stopTexts()).toHaveLength(0);
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+    });
+
+    test('text off on ONE body only: the stop still texts (why the container sets both)', async () => {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ estimated_price: 0, create_invoice_on_complete: false, is_callback: true });
+      sendCustomerMessage.mockClear();
+      const items = fixture.serviceIds.map((serviceId, index) => ({ serviceId, body: itemBody(index === 0 ? { sendCompletionSms: false } : {}) }));
+      const saved = await saveVisitCompletionPacket(submission({ items }));
+      await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(stopTexts()).toHaveLength(1);
+    });
+
+    test('review off on BOTH bodies: no review ask, and the stop text still goes', async () => {
+      const { ran, ReviewService } = await runStop({ requestReview: false });
+      expect(ran).toMatchObject({ status: 200, body: { state: 'done' } });
+      expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+      expect(stopTexts()).toHaveLength(1);
+    });
+
+    test('review off on ONE body only: no review ask (why both must agree)', async () => {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ estimated_price: 0, create_invoice_on_complete: false, is_callback: true });
+      const ReviewService = require('../services/review-request');
+      ReviewService.enrollPostService.mockClear();
+      const items = fixture.serviceIds.map((serviceId, index) => ({ serviceId, body: itemBody(index === 1 ? { requestReview: false } : {}) }));
+      const saved = await saveVisitCompletionPacket(submission({ items }));
+      await runVisitCompletionPacketEffects(saved.body.packetId);
+      expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+    });
+
+    test('both bodies carry the same timing: the one enrollment uses that delay, taken from the first member', async () => {
+      const { ran, ReviewService } = await runStop({ reviewTiming: 'now', reviewDelayMinutes: 0 }, { delay: true });
+      expect(ran).toMatchObject({ status: 200, body: { state: 'done' } });
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+      expect(ReviewService.enrollPostService.mock.calls[0][0]).toMatchObject({ delayMinutes: 0 });
+      // The first member by window_start is the one whose saved timing decides.
+      const first = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).orderBy('window_start').first('id');
+      expect(ReviewService.enrollPostService.mock.calls[0][0].scheduledServiceId).toBe(first.id);
+    });
+
+    test('a custom time on both bodies: the delay follows it', async () => {
+      const at = `${etDateString(addETDays(new Date(), 1))}T08:00`;
+      const { ReviewService } = await runStop({ reviewTiming: 'tomorrow_8', reviewDelayMinutes: 0, reviewScheduledFor: at }, { delay: true });
+      expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+      const delay = ReviewService.enrollPostService.mock.calls[0][0].delayMinutes;
+      expect(delay).toBeGreaterThan(0);
+      expect(delay).toBeLessThanOrEqual(36 * 60);
+    });
+
+    test('Automatic (no timing keys): the enrollment carries no explicit delay, as today', async () => {
+      const { ReviewService } = await runStop({}, { delay: true });
+      expect(ReviewService.enrollPostService.mock.calls[0][0].delayMinutes).toBeUndefined();
+    });
+  });
+
+
 
 });

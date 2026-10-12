@@ -85,6 +85,52 @@ function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
+// The extraction to read ani_cannot_text / text_phone_e164 from: only a VALID V2 payload speaks for
+// them. A schema_failed / normalization_failed payload is stored raw for audit but must never arm the
+// number-wide SMS hold, file the card or raise the flag, in shadow or enforce mode.
+function noTextSafeExtraction(v2Result, extraction = v2Result?.extraction) {
+  if (!extraction || v2Result?.status === 'valid') return extraction;
+  const caller = extraction.caller;
+  if (!caller || (caller.ani_cannot_text == null && caller.text_phone_e164 == null)) return extraction;
+  // The model's own callback_number_needed flag rides along: on a failed payload it can only be
+  // justified by a disclaimer (caller_id_disclaimed true); otherwise it came from the no-text claim
+  // being cleared here and must go with it, or the shadow bridge arms the hold anyway (codex r14 P1).
+  const flags = Array.isArray(extraction.triage_flags) && caller.caller_id_disclaimed !== true
+    ? extraction.triage_flags.filter((f) => f !== 'callback_number_needed') : extraction.triage_flags;
+  return { ...extraction, triage_flags: flags, caller: { ...caller, ani_cannot_text: null, text_phone_e164: null } };
+}
+
+// True only for an explicit ani_cannot_text (schema 1.28.0). One reader for the hold, the
+// card dedupe and the booking-link skip.
+function aniCannotText(caller) {
+  return !!caller && caller.ani_cannot_text === true;
+}
+
+// The card for a no-text line is text_number_differs, which carries both numbers and the
+// ask. callback_number_needed also fires for the hold, but its card would say the same
+// thing twice (and its Resolve means "this number is fine to text"), so it is dropped
+// unless the caller ALSO disclaimed the number.
+function aniCannotTextOnly(extraction) {
+  const caller = extraction?.caller;
+  // Any caller_id_disclaimed keeps the callback card: its hold rests on the ANI comparison, and its
+  // Resolve is the only release for it.
+  return aniCannotText(caller) && caller.caller_id_disclaimed !== true;
+}
+
+// The callback_number_needed flag: the caller disclaimed the number, or said the line cannot get texts.
+function callbackNumberNeeded(caller, opts) {
+  return callerIdDisclaimedNeedsCallback(caller, opts) || aniCannotText(caller);
+}
+
+// Cards this extraction does not need (see aniCannotTextOnly), and whether the bridge files the
+// callback_number_needed card for the flags it was handed.
+function noTextDroppedCards(extraction) {
+  return aniCannotTextOnly(extraction) ? ['callback_number_needed'] : [];
+}
+function callbackCardWanted(flags, extraction) {
+  return flags.includes('callback_number_needed') && !aniCannotTextOnly(extraction);
+}
+
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
 // name — don't treat these as a name↔email mismatch.
 const GENERIC_EMAIL_LOCALPARTS = new Set([
@@ -581,7 +627,12 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
   // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
   // rather than re-deriving the condition).
-  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })) {
+  // ani_cannot_text (schema 1.28.0, owner ruling 2026-10-08, card-only): the caller said
+  // the line they called from cannot get texts. Automation never texts a number the caller
+  // dictated, so the call's texts to the ANI hold through this same flag; the
+  // text_number_differs card (not a callback_number_needed card) asks the office to fix the
+  // phones. Not caller_id_disclaimed: the caller still owns the line for calls.
+  if (callbackNumberNeeded(caller, { ani: opts.contactPhone })) {
     flags.push('callback_number_needed');
   }
 
@@ -841,7 +892,7 @@ function pretreatDroppedCards(preConstructionPretreat) {
 function dropUnneededCallCards(flags, extraction, options) {
   const { canonicalStreet, preConstructionPretreat } = options || {};
   const list = Array.isArray(flags) ? flags : [];
-  const dropped = new Set();
+  const dropped = new Set(noTextDroppedCards(extraction));
   const has = (f) => list.includes(f);
   if (has('cancellation_request')) {
     dropped.add('reschedule_or_cancel');
@@ -874,6 +925,60 @@ function dropUnneededCallCards(flags, extraction, options) {
   pretreatDroppedCards(preConstructionPretreat).forEach((f) => dropped.add(f));
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
+}
+
+// 5. A call that ended with nothing to do (2026-10-10 call audit: 8 cards in
+//    48 hours on callers who heard the price and said no, wanted a product
+//    Waves does not carry, or were outside the service area and were told
+//    so). The model's own verdict is recommended_disposition
+//    no_action_needed, and the call left no open thread: no time agreed,
+//    offered or accepted, no promised callback or follow-up, no promised
+//    quote, not a voicemail. Scheduling status 'requested' means only that
+//    the caller wanted a visit, not that the caller dropped it, so on its own
+//    it keeps every card: it qualifies only with the call's own evidence
+//    that the request ended (the caller declined the stated price and
+//    accepted no other, or the urgency reads no_appointment_needed). Such a call holds on "not_confirmed" or on its
+//    address, and the card that files is nobody's work. Returned as card
+//    codes, not as a flag filter, because not_confirmed is the routing
+//    reason and never one of the call's flags. The routing verdict and the
+//    flags are untouched. A stated street keeps the address cards, for the
+//    same reason as rule 3 (Step 3's backfill can copy it onto a record).
+// The caller said no to the price staff stated, and said yes to no other.
+function callerDeclinedThePrice(serviceRequest) {
+  const sr = serviceRequest || {};
+  const all = [sr.price, ...(Array.isArray(sr.prices) ? sr.prices : [])].filter(Boolean);
+  if (all.some((p) => p.caller_response === 'accepted' || p.accepted === true)) return false;
+  return sr.price?.caller_response === 'declined';
+}
+
+function requestedVisitWasDropped(extraction) {
+  const sr = extraction?.service_request || {};
+  return sr.urgency === 'no_appointment_needed' || callerDeclinedThePrice(sr);
+}
+
+const NO_ACTION_HOLD_CARDS = ['not_confirmed', 'ambiguous_scheduling'];
+const NO_ACTION_ADDRESS_CARDS = ['missing_service_address', 'address_unverifiable', 'address_unverified', 'low_confidence_address'];
+
+function callEndedWithNothingToDo(extraction) {
+  if (!extraction || extraction.recommended_disposition !== 'no_action_needed') return false;
+  if (extraction.meta?.is_voicemail === true) return false;
+  const scheduling = extraction.scheduling || {};
+  const status = String(scheduling.status || 'none');
+  if (status === 'requested' ? !requestedVisitWasDropped(extraction) : status !== 'none') return false;
+  const openThread = scheduling.confirmed_start_at
+    || scheduling.agent_committed_booking === true
+    || scheduling.caller_accepted_slot === true
+    || scheduling.follow_up_mentioned === true
+    || scheduling.callback_window_start
+    || scheduling.callback_window_end;
+  if (openThread) return false;
+  return extraction.service_request?.quote_promised !== true;
+}
+
+function noActionCallCards(extraction, { canonicalStreet } = {}) {
+  if (!callEndedWithNothingToDo(extraction)) return [];
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
+  return statedStreet ? [...NO_ACTION_HOLD_CARDS] : [...NO_ACTION_HOLD_CARDS, ...NO_ACTION_ADDRESS_CARDS];
 }
 
 function hasCanonicalWriteBlock(flags) {
@@ -2811,7 +2916,7 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // so a disclaimed ANI kept getting texted while V2 is in shadow. Same
   // ADVISORY posture as every other flag here — this never holds the
   // booking, only the confirmation/reminder SMS leg (see SMS_ONLY_FLAGS).
-  if (flags.includes('callback_number_needed')) needsConfirmation.push('callback_number_needed');
+  if (callbackCardWanted(flags, v2Extraction)) needsConfirmation.push('callback_number_needed');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -3357,6 +3462,8 @@ module.exports = {
   deriveEmailReview,
   spelledEmailSettled,
   dropUnneededCallCards,
+  callEndedWithNothingToDo,
+  noActionCallCards,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
@@ -3367,6 +3474,9 @@ module.exports = {
   SMS_ONLY_FLAGS,
   callbackNumberNeededBlocksSms,
   callerIdDisclaimedNeedsCallback,
+  aniCannotText,
+  noTextSafeExtraction,
+  aniCannotTextOnly,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

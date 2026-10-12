@@ -420,6 +420,29 @@ describe('buildLawnFastContext', () => {
     });
   });
 
+  describe('Wrap-up (GATE_FAST_COMPLETE_WRAP_UP)', () => {
+    afterEach(() => { delete process.env.GATE_FAST_COMPLETE_WRAP_UP; });
+    const read = () => buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
+
+    test('gate off: the context carries no wrapUp key', async () => {
+      delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+      expect('wrapUp' in await read()).toBe(false);
+    });
+
+    test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+      expect((await read()).wrapUp).toBe(true);
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = '1';
+      expect('wrapUp' in await read()).toBe(false);
+    });
+
+    test('an ineligible visit carries no wrapUp even with the gate on', async () => {
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
+      expect('wrapUp' in await read()).toBe(false);
+    });
+  });
+
   describe('weed spot rules (GATE_LAWN_SPOT_RULES)', () => {
     const P_LEAD = uuid(21);
     const P_SURF = uuid(22);

@@ -24,8 +24,8 @@ const PROMPT = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-10-05', 
 
 describe('version stamp', () => {
   test('prompt v22 is a new cohort', () => {
-    expect(PROMPT_VERSION).toBe('v29');
-    expect(PROMPT_HASH).toMatch(/^v29-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v31');
+    expect(PROMPT_HASH).toMatch(/^v31-[a-f0-9]{12}$/);
   });
 });
 
@@ -132,7 +132,7 @@ describe('case: staff hedges, caller accepts (call 732b3a5a shape)', () => {
   });
 });
 
-// Prompt v29 (2026-10-10 call audit): the CALLER proposed the hour, staff
+// Prompt v31 (2026-10-10 call audit): the CALLER proposed the hour, staff
 // accepted softly and closed with "I'll see you then"; the extraction answered
 // "ambiguous" and the visit was booked by hand 2.5 hours later.
 describe('case: the caller proposes the time, staff accept and close (call 07c4bd83 shape)', () => {

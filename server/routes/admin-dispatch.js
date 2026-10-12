@@ -3875,7 +3875,8 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
       includeCommonProducts: req.query.include === 'common_products',
     });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
-    res.json(ctx);
+    // GATE_FAST_COMPLETE_WRAP_UP: the pest Fast Complete sheet shows its Wrap-up section. The key exists only while the gate is live.
+    res.json(require('../config/feature-gates').fastCompleteWrapUpLive() ? { ...ctx, wrapUp: true } : ctx);
   } catch (err) { next(err); }
 });
 
