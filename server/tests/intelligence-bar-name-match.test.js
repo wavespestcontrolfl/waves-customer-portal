@@ -140,3 +140,13 @@ describe('query_customers sound-alike fallback', () => {
     expect(result.approximate).toBeUndefined();
   });
 });
+
+test('a short first name finds the full one when the last name sounds the same', () => {
+  const candidates = [
+    { id: 'a', first_name: 'Geoffrey', last_name: 'Tanner' },
+    { id: 'b', first_name: 'Samuel', last_name: 'Brennard' },
+    { id: 'c', first_name: 'Dana', last_name: 'Whitlock' },
+  ];
+  expect(rankNameMatches('Sam Braynard', candidates).map(r => r.id)).toEqual(['b']);
+  expect(rankNameMatches('Sa Whitlock', candidates)).toEqual([]);
+});

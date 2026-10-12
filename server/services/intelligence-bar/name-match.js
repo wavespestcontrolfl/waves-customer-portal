@@ -103,7 +103,17 @@ function phoneticSimilarity(keyA, keyB) {
 function wordSimilarity(a, b, keyOf) {
   if (a === b) return 1;
   const spelled = Math.max(a.length, b.length) <= 3 ? 0 : similarity(a, b);
-  return Math.max(spelled, phoneticSimilarity(keyOf(a), keyOf(b)));
+  return Math.max(spelled, prefixSimilarity(a, b), phoneticSimilarity(keyOf(a), keyOf(b)));
+}
+
+// A short form shares its start with the full name ("Sam" / "Samuel" style
+// pairs score low on edit distance). Needs three shared leading letters;
+// scores 0.6 to 0.9 by how much of the shorter word they cover.
+function prefixSimilarity(a, b) {
+  const shorter = Math.min(a.length, b.length);
+  let shared = 0;
+  while (shared < shorter && a[shared] === b[shared]) shared += 1;
+  return shared >= 3 ? 0.6 + 0.3 * (shared / shorter) : 0;
 }
 
 function customerTokens(candidate) {
