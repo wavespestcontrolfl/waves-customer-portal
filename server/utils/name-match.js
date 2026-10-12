@@ -25,12 +25,17 @@ function normalizeNamePart(value) {
 // Latin letters NFD does not decompose — folded by table so "Søren" is
 // "soren", not "sren".
 const NON_DECOMPOSING = { 'ø': 'o', 'Ø': 'O', 'ł': 'l', 'Ł': 'L', 'œ': 'oe', 'Œ': 'OE', 'æ': 'ae', 'Æ': 'AE', 'ß': 'ss', 'đ': 'd', 'Đ': 'D', 'ð': 'd', 'Ð': 'D', 'þ': 'th', 'Þ': 'TH', 'ı': 'i' };
-function normalizeNameFolded(value) {
-  const folded = String(value || '')
+// Folds accents and the table above but keeps case, spaces and punctuation,
+// so a caller that needs word boundaries (fuzzy retrieval) tokenizes on the
+// same folding policy instead of keeping its own.
+function foldNameLetters(value) {
+  return String(value || '')
     .replace(/[øØłŁœŒæÆßđĐðÐþÞı]/g, (c) => NON_DECOMPOSING[c] || c)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
-  return normalizeNamePart(folded);
+}
+function normalizeNameFolded(value) {
+  return normalizeNamePart(foldNameLetters(value));
 }
 
 // Common NANP nickname/diminutive groups — "Bob" calling from a line whose
@@ -323,6 +328,7 @@ function sameSpokenFirstName(a, b) {
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
+  foldNameLetters,
   firstNameVariants,
   sameFirstName,
   sameFirstNameUnambiguous,
