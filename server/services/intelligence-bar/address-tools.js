@@ -17,7 +17,7 @@
 
 const { validateAddress, STATUSES } = require('../address-validation');
 const {
-  parseRawAddress, normalizeStreetLine, normalizeState, splitStreetLineUnit, splitUnitFirstLine, normalizeUnitLine,
+  parseRawAddress, normalizeStreetLine, normalizeState, splitStreetLineUnit, splitUnitFirstLine, unitAnywhereOnLine, normalizeUnitLine,
 } = require('../../utils/address-normalizer');
 
 const CHECK_ADDRESS_TOOL_NAME = 'check_address';
@@ -60,14 +60,20 @@ const cleanText = value => (typeof value === 'string' ? value.replace(/\s+/g, ' 
 const TRAILING_STATE = /\s+(fl|florida)$/i;
 function givenParts(input) {
   const text = cleanText(input.address);
-  const unitFirst = splitUnitFirstLine(text);
-  const parsed = parseRawAddress(unitFirst ? unitFirst.rest : text);
-  const { street, unit } = splitStreetLineUnit(cleanText(parsed.line1) || text);
+  // The whole unit is read from the ORIGINAL text first (trailing, its own
+  // comma segment, or unit-first; "Bldg 2 Apt 4" stays whole), then taken
+  // out before the locality parse, which would file "Apt 4" under the city.
+  const rawUnit = unitAnywhereOnLine(text);
+  const withoutUnit = (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
+    .map(segment => splitStreetLineUnit(segment).street || segment)
+    .filter(segment => segment.toLowerCase() !== rawUnit.toLowerCase());
+  const parsed = parseRawAddress(withoutUnit.join(', '));
+  const street = cleanText(parsed.line1) || withoutUnit[0] || text;
   const parsedCity = cleanText(parsed.city);
   const stateInCity = !parsed.state && TRAILING_STATE.test(parsedCity);
   return {
     street: normalizeStreetLine(street),
-    unit: normalizeUnitLine(unitFirst ? unitFirst.unit : unit),
+    unit: normalizeUnitLine(rawUnit),
     city: cleanText(input.city) || (stateInCity ? parsedCity.replace(TRAILING_STATE, '') : parsedCity),
     state: normalizeState(cleanText(input.state) || cleanText(parsed.state) || (stateInCity ? 'FL' : '')) || '',
     zip: (cleanText(input.zip) || cleanText(parsed.zip)).slice(0, 5),

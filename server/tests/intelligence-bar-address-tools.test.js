@@ -187,6 +187,8 @@ describe('check_address keeps the unit the operator gave', () => {
     ['100 Example Way # 4', 'Unit 4'],
     ['100 Example Way, Apt 4, Sarasota FL', 'Apt 4'],
     ['Apt 204, 100 Example Way, Sarasota, FL 34236', 'Apt 204'],
+    ['100 Example Way, Apt 4', 'Apt 4'],
+    ['100 Example Way Bldg 2 Apt 4', 'Bldg 2 Apt 4'],
   ])('%s returns its unit and reports no street change', async (address, unit) => {
     validateAddress.mockResolvedValue(google());
     const out = await run({ address });
@@ -201,4 +203,11 @@ describe('check_address keeps the unit the operator gave', () => {
     expect(out.unit).toBeNull();
     expect(out.changed).toEqual([]);
   });
+});
+
+test('a unit in its own comma segment is kept when the city is passed separately', async () => {
+  validateAddress.mockResolvedValue(google());
+  const out = await run({ address: '100 Example Way, Apt 4', city: 'Sarasota', zip: '34236' });
+  expect(out.unit).toBe('Apt 4');
+  expect(out.changed).toEqual([]);
 });
