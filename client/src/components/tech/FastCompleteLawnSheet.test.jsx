@@ -1502,20 +1502,17 @@ describe('tips from your tech', () => {
     expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
   });
 
-  test('a tip the note calls for leads the list, ahead of the library order', async () => {
+  test('no tip is listed until the tech searches, whatever the note says (owner 2026-10-12)', async () => {
     tips = lib(['Mow high', 'Dollarweed', 'Chinch bugs']);
     await openSheet();
-    const order = () => screen.getAllByRole('button', { name: /^(Mow high|Dollarweed|Chinch bugs)/ }).map((b) => b.textContent.split('Copy')[0].trim());
-    expect(order()[0]).toBe('Mow high');
+    const listed = () => screen.queryAllByRole('button', { name: /^(Mow high|Dollarweed|Chinch bugs)/ });
+    await screen.findByLabelText('Search tips');
+    expect(listed()).toHaveLength(0);
     fireEvent.change(screen.getByLabelText(/tell me about the visit/i), { target: { value: 'Chinch bugs in the trouble spot, treated with Arena.' } });
-    expect(order()[0]).toBe('Chinch bugs');
-    // Two matches: the tip with more matched keywords leads, not the library's earlier one.
-    tips = lib(['Dollarweed', 'Chinch bugs']);
-    tips.groups[0].tips[1].keywords.push('side strip');
-    cleanup();
-    await openSheet();
-    fireEvent.change(screen.getByLabelText(/tell me about the visit/i), { target: { value: 'Dollarweed near the lanai. Chinch bugs by the drive, chinch bugs in the side strip.' } });
-    expect(order().slice(0, 2)).toEqual(['Chinch bugs', 'Dollarweed']);
+    expect(listed()).toHaveLength(0);
+    expect(screen.queryByText('For what you saw today')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'chinch' } });
+    expect(listed().map((b) => b.textContent.split('Copy')[0].trim())).toEqual(['Chinch bugs']);
   });
 
   test('no tip library, no section, and techTips is null', async () => {
@@ -1532,9 +1529,14 @@ describe('tips from your tech', () => {
     expect(box.tagName).toBe('INPUT');
     expect([...document.querySelectorAll('label')].some((l) => l.textContent === 'Search tips')).toBe(false);
     expect(screen.queryByText('Pick 1 (optional)')).toBeNull();
+    fireEvent.change(box, { target: { value: 'mow' } });
     fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
+    // One pick at a time: the search is gone until the pick is removed.
+    expect(screen.queryByLabelText('Search tips')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove tip' }));
+    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'sedge' } });
     fireEvent.click(screen.getByRole('button', { name: /Sedge/ }));
-    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
     expect(screen.getByRole('button', { name: /Sedge/ }).getAttribute('aria-pressed')).toBe('true');
     await analyzeAndComplete();
     expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
@@ -1543,26 +1545,26 @@ describe('tips from your tech', () => {
   test('reads the list again once the assessment settles, and keeps the tip already picked', async () => {
     tips = lib(['Mow high', 'Dollarweed']);
     await openSheet();
-    fireEvent.click(await screen.findByRole('button', { name: /Mow high/ }));
+    fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'mow' } });
+    fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
     expect(requests.filter((r) => tipRead(r.path))).toHaveLength(1);
     tips = lib(['Dollarweed', 'Mow high']);
     await analyze();
     // the open, the analysis settling, the confirm settling
     await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
-    await waitFor(() => {
-      const names = screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent);
-      expect(names[0]).toMatch(/Dollarweed/);
-    });
     expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
   });
 
   test('a re-read that answers unavailable clears the tips (the server would drop the pick)', async () => {
     tips = lib(['Mow high']);
     await openSheet();
-    await screen.findByRole('button', { name: /Mow high/ });
+    fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'mow' } });
+    fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
     tips = { available: false, groups: [] };
     await analyze();
     await waitFor(() => expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull());
+    expect(screen.queryByText('Tip for the customer')).toBeNull();
   });
 });
 

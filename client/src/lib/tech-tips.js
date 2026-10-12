@@ -115,7 +115,9 @@ export function pestsInNote(note) {
 
 const PEST_TIP_LIFT_MAX = 4;
 
-// The tips the pest sheet lifts under "For what you saw today": advice tagged
+// The tips that fit a pest visit, best first (the pest sheet offers the first
+// as its one suggestion on the report step; the picker itself lists nothing
+// until a search, owner 2026-10-12): advice tagged
 // for a pest the tech tapped or the note names (from the whole library, so a
 // recurring visit reaches roach or flea advice), then the visit's own tips
 // whose keywords the note names. Tips for more of the pests lead; tips this
