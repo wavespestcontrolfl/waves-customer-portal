@@ -25,6 +25,7 @@
 const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
+const { redactSignedLinks, redactString } = require('../../utils/signed-link-redaction');
 const catalog = require('./admin-read-catalog.json');
 
 const LOOPBACK_HOST = '127.0.0.1';
@@ -228,7 +229,7 @@ function fitToCap(data) {
 
 function errorText(parsed, status) {
   const message = parsed && typeof parsed === 'object' ? (parsed.error || parsed.message) : null;
-  return typeof message === 'string' && message.trim() ? message.trim().slice(0, 300) : `The admin endpoint answered HTTP ${status}`;
+  return typeof message === 'string' && message.trim() ? redactString(message.trim().slice(0, 300), { removed: 0 }) : `The admin endpoint answered HTTP ${status}`;
 }
 
 // The body text, with the caller's own token blanked if an endpoint echoes it.
@@ -251,13 +252,25 @@ async function shapeResponse(response, entry, authorization) {
   try { parsed = JSON.parse(scrubToken(await response.text(), authorization)); } catch { parsed = undefined; }
   if (status < 200 || status >= 300) return { status, endpoint: entry.endpoint, error: errorText(parsed, status) };
   if (parsed === undefined) return { status, endpoint: entry.endpoint, error: 'The admin endpoint did not return readable JSON' };
-  const fitted = fitToCap(parsed);
+  return answerFrom(parsed, status, entry);
+}
+
+// The answer: signed links removed first, then cut to the cap.
+function answerFrom(parsed, status, entry) {
+  const state = { removed: 0 };
+  const clean = redactSignedLinks(parsed, state);
+  const fitted = fitToCap(clean);
+  const notes = [
+    state.removed ? `${state.removed} signed file link(s) were removed (shown as "[signed link removed]"); the bar never holds a link that carries its own credential.` : null,
+    fitted.truncated
+      ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). Narrow with "query" filters (a date range, status, id or limit) to see the rest.${paginationHint(clean)}`
+      : null,
+  ].filter(Boolean);
   return {
     status, endpoint: entry.endpoint, data: fitted.data, truncated: fitted.truncated,
     ...(fitted.total_items !== undefined ? { total_items: fitted.total_items } : {}),
-    note: fitted.truncated
-      ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). Narrow with "query" filters (a date range, status, id or limit) to see the rest.${paginationHint(parsed)}`
-      : null,
+    ...(state.removed ? { signed_links_removed: state.removed } : {}),
+    note: notes.length ? notes.join(' ') : null,
   };
 }
 

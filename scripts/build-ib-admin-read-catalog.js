@@ -33,7 +33,7 @@ const CENSUS_FILE = path.join(ROOT, 'docs/intelligence-bar-capabilities.json');
 const OUT_FILE = path.join(ROOT, 'server/services/intelligence-bar/admin-read-catalog.json');
 const EXCLUSIONS_FILE = path.join(ROOT, 'server/services/intelligence-bar/admin-read-exclusions.json');
 const CATALOG_VERSION = 1;
-const ANALYSIS_DEPTH = 5;
+const ANALYSIS_DEPTH = 8;
 
 // ── source parsing ───────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ function parseFile(file) {
   if (!parsed.has(file)) {
     const source = fs.readFileSync(file, 'utf8');
     const ast = parser.parse(source, { sourceType: 'unambiguous', plugins: ['jsx'], errorRecovery: true });
-    parsed.set(file, { source, ast, file, ...topLevel(ast, file) });
+    parsed.set(file, { source, ast, file, ...topLevel(ast, file), nestedRequires: nestedRequireBindings(ast, file) });
   }
   return parsed.get(file);
 }
@@ -109,6 +109,45 @@ function topLevel(ast, file) {
 }
 
 const COLLECTION_CLASSES = new Set(['Map', 'Set', 'WeakMap', 'WeakSet']);
+
+// The require() bindings one declarator makes: `const a = require(x)`,
+// `const a = require(x).b`, `const { a, b } = require(x)`.
+function declaratorRequires(decl, file) {
+  if (!decl.init) return [];
+  if (decl.id.type === 'Identifier') {
+    const target = requireTarget(decl.init, file) || memberRequire(decl.init, file);
+    return target ? [[decl.id.name, target]] : [];
+  }
+  const target = decl.id.type === 'ObjectPattern' ? requireTarget(decl.init, file) : null;
+  if (!target) return [];
+  return decl.id.properties.filter(p => p.type === 'ObjectProperty' && p.value.type === 'Identifier')
+    .map(p => [p.value.name, { ...target, member: p.key.name || p.key.value }]);
+}
+
+// Every require() binding anywhere in the file, including the ones a function
+// makes inside its own body (`const { fn } = require('../services/x')`).
+function nestedRequireBindings(ast, file) {
+  const out = new Map();
+  walk(ast.program.body, (node) => {
+    if (node.type !== 'VariableDeclarator') return;
+    for (const [name, target] of declaratorRequires(node, file)) {
+      if (!out.has(name)) out.set(name, []);
+      out.get(name).push(target);
+    }
+  });
+  return out;
+}
+
+// The module a name is bound to: a top-level binding, else a nested one when
+// every nested binding of that name agrees. An ambiguous name is unresolved.
+function lookupRequire(info, name) {
+  if (!name) return null;
+  if (info.requires.has(name)) return info.requires.get(name);
+  const targets = info.nestedRequires.get(name) || [];
+  const first = targets[0];
+  const agree = first && targets.every(t => t.file === first.file && t.member === first.member && t.external === first.external);
+  return agree ? first : null;
+}
 
 function bindDeclarator(decl, file, tables) {
   if (!decl.init) return;
@@ -183,8 +222,9 @@ function methodOf(node, member, info) {
   return null;
 }
 
-// A function node for an exported name (or a top-level name) in a file.
-function exportedFunction(file, member) {
+// A function node for an exported name (or a top-level name) in a file. A
+// name the file re-exports from another module is followed there.
+function exportedFunction(file, member, hops = 0) {
   const info = parseFile(file);
   const value = info.exportsMap.get(member);
   if (value && isFunction(value)) return { fn: value, info };
@@ -194,7 +234,8 @@ function exportedFunction(file, member) {
   const holder = whole?.type === 'Identifier' ? info.objects.get(whole.name) : whole;
   const method = methodOf(holder, member, info);
   if (method) return { fn: method, info };
-  return null;
+  const reexport = value?.type === 'Identifier' && hops < 4 ? info.requires.get(value.name) : null;
+  return reexport?.file && reexport.member ? exportedFunction(reexport.file, reexport.member, hops + 1) : null;
 }
 
 // ── mounts and routes ────────────────────────────────────────────────────
@@ -316,10 +357,56 @@ const EFFECT_ANYWHERE_RE = /(OrCreate|OrInsert|OrInit|OrUpdate|AndMark|AndSave|A
 function firstWord(name) {
   return String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[\s_]+/)[0].toLowerCase();
 }
-const NEUTRAL_RECEIVERS = new Set(['res', 'req', 'logger', 'console', 'Math', 'JSON', 'Object', 'Array', 'Number', 'String', 'Date', 'Promise',
-  'Set', 'Map', 'path', 'moment', 'dayjs', 'DateTime', 'crypto', 'Buffer', 'Intl', 'process', 'db', 'trx', 'knex']);
-const NEUTRAL_CALLS = new Set(['next', 'require', 'Number', 'String', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'Date', 'Array', 'Object', 'Set', 'Map', 'Promise', 'Error',
-  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'encodeURIComponent', 'decodeURIComponent', 'BigInt', 'Symbol', 'db', 'trx', 'knex', 'transaction']);
+// What counts as safe WITHOUT following the call into source. Anything else
+// that the scan cannot resolve to a function body it has scanned is
+// "unresolved", and a route with an unresolved call is excluded unless a
+// reviewer allowed that exact callee list (admin-read-exclusions.json).
+//   1. Objects whose methods are response, logging or language built-ins.
+const SAFE_ROOTS = new Set(['res', 'req', 'logger', 'console', 'JSON', 'Math', 'Date', 'Number', 'String', 'Boolean', 'Object', 'Array',
+  'Promise', 'Set', 'Map', 'WeakMap', 'WeakSet', 'Buffer', 'Intl', 'RegExp', 'URL', 'URLSearchParams', 'Symbol', 'BigInt', 'path', 'crypto',
+  'moment', 'dayjs', 'DateTime', 'luxon', 'uuid']);
+//   2. Bare calls: built-in functions, Express next, and the knex handle every
+//      service passes around (db, trx and the names it is conventionally given).
+const SAFE_BARE = new Set(['next', 'require', 'Number', 'String', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'Date', 'Array',
+  'Object', 'Set', 'Map', 'Promise', 'Error', 'BigInt', 'Symbol', 'encodeURIComponent', 'decodeURIComponent', 'encodeURI', 'decodeURI',
+  'structuredClone', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'moment', 'dayjs', 'uuid',
+  'db', 'trx', 'tx', 'knex', 'conn', 'connection', 'database', 'dbh', 'dbOrTrx']);
+//   3. Pure data methods on a value (never on a required module or `this`).
+const PURE_METHODS = new Set(['map', 'filter', 'reduce', 'reduceRight', 'find', 'findIndex', 'findLast', 'some', 'every', 'forEach', 'flatMap',
+  'flat', 'slice', 'concat', 'join', 'includes', 'indexOf', 'lastIndexOf', 'sort', 'toSorted', 'reverse', 'push', 'pop', 'shift', 'unshift',
+  'splice', 'fill', 'keys', 'values', 'entries', 'get', 'set', 'has', 'add', 'clear', 'toString', 'toISOString', 'toJSON', 'toFixed',
+  'toLocaleString', 'toLocaleDateString', 'toLocaleTimeString', 'toUpperCase', 'toLowerCase', 'localeCompare', 'split', 'trim', 'trimStart',
+  'trimEnd', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'match', 'matchAll', 'test', 'exec', 'padStart', 'padEnd', 'charAt',
+  'charCodeAt', 'substring', 'substr', 'at', 'repeat', 'normalize', 'then', 'catch', 'finally', 'assign', 'freeze', 'isArray', 'isInteger',
+  'from', 'of', 'parse', 'stringify', 'getTime', 'getFullYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes', 'getSeconds',
+  'getUTCFullYear', 'getUTCMonth', 'getUTCDate', 'getUTCDay', 'getUTCHours', 'getUTCMinutes', 'setDate', 'setHours', 'setMonth', 'setUTCDate',
+  'setUTCHours', 'valueOf', 'hasOwnProperty', 'floor', 'ceil', 'round', 'abs', 'max', 'min', 'pow', 'sqrt', 'trunc', 'sign', 'random', 'now',
+  'all', 'allSettled', 'race', 'resolve', 'reject', 'fromEntries', 'format', 'subtract', 'startOf', 'endOf', 'diff', 'isBefore', 'isAfter',
+  'isSame', 'isValid', 'utc', 'tz', 'unix', 'toDate', 'formatToParts', 'resolvedOptions', 'getTimezoneOffset', 'toLocaleLowerCase',
+  'toLocaleUpperCase']);
+//   4. Knex query-builder READ methods (writes are flagged on their own).
+const DB_READ_METHODS = new Set(['select', 'where', 'whereIn', 'whereNotIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereBetween',
+  'whereNotBetween', 'whereExists', 'whereNotExists', 'whereRaw', 'whereLike', 'whereILike', 'orWhere', 'orWhereIn', 'orWhereNotIn',
+  'orWhereNull', 'orWhereNotNull', 'orWhereRaw', 'orWhereNot', 'andWhere', 'andWhereRaw', 'andWhereNot', 'having', 'havingRaw', 'join',
+  'leftJoin', 'rightJoin', 'innerJoin', 'crossJoin', 'leftOuterJoin', 'fullOuterJoin', 'joinRaw', 'groupBy', 'groupByRaw', 'orderBy',
+  'orderByRaw', 'limit', 'offset', 'first', 'count', 'countDistinct', 'sum', 'avg', 'min', 'max', 'pluck', 'distinct', 'as', 'from', 'table',
+  'column', 'columns', 'columnInfo', 'hasTable', 'hasColumn', 'schema', 'withSchema', 'modify', 'clone', 'with', 'withRecursive', 'union',
+  'unionAll', 'clearSelect', 'clearOrder', 'clearWhere', 'clearGroup', 'clearHaving', 'raw', 'fn', 'toSQL']);
+const DB_WHERE_RE = /^(or|and)?[Ww]here(Not)?[A-Z][A-Za-z]*$/; // whereLike, orWhereExists, andWhereNotNull ...
+//   5. Constructors of language built-ins.
+const SAFE_NEW = new Set(['Date', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Error', 'TypeError', 'RangeError', 'SyntaxError', 'RegExp', 'URL',
+  'URLSearchParams', 'Array', 'Object', 'Promise', 'Intl', 'Buffer', 'AbortController', 'Number', 'String']);
+//   6. The knex handle itself, named as services conventionally name it. A READ
+//      method on it is safe; `this` inside a knex `.where(function () {...})`
+//      callback is the builder, so READ methods on `this` are too.
+const KNEX_HANDLES = new Set(['db', 'trx', 'tx', 'knex', 'conn', 'connection', 'database', 'dbh', 'dbOrTrx', 'this']);
+// Auth middleware every admin route already runs; not part of what a read does.
+const TRUSTED_MIDDLEWARE = new Set(['adminAuthenticate', 'requireAdmin', 'requireTechOrAdmin', 'requireFullAccess']);
+// A helper that mints a link carrying its own credential (an S3 presigned
+// URL and friends). Found in getSignedUrl (@aws-sdk/s3-request-presigner),
+// signedViewUrl, signedUrl, presignUpload, stopPhotoViewUrls, getViewUrl,
+// getEvidenceUrl. A route that reaches one is never in the catalog.
+const SIGNING_RE = /(signed(url|link|view|photo|read|get)|presign|view_?urls?$|evidence_?url|sign_?(url|link)|temporary_?url|download_?url)/i;
 const SQL_WRITE_RE = /\b(insert\s+into|update\s+\w|delete\s+from|truncate|alter\s+table|drop\s+table|create\s+table|create\s+index|nextval|setval|pg_advisory|for\s+update|on\s+conflict|refresh\s+materialized)\b/i;
 const RESPONSE_BINARY = new Set(['sendFile', 'download', 'redirect', 'write', 'pipe', 'attachment', 'cookie', 'clearCookie', 'sendStatus', 'type', 'format']);
 const JSON_RESPONSE = new Set(['json', 'send', 'jsonp']);
@@ -334,8 +421,12 @@ function flag(signals, signal, info, node) {
   if (!origins.has(signal)) origins.set(signal, `${path.relative(ROOT, info.file)}:${node.loc?.start.line}`);
 }
 
-// Service calls the scan could not follow into source (review aid only).
+// Service calls the scan could not follow into source. Fail closed: a route
+// with any of these is excluded unless a reviewer allowed exactly this list.
 const unresolvedCalls = new Set();
+function noteUnresolved(info, label) {
+  unresolvedCalls.add(`${path.relative(ROOT, info.file).replace(/^server\//, '')}#${label}`);
+}
 
 function calleeName(callee) {
   if (callee.type === 'Identifier') return { name: callee.name, receiver: null };
@@ -354,12 +445,23 @@ function sourceOf(info, node) {
   return info.source.slice(node.start, node.end);
 }
 
+// Names a function declares inside its own body: calls to them run code the
+// walk below already reads in place.
+function nestedFunctionNames(fn) {
+  const names = new Set();
+  walk(fn.body || fn, (node) => {
+    if (node.type === 'FunctionDeclaration' && node.id) names.add(node.id.name);
+    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && isFunction(node.init)) names.add(node.id.name);
+  });
+  return names;
+}
+
 function analyze(fn, info, depth, seen = new Set()) {
   const signals = new Set();
   if (!fn || seen.has(fn)) return signals;
   seen.add(fn);
   touchedFiles.add(path.relative(ROOT, info.file));
-  const ctx = { info, depth, seen, signals, sawResponse: false };
+  const ctx = { info, depth, seen, signals, sawResponse: false, nested: nestedFunctionNames(fn) };
   walk(fn.body || fn, (node, parent) => visitNode(node, parent, ctx));
   if (!ctx.sawResponse && depth === 0) flag(signals, 'no_json_response', info, fn);
   return signals;
@@ -368,13 +470,23 @@ function analyze(fn, info, depth, seen = new Set()) {
 function visitNode(node, parent, ctx) {
   const { info, signals } = ctx;
   if (node.type === 'Identifier' && OUTSIDE_IDENTIFIERS.has(node.name) && !isPropertyName(node, parent)) flag(signals, `outside:${node.name}`, info, node);
+  if (node.type === 'Identifier' && node.name === 'GetObjectCommand') flag(signals, 'signed_url:GetObjectCommand', info, node);
   if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression' && node.left.object.name === 'process') flag(signals, 'writes_process_state', info, node);
+  if (node.type === 'NewExpression') { inspectNew(node, ctx); return; }
   if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+  if (node.callee.type === 'Import') { noteUnresolved(info, 'import()'); return; }
   const { name, receiver } = calleeName(node.callee);
   if (name === 'require') return;
   if (isResponseCall(node, receiver)) { inspectResponseCall(node, name, ctx); return; }
   inspectWriteCall(node, name, receiver, info, signals);
-  inspectCallee(node, name, receiver, info, ctx.depth, ctx.seen, signals);
+  if (SIGNING_RE.test(name)) flag(signals, `signed_url:${name}`, info, node);
+  inspectCallee(node, name, receiver, ctx);
+}
+
+function inspectNew(node, ctx) {
+  const callee = node.callee;
+  const name = callee.type === 'Identifier' ? callee.name : callee.object?.name;
+  if (!SAFE_NEW.has(name) && !/Error$/.test(name || '')) noteUnresolved(ctx.info, `new ${name || '<dynamic>'}`);
 }
 
 function isResponseCall(node, receiver) {
@@ -410,37 +522,51 @@ function isPropertyName(node, parent) {
 function outsideTargetSignals(targets, info, node, signals) {
   for (const target of targets) {
     if (target?.external && OUTSIDE_IDENTIFIERS.has(target.external.replace(/^node:/, ''))) flag(signals, `outside:${target.external}`, info, node);
+    if (target?.external && /presigner/.test(target.external)) flag(signals, `signed_url:${target.external}`, info, node);
     if (target?.file && OUTSIDE_PATH_RE.test(path.relative(ROOT, target.file))) {
       flag(signals, `outside_service:${path.relative(ROOT, target.file).replace(/^server\/(services\/)?/, '').replace(/\.js$/, '')}`, info, node);
     }
   }
 }
 
-function isNeutralCall(name, receiver) {
-  return NEUTRAL_RECEIVERS.has(receiver) || NEUTRAL_CALLS.has(name);
+// Safe without source: see the SAFE_* sets above. A method on a required
+// module or on `this` is a service call and must resolve to scanned source.
+function triviallySafe(node, name, receiver, ctx) {
+  const callee = node.callee;
+  if (isFunction(callee)) return true;
+  if (callee.type === 'Identifier') return SAFE_BARE.has(name) || ctx.nested.has(name);
+  if (!name) return false;
+  if (SAFE_ROOTS.has(receiver)) return true;
+  const direct = callee.object?.type === 'Identifier' ? callee.object.name : null;
+  if (KNEX_HANDLES.has(direct) && (DB_READ_METHODS.has(name) || DB_WHERE_RE.test(name))) return true;
+  if (direct === 'this' || (direct && lookupRequire(ctx.info, direct))) return false;
+  return PURE_METHODS.has(name) || DB_READ_METHODS.has(name) || DB_WHERE_RE.test(name);
 }
 
-// Only a bare function or a call on a required module can be a service
-// action; `arr.push`, `str.startsWith` and `map.set` are language calls.
+// Only a bare function or a method called directly on a required module (or
+// `this`) can be a service action; the verb it starts with says whether it acts.
 function isServiceEffect(node, name, receiver, required) {
-  const serviceCall = node.callee.type === 'Identifier' || Boolean(required) || receiver === 'this';
-  return serviceCall && !isNeutralCall(name, receiver) && (EFFECT_WORDS.has(firstWord(name)) || EFFECT_ANYWHERE_RE.test(name));
+  const bare = node.callee.type === 'Identifier';
+  const service = bare ? !SAFE_BARE.has(name) : (Boolean(required) || receiver === 'this') && !SAFE_ROOTS.has(receiver);
+  return service && (EFFECT_WORDS.has(firstWord(name)) || EFFECT_ANYWHERE_RE.test(name));
 }
 
-function noteUnresolved(node, name, receiver, required, direct) {
-  if (!(node.callee.type === 'Identifier' || required) || isNeutralCall(name, receiver)) return;
-  const source = (required || direct)?.file;
-  unresolvedCalls.add(`${receiver ? `${receiver}.` : ''}${name}${source ? `@${path.relative(ROOT, source).replace('server/', '')}` : ''}`);
+// `require('./x').fn(...)`: the module is named on the call itself.
+function inlineRequire(callee, info) {
+  if (callee.type !== 'MemberExpression' || callee.object.type !== 'CallExpression') return null;
+  return requireTarget(callee.object, info.file);
 }
 
-function inspectCallee(node, name, receiver, info, depth, seen, signals) {
-  const local = node.callee.type === 'Identifier' ? info.functions.get(name) : null;
-  const required = receiver && info.requires.get(receiver);
-  const direct = node.callee.type === 'Identifier' ? info.requires.get(name) : null;
+function inspectCallee(node, name, receiver, ctx) {
+  const { info, depth, seen, signals } = ctx;
+  const callee = node.callee;
+  const local = callee.type === 'Identifier' ? info.functions.get(name) : null;
+  const direct = callee.type === 'Identifier' ? lookupRequire(info, name) : null;
+  const required = callee.object?.type === 'Identifier' ? lookupRequire(info, callee.object.name) : inlineRequire(callee, info);
   outsideTargetSignals([required, direct], info, node, signals);
   const next = local ? { fn: local, info } : resolveRequired(required, direct, name);
-  if (next && depth < ANALYSIS_DEPTH) { mergeSignals(signals, analyze(next.fn, next.info, depth + 1, seen)); return; }
-  if (!next) noteUnresolved(node, name, receiver, required, direct);
+  if (next && depth < ANALYSIS_DEPTH) mergeSignals(signals, analyze(next.fn, next.info, depth + 1, seen));
+  else if (next || !triviallySafe(node, name, receiver, ctx)) noteUnresolved(info, `${receiver && callee.type !== 'Identifier' ? `${receiver}.` : ''}${name || '<dynamic>'}${next ? ' (depth limit)' : ''}`);
   if (!local && isServiceEffect(node, name, receiver, required)) flag(signals, `effect_call:${name}`, info, node);
 }
 
@@ -461,15 +587,25 @@ function resolveRequired(required, direct, name) {
 }
 
 // The function nodes that run for one route: inline middleware and handler.
+function argLabel(arg) {
+  if (arg.type === 'Identifier') return arg.name;
+  if (arg.type === 'MemberExpression') return `${arg.object.name || '<expr>'}.${arg.property.name || '<expr>'}`;
+  if (arg.type === 'CallExpression') return `${argLabel(arg.callee)}()`;
+  return '<inline>';
+}
+
+// Route-level middleware either resolves to scanned source, is a trusted auth
+// guard, or counts as an unresolved call.
 function routeFunctions(route) {
   const info = route.info;
   const out = [];
-  const args = route.args;
   let handlerFound = false;
-  args.forEach((arg, index) => {
-    const last = index === args.length - 1;
+  route.args.forEach((arg, index) => {
+    const last = index === route.args.length - 1;
+    const label = argLabel(arg);
+    if (!last && TRUSTED_MIDDLEWARE.has(label)) return;
     const resolved = resolveArg(arg, info);
-    if (resolved) { out.push(resolved); if (last) handlerFound = true; }
+    if (resolved) { out.push(resolved); if (last) handlerFound = true; } else if (!last) noteUnresolved(info, `middleware ${label}`);
   });
   return { functions: out, handlerFound };
 }
@@ -488,7 +624,7 @@ function resolveArg(arg, info) {
 }
 
 function resolveImported(name, receiver, info) {
-  const target = receiver ? info.requires.get(receiver) : info.requires.get(name);
+  const target = lookupRequire(info, receiver || name);
   if (!target?.file) return null;
   const found = exportedFunction(target.file, receiver ? name : (target.member || 'default'));
   return found ? { fn: found.fn, info: found.info } : null;
@@ -508,6 +644,14 @@ function loadExclusions() {
   };
 }
 
+// A reviewer's allow row clears a route only for the exact scan result the
+// reviewer read: the same signals AND the same unresolved callee list.
+function allowedBy(exclusions, key, list, unresolved) {
+  const row = exclusions.allow.get(key);
+  const same = (a, b) => Array.isArray(a) && a.join('\n') === b.join('\n');
+  return row && same(row.signals, list) && same(row.unresolved, unresolved) ? row : null;
+}
+
 function judgeRoute(entry, exclusions, opaqueMounts) {
   const key = routeKey(entry.full);
   const ruled = rules.denyReason(entry.full);
@@ -516,21 +660,23 @@ function judgeRoute(entry, exclusions, opaqueMounts) {
   if (opaqueMounts.some(prefix => entry.full === prefix || entry.full.startsWith(`${prefix}/`))) {
     return { safe: false, kind: 'review', reason: 'router has a catch-all or dynamic route' };
   }
+  unresolvedCalls.clear();
+  touchedFiles.clear();
   const { functions, handlerFound } = routeFunctions(entry.route);
   if (!functions.length || !handlerFound) return { safe: false, kind: 'review', reason: 'handler_not_found' };
   const signals = new Set();
-  unresolvedCalls.clear();
-  touchedFiles.clear();
   functions.forEach(({ fn, info }) => analyze(fn, info, 0).forEach(signal => signals.add(signal)));
   const unresolved = [...unresolvedCalls].sort();
   const touched = [...touchedFiles].sort();
   // The final handler must answer with JSON; middleware need not.
   if (functions.length > 1) signals.delete('no_json_response');
   const list = [...signals].sort();
-  if (!list.length) return { safe: true, signals: list, unresolved, touched };
-  const allowed = exclusions.allow.get(key);
-  if (allowed && allowed.signals.join(',') === list.join(',')) return { safe: true, signals: list, cleared: allowed.reason };
-  return { safe: false, kind: 'review', reason: `scan: ${list.join(', ')}`, signals: list };
+  if (!list.length && !unresolved.length) return { safe: true, signals: list, unresolved, touched };
+  // A route that mints signed links is never cleared by a review.
+  const allowed = list.some(signal => signal.startsWith('signed_url')) ? null : allowedBy(exclusions, key, list, unresolved);
+  if (allowed) return { safe: true, signals: list, unresolved, touched, cleared: allowed.reason };
+  const why = [list.length ? `scan: ${list.join(', ')}` : null, unresolved.length ? `unresolved: ${unresolved.join(', ')}` : null].filter(Boolean).join(' | ');
+  return { safe: false, kind: 'review', reason: why, signals: list, unresolved };
 }
 
 // ── census → catalog ─────────────────────────────────────────────────────
@@ -715,4 +861,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { origins, touchedFiles, buildCatalog, serialize, routeTable, judgeRoute, routeKey, loadExclusions, CENSUS_FILE, OUT_FILE, EXCLUSIONS_FILE };
+module.exports = { origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, routeKey, loadExclusions, CENSUS_FILE, OUT_FILE, EXCLUSIONS_FILE };

@@ -298,6 +298,69 @@ describe('the answer', () => {
   });
 });
 
+describe('signed file links', () => {
+  const SIGNED = [
+    'https://bucket.s3.us-east-1.amazonaws.com/evidence/shot.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIATESTKEY%2F20261012&X-Amz-Signature=deadbeef&X-Amz-Expires=3600',
+    'https://files.example.test/doc.pdf?Expires=1760000000&Signature=abc123&Key-Pair-Id=K1',
+    'https://files.example.test/a.png?token=abc123',
+    'https://files.example.test/a.png?access_token=abc123',
+    'https://files.example.test/a.png?sig=abc&se=2026-10-13',
+    'https://files.example.test/a.png?key=abc123',
+    'https://acct.r2.cloudflarestorage.com/bucket/object.png',
+    'https://pub-abc.r2.dev/object.png',
+    'https://storage.googleapis.com/bucket/object.png',
+    'https://acct.blob.core.windows.net/c/o.png',
+    'https://user:pass@files.example.test/a.png',
+    'https://files.example.test/a.png#access_token=abc123',
+  ];
+
+  test('every shape of signed or storage link is replaced, wherever it sits in the JSON', async () => {
+    const body = {
+      screenshots: SIGNED.slice(0, 6).map((url, i) => ({ label: `shot ${i}`, url })),
+      nested: { deeper: { list: [{ href: SIGNED[6] }, { href: SIGNED[7] }], note: `see ${SIGNED[8]} for the file` } },
+      more: SIGNED.slice(9),
+      kept: 'https://www.example.test/page?tab=2',
+    };
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, body));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    const text = JSON.stringify(result);
+    for (const url of SIGNED) expect(text).not.toContain(url);
+    for (const secret of ['X-Amz-Signature', 'AKIATESTKEY', 'deadbeef', 'abc123', 'user:pass', 'r2.cloudflarestorage', 'r2.dev', 'storage.googleapis', 'blob.core.windows']) {
+      expect(text).not.toContain(secret);
+    }
+    expect(result.data.screenshots[0].url).toBe('[signed link removed]');
+    expect(result.data.nested.deeper.list[0].href).toBe('[signed link removed]');
+    expect(result.data.nested.deeper.note).toBe('see [signed link removed] for the file');
+    expect(result.data.kept).toBe('https://www.example.test/page?tab=2');
+    expect(result.signed_links_removed).toBe(SIGNED.length);
+    expect(result.note).toMatch(/signed file link/);
+  });
+
+  test('links are removed before the answer is cut, so none hide in the part that is dropped', async () => {
+    const rows = Array.from({ length: 800 }, (_, i) => ({ id: i, url: `https://b.s3.amazonaws.com/o${i}.png?X-Amz-Signature=sig${i}` }));
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, rows));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    expect(result.truncated).toBe(true);
+    expect(result.signed_links_removed).toBe(800);
+    expect(JSON.stringify(result)).not.toContain('X-Amz-Signature');
+    expect(result.note).toMatch(/signed file link/);
+    expect(result.note).toMatch(/narrow/i);
+  });
+
+  test('an error message that carries a signed link is cleaned', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(500, { error: 'failed to load https://b.s3.amazonaws.com/o.png?X-Amz-Signature=zzz' }));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    expect(result.error).toBe('failed to load [signed link removed]');
+  });
+
+  test('an answer with no signed link carries no removal note', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, { link: 'https://www.example.test/a', n: 1 }));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    expect(result.note).toBeNull();
+    expect(result.signed_links_removed).toBeUndefined();
+  });
+});
+
 describe('find_admin_reads', () => {
   test('returns up to 10 entries with endpoint, params, label and screen, and reads no rows', async () => {
     const result = await executeAdminReadTool(FIND, { query: 'customer' }, ownerContext());
