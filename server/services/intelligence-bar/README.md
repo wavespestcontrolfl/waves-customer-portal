@@ -9,9 +9,25 @@ describes that integrated contract. See the foundation review split document.
 With `GATE_IB_PLATFORM`, the server-owned `action-registry.js` discovers actions
 across pages. Add the module there and classify every action in
 `action-policy.json`; unknown policies fail closed. Do not add a second business
-writer or an arbitrary HTTP/SQL executor. Call the same authoritative operation
-as the corresponding portal action, including its route-owned validation and
-effects where those need extraction.
+writer or an arbitrary HTTP/SQL executor for writes. Call the same authoritative
+operation as the corresponding portal action, including its route-owned
+validation and effects where those need extraction.
+
+Reads have one exception (owner ruling 2026-10-12: "The Intelligence Bar may read
+what any admin screen reads, on the owner login, behind a gate"). `find_admin_reads`
+and `read_admin_data` (`admin-read-tools.js`, `GATE_IB_GENERAL_READ`, owner login
+only) read through the reviewed catalog `admin-read-catalog.json`: the admin GET
+endpoints the request census (`docs/intelligence-bar-capabilities.json`) resolves,
+minus credentials, identity flows, files, streams, action verbs and any handler the
+generator finds writing to the database or calling an outside service
+(`npm run ib:read-catalog`; reviewed exceptions in `admin-read-exclusions.json`).
+The model passes a catalog pattern and parameter values, never a URL; the server
+sends a loopback GET with the operator's own bearer token (set on the action context
+by the route, never model input, logged or stored), so every router middleware
+applies as on the screen. This is a catalog of reads, not an arbitrary executor: an
+endpoint outside it is refused, and writes are unchanged (they still need their own
+registered tool, `write-gates.js` entry and confirmation). A catalog read is not
+coverage evidence: do not mark census rows verified because of it.
 
 Writes must also register in `write-gates.js` and the write-gate contract test.
 The model can prepare a proposal, never approve it. Bind target IDs, recipient,

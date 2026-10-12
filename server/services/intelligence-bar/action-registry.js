@@ -8,12 +8,13 @@ const addFormats = require('ajv-formats');
 const policy = require('./action-policy.json');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
-  FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES, FULL_ACCESS_READ_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
+const { adminReadLive } = require('./admin-read-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -68,6 +69,7 @@ const MODULES = [
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
+  ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -127,6 +129,8 @@ const GATED_ACTIONS = {
   merge_customers: () => mergeCustomersEnabled(),
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
+  find_admin_reads: () => adminReadLive(),
+  read_admin_data: () => adminReadLive(),
 };
 
 function allowed(action, { role, context, fullAccess } = {}) {
@@ -145,6 +149,8 @@ function allowed(action, { role, context, fullAccess } = {}) {
   // refusal, but these ARE structurally two-step (a card), so they need
   // their own check here rather than the blanket approval-kind refusal.
   if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
+  // General admin reads (owner ruling 2026-10-12): owner login only.
+  if (FULL_ACCESS_READ_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
   return true;
 }
 

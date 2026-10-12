@@ -3832,6 +3832,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // an owner-direct fallback read is unscoped.
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
+              // General admin read (owner ruling 2026-10-12): the request's own
+              // login and bearer token, set here from the authenticated request,
+              // never from model input; read_admin_data forwards the token on
+              // its loopback GET and it is persisted nowhere. Only the platform
+              // contexts carry full access, so the tech and agent_estimate rails
+              // refuse these reads even for a forced call.
+              fullAccess: platformEnabled && ibFullAccess(req), staffAuthorization: req.headers.authorization,
             });
             if (isToolFailure(result)) {
               failed = true;
@@ -4273,7 +4280,7 @@ router.post('/execute', async (req, res, next) => {
     }
 
     if (gateEnvValue('GATE_IB_PLATFORM') && !CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
-      const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform' });
+      const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform', fullAccess: ibFullAccess(req) });
       if (invalid) return res.status(invalid.code === 'permission_denied' ? 403 : 400).json(invalid);
     }
 
@@ -4297,6 +4304,8 @@ router.post('/execute', async (req, res, next) => {
       // Request-derived actor for actor-bound reads (recall) — same source
       // the /query loop uses, never the client params.
       actorId: getAdminActorId(req),
+      // General admin read (owner ruling 2026-10-12): see the /query loop.
+      fullAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization,
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 

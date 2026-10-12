@@ -318,6 +318,9 @@ const SCOPE_SNAPSHOT = {
     // Third-party anchor text + agent-written strategy summaries, provider
     // error messages, human-typed Play release names.
     'get_backlink_overview', 'get_integration_token_health', 'get_play_store_status',
+    // read_admin_data returns whatever a catalog admin endpoint returns, which
+    // can list any customer's rows (owner ruling 2026-10-12).
+    'read_admin_data',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],

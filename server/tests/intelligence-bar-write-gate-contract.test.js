@@ -329,6 +329,9 @@ const READ_ONLY = [
   // billing-reader-tools.js (W9): read-only per-customer invoice list and invoice detail
   // with a payments timeline (attempts kept apart from received payments).
   'get_customer_invoices', 'get_invoice_detail',
+  // admin-read-tools.js (GATE_IB_GENERAL_READ, owner ruling 2026-10-12): a catalog search and
+  // one loopback GET to a reviewed admin endpoint. Reads only, owner login only (FULL_ACCESS_READ_TOOL_NAMES).
+  'find_admin_reads', 'read_admin_data',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
