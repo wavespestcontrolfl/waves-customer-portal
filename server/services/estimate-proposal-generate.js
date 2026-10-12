@@ -742,9 +742,13 @@ const oneTimeIdentity = (item) => [
 // manualFinalOneTime is NOT part of the identity: it is the operator-accepted
 // net on one mirror of the same row, and the collapse's net reconciliation
 // must see both copies as one row (codex #6113 r34).
+// The gross a raw row states, whichever legacy alias carries it: one engine
+// run persists `price` in one shape and `oneTimePrice` in the other, and the
+// two copies must be one identity (codex #6113 r35).
+const rawGrossKey = (line) => String(num(line.price ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime ?? line.total) ?? '');
 const rawIdentity = (line) => [
   String(line.service || line.name || '').toLowerCase(),
-  String(line.price ?? ''), String(line.oneTimePrice ?? ''), String(line.total ?? ''),
+  rawGrossKey(line),
   String(line.installation?.price ?? ''),
 ].join('|');
 // manualFinalOneTime is the operator-ACCEPTED net (the engine keeps `price`

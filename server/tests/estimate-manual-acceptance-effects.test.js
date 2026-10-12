@@ -661,6 +661,39 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.amount, e.visits, e.includes])).toEqual([[300, undefined, ['Kitchen']], [300, 3, ['Garage']]]);
   });
+  test('round 35: a raw mirror that states its gross as oneTimePrice instead of price is one line, never two', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, billingCadence: 'one_time' }] },
+          engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', oneTimePrice: 100, billingCadence: 'one_time' }] },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Wasp Nest Removal', 100]]);
+  });
+  test('round 35: an explicit discounted setup row ($49 sold) outranks a stale cached $99 membership fee', async () => {
+    const setupRow = { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, priceAfterDiscount: 49 };
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, total: 399, items: [roach, setupRow] }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 49]]);
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, items: [roach, setupRow] }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 49]]);
+  });
+  test('round 35: the estimate page accept (no card pins) keeps a detached office-bell post and does not wait on the notification write', async () => {
+    let release;
+    NotificationService.notifyAdmin.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const world = makeWorld();
+    const outcome = await Promise.race([
+      markEstimateManuallyAccepted(base(world, fakeConverter(world, { tierBell: true }))).then(() => 'accepted'),
+      new Promise((resolve) => setTimeout(() => resolve('timed out'), 500)),
+    ]);
+    expect(outcome).toBe('accepted');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(world.state.committed).toBe(1);
+    release({ id: 'notif-late' });
+    await settle();
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

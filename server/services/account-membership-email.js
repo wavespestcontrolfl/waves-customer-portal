@@ -213,66 +213,16 @@ async function sendTemplate({
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
-
   const contact = contactOverride || getPrimaryContact(recipientCustomer);
-  const recipientSkip = templateRecipientSkip(contact, expectedRecipientKey);
-  if (recipientSkip) {
-    if (recipientSkip === 'recipient_changed') logger.warn(`[account-membership-email] ${templateKey} not sent for customer ${recipientCustomer.id}: the address changed since it was approved`);
-    await logLifecycleEmailAttempt({ customerId: recipientCustomer.id, templateKey, eventType, status: 'skipped', failureReason: recipientSkip, metadata });
-    return { ok: false, skipped: true, reason: recipientSkip };
-  }
-
-  // Portal-wide "Email Messages" kill switch (notification_prefs.email_enabled
-  // = false) must fail-closed across the whole membership.*/account.* family,
-  // the way receipt-delivery-queue.js:262, estimate-deposits.js:386,
-  // cancellation-confirmations.js:185 and autopay-setup-link.js:272 already
-  // do — this sender previously never read notification_prefs at all, so an
-  // opted-out customer had no self-serve way to stop these emails (the
-  // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
-  // SendGrid-side suppression groups by design). A lookup failure is treated
-  // the same as opted-out: it must not read as "no opt-out" on a DB blip.
-  // A billing email (billingAuthorityInput set) leaves the switch, the billing
-  // choice and the recipient to the shared billing email authority (owner
-  // ruling 2026-09-27): read by the caller, and again at the provider handoff
-  // below.
-  const optOut = billingAuthorityInput ? { emailOptedOut: false } : await readEmailOptOut(recipientCustomer.id);
-  if (optOut.unavailable) {
-    await logLifecycleEmailAttempt({ customerId: recipientCustomer.id, templateKey, eventType, status: 'failed', failureReason: 'prefs_unavailable', metadata });
-    return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
-  }
-  const emailOptedOut = optOut.emailOptedOut;
-  if (emailOptedOut) {
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'email_opted_out',
-      metadata,
-    });
-    return { ok: false, skipped: true, reason: 'email_opted_out' };
-  }
-
-  const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
-    ? recipientCustomer
-    : await loadCustomer(customerId);
-  const firstName = firstToken(contact.name) || firstToken(recipientCustomer.first_name) || 'there';
-  const finalPayload = {
-    first_name: firstName,
-    customer_name: fullName(recipientCustomer),
-    customer_portal_url: portalTabUrl('dashboard'),
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
-    company_email: CONTACT_EMAIL,
-    property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
-    ...payload,
-  };
+  const log = { customerId: recipientCustomer.id, templateKey, eventType, metadata };
+  const blocked = await templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, log });
+  if (blocked) return blocked;
+  const finalPayload = await templatePayload({ customerId, recipientCustomer, contact, payload });
 
   // A billing email's refusals and thrown sends map and log like every other
   // billing sender's (billing-email-sender.js).
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
-  const billingLog = (fields) => logLifecycleEmailAttempt({
-    customerId: recipientCustomer.id, templateKey, eventType, metadata, ...fields,
-  });
+  const billingLog = (fields) => logLifecycleEmailAttempt({ ...log, ...fields });
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -288,47 +238,96 @@ async function sendTemplate({
         ...categories,
       ],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
-      ...(billingAuthorityInput ? {
-        withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
-          input: billingAuthorityInput, recipientEmail: contact.email, templateKey, dispatch, state,
-        }),
-      } : {}),
+      ...billingHandoffOption({ billingAuthorityInput, recipientEmail: contact.email, templateKey, state }),
     });
-
     if (state.boundaryBlock) return await billingEmailSendOutcome(result, state, billingLog);
-
-    if (result.deduped) {
-      return {
-        ok: !!result.sent,
-        deduped: true,
-        blocked: !!result.blocked,
-        messageId: result.message?.provider_message_id || null,
-        // The ORIGINAL acceptance time from the existing email_messages row
-        // (Codex #4921 r4 P1): a caller that records a dated witness for the
-        // send — the termite renewal notice's on-time/late classification —
-        // must use when the provider first accepted it, not this retry's time.
-        sentAt: result.message?.sent_at || null,
-      };
-    }
-
-    return settleTemplateResult(result, { customerId: recipientCustomer.id, templateKey, eventType, metadata });
+    if (result.deduped) return dedupedTemplateResult(result);
+    return settleTemplateResult(result, log);
   } catch (err) {
-    if (billingAuthorityInput) {
-      return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
-        logTag: 'account-membership-email', label: `${eventType} for ${recipientCustomer.id}`,
-      });
-    }
-    await logLifecycleEmailAttempt({
-      customerId: recipientCustomer.id,
-      templateKey,
-      eventType,
-      status: 'failed',
-      failureReason: err.message,
-      metadata,
-    });
-    logger.error(`[account-membership-email] ${eventType} failed for ${recipientCustomer.id}: ${err.message}`);
-    return { ok: false, error: err.message };
+    return templateSendFailure(err, { billingAuthorityInput, state, billingLog, log });
   }
+}
+
+// The recipient and opt-out checks that stop a send before the payload is
+// built: the approved-recipient veto, then the portal-wide "Email Messages"
+// kill switch (notification_prefs.email_enabled = false), which must
+// fail-closed across the whole membership.*/account.* family the way
+// receipt-delivery-queue.js:262, estimate-deposits.js:386,
+// cancellation-confirmations.js:185 and autopay-setup-link.js:272 already
+// do (the suppressionGroupKey is TRANSACTIONAL_GROUP, which bypasses
+// SendGrid-side suppression groups by design). A lookup failure is treated
+// the same as opted-out: it must not read as "no opt-out" on a DB blip. A
+// billing email (billingAuthorityInput set) leaves the switch, the billing
+// choice and the recipient to the shared billing email authority (owner
+// ruling 2026-09-27): read by the caller, and again at the provider handoff.
+// Returns the result to hand back, or null to go on.
+async function templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, log }) {
+  const recipientSkip = templateRecipientSkip(contact, expectedRecipientKey);
+  if (recipientSkip) {
+    if (recipientSkip === 'recipient_changed') logger.warn(`[account-membership-email] ${log.templateKey} not sent for customer ${log.customerId}: the address changed since it was approved`);
+    await logLifecycleEmailAttempt({ ...log, status: 'skipped', failureReason: recipientSkip });
+    return { ok: false, skipped: true, reason: recipientSkip };
+  }
+  const optOut = billingAuthorityInput ? { emailOptedOut: false } : await readEmailOptOut(log.customerId);
+  if (optOut.unavailable) {
+    await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: 'prefs_unavailable' });
+    return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
+  }
+  if (optOut.emailOptedOut) {
+    await logLifecycleEmailAttempt({ ...log, status: 'skipped', failureReason: 'email_opted_out' });
+    return { ok: false, skipped: true, reason: 'email_opted_out' };
+  }
+  return null;
+}
+
+async function templatePayload({ customerId, recipientCustomer, contact, payload }) {
+  const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
+    ? recipientCustomer
+    : await loadCustomer(customerId);
+  const firstName = firstToken(contact.name) || firstToken(recipientCustomer.first_name) || 'there';
+  return {
+    first_name: firstName,
+    customer_name: fullName(recipientCustomer),
+    customer_portal_url: portalTabUrl('dashboard'),
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_email: CONTACT_EMAIL,
+    property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
+    ...payload,
+  };
+}
+
+function billingHandoffOption({ billingAuthorityInput, recipientEmail, templateKey, state }) {
+  if (!billingAuthorityInput) return {};
+  return {
+    withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+      input: billingAuthorityInput, recipientEmail, templateKey, dispatch, state,
+    }),
+  };
+}
+
+function dedupedTemplateResult(result) {
+  return {
+    ok: !!result.sent,
+    deduped: true,
+    blocked: !!result.blocked,
+    messageId: result.message?.provider_message_id || null,
+    // The ORIGINAL acceptance time from the existing email_messages row
+    // (Codex #4921 r4 P1): a caller that records a dated witness for the
+    // send — the termite renewal notice's on-time/late classification —
+    // must use when the provider first accepted it, not this retry's time.
+    sentAt: result.message?.sent_at || null,
+  };
+}
+
+async function templateSendFailure(err, { billingAuthorityInput, state, billingLog, log }) {
+  if (billingAuthorityInput) {
+    return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
+      logTag: 'account-membership-email', label: `${log.eventType} for ${log.customerId}`,
+    });
+  }
+  await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: err.message });
+  logger.error(`[account-membership-email] ${log.eventType} failed for ${log.customerId}: ${err.message}`);
+  return { ok: false, error: err.message };
 }
 
 function itemSummary(items = []) {

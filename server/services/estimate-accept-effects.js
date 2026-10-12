@@ -237,11 +237,13 @@ function cachedMembershipFee(data) {
   }
   return null;
 }
-// One fee line at most: the cached aggregate fee, else the explicit setup
-// row's amount, and only while the fee applies.
+// One fee line at most, only while the fee applies. An explicit setup row
+// is the sold amount (its own net, as the estimate page's normalizer treats
+// it); the cached aggregate fee is read only when no such row exists
+// (codex #6113 r35).
 function membershipFeeLine(data, { applies, setupRows = [] }) {
   if (!applies) return null;
-  const amount = cachedMembershipFee(data) ?? setupRows.map((r) => Number(r.amount)).find((n) => Number.isFinite(n) && n > 0) ?? null;
+  const amount = setupRows.map((r) => Number(r.amount)).find((n) => Number.isFinite(n) && n > 0) ?? cachedMembershipFee(data) ?? null;
   return amount == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand' };
 }
 
@@ -830,6 +832,13 @@ const POST_COMMIT_STEPS = {
     },
     async run(step, ctx) {
       const field = BELLS.find(([bell]) => bell === step.bell)[1];
+      // The estimate page's own Mark accepted (no card pins) keeps its
+      // detached, guarded post: a slow notification write must not hold the
+      // admin request open after the accept committed (codex #6113 r35).
+      if (step.target === undefined) {
+        void fireAdminBell(ctx.conversion[field], ctx.acceptedEstimate.id, BELL_LABELS[step.bell]);
+        return;
+      }
       const posted = await fireAdminBell(ctx.conversion[field], ctx.acceptedEstimate.id, BELL_LABELS[step.bell]);
       if (!posted) ctx.warnings?.push(`${STEP_LABELS.admin_bell} ("${String(ctx.conversion[field]?.title || step.bell)}"): the post failed after the accept. Tell the office by hand.`);
     },
