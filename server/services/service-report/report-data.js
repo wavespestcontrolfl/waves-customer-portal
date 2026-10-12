@@ -2886,12 +2886,12 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // cached before a flip must never be served after it, nor the reverse. The
   // stamp rides only while the gate is live: gate off leaves every signature,
   // and so every cached PDF key, byte-identical to before.
-  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
-  // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
-  // its PDF key moves with it; the stamp rides only while the gate is live.
-  // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
-  // so a PDF never depends on the customer's bookings and needs no key for them.
-  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // The v6 copy writer (live with the lead) changes the lead's words. Its part
+  // ':copyv6=1' stays a CONSTANT in the stamp so every PDF cached while the v6
+  // copy gate was live keeps its key. The by-next-visit sentences are LIVE-VIEW
+  // ONLY (stripLiveOnlyScheduleFields), so a PDF never depends on the customer's
+  // bookings and needs no key for them.
+  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1:copyv6=1';
   // The copy fixes (GATE_LAWN_REPORT_COPY_FIXES) change the lawn report's words, labels and charts,
   // so its PDF key moves with it; the part is empty while the gate is off.
   irrigationStamp += copyFixesPdfStamp();
@@ -4076,10 +4076,10 @@ function buildWateringBanner(instruction, weekPlan = null) {
   };
 }
 
-// The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
+// The v6 copy carrier for a render with no copy.
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null });
 
-// The next lawn visit AT THIS REPORT'S PROPERTY (GATE_LAWN_REPORT_COPY_V6):
+// The next lawn visit AT THIS REPORT'S PROPERTY (live with the report lead):
 // what the report's "Next visit" line shows and what the v6 copy's "by your
 // next visit" sentence is timed from, so the two can never disagree. On a
 // multi-property account a booking at another home is skipped, not taken
@@ -6062,10 +6062,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // same way svcIso does above before slicing, or String(Date) yields
           // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
           const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
-          // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
-          // (lawnNextVisitAtProperty); the same visit times the v6 copy's
-          // by-next-visit sentence. Gate off: the customer-wide query, as before.
-          const copyV6Next = featureGates.lawnReportCopyV6Live();
+          // The v6 copy is live with the report lead: the next lawn visit at THIS
+          // property (lawnNextVisitAtProperty); the same visit times the v6 copy's
+          // by-next-visit sentence. Lead off: the customer-wide query, as before.
+          const copyV6Next = featureGates.lawnReportLeadLive();
           // The Visit Summary's write gate (programVisitOut) needs the PROPERTY-scoped answer with
           // copy v6 off too: the legacy query below is customer-wide. A failed read leaves it unset.
           const visitSummaryOut = opts.programVisitOut && typeof opts.programVisitOut === 'object' ? opts.programVisitOut : null;
@@ -6125,16 +6125,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
         } catch {
-          // Best-effort for the label; under the v6 gate it is also an input
-          // the copy must not freeze without.
-          if (featureGates.lawnReportCopyV6Live()) readFailures.add('next_visit');
+          // Best-effort for the label; with the lead live it is also an input
+          // the v6 copy must not freeze without.
+          if (featureGates.lawnReportLeadLive()) readFailures.add('next_visit');
         }
       }
 
-      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
-        // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
+      if (reportV2 && featureGates.lawnReportLeadLive()) {
+        // The v6 copy (P14): the structural writer replaces the
         // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
-        // read while this is live). Fixed sentences from this visit's facts, no
+        // read while the report lead is live). Fixed sentences from this visit's facts, no
         // model (owner 2026-10-02); frozen copy replays; a degraded read or an
         // unverifiable treatment ships the lead's own copy. The fields ride the
         // in-process report as `copyV6` for the lead derivation (a non-enumerable

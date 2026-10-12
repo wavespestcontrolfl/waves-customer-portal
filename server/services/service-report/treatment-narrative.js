@@ -22,14 +22,15 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // permanently caching every such report as deterministic fallback — the bump
 // re-arms those cache keys so they regenerate on next read).
 const PROMPT_VERSION = 'treatment_narrative_v5';
-// Lawn while GATE_LAWN_REPORT_COPY_V6 is live (P15): the paragraph states no
-// result timing, which reaches the customer only as the owner-approved "What
-// to expect" sentences (owner rulings 2026-10-01 / 10-02). Its own version so
-// pest and tree & shrub rows are untouched, and gate off reads v5 as before.
+// Lawn while the report lead is live (P15; the v6 copy rides the lead): the
+// paragraph states no result timing, which reaches the customer only as the
+// owner-approved "What to expect" sentences (owner rulings 2026-10-01 / 10-02).
+// Its own version so pest and tree & shrub rows are untouched, and lead off
+// reads v5 as before.
 const LAWN_NO_TIMING_PROMPT_VERSION = 'treatment_narrative_v6_lawn_no_timing';
 
 function lawnNoTiming(serviceLine) {
-  return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live();
+  return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportLeadLive();
 }
 
 function promptVersionFor(serviceLine) {
@@ -131,7 +132,7 @@ function validateNarrative(text, productNames = [], activeIngredients = [], { no
   if (!t) return 'empty';
   if (t.length > 1200) return 'too_long';
   if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
-  // Lawn under GATE_LAWN_REPORT_COPY_V6: any forward result timing fails (the
+  // Lawn with the report lead live (v6 copy): any forward result timing fails (the
   // writer-rules timeframe screen; "today", "peak season" and past windows
   // pass), and the timing-free deterministic summary is served instead.
   if (noTiming && lawnResultTimingViolation(t, { carePlanExempt: false })) return 'lawn_timing';
@@ -309,7 +310,7 @@ async function treatmentNarrativePdfSignature(serviceRecordId, knex = db, { serv
       // A caller with no line falls back to every version a render could read.
       .whereIn('prompt_version', serviceLine
         ? [promptVersionFor(serviceLine)]
-        : (require('../../config/feature-gates').lawnReportCopyV6Live()
+        : (require('../../config/feature-gates').lawnReportLeadLive()
           ? [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION]
           : [PROMPT_VERSION]))
       .orderBy('generated_at', 'desc')

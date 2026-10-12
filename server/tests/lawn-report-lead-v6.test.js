@@ -1,4 +1,4 @@
-// The v6 copy writer's fields (P14, GATE_LAWN_REPORT_COPY_V6) on the lawn LEAD:
+// The v6 copy writer's fields (P14, the lawn v6 copy) on the lawn LEAD:
 // headline replaces the lead's headline when present and whatWeDid is the ONLY
 // applied source, whatToExpect and watching are new lead fields, every field keeps
 // the lead's own caps and watering-wording rule, the word budget has a drop

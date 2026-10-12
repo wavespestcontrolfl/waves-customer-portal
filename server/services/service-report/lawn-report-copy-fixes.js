@@ -46,7 +46,7 @@ function copyFixesPayloadFlag(serviceLine) {
  */
 async function lawnTreatmentNarrative(args) {
   if (!copyFixesLive()) return require('./treatment-narrative').buildTreatmentNarrative(args);
-  return { text: buildCategoryTreatmentSummary(args.treatment, { noTiming: featureGates.lawnReportCopyV6Live() }), signature: null };
+  return { text: buildCategoryTreatmentSummary(args.treatment, { noTiming: featureGates.lawnReportLeadLive() }), signature: null };
 }
 
 const num = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
