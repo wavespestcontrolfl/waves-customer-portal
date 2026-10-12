@@ -98,6 +98,91 @@ function detectContactDictationSignals(transcript) {
   return { email, address, name, any: email || address || name };
 }
 
+// ── Collapsed-spelling trigger ───────────────────────────────────────────────
+// The diarized primary transcript sometimes collapses a spoken spelling ("Serov,
+// S-E-R-O-V") into the plain word ("Serov, Serov"), so every letter-run regex above
+// returns false and the spelling-preserving second pass never runs. These signals are
+// what the collapse leaves behind. Cheap and pure; the caller pays for a second pass
+// only when one fires.
+
+// (a) A name token said twice in a row across punctuation ("Serov, Serov" / "Serov. Serov"),
+// with an optional speaker label between ("Caller: Serov. Agent: Serov.").
+const REPEATED_TOKEN_RE = /\b([A-Z][\p{L}'’-]{2,})\s*[,.;:?!]+(?:\s*(?:Caller|Agent|Customer|Speaker \d+)\s*:)?\s*\1\b/gu;
+// Capitalized words that repeat in ordinary speech ("Okay. Okay.") are not names.
+const REPEAT_STOPWORDS = new Set(['okay', 'yes', 'yeah', 'yep', 'sure', 'right', 'thanks', 'thank', 'sorry', 'hello', 'perfect', 'great', 'good', 'alright', 'again', 'what', 'well', 'please', 'exactly', 'correct', 'wonderful', 'awesome', 'bye', 'goodbye', 'morning', 'afternoon']);
+// (b) A phrase that announces a spelling. It counts only when no letter run follows within
+// ANNOUNCE_WINDOW characters: a spelling that survived is the detector's job above.
+// The letter forms are case sensitive on purpose ("that's S", not "that's a").
+const ANNOUNCE_WINDOW = 60;
+const SPELLING_ANNOUNCE_RES = [
+  new RegExp(NAME_SPELLING_WORD_RE.source, 'gi'),
+  new RegExp([
+    String.raw`\bthat'?s\s+(?:an?\s+)?[B-HJ-Z]\b(?![\p{L}'’])`,
+    String.raw`\bwith\s+an?\s+[B-HJ-Z]\b(?![\p{L}'’])`,
+    String.raw`\b[B-HJ-Z]\s+(?:as|like)\s+in\b`,
+  ].join('|'), 'gu'),
+];
+const LETTER_RUN_AFTER_RE = new RegExp(`${NAME_SPELLING_LETTERS_RE.source}|${NAME_SPELLING_PHONETIC_RE.source}`, 'i');
+
+function repeatedNameToken(text) {
+  for (const m of text.matchAll(REPEATED_TOKEN_RE)) {
+    if (!REPEAT_STOPWORDS.has(m[1].toLowerCase())) return true;
+  }
+  return false;
+}
+
+function announcedWithoutLetters(text) {
+  for (const re of SPELLING_ANNOUNCE_RES) {
+    for (const m of text.matchAll(re)) {
+      const end = m.index + m[0].length;
+      if (!LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) return true;
+    }
+  }
+  return false;
+}
+
+// Plain edit distance (insert, delete, substitute), early-out above `limit`.
+function editDistance(a, b, limit = 2) {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// (c) The extracted last name is the stored last name misspelled by one or two letters,
+// same first letter. A short name (4 letters or fewer) tolerates one letter only, so "Lee"
+// against "Lam" is not a near miss.
+function lastNameNearMiss(extracted, knownCustomer) {
+  const got = nameKey(extracted?.last_name);
+  const had = nameKey(knownCustomer?.last_name);
+  if (got.length < 3 || had.length < 3 || got === had || got[0] !== had[0]) return false;
+  const limit = Math.min(got.length, had.length) <= 4 ? 1 : 2;
+  return editDistance(got, had, limit) <= limit;
+}
+
+/**
+ * Which collapse signals the call leaves behind. `repeated` and `announced` read the primary
+ * transcript alone (so they can gate the second transcription pass, which runs before the
+ * extraction exists); `nearMiss` also needs the extraction and the stored customer.
+ */
+function spellingCollapseSignals(transcript, { extracted = null, knownCustomer = null } = {}) {
+  const t = String(transcript || '');
+  const repeated = repeatedNameToken(t);
+  const announced = announcedWithoutLetters(t);
+  const nearMiss = lastNameNearMiss(extracted, knownCustomer);
+  return { repeated, announced, nearMiss, any: repeated || announced || nearMiss };
+}
+
+function spellingLikelyCollapsed(transcript, ctx = {}) {
+  return spellingCollapseSignals(transcript, ctx).any;
+}
+
 // ── Second-pass transcription prompt ─────────────────────────────────────────
 // Applied ONLY on promptable STT models (gpt-4o-transcribe). Deliberately
 // example-free: concrete streets/emails in a biasing prompt can seed values
@@ -560,6 +645,8 @@ function applyEmailDictationPolicy({ extracted = {}, dictation = null } = {}) {
 
 module.exports = {
   detectContactDictationSignals,
+  spellingLikelyCollapsed,
+  spellingCollapseSignals,
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   nameSpellingDifferences,

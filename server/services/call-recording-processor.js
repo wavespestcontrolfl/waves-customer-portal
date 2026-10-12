@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -8192,6 +8192,73 @@ Rules:
   }
 }
 
+// Why the contact pass / decoder runs for this transcript, or null when it does not.
+// 'signals' = the dictation detector (always on). 'collapse:<signal>' = a collapsed
+// spelling's marks (GATE_CALL_SPELLING_COLLAPSE_TRIGGER, dark): the ONLY case the new
+// trigger adds a pass, so it is the one that is logged. `ctx` carries { extracted,
+// knownCustomer } once the extraction exists; the second pass runs before it, so the
+// near-miss signal can only fire at the decoder gate.
+function contactPassTrigger(transcription, ctx = {}) {
+  if (!transcription) return null;
+  if (detectContactDictationSignals(transcription).any) return 'signals';
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
+  const sig = spellingCollapseSignals(transcription, ctx);
+  if (!sig.any) return null;
+  return `collapse:${['repeated', 'announced', 'nearMiss'].filter((k) => sig[k]).join('+')}`;
+}
+
+function contactPassTriggerLogged(transcription, call, stage, ctx = {}) {
+  const trigger = contactPassTrigger(transcription, ctx);
+  logCollapseTrigger(trigger, call?.twilio_call_sid, stage);
+  return trigger !== null;
+}
+
+function logCollapseTrigger(trigger, callSid, stage) {
+  if (typeof trigger === 'string' && trigger.startsWith('collapse:')) {
+    logger.info(`[call-proc] spelling collapse trigger (${stage}): ${trigger.slice(9)} for ${maskSid(callSid)}`);
+  }
+}
+
+// The decoder gate. Runs when a second-pass transcript exists or the dictation detector fires
+// (as before). With GATE_CALL_SPELLING_COLLAPSE_TRIGGER on it also runs for a collapsed spelling:
+// the repeated-token and announced-spelling signals already bought the second pass in the wrapper,
+// so only the near-miss signal (the extracted last name one or two letters from the stored one) is
+// new here, and it needs the second pass the wrapper could not run before the extraction existed.
+// That pass runs now, on a fresh download. Fail-open: any failure leaves the decoder off.
+async function contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid }) {
+  const off = { run: false, lateContactPass: null };
+  if (contactPassTranscript) return { run: true, lateContactPass: null };
+  if (detectContactDictationSignals(transcription).any) return { run: true, lateContactPass: null };
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return off;
+  try {
+    if (!call.recording_url || !extracted?.last_name) return off;
+    const known = call.customer_id
+      ? await db('customers').where({ id: call.customer_id }).first('last_name')
+      : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
+    const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known });
+    if (!trigger) return off;
+    logCollapseTrigger(trigger, callSid, 'decoder');
+    const late = await lateContactPass(call);
+    return late ? { run: true, lateContactPass: late } : off;
+  } catch (err) {
+    logger.warn(`[call-proc] spelling collapse decoder gate skipped for ${maskSid(callSid)}: ${err.message}`);
+    return off;
+  }
+}
+
+// One extra dictation-focused transcription pass over the call audio, scrubbed like the primary.
+// A pass that holds a card number is dropped, never used.
+async function lateContactPass(call) {
+  const buffer = await downloadRecording(call.recording_url, { expectedSeconds: null });
+  const second = await transcribeWithOpenAI(buffer, {
+    model: process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe',
+    prompt: CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
+  });
+  if (!second?.text || Number(second.panCount || 0) > 0) return null;
+  const scrubbed = scrubPansDetailed(second.text);
+  return scrubbed.count > 0 ? null : scrubbed.text;
+}
+
 // Wrapper: primary transcription + (when the call dictated contact info) a
 // SECOND full-call pass on a promptable model. The diarized primary cannot be
 // prompted, so token-level dictation fidelity ("W, C as in Charlie, W, six
@@ -8209,7 +8276,7 @@ async function transcribeRecording(mp3Url, opts = {}) {
       // forceContactPass (bounce re-verify): the primary transcript may have
       // normalized a misheard address into a shape that no longer trips the
       // dictation signals — the caller knows an email was dictated.
-      && (opts.forceContactPass === true || detectContactDictationSignals(result.transcription).any)
+      && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass'))
     ) {
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
@@ -11743,8 +11810,12 @@ const CallRecordingProcessor = {
     let contactDictation = null;
     let dictationEmailPayload = null;
     try {
-      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
-        contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
+      if (transcription) {
+        const gate = await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, extracted, callSid });
+        if (gate.lateContactPass) contactPassTranscript = gate.lateContactPass;
+        if (gate.run) {
+          contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
+        }
       }
       if (contactDictation) {
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
@@ -24262,6 +24333,9 @@ function legacyDisputeServiceIntent(extracted) {
 
 CallRecordingProcessor._test = {
   fileNameSpellingCard,
+  contactPassTrigger,
+  contactPassTriggerLogged,
+  contactDecoderGate,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
