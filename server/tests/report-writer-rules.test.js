@@ -767,6 +767,11 @@ describe('product facts for the pest writer', () => {
     expect(screen('WHAT TO EXPECT\nYour home feels protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nThe treatment has your home protected.')).toBe('owner_phrase');
     expect(screen('WHAT WE DID AND WHY\nWe placed bait in the protected stations along the fence.')).toBeNull();
+    // A protected noun phrase is a verdict too, unless the noun is a placement (Codex r10).
+    expect(screen('WHAT TO EXPECT\nYour home is a protected space.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nThe treatment leaves a protected home.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYou now have a protected property.')).toBe('owner_phrase');
+    expect(screen('WHAT WE DID AND WHY\nThe gel went into a protected bait station under the sink.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are in a protected area along the fence.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are protected from rain by their covers.')).toBeNull();
