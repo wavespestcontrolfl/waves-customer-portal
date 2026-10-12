@@ -26,13 +26,19 @@ const judgeAsks = () => asksFor('call_judge.v4');
 const judgeRecords = () => recordsFor('call_judge.v4');
 const judgeTally = ({ gateChecks, ...rest }) => rest;
 
+// The processor's V2-primary mode (production's setting): a valid V2 extraction writes the stored answers.
+process.env.CALL_EXTRACTION_V2_ENABLED = 'true';
+process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING = 'true';
+delete process.env.CALL_TRIAGE_ENFORCE_V2_GATES;
+delete process.env.CALL_EXTRACTION_V2_PRIMARY;
+
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
   transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(8),
   ai_extraction: JSON.stringify({ is_lead: true }), disposition: null,
   // A valid V2 extraction whose appointment answer is the stored one: the V2 extractor wrote the
   // baseline, so the call is graded by the V2 contract (call_judge.v4).
-  v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none' } }), ...over,
+  v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling: { status: 'none' } }), ...over,
 });
 
 function mockDb({ calls, onInsert = () => {}, whereCalls = [], promiseCallIds = [], whereInCalls = [] }) {
@@ -384,11 +390,10 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [call], promiseCallIds: ['call-7'] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
 
-    const [judge] = asksFor('call_judge.v4');
+    // This fixture's enriched extraction is not V2-shaped, so V1 wrote the stored answer: v3 is asked.
+    const [judge] = asksFor('call_judge.v3');
     const [gates] = asksFor('call_gate_checks.v1');
-    // The same call state, except the call start that only call_judge.v4's shape takes.
-    const { call_started_et: _started, ...shared } = judge[1];
-    expect(gates[1]).toEqual(shared);
+    expect(gates[1]).toEqual(judge[1]); // identical call state
     expect(gates[1]).not.toHaveProperty('call_started_et');
     const [args] = recordsFor('call_gate_checks.v1')[0];
     expect(args).toMatchObject({ capability: 'call_gate_checks', provider: 'typesafe', subjectType: 'call_log', subjectId: 'call-7', result: JEV });
@@ -662,30 +667,53 @@ describe('the auditor is told when the call started', () => {
   });
 });
 
-// Codex #6294 r2: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
+// Codex #6294 r2, r3: an answer the V1 extractor wrote is graded by V1's rules, never by the V2-only ones.
 describe('the contract follows the extractor that wrote the stored answer', () => {
   const { baselineFromV2, auditPromptFor, auditInputHash, AUDIT_PROMPT, AUDIT_PROMPT_V1 } = require('../services/call-self-audit');
   const { CALLER_PROPOSED_TIME_RULE, STAFF_HEDGE_RULE, EXISTING_APPOINTMENT_RULE } = require('../services/prompts/appointment-confirmed-rules');
-  const confirmedV2 = JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' } });
+  const v2With = (scheduling) => JSON.stringify({ meta: { schema_version: '1.28.0' }, scheduling });
+  const confirmedV2 = v2With({ status: 'confirmed', confirmed_start_at: '2026-10-09T13:00:00-04:00' });
+  const noneV2 = v2With({ status: 'none' });
   const row = (over = {}) => ({ direction: 'inbound', transcription: 'Agent: Waves. Caller: hi.', created_at: '2026-10-09T19:49:00Z', ...over });
+  const valid = (enriched, stored) => row({ v2_extraction_status: 'valid', ai_extraction_enriched: enriched, ai_extraction: JSON.stringify(stored) });
 
-  test('V2 wrote it: a valid V2 extraction whose appointment answer equals the stored one', () => {
-    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: confirmedV2, ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(true);
-    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none' } }), ai_extraction: '{}' }))).toBe(true);
+  test('V2 wrote it: primary mode, a valid V2 extraction with a decisive status, and the stored answer adoption writes', () => {
+    expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true }))).toBe(true);
+    expect(baselineFromV2(valid(noneV2, {}))).toBe(true);
+    expect(baselineFromV2(valid(v2With({ status: 'requested' }), { appointment_confirmed: false }))).toBe(true);
   });
-  test('V1 wrote it: no valid V2 extraction, an empty one, or a stored answer that differs from V2\'s', () => {
+  test('V1 wrote it: no valid V2 extraction, not the V2 shape, or a stored answer adoption would not have written', () => {
     expect(baselineFromV2(row({ ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(false);
-    expect(baselineFromV2(row({ v2_extraction_status: 'parse_failed', ai_extraction_enriched: confirmedV2, ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBe(false);
-    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: null }))).toBe(false);
-    // V2 confirmed but routing did not adopt it: the stored answer is V1's "not confirmed".
-    expect(baselineFromV2(row({ v2_extraction_status: 'valid', ai_extraction_enriched: confirmedV2, ai_extraction: JSON.stringify({ appointment_confirmed: false }) }))).toBe(false);
+    expect(baselineFromV2({ ...valid(confirmedV2, { appointment_confirmed: true }), v2_extraction_status: 'parse_failed' })).toBe(false);
+    expect(baselineFromV2(valid(null, {}))).toBe(false);
+    expect(baselineFromV2(valid(JSON.stringify({ scheduling: { status: 'none' } }), {}))).toBe(false);
+    expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: false }))).toBe(false);
+    expect(baselineFromV2(valid(noneV2, { appointment_confirmed: true }))).toBe(false);
+  });
+  test('V1 wrote it: an ambiguous or missing V2 status leaves V1\'s answer, even when the two answers are equal (r3)', () => {
+    expect(baselineFromV2(valid(v2With({ status: 'ambiguous' }), { appointment_confirmed: false }))).toBe(false);
+    expect(baselineFromV2(valid(v2With({ status: 'ambiguous' }), { appointment_confirmed: true }))).toBe(false);
+    expect(baselineFromV2(valid(v2With({}), {}))).toBe(false);
+    // V2 confirmed with no parseable start: adoption does not write "confirmed".
+    expect(baselineFromV2(valid(v2With({ status: 'confirmed', confirmed_start_at: null }), { appointment_confirmed: true }))).toBe(false);
+    expect(baselineFromV2(valid(v2With({ status: 'confirmed' }), { appointment_confirmed: false }))).toBe(false);
+  });
+  test('V1 wrote it: V2 ran in shadow (primary mode off), even when the two answers are equal (r3)', () => {
+    for (const [key, value] of [['CALL_EXTRACTION_V2_PRIMARY', 'false'], ['CALL_EXTRACTION_V2_ENABLED', 'false'], ['CALL_EXTRACTION_V2_DRIVES_ROUTING', 'false']]) {
+      const before = process.env[key];
+      process.env[key] = value;
+      try {
+        expect(baselineFromV2(valid(confirmedV2, { appointment_confirmed: true }))).toBe(false);
+        expect(baselineFromV2(valid(noneV2, {}))).toBe(false);
+      } finally { process.env[key] = before; }
+    }
   });
   test('the V1 prompt keeps the shared rules and carries none of the V2-only ones; the hash follows the prompt', () => {
     expect(AUDIT_PROMPT_V1).toContain(EXISTING_APPOINTMENT_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(CALLER_PROPOSED_TIME_RULE);
     expect(AUDIT_PROMPT_V1).not.toContain(STAFF_HEDGE_RULE);
     const v1 = row({ ai_extraction: '{}' });
-    const v2 = row({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none' } }), ai_extraction: '{}' });
+    const v2 = valid(noneV2, {});
     expect(auditPromptFor(v1)).toBe(AUDIT_PROMPT_V1);
     expect(auditPromptFor(v2)).toBe(AUDIT_PROMPT);
     expect(auditInputHash(v1)).not.toBe(auditInputHash(v2));

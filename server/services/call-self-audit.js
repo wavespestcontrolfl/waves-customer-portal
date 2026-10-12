@@ -114,18 +114,31 @@ function auditInputHash(call) {
   return require('crypto').createHash('sha256').update(`${auditPromptFor(call)}\n\u0000\n${auditUserContent(call)}`).digest('hex').slice(0, 24);
 }
 
-// Which extractor wrote the stored appointment answer. A valid V2 extraction is adopted only when
-// routing approved it; otherwise ai_extraction keeps the V1 answer, and no column records which
-// happened. The answer itself tells: when the stored value equals what the valid V2 extraction
-// decided, it is V2's decision and V2's rules grade it; when it differs (or there is no valid V2
-// extraction), V1 wrote it and V1's rules grade it (Codex #6294 r2).
+// Which extractor wrote the stored appointment answer. The processor's own rule decides it
+// (adoptV2PrimaryFields, "v2-wins in BOTH directions"): in V2-primary mode a valid V2 extraction
+// with a DECISIVE scheduling status overwrites V1's answer, whether or not routing later approved
+// a booking. Decisive = 'confirmed' with a parseable start, or any other status except
+// 'ambiguous' (which leaves V1's answer alone). So V2 wrote the answer only when all of these
+// hold; in every other case V1's contract grades it (Codex #6294 r2, r3):
+//   - V2-primary mode is on (the processor's switch, read the same way);
+//   - the V2 extraction is valid and has the V2 shape;
+//   - its status is decisive;
+//   - the stored answer is the one that adoption writes (a row processed in another mode fails this).
+function v2PrimaryMode() {
+  return process.env.CALL_EXTRACTION_V2_ENABLED === 'true'
+    && (process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true' || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true')
+    && process.env.CALL_EXTRACTION_V2_PRIMARY !== 'false';
+}
 function baselineFromV2(call) {
-  if (!call || call.v2_extraction_status !== 'valid') return false;
+  if (!v2PrimaryMode() || !call || call.v2_extraction_status !== 'valid') return false;
   const v2 = safeParse(call.ai_extraction_enriched);
-  if (!v2 || !Object.keys(v2).length) return false;
-  // The V2 answer as the flat view maps it (extraction-compat flatView): scheduling.status 'confirmed'.
-  const v2Confirmed = !!v2.scheduling && v2.scheduling.status === 'confirmed';
-  return v2Confirmed === (safeParse(call.ai_extraction).appointment_confirmed === true);
+  if (!require('../utils/extraction-compat').isV2Extraction(v2)) return false;
+  const sched = v2.scheduling || {};
+  const status = typeof sched.status === 'string' ? sched.status.trim() : '';
+  if (!status || status === 'ambiguous') return false;
+  const confirmed = status === 'confirmed';
+  if (confirmed && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(sched.confirmed_start_at || '').trim())) return false;
+  return confirmed === (safeParse(call.ai_extraction).appointment_confirmed === true);
 }
 function auditPromptFor(call) {
   return baselineFromV2(call) ? AUDIT_PROMPT : AUDIT_PROMPT_V1;
