@@ -1,0 +1,148 @@
+{
+  "_note": "Reviewed by hand 2026-10-12 (owner ruling: the bar may read what any admin screen reads). allow = the scan flagged exactly these signals and a reviewer read each site and found no write or outside call; if the signals change, the route is excluded again. exclude = a reviewer keeps the route out for a reason the scan cannot see.",
+  "allow": [
+    {
+      "route": "GET /admin/ads/capital-allocation",
+      "signals": [
+        "effect_call:ensure"
+      ],
+      "reason": "ensure is a local accumulator in channel-attribution.js; read-layer grouping only"
+    },
+    {
+      "route": "GET /admin/ads/revenue-attribution",
+      "signals": [
+        "effect_call:ensure"
+      ],
+      "reason": "ensure is a local accumulator in channel-attribution.js; read-layer grouping only"
+    },
+    {
+      "route": "GET /admin/agents/activity",
+      "signals": [
+        "effect_call:runQuery"
+      ],
+      "reason": "runQuery is a local select builder in agent-activity.js"
+    },
+    {
+      "route": "GET /admin/consultations/stats",
+      "signals": [
+        "effect_call:create"
+      ],
+      "reason": "create is a callback that builds an in-memory group entry"
+    },
+    {
+      "route": "GET /admin/customers/:param",
+      "signals": [
+        "effect_call:upsertSupplement"
+      ],
+      "reason": "upsertSupplement is an in-memory list helper inside estimate-public.js; no write"
+    },
+    {
+      "route": "GET /admin/customers/:param/schedule-estimates",
+      "signals": [
+        "effect_call:upsertSupplement"
+      ],
+      "reason": "upsertSupplement is an in-memory list helper inside estimate-public.js; no write"
+    },
+    {
+      "route": "GET /admin/customers/new",
+      "signals": [
+        "effect_call:upsertSupplement"
+      ],
+      "reason": "upsertSupplement is an in-memory list helper inside estimate-public.js; no write"
+    },
+    {
+      "route": "GET /admin/dispatch/:param/reschedule-options",
+      "signals": [
+        "effect_call:stopExpectedMinutes",
+        "write:delete",
+        "write:transaction"
+      ],
+      "reason": "transaction nests a read savepoint; delete is on a local Map; stopExpectedMinutes is pure"
+    },
+    {
+      "route": "GET /admin/dispatch/:param/series-move-preview",
+      "signals": [
+        "effect_call:stopExpectedMinutes",
+        "write:transaction"
+      ],
+      "reason": "transaction nests a read savepoint; stopExpectedMinutes is a pure mapper"
+    },
+    {
+      "route": "GET /admin/estimates",
+      "signals": [
+        "effect_call:merge"
+      ],
+      "reason": "merge is a local closure in estimate-result-container.js that dedupes lines in memory"
+    },
+    {
+      "route": "GET /admin/estimates/:param/pricing-audit",
+      "signals": [
+        "effect_call:merge"
+      ],
+      "reason": "merge is a local closure in estimate-result-container.js that dedupes lines in memory"
+    },
+    {
+      "route": "GET /admin/estimates/:param/schedule-source",
+      "signals": [
+        "effect_call:scheduleLinesFromEstimate"
+      ],
+      "reason": "scheduleLinesFromEstimate is a pure mapper over loaded rows"
+    },
+    {
+      "route": "GET /admin/invoices",
+      "signals": [
+        "write:transaction"
+      ],
+      "reason": "transaction wraps a read (optionalInvoiceRead) so a missing optional table does not abort the caller"
+    },
+    {
+      "route": "GET /admin/invoices/:param",
+      "signals": [
+        "write:transaction"
+      ],
+      "reason": "transaction wraps a read (optionalRead in invoice-prepay.js) so a missing optional table does not abort the caller"
+    },
+    {
+      "route": "GET /admin/lawn-assessment/service/:param",
+      "signals": [
+        "write:transaction"
+      ],
+      "reason": "transaction wraps a read of lawn_assessment_runs (loadRun)"
+    },
+    {
+      "route": "GET /admin/rate-review/batches/:param",
+      "signals": [
+        "write:transaction"
+      ],
+      "reason": "repeatable-read transaction around three selects"
+    },
+    {
+      "route": "GET /admin/schedule/:param/estimate-source",
+      "signals": [
+        "effect_call:scheduleLinesFromEstimate"
+      ],
+      "reason": "scheduleLinesFromEstimate is a pure mapper over loaded rows"
+    },
+    {
+      "route": "GET /admin/schedule/annual-prepay-preview",
+      "signals": [
+        "write:transaction"
+      ],
+      "reason": "transaction nests a read savepoint (customerPrefersNoWeekends)"
+    }
+  ],
+  "exclude": [
+    {
+      "route": "GET /admin/invoices/:param/attachments/:param/url",
+      "reason": "returns a signed bearer URL to a stored file; the bar must not hold one"
+    },
+    {
+      "route": "GET /admin/projects/:param/photos/:param/url",
+      "reason": "returns a signed bearer URL to a stored photo; the bar must not hold one"
+    },
+    {
+      "route": "GET /admin/schedule/:param/visit-prep-photos",
+      "reason": "returns signed photo URLs (stopPhotoViewUrls); the bar must not hold bearer URLs"
+    }
+  ]
+}
