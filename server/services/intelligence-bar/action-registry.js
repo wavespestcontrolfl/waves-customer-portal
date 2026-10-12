@@ -200,7 +200,7 @@ function discover(input, scope) {
 // the Customers page or dashboard). Only the OFFERED list widens: allowed()
 // still applies role/context, and every write keeps its ui_confirm card.
 const EVERY_PAGE_TOOL_NAMES = Object.freeze([
-  'add_customer_property', 'set_primary_property', 'update_customer_property',
+  'add_customer_property', 'set_primary_property', 'update_customer_property', 'remove_customer_property',
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',

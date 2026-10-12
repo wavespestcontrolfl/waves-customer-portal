@@ -121,7 +121,6 @@ import {
   UNIT_CHOICES, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
-import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
   RecoveredCompletion, SavedView, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
@@ -1716,9 +1715,6 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // The tips are ranked by this visit's assessment, so they are read again each
   // time an analysis or confirm settles.
   const tips = useTipLibrary({ base, request, refreshKey: settles });
-  // Tips the note calls for lead the picker: "chinch bugs" in the note lifts the
-  // chinch tip above the photo-finding order the server sent.
-  const noteTipIds = useMemo(() => tipsCalledForByNote((tips?.groups || []).flatMap((g) => g.tips || []), form.note), [tips, form.note]);
   const tipsAvailable = !!tips;
   // The blog post search is offered while the server answers available.
   const blog = useBlogPostOffer({ base, request });
@@ -1842,9 +1838,6 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
             <TipSection
               quiet
               library={tips}
-              priorityTipIds={noteTipIds}
-              sentLast={false}
-              priorityOrdered
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}

@@ -104,8 +104,12 @@ beforeEach(() => {
   mockAliasRows = [];
   mockBooked = {};
   delete process.env.GATE_REPORT_WRITER_RULES;
+  // The lawn timing meaning check is always on now (it was off with the lead gate). It calls the
+  // mocked provider and cannot judge its reply, so an unjudged draft is never cached; this suite
+  // is about writer rules, so keep the check out of it (lawn-draft-timing-check.test.js covers it).
+  process.env.LAWN_DRAFT_TIMING_CHECK = 'off';
 });
-afterEach(() => { delete process.env.GATE_REPORT_WRITER_RULES; });
+afterEach(() => { delete process.env.GATE_REPORT_WRITER_RULES; delete process.env.LAWN_DRAFT_TIMING_CHECK; });
 
 test.each([
   ['lawn_care_6week', null, 'Every 6 Weeks Lawn Care Service'],

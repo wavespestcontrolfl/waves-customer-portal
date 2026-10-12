@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Findings / water card diet (lawn report rebuild P8): in lead mode (the
-// payload carries `lead`, GATE_LAWN_REPORT_LEAD) each finding keeps its
+// payload carries `lead`) each finding keeps its
 // headline, status and what-we-saw, and everything else folds into a native
 // <details> that print/PDF opens. Without a lead the legacy rows render as before.
 import React from 'react';

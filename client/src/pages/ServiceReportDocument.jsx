@@ -713,7 +713,7 @@ export default function ServiceReportDocument({ data, token }) {
   const termiteV2 = suppressProgramDashboards ? null : (data.termiteReportV2 || null);
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
-  // GATE_LAWN_REPORT_LEAD: only lawn payloads ever carry `lead` (the server
+  // Only lawn payloads ever carry `lead` (the server
   // derives it for lawn alone); tree & shrub is excluded here too, so it
   // prints exactly as before.
   const v2Lead = v2 && v2.lead && typeof v2.lead === 'object' && data.serviceLine !== 'tree_shrub' ? v2.lead : null;
