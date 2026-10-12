@@ -145,7 +145,8 @@ async function storeNextVisitNote(trx, { completed, note, nextVisitId = null, ac
     }
     return result;
   } catch (err) {
-    logger.warn(`[completion] next-visit note not stored for service ${completed.id}: ${err.message}`);
+    // The error's code only: a database error message can carry the statement and the note's text.
+    logger.warn(`[completion] next-visit note not stored for service ${completed.id}: ${(err && (err.code || err.name)) || 'error'}`);
     return { status: 'error' };
   }
 }

@@ -173,8 +173,10 @@ describe('storeNextVisitNote', () => {
 
   test('a database error is logged and swallowed, never thrown into the completion', async () => {
     logger.warn.mockClear();
-    const k = () => { throw new Error('boom'); };
+    // A database error message can carry the statement and the note's text: only its code is logged.
+    const k = () => { throw Object.assign(new Error('insert failed: secret note text'), { code: '23514' }); };
     expect(await storeNextVisitNote(k, { completed, note: 'x', nextVisitId: UUID })).toEqual({ status: 'error' });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('23514'));
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('secret note text'));
   });
 });
