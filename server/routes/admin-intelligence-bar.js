@@ -4300,7 +4300,7 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action) || SCOPE_NONE_PII_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,
