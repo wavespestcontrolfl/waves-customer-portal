@@ -11063,7 +11063,10 @@ const CallRecordingProcessor = {
         etWallClock: v2IsoToEtWallClock,
         callerPhone: contactPhone,
       });
-      extracted = adoption.merged;
+      // Stamped on the stored extraction: V2-primary adoption ran for this call, so its decisive
+      // answers are V2's. The nightly self-audit reads it to grade by the right extractor's rules
+      // (call-self-audit baselineFromV2); the live environment cannot tell it for an older row.
+      extracted = { ...adoption.merged, v2_primary_adopted: true };
       if (adoption.adoptedFields.length) {
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         logger.info(`[call-proc] V2-primary adopted ${adoption.adoptedFields.length} field(s) for ${maskSid(callSid)}: ${adoption.adoptedFields.join(', ')}`);
@@ -17711,6 +17714,10 @@ const CallRecordingProcessor = {
         extracted.preferred_date_time = v2WallClock;
       }
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
+      // Stamped for the nightly self-audit (call-self-audit baselineFromV2): this approved V2
+      // extraction wrote the appointment answer, also when V2-primary adoption is switched off
+      // (CALL_EXTRACTION_V2_PRIMARY=false with enforce routing on; codex #6294 r6).
+      extracted.v2_appointment_written = true;
       // flatView.matched_service is the coarse category→legacy map ("Termite
       // Inspection" for every termite call). Overwriting V1's specific label
       // with it downgraded e.g. a pre-slab soil-treatment booking to a plain
