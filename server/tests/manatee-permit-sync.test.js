@@ -207,26 +207,25 @@ describe('syncPoolPermits fetch + upsert', () => {
     await expect(syncPoolPermits()).rejects.toThrow(/not CSV/);
   });
 
-  test('the non-CSV error says what the page was: its title, one short line', async () => {
+  test('the non-CSV error names the page file and size, never the page text', async () => {
     process.env.GATE_PERMIT_SYNC = 'true';
     useSingleWindowSync();
     db.mockImplementation(() => builder(1));
     db.fn = { now: () => 'NOW()' };
     installTransactionMock();
-    const page = (body) => {
+    const body = '<html><title>100 Example St</title><body>Pat Sample, 100 Example St</body></html>';
+    const page = (url) => {
       global.fetch = jest.fn()
         .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
         .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
-        .mockResolvedValueOnce(acaResponse({ text: body, contentType: 'text/html; charset=utf-8' }));
-      return syncPoolPermits();
+        .mockResolvedValueOnce({ ...acaResponse({ text: body, contentType: 'text/html; charset=utf-8' }), url });
+      return syncPoolPermits().then(() => null, (err) => err.message);
     };
-    await expect(page('<html><head><title>\n Report  Server\tBusy </title></head><body>x</body></html>'))
-      .rejects.toThrow('report output is not CSV (text/html; charset=utf-8): "Report Server Busy"');
-    // No title: the first words, without script text or tags, cut at 80.
-    await expect(page(`<html><script>var a = "<b>";</script><body><h1>An "error" occurred</h1>${'word '.repeat(40)}</body></html>`))
-      .rejects.toThrow(/not CSV \(text\/html; charset=utf-8\): "An error occurred (word ){12}wo\.\.\."/);
-    // An empty body adds nothing.
-    await expect(page('')).rejects.toThrow(/not CSV \(text\/html; charset=utf-8\)$/);
+    const redirected = await page('https://aca-prod.accela.com/MANATEE/Error.aspx?id=100%20Example%20St');
+    expect(redirected).toBe(`report output is not CSV (text/html; charset=utf-8; Error.aspx, ${body.length} chars)`);
+    expect(redirected).not.toMatch(/Example|Sample/);
+    // No final URL on the response: the size alone.
+    expect(await page(undefined)).toBe(`report output is not CSV (text/html; charset=utf-8; ${body.length} chars)`);
   });
 });
 

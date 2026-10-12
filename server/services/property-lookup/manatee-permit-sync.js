@@ -111,22 +111,19 @@ function hiddenValue(html, name) {
 }
 
 /**
- * What a page ACA sent in place of the CSV says: its <title>, else its first
- * words, as one short line. The 2026-10-12 run got text/html for both
- * reports and job_health could not say whether that was a login page, an
- * error page or a "report server busy" page. The reports are public county
- * pages, so the line carries no customer data.
+ * Where a non-CSV answer came from, for the error line: the file name of the
+ * URL the request ended on (ShowReport.aspx, or the Login.aspx / Error.aspx
+ * it was redirected to) and the body size. On 2026-10-12 both reports came
+ * back as text/html and job_health could not say which page that was.
+ * NO page text (codex #6286 P1): the reports carry street addresses and
+ * owner names, and a page that echoes a record must not reach the log.
  */
-function pageSummary(html) {
-  const raw = String(html || '');
-  const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  const words = (title && title[1].trim() ? title[1] : raw.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' '))
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/[^\x20-\x7E]+/g, ' ')
-    .replace(/["\\]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return words.length > 80 ? `${words.slice(0, 80)}...` : words;
+function pageSource(res, text) {
+  let file = '';
+  try {
+    file = new URL(res.url).pathname.split('/').pop().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 40);
+  } catch { /* no final URL on the response */ }
+  return `${file ? `${file}, ` : ''}${String(text || '').length} chars`;
 }
 
 /** A request failure worth a fresh-session retry (vs. a report/schema break). */
@@ -214,8 +211,7 @@ async function fetchAcaReportCsvOnce({ reportId, dateFromField, dateToField }, f
   const { res: report, text } = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer, step: 'report download' });
   const ctype = String(report.headers.get('content-type') || '');
   if (!/csv/i.test(ctype)) {
-    const said = pageSummary(text);
-    throw new Error(`report output is not CSV (${ctype || 'no content-type'})${said ? `: "${said}"` : ''}`);
+    throw new Error(`report output is not CSV (${ctype || 'no content-type'}; ${pageSource(report, text)})`);
   }
   return text;
 }
