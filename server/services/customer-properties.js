@@ -1059,10 +1059,12 @@ const VISIT_POINTER_COLUMNS = ['id', 'property_id', 'source_estimate_id', 'servi
 // location of its own) its source estimate does. A row linked to another
 // property but carrying this address still counts.
 async function propertyRemovalDependents(conn, customerId, target) {
-  // 'rescheduled' is NOT settled here: a customer reschedule request parks
-  // the visit in that status with no replacement visit yet (routes/schedule.js),
-  // so it is still an outstanding booking at this property.
-  const settledVisitStatuses = require('./property-role-proposals').TERMINAL_VISIT_STATUSES.filter(status => status !== 'rescheduled');
+  // 'rescheduled' is settled history once its date has passed (the cancel
+  // and recreate pattern leaves such rows behind). A row dated today or
+  // later is still outstanding: a customer reschedule request parks the
+  // visit in that status with no replacement visit yet (routes/schedule.js).
+  const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
+  const today = require('../utils/datetime-et').etDateString(new Date());
   const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
   const { parseEstimateAddress } = require('./estimate-property-linkage');
   const estimates = await conn('estimates').where({ customer_id: customerId })
@@ -1075,7 +1077,8 @@ async function propertyRemovalDependents(conn, customerId, target) {
   const openEstimates = estimates.filter(estimate => targetEstimateIds.has(estimate.id)
     && !estimate.archived_at && !TERMINAL_ESTIMATE_STATUSES.includes(estimate.status));
   const visits = await conn('scheduled_services').where({ customer_id: customerId })
-    .where(q => q.whereNull('status').orWhereNotIn('status', settledVisitStatuses)
+    .where(q => q.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .orWhere(parked => parked.where('status', 'rescheduled').where('scheduled_date', '>=', today))
       .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
     .orderBy('id')
     .select(...VISIT_POINTER_COLUMNS);

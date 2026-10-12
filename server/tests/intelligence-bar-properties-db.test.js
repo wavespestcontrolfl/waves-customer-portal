@@ -117,6 +117,10 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     // A customer reschedule request parks the visit as 'rescheduled' with no replacement yet: still blocks.
     await db('scheduled_services').where({ id: stamped }).update({ status: 'rescheduled' });
     await blocked();
+    // A past-dated 'rescheduled' row is superseded history: no block from this row.
+    await db('scheduled_services').where({ id: stamped }).update({ scheduled_date: '2020-01-06' });
+    await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });
+    await db('scheduled_services').where({ id: stamped }).update({ scheduled_date: date });
     await db('scheduled_services').where({ id: stamped }).update({ status: 'completed' });
     // An open visit with no property link but this service address blocks.
     await db('scheduled_services').insert({ id: unstamped, ...visit, status: 'pending', service_address_line1: '2100 Example Grove',
