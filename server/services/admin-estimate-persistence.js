@@ -1453,7 +1453,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // FOR UPDATE across its dependency check, so either this save commits first
 // and the removal sees the estimate and refuses, or the removal commits
 // first and this save is refused.
-// Lock order is customers, then the property, the order the removal uses: the
+// Lock order is the comms fence, customers, then the property, the order the removal uses: the
 // estimate insert takes a key-share lock on the customer row anyway (its
 // foreign key), and taking it after the property lock would deadlock with a
 // removal that holds the customer row and waits for the property.
@@ -1461,6 +1461,10 @@ async function lockSelectedEstimateProperty(trx, writeFields) {
   if (!writeFields.property_id) return;
   const owner = await trx('customer_properties').where({ id: writeFields.property_id }).first('customer_id');
   if (!owner) throw errorWithStatus('Property not found', 404);
+  // The removal's full order is customer-comms fence, customer row, property
+  // row. The fence is re-entrant in one transaction, so a later
+  // lockCustomerComms in the same save is a no-op.
+  await require('../utils/customer-comms-lock').lockCustomerComms(trx, owner.customer_id);
   await trx.raw('SELECT 1 FROM customers WHERE id = ? FOR KEY SHARE', [owner.customer_id]);
   const live = await trx('customer_properties').where({ id: writeFields.property_id, active: true }).forShare().first('id');
   if (!live) throw errorWithStatus('Property not found', 404);
