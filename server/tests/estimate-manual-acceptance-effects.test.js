@@ -599,6 +599,37 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     expect(Effects.oneTimeAggregateConflict({ onetime_total: null, estimate_data: JSON.stringify({ result: { oneTime: { total: 300 } }, engineResult: { oneTime: { total: 350 } } }) })).toEqual([300, 350]);
     expect(Effects.oneTimeAggregateConflict({ onetime_total: '300.00', estimate_data: JSON.stringify({ result: { oneTime: { total: '300' } } }) })).toBeNull();
   });
+  const feeWorld = (recurringServices, oneTime, extra = {}) => makeWorld({
+    estimateOverrides: {
+      monthly_total: '49.00', onetime_total: null,
+      estimate_data: JSON.stringify({ recurring: { services: recurringServices }, result: { oneTime }, ...extra }),
+    },
+  });
+  const solo = [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }];
+  const bundle = [...solo, { name: 'Mosquito Control', service: 'mosquito', monthly: 39 }];
+  const roach = { service: 'german_roach', name: 'German Roach Cleanout', price: 350 };
+  const lineNames = async (world) => (await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+    .effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount]);
+  test('round 33: a cached $99 membership fee on a multi-service bundle (no setup fee by rule) is not listed', async () => {
+    expect(await lineNames(feeWorld(bundle, { membershipFee: 99, total: 350, items: [roach] }))).toEqual([['German Roach Cleanout', 350]]);
+  });
+  test('round 33: a cached membership fee under an operator waiver, or a frozen $0 quote, or an existing member, is not listed', async () => {
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, total: 350, items: [roach] }, { operatorPriceAdjustment: { waiveSetupFee: true } }))).toEqual([['German Roach Cleanout', 350]]);
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, total: 350, items: [roach] }, { setupFeeQuote: { amount: 0, waived: true } }))).toEqual([['German Roach Cleanout', 350]]);
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, total: 350, items: [roach] }, { membershipSnapshot: { isExistingCustomer: true } }))).toEqual([['German Roach Cleanout', 350]]);
+  });
+  test('round 33: an explicit setup row is never work: dropped on a bundle, listed once as the fee on an eligible solo plan', async () => {
+    const setupRow = { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 };
+    expect(await lineNames(feeWorld(bundle, { total: 350, items: [roach, setupRow] }))).toEqual([['German Roach Cleanout', 350]]);
+    expect(await lineNames(feeWorld(solo, { total: 449, items: [roach, setupRow] }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 99]]);
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, total: 449, items: [roach, setupRow] }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 99]]);
+  });
+  test('round 33: the eligibility is the converter rule itself', () => {
+    const data = { recurring: { services: solo } };
+    expect(Effects.setupFeeApplies(data, 'standard')).toBe(true);
+    expect(Effects.setupFeeApplies(data, 'prepay_annual')).toBe(false);
+    expect(Effects.setupFeeApplies({ recurring: { services: bundle } }, 'standard')).toBe(false);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

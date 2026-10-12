@@ -211,12 +211,38 @@ function oneTimeContainers(data) {
     return true;
   });
 }
-function membershipFeeLine(data) {
+// The WaveGuard setup fee is owed only when the accept itself would invoice
+// it: the converter's own eligibility (a solo pest or solo mosquito mix with
+// no standalone supplement) and every waiver it honors (the frozen quote,
+// an existing member, the operator waiver), on the standard term only. A
+// legacy or edited estimate can keep a positive cached oneTime.membershipFee
+// or an explicit setup row past a waiver or a bundle; every other estimate
+// path discards those, and so does the card (codex #6113 r33).
+function setupFeeApplies(data, billingTerm) {
+  if (billingTerm === 'prepay_annual') return false;
+  const Converter = require('./estimate-converter');
+  return Converter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: Converter.recurringServicesFromEstimateData(data), estimateData: data });
+}
+// An explicit setup row among the one-time lines (the converter's
+// isIgnorableSetupOneTimeItem shape): never work, only the fee line.
+function isSetupFeeRow(line = {}) {
+  const service = String(line.service || '').toLowerCase();
+  const text = String(line.name || line.label || '').toLowerCase();
+  return service === 'waveguard_setup' || text.includes('waveguard setup') || text.includes('membership');
+}
+function cachedMembershipFee(data) {
   for (const container of oneTimeContainers(data)) {
     const n = Number(container.oneTime?.membershipFee);
-    if (Number.isFinite(n) && n > 0) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(n), consequence: 'invoice_by_hand' };
+    if (Number.isFinite(n) && n > 0) return round2(n);
   }
   return null;
+}
+// One fee line at most: the cached aggregate fee, else the explicit setup
+// row's amount, and only while the fee applies.
+function membershipFeeLine(data, { applies, setupRows = [] }) {
+  if (!applies) return null;
+  const amount = cachedMembershipFee(data) ?? setupRows.map((r) => Number(r.amount)).find((n) => Number.isFinite(n) && n > 0) ?? null;
+  return amount == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand' };
 }
 
 function unrepresentableRefusal(warning) {
@@ -289,17 +315,19 @@ function rawLineAmount(line) {
   return null;
 }
 
-function oneTimeLineEffects(estimate, converter) {
+function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard' } = {}) {
   const data = parseData(estimate.estimate_data);
   const canonical = canonicalOneTimeLines(estimate, data);
   if (canonical.refusal) return canonical;
+  const setupRows = canonical.lines.filter(isSetupFeeRow);
+  canonical.lines = canonical.lines.filter((line) => !isSetupFeeRow(line));
   const disagreeing = oneTimeAggregateConflict(estimate);
   if (disagreeing) {
     return { lines: [], refusal: { statusCode: 409, code: 'one_time_total_conflict', totals: disagreeing, message: `This estimate carries more than one accepted one-time total (${disagreeing.map(money).join(' and ')}), so the bar cannot say what to invoice. Accept it from the estimate page.` } };
   }
   const dropped = unrepresentableRow(data, converter, { hasTotal: oneTimeAggregateTotal(estimate) != null });
   if (dropped) return { lines: [], refusal: unrepresentableRefusal(dropped) };
-  const fee = membershipFeeLine(data);
+  const fee = membershipFeeLine(data, { applies: setupFeeApplies(data, billingTerm), setupRows });
   const listed = fee ? [...canonical.lines, fee] : canonical.lines;
   const discount = pooledDiscountLine(estimate, listed);
   return { lines: discount ? [...listed, discount] : listed, refusal: null };
@@ -867,6 +895,7 @@ module.exports = {
   stateDiffEffects,
   conversionEffect,
   oneTimeLineEffects,
+  setupFeeApplies,
   oneTimeAggregateTotal,
   oneTimeAggregateConflict,
   unitemizedOneTimeRefusal,
