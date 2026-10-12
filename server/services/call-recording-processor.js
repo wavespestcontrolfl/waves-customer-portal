@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -8338,6 +8338,190 @@ Rules:
   }
 }
 
+// Why the contact pass / decoder runs for this transcript, or null when it does not.
+// 'signals' = the dictation detector (always on). 'collapse:<signal>' = a collapsed
+// spelling's marks (GATE_CALL_SPELLING_COLLAPSE_TRIGGER, dark): the ONLY case the new
+// trigger adds a pass, so it is the one that is logged. `ctx` carries { extracted,
+// knownCustomer } once the extraction exists; the second pass runs before it, so the
+// near-miss signal can only fire at the decoder gate.
+function contactPassTrigger(transcription, ctx = {}) {
+  if (!transcription) return null;
+  if (detectContactDictationSignals(transcription).any) return 'signals';
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
+  // The name-only trigger feeds the name-spelling card, which never files on an outbound call
+  // (outbound diarization can swap the labels): no paid pass for it there.
+  if (ctx.call && isOutboundCall(ctx.call)) return null;
+  const sig = spellingCollapseSignals(transcription, ctx);
+  if (!sig.any) return null;
+  return `collapse:${['repeated', 'announced', 'nearMiss'].filter((k) => sig[k]).join('+')}`;
+}
+
+function contactPassTriggerLogged(transcription, call, stage, ctx = {}) {
+  const trigger = contactPassTrigger(transcription, ctx);
+  logCollapseTrigger(trigger, call?.twilio_call_sid, stage);
+  return trigger !== null;
+}
+
+function logCollapseTrigger(trigger, callSid, stage) {
+  if (typeof trigger === 'string' && trigger.startsWith('collapse:')) {
+    logger.info(`[call-proc] spelling collapse trigger (${stage}): ${trigger.slice(9)} for ${maskSid(callSid)}`);
+  }
+}
+
+// The expected recording length to verify a download against, or null. Verification (and the
+// retryable not-ready classification) only applies inside the CDN propagation window: an old row's
+// recording is as complete as it will ever get, and verifying it would reject it forever (Codex
+// #3037 P2). The window is anchored at call END (created_at + duration), since the recording only
+// exists once the call ends (Codex #3037 round-2 P2). Shared by the primary download and the late
+// contact pass so a truncated CDN response is never transcribed by either.
+function propagationExpectedSeconds(call) {
+  const callCreatedMs = call?.created_at ? new Date(call.created_at).getTime() : null;
+  const callEndMs = Number.isFinite(callCreatedMs)
+    ? callCreatedMs + recordingDurationSeconds(call || {}) * 1000
+    : null;
+  const withinPropagationWindow = Number.isFinite(callEndMs)
+    && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
+  return withinPropagationWindow ? (recordingDurationSeconds(call || {}) || null) : null;
+}
+
+// One extra dictation-focused transcription pass over the call audio, scrubbed like the primary.
+// Returns { text, model, chars } or, when this pass is the first leg to hear a card number,
+// { pan: true, panCount } with no text: the caller quarantines the recording and decodes nothing.
+async function lateContactPass(call) {
+  let buffer;
+  try {
+    buffer = await downloadRecording(call.recording_url, { expectedSeconds: propagationExpectedSeconds(call) });
+  } catch (err) {
+    if (err.code !== RECORDING_NOT_READY) throw err;
+    // A short or missing CDN read: never transcribe or persist it. The pass simply does not run.
+    logger.warn(`[call-proc] late contact pass: recording not ready, pass skipped: ${err.message}`);
+    return null;
+  }
+  const second = await transcribeWithOpenAI(buffer, {
+    model: process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe',
+    prompt: CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
+  });
+  if (!second?.text) return null;
+  const scrubbed = scrubPansDetailed(second.text);
+  const panCount = Math.max(Number(second.panCount || 0), scrubbed.count);
+  if (panCount > 0) return { pan: true, panCount };
+  return { text: scrubbed.text, model: second.model || null, chars: scrubbed.text.length };
+}
+
+// The same card-number handling the normal wrapper and the choke-point scrub use: quarantine the
+// recording (Twilio delete, strip the URL, stamp pan_detected, alert the office) and clear the URL
+// on the in-memory row so nothing downstream re-downloads the audio.
+async function quarantineLatePanPass(call, panCount) {
+  await quarantineCardRecording(call, { source: 'late_contact_pass' });
+  call.recording_url = null;
+  return panCount;
+}
+
+// Whether the late (post-extraction) pass may run at all: gate on, contact dictation not switched
+// off, an inbound call whose recording is still there, and an extraction with a name to work with.
+// The wrapper already bought (and may have lost) the pass for the transcript-only signals; only the
+// near miss, which needs the extraction, is new after it, and the near miss needs a last name.
+function lateContactPassAllowed({ call, extracted, contactPassAttempted }) {
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return false;
+  if (process.env.CONTACT_DICTATION_ENABLED === 'false') return false;
+  if (!call.recording_url || isOutboundCall(call)) return false;
+  if (!extracted?.first_name && !extracted?.last_name) return false;
+  return !(contactPassAttempted && !extracted.last_name);
+}
+
+// The collapse trigger for the late pass, or null. Either extracted name is context for the
+// repeated-name signal; only the stored-last-name near miss needs a customer lookup. After a pass
+// the wrapper already tried, only the near miss counts.
+async function lateContactPassTrigger({ call, contactPhone, transcription, extracted, contactPassAttempted }) {
+  let known = null;
+  if (extracted.last_name) {
+    known = call.customer_id
+      ? await db('customers').where({ id: call.customer_id }).first('last_name')
+      : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
+  }
+  const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known, call });
+  if (!trigger || (contactPassAttempted && !trigger.includes('nearMiss'))) return null;
+  return trigger;
+}
+
+// The decoder gate. Runs when a second-pass transcript exists or the dictation detector fires
+// (as before). With GATE_CALL_SPELLING_COLLAPSE_TRIGGER on it also runs for a collapsed spelling the
+// wrapper could not see before the extraction existed (the near miss): one late second pass on a
+// fresh, verified download. A pass that hears a card number is quarantined and nothing is decoded.
+// Fail-open: any failure leaves the decoder off. `late` carries what the caller must persist;
+// `panCount` means the recording is gone.
+async function contactDecoderGate(args) {
+  const { call, transcription, contactPassTranscript, callSid } = args;
+  const off = { run: false, lateContactPass: null, late: null, panCount: 0 };
+  if (contactPassTranscript) return { ...off, run: true };
+  if (detectContactDictationSignals(transcription).any) return { ...off, run: true };
+  if (!lateContactPassAllowed(args)) return off;
+  try {
+    const trigger = await lateContactPassTrigger(args);
+    if (!trigger) return off;
+    logCollapseTrigger(trigger, callSid, 'decoder');
+    const late = await lateContactPass(call);
+    if (late?.pan) return { ...off, panCount: await quarantineLatePanPass(call, late.panCount) };
+    return late ? { ...off, run: true, lateContactPass: late.text, late } : off;
+  } catch (err) {
+    logger.warn(`[call-proc] spelling collapse decoder gate skipped for ${maskSid(callSid)}: ${err.message}`);
+    return off;
+  }
+}
+
+// transcript_structured as the main transcript write builds it: the diarized segments plus the
+// dictation-focused second stream as the audit trail.
+function structuredTranscriptJson(result, contactPassTranscript) {
+  return JSON.stringify({
+    provider: result.provider,
+    model: result.model || OPENAI_TRANSCRIPTION_MODEL,
+    segments: result.structuredSegments || null,
+    ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
+  });
+}
+
+// What a late pass adds to the call row's transcription metadata: the second stream's model and
+// size, or, for a pass that heard a card number, pan_detected + pan_count (quarantineCardRecording
+// already stripped the URL and stamped the quarantine). Plain object, merged into the caller's
+// in-memory provenance too so a later metadata write does not restore an older pan_count.
+function lateContactPassMeta({ provenanceMetadata, gate }) {
+  if (gate.panCount > 0) {
+    return { pan_detected: true, pan_count: Math.max(Number(provenanceMetadata?.pan_count || 0), gate.panCount) };
+  }
+  return { contact_pass_model: gate.late.model, contact_pass_chars: gate.late.chars };
+}
+
+// Written through the same token-fenced, quarantine-preserving metadata write as the main
+// transcript. The second stream is merged INTO whatever transcript_structured the accepted
+// transcript already has (primary segments, a fallback's, or none): it never replaces them. A
+// composite relay call has no structured form, so only the metadata is written there. Returns
+// false when the fence says a peer owns the call.
+async function persistLateContactPass({ call, procToken, provenanceMetadata, gate, relay }) {
+  if (!gate?.late && !(gate?.panCount > 0)) return true;
+  const meta = lateContactPassMeta({ provenanceMetadata, gate });
+  if (provenanceMetadata) Object.assign(provenanceMetadata, meta);
+  // Only the new fields are merged into the CURRENT jsonb: a relay close or summary write between
+  // the main transcript write and this one may have added keys the in-memory provenance lacks.
+  const metaWrite = db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(meta)]);
+  const patch = { transcription_metadata: metaWrite, updated_at: new Date() };
+  if (gate.late && !relay) {
+    patch.transcript_structured = db.raw(
+      "COALESCE(transcript_structured, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({ contact_pass_transcript: gate.late.text })],
+    );
+  }
+  const rows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update(patch);
+  return Number(rows) > 0;
+}
+
+// Persists a late contact pass and answers whether the claim is still ours: null to carry on, or
+// the same ownership-lost result the transcript write returns when a peer reclaimed the call.
+async function settleLateContactPass({ callSid, ...rest }) {
+  if (await persistLateContactPass(rest)) return null;
+  logger.warn(`[call-proc] late contact pass write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer; abandoning this pass`);
+  return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+}
+
 // Wrapper: primary transcription + (when the call dictated contact info) a
 // SECOND full-call pass on a promptable model. The diarized primary cannot be
 // prompted, so token-level dictation fidelity ("W, C as in Charlie, W, six
@@ -8355,8 +8539,11 @@ async function transcribeRecording(mp3Url, opts = {}) {
       // forceContactPass (bounce re-verify): the primary transcript may have
       // normalized a misheard address into a shape that no longer trips the
       // dictation signals — the caller knows an email was dictated.
-      && (opts.forceContactPass === true || detectContactDictationSignals(result.transcription).any)
+      && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass', { call: opts.call }))
     ) {
+      // Recorded BEFORE the paid call: a pass that returns nothing or throws still counts as tried, so
+      // the late decoder gate never repeats it for the same signal.
+      result.contactPassAttempted = true;
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
         model: contactModel,
@@ -8430,24 +8617,10 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
     // as it will ever get — verifying it would either reject it forever
     // (starving the sweep on dead URLs, Codex #3037 P2) or block a partial
     // recording that is still better transcribed than dropped.
-    const callCreatedMs = opts.call?.created_at ? new Date(opts.call.created_at).getTime() : null;
-    // Anchor the window at call END (created_at + duration), not call start —
-    // the recording only exists once the call ends, so an hour-long call
-    // anchored at creation would already be outside the window when the
-    // recording-completed webhook fires and would never get verification
-    // (Codex #3037 round-2 P2).
-    const callEndMs = Number.isFinite(callCreatedMs)
-      ? callCreatedMs + recordingDurationSeconds(opts.call || {}) * 1000
-      : null;
-    const withinPropagationWindow = Number.isFinite(callEndMs)
-      && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
+    const expectedSeconds = propagationExpectedSeconds(opts.call);
     let audioBuffer;
     try {
-      audioBuffer = await downloadRecording(mp3Url, {
-        expectedSeconds: withinPropagationWindow
-          ? (recordingDurationSeconds(opts.call || {}) || null)
-          : null,
-      });
+      audioBuffer = await downloadRecording(mp3Url, { expectedSeconds });
     } catch (err) {
       if (err.code === RECORDING_NOT_READY) {
         // CDN propagation lag (404 or truncated buffer for the known
@@ -10302,6 +10475,8 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // The wrapper already tried the second pass (it may have returned nothing).
+    let contactPassAttempted = false;
     // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
     // near-silence) is discarded here so the Twilio-builtin fallback below can
     // supply a real transcript; the terminal rejection only fires if the
@@ -10435,6 +10610,7 @@ const CallRecordingProcessor = {
       transcription = result.transcription;
       recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
+      contactPassAttempted = result.contactPassAttempted === true;
       // PAN redaction guard (card-on-file spec Phase 0): a card number
       // blurted on the recorded line must become a non-event — scrubbed
       // BEFORE the plausibility gate, BEFORE persistence, and therefore
@@ -10473,6 +10649,7 @@ const CallRecordingProcessor = {
         rejectedPrimaryChars = transcription.length; // keep the metric before discarding
         transcription = null;
         contactPassTranscript = null;
+        contactPassAttempted = false; // the wrapper's pass belonged to the discarded transcript
       }
       if (transcription) {
         transcriptionProvenance = {
@@ -10515,14 +10692,9 @@ const CallRecordingProcessor = {
         if (relaySegment) {
           transcriptUpdate.transcript_structured = null;
         } else if (result.structuredSegments || contactPassTranscript) {
-          transcriptUpdate.transcript_structured = JSON.stringify({
-            provider: result.provider,
-            model: result.model || OPENAI_TRANSCRIPTION_MODEL,
-            segments: result.structuredSegments || null,
-            // Audit trail for the contact-field decoder's second evidence
-            // stream (dictation-focused re-transcription of the same audio).
-            ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
-          });
+          // Includes the audit trail for the contact-field decoder's second evidence
+          // stream (dictation-focused re-transcription of the same audio).
+          transcriptUpdate.transcript_structured = structuredTranscriptJson(result, contactPassTranscript);
         }
         // Token-fenced like the terminal writes: this runs AFTER a
         // multi-minute provider await, by which time a peer may have
@@ -11891,8 +12063,20 @@ const CallRecordingProcessor = {
     // address-recovery lookup below. Fail-open.
     let contactDictation = null;
     let dictationEmailPayload = null;
+    // The late contact pass (paid) is persisted OUTSIDE the fail-open try below: a lost claim abandons
+    // the pass like the transcript write above, and a THROWN fence write escapes to the outer
+    // processing-failure path instead of marking the call processed with the late transcript
+    // neither saved nor decoded.
+    const decoderGate = transcription
+      ? await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, contactPassAttempted, extracted, callSid })
+      : null;
+    if (decoderGate?.lateContactPass) contactPassTranscript = decoderGate.lateContactPass;
+    const lost = decoderGate
+      ? await settleLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate: decoderGate, relay: Boolean(recordedSegmentText), callSid })
+      : null;
+    if (lost) return lost;
     try {
-      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
+      if (decoderGate?.run) {
         contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
       }
       if (contactDictation) {
@@ -24415,6 +24599,12 @@ function legacyDisputeServiceIntent(extracted) {
 
 CallRecordingProcessor._test = {
   fileNameSpellingCard,
+  contactPassTrigger,
+  contactPassTriggerLogged,
+  contactDecoderGate,
+  persistLateContactPass,
+  settleLateContactPass,
+  lateContactPassMeta,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
