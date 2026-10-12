@@ -233,7 +233,8 @@ function ReviewTiming({ choice, set, hint }) {
 }
 
 function NextVisitBlock({ nextVisit, noteOn, note, onNote }) {
-  const [open, setOpen] = useState(false);
+  // A note already typed keeps its box open when the section is drawn again (the pest sheet's two steps).
+  const [open, setOpen] = useState(!!note);
   return (
     <div className="tech-wrapup-block">
       <span className="tech-product-editor-label">Next scheduled visit</span>

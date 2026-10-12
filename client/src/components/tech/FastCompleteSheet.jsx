@@ -1806,7 +1806,7 @@ function ReportFlowForm({
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
   usePartBusy('pest-report', !!writing);
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section on the report step. The report flow posted no
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
   // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
@@ -2339,6 +2339,8 @@ function VisitStep({
               onChange={(next) => setField('promiseMarks', next)}
             />
           )}
+          {/* The Wrap-up on the first screen too (owner 2026-10-12): the same choices the report step shows. Draws nothing while it is off. */}
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
       </div>
       <StepFooter reason={footer.reason} warn={warn} label={footer.label} busy={writing} disabled={writing} onAction={footer.onAction} coverProps={picker.coverProps}>
