@@ -684,13 +684,12 @@ describe('product facts for the pest writer', () => {
       app('Atticus Talak 7.9 F', 'insect-control application', 'perimeter_spray', 'Outside', ['ants']),
       app('LESCO 90/10 Nonionic Surfactant', 'adjuvant', 'perimeter_spray', 'Outside', []),
     ]));
-    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants; labeled for 25+ pests.');
-    expect(text).toContain('mainly used for spiders and crawling insects; tagged today for ants; labeled for 75+ pests.');
+    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants.');
+    expect(text).toContain('mainly used for spiders and crawling insects; tagged today for ants.');
     expect(text).not.toMatch(/taurus|talak|lesco|adjuvant/i);
-    // The count is a stated exception to the no-amounts rule, and it passes the screen (Codex r5).
-    expect(OWNER_RULES).toContain('The one figure the report may give is a PRODUCT FACTS "labeled for" count of pests');
-    expect(PEST_WRITER_ADAPTER).toContain('(a PRODUCT FACTS "labeled for" count is not one)');
-    expect(screen('WHAT WE DID AND WHY\nYou asked about spiders: the same treatment is labeled for 25+ pests.')).toBeNull();
+    // The label count stays on the card (Codex r7).
+    expect(text).not.toMatch(/labeled for|\d/);
+    expect(OWNER_RULES).not.toContain('labeled for');
   });
 
   test('a roach visit: each entry carries its own tags; the label duration stays on the card, never with the writer', () => {
@@ -701,9 +700,9 @@ describe('product facts for the pest writer', () => {
     ]);
     const text = block(records);
     // Alpine in the kitchen is tagged for roaches only: never the reason for ants found outside (Codex r3).
-    expect(text).toContain('- insect-control application, crack and crevice, Kitchen: mainly used for ants and roaches; tagged today for roaches; labeled for 25+ pests.');
+    expect(text).toContain('- insect-control application, crack and crevice, Kitchen: mainly used for ants and roaches; tagged today for roaches.');
     expect(text).toContain('- insect growth regulator, crack and crevice, Kitchen: mainly used for roaches; tagged today for roaches.');
-    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants; labeled for 25+ pests.');
+    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants.');
     expect(PEST_WRITER_ADAPTER).toContain('only when that pest is in the same entry\'s "tagged today for" list');
     // The duration: on the card, not with the writer, and its words are no allowance (Codex r1 to r3).
     expect(records.sections.join('\n')).not.toMatch(/4 months|LABEL DURATION/);
@@ -714,7 +713,7 @@ describe('product facts for the pest writer', () => {
 
   test('an untagged application says so', () => {
     expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', [])])))
-      .toContain('mainly used for ants; tagged today for no pest; labeled for 25+ pests.');
+      .toContain('mainly used for ants; tagged today for no pest.');
   });
 
   test('no reviewed product, or a lawn visit: no block', () => {
@@ -729,6 +728,9 @@ describe('product facts for the pest writer', () => {
       expect(line([alpine(['roaches'])], plain)).not.toMatch(/few days|couple of weeks/);
       expect(line([alpine(['roaches'])], plain)).toMatch(/carry it back to their harborage\.$/);
       expect(line([alpine(['ants'])], plain)).toContain('then declines over the next couple of weeks.');
+      // Untagged Alpine fails closed (Codex r7).
+      expect(line([alpine([])], plain)).not.toMatch(/few days|couple of weeks/);
+      expect(line([alpine(undefined)], plain)).not.toMatch(/few days|couple of weeks/);
       expect(line([alpine(['ants', 'roaches'])], plain)).toContain('couple of weeks');
       expect(line([alpine(['roaches']), { name: 'Taurus SC', method: 'spot_treatment', applicationArea: 'Garage', targets: ['roaches'] }], plain)).toContain('couple of weeks');
     }
@@ -739,6 +741,7 @@ describe('product facts for the pest writer', () => {
     const alpine = (targets) => app('Alpine WSG', 'insect-control application', 'crack_and_crevice', 'Kitchen', targets);
     expect(records([alpine(['roaches'])]).allowedDates).toEqual([]);
     expect(records([alpine(['roaches'])]).sections.join('\n')).not.toContain('REACH-OUT DATE');
+    expect(records([alpine([])]).allowedDates).toEqual([]);
     expect(records([alpine(['ants'])]).allowedDates).toHaveLength(2);
     // The roach gel beside it still states its own window.
     expect(records([alpine(['roaches']), app('Advion Evolution Cockroach Gel Bait', 'bait application', 'bait_placement', 'Kitchen', ['roaches'])]).allowedDates).toHaveLength(2);
@@ -751,6 +754,8 @@ describe('product facts for the pest writer', () => {
     // Only the verdict, not the word: other writers and the Ask answer share this screen (Codex r6).
     expect(screen('WHAT TO EXPECT\nThis keeps your home protected.')).toBe('owner_phrase');
     expect(screen('WHAT TO EXPECT\nYou’re now fully protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYour home is completely protected.')).toBe('owner_phrase');
+    expect(screen('WHAT TO EXPECT\nYour home is currently protected.')).toBe('owner_phrase');
     expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are in a protected area along the fence.')).toBeNull();
     expect(screen('WHAT WE DID AND WHY\nThe stations are protected from rain by their covers.')).toBeNull();
@@ -769,6 +774,5 @@ describe('product facts for the pest writer', () => {
     expect(PEST_WRITER_ADAPTER).toContain('PRODUCT FACTS are how you know what each treatment is for');
     expect(PEST_WRITER_ADAPTER).toContain('Reassure with a recorded fact, never with a verdict');
     expect(PEST_WRITER_ADAPTER).toContain('when the TECHNICIAN NOTE names the places swept, name only those places');
-    expect(PEST_WRITER_ADAPTER).toContain('An absence names the pest and the place');
   });
 });

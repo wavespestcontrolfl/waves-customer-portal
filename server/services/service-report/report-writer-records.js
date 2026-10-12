@@ -13,7 +13,7 @@
 const {
   buildWhatToExpect, expectationWindowClasses, toExpectationProduct,
 } = require('./pest-report-expectations');
-const { findReportProductCopyEntry, labeledPestCountText } = require('../../config/report-product-copy');
+const { findReportProductCopyEntry } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
 const { writerPromiseLines } = require('./visit-promises');
@@ -98,20 +98,19 @@ function writerExpectations({ line = null, findingsType = null, applications = [
 // 2026-10-01 lets the writer use it too), labeled with the recorded job,
 // method and area so the writer ties each line to the right piece of work.
 // What each recorded treatment is for (owner 2026-10-12: the writer should
-// know Taurus is for ants, Alpine and Gentrol for roaches, and how many pests
-// a label covers). One line per job, never a product name. Reviewed config
+// know Taurus is for ants, Alpine and Gentrol for roaches). The label's pest
+// count stays on the product card: a figure the writer may say needs a screen
+// that knows the count and whether the customer asked. One line per job, never a product name. Reviewed config
 // only: config/report-product-copy.js.
 function productFactLines(applications) {
   const seen = new Set();
   return (Array.isArray(applications) ? applications : []).flatMap((application) => {
     const entry = findReportProductCopyEntry({ epaReg: application?.epaReg, name: application?.name });
     if (!entry?.mainPests?.length) return [];
-    const count = labeledPestCountText(entry);
     const tagged = (Array.isArray(application.targets) ? application.targets : []).map(cleanText).filter(Boolean);
     const facts = [
       `mainly used for ${entry.mainPests.join(' and ')}`,
       `tagged today for ${tagged.length ? tagged.join(', ') : 'no pest'}`,
-      count ? `labeled for ${count}` : null,
     ].filter(Boolean);
     const label = [application.role, application.methodLabel, application.applicationArea]
       .map(cleanText).filter(Boolean).join(', ');
@@ -125,7 +124,7 @@ function productFactLines(applications) {
 function productFactsSection(applications) {
   const lines = productFactLines(applications);
   if (!lines.length) return null;
-  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Tagged today for" is what the technician recorded this one treatment for. "Labeled for" is how many pests the label covers: say it only when the customer asked about a pest other than the main one, and say nothing else about the label):'
+  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Tagged today for" is what the technician recorded this one treatment for.):'
     + `\n${lines.join('\n')}`;
 }
 

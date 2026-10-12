@@ -273,15 +273,8 @@ function reportProductCopyFor({ epaReg, name, city } = {}) {
   };
 }
 
-// The label's reach as the writer may say it: the floored count, no city.
-function labeledPestCountText(entry) {
-  const floored = floorToMultipleOf25(entry?.alsoLabeledForPestCount);
-  return floored ? `${floored}+ pests` : null;
-}
-
 module.exports = {
   REPORT_PRODUCT_COPY,
-  labeledPestCountText,
   findReportProductCopyEntry,
   reportProductCopyFor,
   floorToMultipleOf25,

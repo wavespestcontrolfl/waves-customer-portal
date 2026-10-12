@@ -413,12 +413,13 @@ function igrLabelDuration(products) {
   return durations.length === 1 && names.size === 1 ? durations[0] : '';
 }
 
-// Alpine WSG put down for roaches and not for ants: the label gives no time
-// for roaches, so no timeframe is stated for it (owner 2026-10-12).
+// Alpine WSG not recorded for ants: the label gives no time for roaches, so
+// no timeframe is stated for it (owner 2026-10-12). An untagged application
+// counts too: no tag is no proof it was an ant job.
 const NO_ROACH_TIMEFRAME_PRODUCTS = new Set(['alpine wsg'].map(normalizeProductName));
 function noLabelRoachTimeframe(product) {
   return NO_ROACH_TIMEFRAME_PRODUCTS.has(normalizeProductName(product?.name))
-    && hasRoachTarget(product) && !hasAntTargetEvidence(product);
+    && !hasAntTargetEvidence(product);
 }
 
 function hasPerimeterBandEvidence(product = {}) {
