@@ -252,6 +252,14 @@ function parseProgramInput(input) {
 // dues-covered both before and after the bill changes (see header). One saved
 // address at most: the card names no address picker; that is the Schedule
 // screen's job.
+// One eligibility check for the preview and for the bill step's locked row: a customer who is not active, or whose stage
+// is churned, is refused (a restart is a separate, deliberate step on the customer page).
+const INACTIVE_TEXT = 'This customer is inactive or churned. Restart this customer from the customer page first.';
+function inactiveCustomerRefusal(customer) {
+  if (customer.active === true && customer.pipeline_stage !== 'churned') return null;
+  return refusal(`${INACTIVE_TEXT} Nothing was proposed.`, 'program_customer_inactive');
+}
+
 async function loadProgramCustomer(customerId) {
   const { resolveBillingLane } = require('../billing-lane');
   const customer = await db('customers').where({ id: customerId })
@@ -264,9 +272,8 @@ async function loadProgramCustomer(customerId) {
   }
   // A churned or inactive customer can keep a monthly_membership lane and an old rate. The booking's plan sync would mark
   // the account active again as a side effect this card does not show, so a restart is a separate, deliberate step.
-  if (customer.active !== true || customer.pipeline_stage === 'churned') {
-    return refusal('This customer is inactive or churned. Restart this customer from the customer page first. Nothing was proposed.', 'program_customer_inactive');
-  }
+  const inactive = inactiveCustomerRefusal(customer);
+  if (inactive) return inactive;
   if (customer.payer_id || resolveBillingLane(customer).mode !== 'monthly_membership' || !(Number(customer.monthly_rate) > 0)) {
     return refusal('This tool starts a program only for a customer who already pays a monthly plan bill (monthly membership, no Bill-To payer). Start this customer\'s first plan from an accepted estimate or the Schedule screen. Nothing was proposed.', 'program_needs_monthly_plan');
   }
@@ -760,12 +767,13 @@ function contactLines(plan) {
   return require('../booking-contact-state').contactCardLines(plan.contact.state, { sendTexts: plan.sendTexts, welcome: plan.welcomeCandidate, welcomeEmailCovered: plan.welcomeEmailCovered });
 }
 
-// The card, as ordered lines per kind. The contract sorts lines by kind and
-// then by text, so the bill lines carry "n of m" to keep their order.
-function cardLines(plan) {
-  const RateChange = require('./rate-change');
-  const lines = [];
-  const add = (kind, text) => lines.push({ kind, text });
+// Does the pinned contact state reach anyone with the booking confirmation? Both the card and the receipt read this, so
+// neither promises a confirmation the sender will suppress (confirmations off, or no phone or email to reach).
+function confirmationReaches(plan) {
+  return plan.sendTexts === true && require('../booking-contact-state').confirmationLegs(plan.contact.state).length > 0;
+}
+
+function seriesLines(plan, add) {
   const when = `${dateLabel(plan.firstDate)}, ${clockLabel(plan.windowStart)}-${clockLabel(plan.windowEnd)}`;
   const series = `ongoing, no end date (the first ${ONGOING_PRESEED} visits are booked now, as on the Schedule screen)`;
   add('operational', `Series: ${plan.catalogRow.name}, ${CADENCES[plan.cadence]}, ${series}`);
@@ -773,34 +781,42 @@ function cardLines(plan) {
   add('operational', `Visit dates booked now: ${plan.visitDates.map((d) => dateLabel(d)).join('; ')}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
   add('operational', 'Leads: no lead status changes');
-  if (plan.consultations.length && !plan.consultationsWon) {
-    add('operational', `${plan.consultations.length} open consultation(s) stay open: this booking is dues-covered and does not count as a sale`);
-  } else if (plan.consultations.length) {
-    plan.consultations.forEach((c) => add('operational', `Marks consultation of ${c.date ? dateLabel(c.date) : 'an unknown date'} (outcome ${c.outcome}) as won`));
-  } else {
-    add('operational', 'No consultation is marked won');
-  }
-  add('operational', plan.overlap.length
-    ? `No other visits at the ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times beyond the overlaps listed here (if a new one appears, nothing is booked)`
-    : `No other visits at the first ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times (if one appears, nothing is booked)`);
-  add('operational', `After booking: ask the bar to optimize ${plan.tech.name}'s route on ${dateLabel(plan.firstDate)} (a second card)`);
-  if (plan.overlap.length) {
-    const who = plan.overlap.map((o) => `${dateLabel(o.date)}: ${[o.customer, o.service, o.window].filter(Boolean).join(', ')}`).join('; ');
-    add('operational', `Overlap: ${plan.overlap.length === 1 ? 'a booked visit overlaps a visit' : 'booked visits overlap visits'} already on the schedule (${who}). The booking goes ahead, as on the Schedule screen`);
-  }
+}
 
+function consultationLines(plan, add) {
+  const open = plan.consultations;
+  if (!open.length) return add('operational', 'No consultation is marked won');
+  if (!plan.consultationsWon) return add('operational', `${open.length} open consultation(s) stay open: this booking is dues-covered and does not count as a sale`);
+  return open.forEach((c) => add('operational', `Marks consultation of ${c.date ? dateLabel(c.date) : 'an unknown date'} (outcome ${c.outcome}) as won`));
+}
+
+function overlapLines(plan, add) {
+  const count = ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED;
+  add('operational', plan.overlap.length
+    ? `No other visits at the ${count} visit times beyond the overlaps listed here (if a new one appears, nothing is booked)`
+    : `No other visits at the first ${count} visit times (if one appears, nothing is booked)`);
+  add('operational', `After booking: ask the bar to optimize ${plan.tech.name}'s route on ${dateLabel(plan.firstDate)} (a second card)`);
+  if (!plan.overlap.length) return;
+  const who = plan.overlap.map((o) => `${dateLabel(o.date)}: ${[o.customer, o.service, o.window].filter(Boolean).join(', ')}`).join('; ');
+  add('operational', `Overlap: ${plan.overlap.length === 1 ? 'a booked visit overlaps a visit' : 'booked visits overlap visits'} already on the schedule (${who}). The booking goes ahead, as on the Schedule screen`);
+}
+
+function billLines(plan, add) {
+  const RateChange = require('./rate-change');
   const total = plan.bill.lines.length + 1;
+  const noteFor = (l) => {
+    if (l.family === plan.family) return 'new';
+    return plan.reprice.some((r) => r.family === l.family) ? `${plan.tier} applied, you said yes` : `unchanged, ${plan.tier} not applied`;
+  };
   plan.bill.lines.forEach((l, i) => {
-    let note;
-    if (l.family === plan.family) note = 'new';
-    else if (plan.reprice.some((r) => r.family === l.family)) note = `${plan.tier} applied, you said yes`;
-    else note = `unchanged, ${plan.tier} not applied`;
-    add('billing', `Monthly bill ${i + 1} of ${total}: ${RateChange.lineLabel(l.family)} ${money(l.before)} -> ${money(l.after)} (${note})`);
+    add('billing', `Monthly bill ${i + 1} of ${total}: ${RateChange.lineLabel(l.family)} ${money(l.before)} -> ${money(l.after)} (${noteFor(l)})`);
   });
   add('billing', `Monthly bill ${total} of ${total}: total ${money(plan.bill.totalBefore)} -> ${money(plan.bill.totalAfter)} a month`);
   add('billing', 'Visits carry no price: the monthly bill covers them (dues-billed plan visits)');
   add('billing', 'Billing lane: stays monthly membership');
+}
 
+function customerLines(plan, add) {
   const sync = plan.planSyncUpdates || {};
   const syncParts = [
     sync.waveguard_tier !== undefined && `tier ${plan.tierBefore || 'none'} -> ${sync.waveguard_tier}`,
@@ -814,26 +830,45 @@ function cardLines(plan) {
   add('customer', plan.tierChanges
     ? `WaveGuard tier: ${plan.tierBefore || 'none'} -> ${plan.tier} (set by hand, so the nightly tier check keeps it)`
     : `WaveGuard tier: ${plan.tier} (no change)`);
+}
 
+// The confirmation promise comes from the pinned contact state (confirmationReaches), never from send_texts alone.
+function confirmationComms(plan, add) {
   const { arrivalWindowRange, formatSmsTimeRange } = require('../../utils/sms-time-format');
-  if (plan.sendTexts) {
+  if (!plan.sendTexts) return add('comms', 'Texts: no booking confirmation is sent (send texts is off)');
+  if (confirmationReaches(plan)) {
     add('comms', `Texts: a booking confirmation for the first visit goes out by text or email, per their settings. It gives the arrival window ${dateLabel(plan.firstDate)}, ${formatSmsTimeRange(arrivalWindowRange(plan.windowStart))}`);
-  } else {
-    add('comms', 'Texts: no booking confirmation is sent (send texts is off)');
   }
+  return undefined;
+}
+
+function welcomeComms(plan, add) {
+  const hours = Math.round(plan.welcomeDelay / 60) || 1;
+  if (!plan.welcomeCandidate) return add('comms', 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
+  if (!plan.welcomeEmailCovered) {
+    return add('comms', `Texts and email: the new-customer welcome is queued for about ${hours} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`);
+  }
+  const masked = require('../booking-contact-state').maskEmail(plan.contact.state.holder.email) || 'the same address';
+  add('comms', `Texts: the new-customer welcome text is queued for about ${hours} hour after booking, once ever, if the customer allows texts`);
+  return add('comms', `Welcome email: already covered by today's signup email to ${masked}; none is sent`);
+}
+
+function commsLines(plan, add) {
+  confirmationComms(plan, add);
   contactLines(plan).forEach((text) => add('comms', text));
-  if (plan.welcomeCandidate && plan.welcomeEmailCovered) {
-    const masked = require('../booking-contact-state').maskEmail(plan.contact.state.holder.email) || 'the same address';
-    add('comms', `Texts: the new-customer welcome text is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking, once ever, if the customer allows texts`);
-    add('comms', `Welcome email: already covered by today's signup email to ${masked}; none is sent`);
-  } else {
-    add('comms', plan.welcomeCandidate
-      ? `Texts and email: the new-customer welcome is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`
-      : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
-  }
+  welcomeComms(plan, add);
   add('comms', 'Texts: visit reminders before each visit, set up as the Schedule screen sets them up');
   add('comms', 'Email: the membership-started email is not sent');
-  if (plan.techNotice) add('comms', `Technician: notifies ${plan.tech.name} of the new visits (app notice)`);
+  // The handler's hook notifies for the first visit only (notifyTechVisitChange on the parent row), not for the generated series visits.
+  if (plan.techNotice) add('comms', `Technician: notifies ${plan.tech.name} of the first visit only (app notice); the later visits get no notice`);
+}
+
+// The card, as ordered lines per kind. The contract sorts lines by kind and
+// then by text, so the bill lines carry "n of m" to keep their order.
+function cardLines(plan) {
+  const lines = [];
+  const add = (kind, text) => lines.push({ kind, text });
+  [seriesLines, consultationLines, overlapLines, billLines, customerLines, commsLines].forEach((part) => part(plan, add));
   return lines;
 }
 
@@ -935,6 +970,10 @@ async function applyTierAndBill(plan) {
     await lockCustomerComms(trx, plan.customerId);
     const locked = await trx('customers').where('id', plan.customerId).forUpdate().first();
     if (!locked || locked.deleted_at) throw Object.assign(new Error('The customer record is no longer live.'), { drift: true });
+    // The preview's own eligibility check, on the locked row: a cancellation that landed after the booking (the legacy
+    // path sets active=false and stage churned and keeps the tier, rate and ledger) must not get a new tier and charge.
+    const inactive = inactiveCustomerRefusal(locked);
+    if (inactive) throw Object.assign(new Error(INACTIVE_TEXT), { drift: true, code: inactive.code });
     // The card refuses a commercial account; the bill step re-checks the canonical predicate on the locked row.
     if (require('../self-booking-plan-sync').isCommercialAccount(locked)) {
       throw Object.assign(new Error('The account became a commercial or business account after the card was shown.'), { drift: true, code: 'program_commercial_account' });
@@ -996,7 +1035,7 @@ function tierAndBillUnknown(plan, booked, err) {
   return {
     outcome_unknown: true,
     series_booked: booked,
-    error: `The visits are booked (${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}). The tier and monthly bill step ended without a clear answer (${err.code || err.message}), and a follow-up read could not say whether it landed. Check this customer's WaveGuard tier and monthly bill on the customer profile before trying again. Do not book the visits again: the next program start for this customer first checks this step and offers to finish it.`,
+    error: `The visits are booked (${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}). The tier and monthly bill step ended without a clear answer (${err.code || err.message}), and a follow-up read could not say whether it landed. Check this customer's WaveGuard tier and monthly bill on the customer page. Do not book the visits again: another program start for this customer is refused until the bill step is cleared. Finish it by hand: on the customer page set the tier to ${plan.tier} and the monthly bill to ${money(plan.bill.totalAfter)} if they are not already set, then mark the bill-not-set alert done there. That clears the record.`,
   };
 }
 
@@ -1106,9 +1145,13 @@ async function bookSeries(plan, actionContext) {
 // The handler queues its texts after it replies (setImmediate), so the
 // receipt says queued, never sent.
 function receiptTexts(plan) {
-  const confirmation = plan.sendTexts
-    ? ' Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).'
-    : ' No booking confirmation (send texts was off).';
+  // "Queued" only when the pinned contact state reaches someone; otherwise the sender suppresses it and the receipt says so.
+  let confirmation = ' No booking confirmation (send texts was off).';
+  if (plan.sendTexts) {
+    confirmation = confirmationReaches(plan)
+      ? ' Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).'
+      : ' No booking confirmation (their settings turn it off or leave no phone or email to reach).';
+  }
   const welcome = plan.welcomeCandidate
     ? (plan.welcomeEmailCovered
       ? ' Welcome text queued for about 1 hour from now; no welcome email (today\'s signup email covers it).'

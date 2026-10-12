@@ -379,6 +379,38 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     expect(lines(await run(BASE_INPUT), 'comms')).toContain('No confirmation message: the customer turned appointment confirmations off');
   });
 
+  test('the confirmation promise follows the pinned recipients: off or unreachable means no promise and no queued receipt (round 16)', async () => {
+    const promise = (preview) => lines(preview, 'comms').filter((l) => l.startsWith('Texts: a booking confirmation'));
+    const offStates = [
+      contactStateFixture({ toggles: { channel: 'sms', confirmation: false, sms: true, email: true } }),
+      contactStateFixture({ toggles: { channel: 'sms', confirmation: true, sms: false, email: true } }),
+      contactStateFixture({ textTo: [], emailTo: [] }),
+    ];
+    for (const state of offStates) {
+      contactState = state;
+      const preview = await run(BASE_INPUT);
+      expect(promise(preview)).toEqual([]);
+      expect(lines(preview, 'comms').some((l) => l.startsWith('No confirmation message:'))).toBe(true);
+      expect(lines(preview, 'comms').some((l) => l.startsWith('Confirmation goes to'))).toBe(false);
+      bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+      expect(result.message).not.toContain('Booking confirmation queued');
+      expect(result.message).toContain('No booking confirmation (their settings turn it off or leave no phone or email to reach).');
+    }
+    // Reachable: the promise and the queued receipt stand.
+    contactState = contactStateFixture();
+    const reachable = await run(BASE_INPUT);
+    expect(promise(reachable)).toHaveLength(1);
+    expect(lines(reachable, 'comms')).toContain('Confirmation goes to ***0134 by text');
+  });
+
+  test('the technician line names the first visit only, as the handler notifies (round 16)', async () => {
+    TechNotices.isEnabled.mockReturnValue(true);
+    const preview = await run(BASE_INPUT, { technicianId: 'office-admin-1' });
+    expect(lines(preview, 'comms')).toContain('Technician: notifies Sam Tech of the first visit only (app notice); the later visits get no notice');
+    expect(JSON.stringify(preview)).not.toContain('of the new visits');
+  });
+
   test('a new-customer welcome line names its masked recipients too', async () => {
     jest.spyOn(Welcome, 'isNewRecurringSignupCandidate').mockResolvedValue(true);
     const preview = await run({ ...BASE_INPUT, send_texts: true });
@@ -477,7 +509,7 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
   test('tech notice gate on and the confirming actor is not the technician: the card and contract name the notice', async () => {
     TechNotices.isEnabled.mockReturnValue(true);
     const preview = await run(BASE_INPUT, { technicianId: 'office-admin-1' });
-    expect(lines(preview, 'comms')).toContain('Technician: notifies Sam Tech of the new visits (app notice)');
+    expect(lines(preview, 'comms')).toContain('Technician: notifies Sam Tech of the first visit only (app notice); the later visits get no notice');
     expect(preview.notifies_technician).toBe(true);
     const contract = buildContract({ toolName: 'start_program', params: BASE_INPUT, displayParams: {}, preview });
     expect(contract.notifies_technician).toBe(true);
@@ -998,6 +1030,11 @@ describe('commit', () => {
       const result = await runLostAck('unreadable');
       expect(result.outcome_unknown).toBe(true);
       expect(executionOutcome(result)).toBe('outcome_unknown');
+      // Round 16: no promise of an automatic finish; the exact manual repair is named.
+      expect(result.error).not.toMatch(/offers to finish|next program start/);
+      expect(result.error).toContain('another program start for this customer is refused until the bill step is cleared');
+      expect(result.error).toMatch(/on the customer page set the tier to Silver and the monthly bill to \$\d+\.\d\d if they are not already set/);
+      expect(result.error).toContain('mark the bill-not-set alert done there');
     });
   });
 
@@ -1519,6 +1556,23 @@ describe('commit', () => {
       // The next start is refused as owed, and the sweep (not the drift path) rings the bell.
       tables.ib_action_phases = [{ id: 'phase-1', tool: 'start_program', customer_id: CUSTOMER_ID, action_key: 'v1:phase-1', created_at: new Date().toISOString(), phase: 'booked_pending_bill', payload: JSON.stringify({ target: {} }) }];
       expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_bill_step_owed' });
+    });
+
+    test('a customer churned between the booking and the billing step: refused, no billing write, the row stays booked_pending_bill (round 16)', async () => {
+      const version = await approvedVersion();
+      createScheduleBooking.mockImplementation(async () => {
+        // The legacy cancel path: inactive and churned, tier, rate and ledger kept.
+        tables.customers = [memberCustomer({ waveguard_tier: 'Silver', active: false, pipeline_stage: 'churned' })];
+        return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+      });
+      const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+      expect(result).toMatchObject({ partial: true });
+      expect(result.warning).toContain('This customer is inactive or churned. Restart this customer from the customer page first.');
+      expect(result.warning).toContain('The visits are booked and the bill step is owed');
+      expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+      expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+      const phases = rowUpdates().map((w) => w.data.phase);
+      expect(phases).toEqual(['booked_pending_bill']);
     });
 
     test('a refusal BEFORE any visit is booked still abandons the row', async () => {

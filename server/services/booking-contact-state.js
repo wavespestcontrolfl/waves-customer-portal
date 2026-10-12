@@ -114,17 +114,26 @@ function noConfirmationReason(t) {
 }
 
 // The card's two lines (confirmation, welcome), from the pinned state. Masked; never an address or a full number.
+// The confirmation legs the pinned state reaches ("***0134 by text", "l***@example.com by email"); empty when confirmations
+// are off or no channel has anyone to reach. The card's confirmation line and the receipt's "queued" claim both read this.
+function confirmationLegs(state) {
+  const t = state.toggles;
+  if (!t.confirmation) return [];
+  const text = t.channel !== 'email' && t.sms ? state.textTo.map((p) => maskPhone(p)).filter(Boolean) : [];
+  const email = (t.channel === 'email' || t.channel === 'both') && t.email ? state.emailTo.map(maskEmail).filter(Boolean) : [];
+  return [text.length && `${text.join(', ')} by text`, email.length && `${email.join(', ')} by email`].filter(Boolean);
+}
+
+function confirmationLine(state) {
+  const legs = confirmationLegs(state);
+  if (!state.toggles.confirmation) return 'No confirmation message: the customer turned appointment confirmations off';
+  return legs.length ? `Confirmation goes to ${legs.join(' and ')}` : `No confirmation message: ${noConfirmationReason(state.toggles)}`;
+}
+
 function contactCardLines(state, { sendTexts, welcome, welcomeEmailCovered = false }) {
   const lines = [];
   const t = state.toggles;
-  if (sendTexts) {
-    const text = t.channel !== 'email' && t.sms ? state.textTo.map((p) => maskPhone(p)).filter(Boolean) : [];
-    const email = (t.channel === 'email' || t.channel === 'both') && t.email ? state.emailTo.map(maskEmail).filter(Boolean) : [];
-    const legs = [text.length && `${text.join(', ')} by text`, email.length && `${email.join(', ')} by email`].filter(Boolean);
-    if (!t.confirmation) lines.push('No confirmation message: the customer turned appointment confirmations off');
-    else if (legs.length) lines.push(`Confirmation goes to ${legs.join(' and ')}`);
-    else lines.push(`No confirmation message: ${noConfirmationReason(t)}`);
-  }
+  if (sendTexts) lines.push(confirmationLine(state));
   if (welcome) {
     const account = state.accountToggles || t;
     const text = account.sms ? maskPhone(state.holder.phone) : null;
@@ -141,4 +150,4 @@ function contactCardLines(state, { sendTexts, welcome, welcomeEmailCovered = fal
 // send that happens later (the recovery sweep included) cannot reach recipients the card did not show.
 const CONTACT_PIN_ACTION = 'booking_contact_pin';
 
-module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, contactCardLines, maskPhone, maskEmail };
+module.exports = { CONTACT_PIN_ACTION, lockContactPrefs, bookingContactState, contactKey, confirmationKey, welcomeKey, currentContactKey, contactCardLines, confirmationLegs, maskPhone, maskEmail };
