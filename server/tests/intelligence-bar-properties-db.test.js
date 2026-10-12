@@ -125,6 +125,9 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     // A partial stamp (street only) can still name this property: blocks.
     await db('scheduled_services').where({ id: unstamped }).update({ service_address_city: null, service_address_zip: null });
     await blocked();
+    // Same ZIP under a different mailing city is the same address: blocks.
+    await db('scheduled_services').where({ id: unstamped }).update({ service_address_city: 'Lakewood Ranch', service_address_zip: '34201' });
+    await blocked();
     // A different ZIP on the same street name is another address: no block from this row.
     await db('scheduled_services').where({ id: unstamped }).update({ service_address_zip: '34239' });
     await expect(service.previewManualPropertyChange(customerA, 'remove', {}, saved.propertyId)).resolves.toMatchObject({ removed_property: { id: saved.propertyId } });

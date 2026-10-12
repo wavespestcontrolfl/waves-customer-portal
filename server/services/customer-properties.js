@@ -1028,9 +1028,12 @@ function visitAddressNamesProperty(visit, target) {
   if (!street || street !== streetKey(target.address_line1)) return false;
   const unitOf = (line1, line2) => unitKey(line2) || streetEmbeddedUnitKey(line1);
   const differs = (a, b) => !!a && !!b && a !== b;
-  return !differs(unitOf(visit.service_address_line1, visit.service_address_line2), unitOf(target.address_line1, target.address_line2))
-    && !differs(normStreet(visit.service_address_city), normStreet(target.city))
-    && !differs(normalizeZip(visit.service_address_zip), normalizeZip(target.zip));
+  if (differs(unitOf(visit.service_address_line1, visit.service_address_line2), unitOf(target.address_line1, target.address_line2))) return false;
+  // ZIP first, like addressKey: mailing-city aliases (Bradenton / Lakewood
+  // Ranch) name one address, so cities are compared only without two ZIPs.
+  const [visitZip, targetZip] = [normalizeZip(visit.service_address_zip), normalizeZip(target.zip)];
+  if (visitZip && targetZip) return visitZip === targetZip;
+  return !differs(normStreet(visit.service_address_city), normStreet(target.city));
 }
 
 // Open rows that still depend on a saved property. Every estimate and every
