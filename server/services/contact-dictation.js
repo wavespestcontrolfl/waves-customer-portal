@@ -174,12 +174,22 @@ function repeatedNameToken(text, extracted = null) {
   return false;
 }
 
+// A single-letter announcement ("with a C") is ordinary speech when a word follows the letter
+// ("with a C corporation", codex #6290 r5). It counts only when the letter ends the thought
+// (punctuation, end of text, "and" / "then", "as in" / "like in") or a name is being given in
+// the same turn. The spelling words (first pattern) need no such check.
+const LETTER_ENDS_THOUGHT_RE = /^\s*(?:[,.;:!?)-]|$|and\b|then\b|as\s+in\b|like\s+in\b)/i;
 function announcedWithoutLetters(text) {
-  for (const re of SPELLING_ANNOUNCE_RES) {
-    for (const m of text.matchAll(re)) {
-      const end = m.index + m[0].length;
-      if (!LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) return true;
-    }
+  SPELLING_ANNOUNCE_RES.forEach((re) => { re.lastIndex = 0; });
+  const [wordRe, letterRe] = SPELLING_ANNOUNCE_RES;
+  for (const m of text.matchAll(wordRe)) {
+    const end = m.index + m[0].length;
+    if (!LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) return true;
+  }
+  for (const m of text.matchAll(letterRe)) {
+    const end = m.index + m[0].length;
+    if (LETTER_RUN_AFTER_RE.test(text.slice(end, end + ANNOUNCE_WINDOW))) continue;
+    if (LETTER_ENDS_THOUGHT_RE.test(text.slice(end, end + 12)) || NAME_CONTEXT_RE.test(sameTurnBefore(text, m.index))) return true;
   }
   return false;
 }
