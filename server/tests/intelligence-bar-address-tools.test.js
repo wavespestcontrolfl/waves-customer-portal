@@ -119,6 +119,7 @@ describe('check_address result', () => {
       unconfirmed: false,
       missing: [],
       zip_plus4_given: false,
+      state_mismatch: false,
       service_area_lookup_failed: false,
       state_hint_used: 'FL',
       note: expect.any(String),
@@ -287,6 +288,28 @@ describe('check_address served south-Hillsborough towns', () => {
       expect(isPolicyRefusal(out)).toBe(true);
     }
     expect(validateAddress).not.toHaveBeenCalled();
+  });
+
+  test('a state field that Google contradicts holds the result, whatever Google said', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way, Sarasota', state: 'GA' });
+    expect(out.status).toBe('confirm_needed');
+    expect(out.state_mismatch).toBe(true);
+    expect(out.in_service_area).toBeNull();
+    expect(out.note).toMatch(/different state/);
+    expect(out.note).not.toMatch(/Save Google/);
+  });
+
+  test('a matching state field is not a mismatch', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way, Sarasota', state: 'Florida' });
+    expect(out.status).toBe('validated_accept');
+    expect(out.state_mismatch).toBe(false);
+  });
+
+  test('a rejected state value is never echoed', async () => {
+    const out = await run({ address: '100 Example Way', state: '9415550100 Pat' });
+    expect(JSON.stringify(out)).not.toMatch(/9415550100|Pat/);
   });
 
   test('another Hillsborough city stays outside the service area', async () => {

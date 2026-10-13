@@ -135,12 +135,24 @@ const COUNTY_GAP_NOTE = 'Google matched this address, but the county lookup that
 const ZIP_PLUS4_RE = /\b\d{5}-\d{4}\b/;
 const ZIP_PLUS4_NOTE = 'The operator gave a ZIP+4. Google\'s ZIP has five digits and the four-digit suffix was not checked: tell the operator the suffix is left out, or keep their ZIP+4 if they ask for it.';
 
+// The state FIELD is a hard constraint: when the operator passed one and
+// Google resolved the address in a different state, the result is held for
+// confirmation, whatever Google's own verdict was. (No state is read from the
+// address text; that is Google's job.)
+function heldOnStateMismatch(result, state) {
+  const googleState = normalizeState(result.normalized?.state);
+  // An out-of-area verdict is already a hold and stays as it is.
+  if (!state || !googleState || googleState === state || result.status === STATUSES.OUT_OF_SERVICE_AREA) return result;
+  return { ...result, status: STATUSES.CONFIRM_NEEDED, inServiceArea: null, stateMismatch: true };
+}
+const STATE_MISMATCH_NOTE = 'Google resolved this address in a different state than the state the operator gave. Do not save it: tell the operator both states and ask which is right.';
+
 function shape(providerResult, given, state) {
-  const result = servedHillsborough(providerResult, state);
+  const result = heldOnStateMismatch(servedHillsborough(providerResult, state), state);
   // isCountyGap also covers "only the unit is missing"; that stays an
   // explicit hold, so only a result with nothing missing is a pure lookup gap.
   const missing = Array.isArray(result.missingComponents) ? result.missingComponents : [];
-  const countyGap = isCountyGap(result) && missing.length === 0 && result.status === STATUSES.CONFIRM_NEEDED;
+  const countyGap = !result.stateMismatch && isCountyGap(result) && missing.length === 0 && result.status === STATUSES.CONFIRM_NEEDED;
   const zipPlus4 = ZIP_PLUS4_RE.test(`${given.address || ''} ${given.zip || ''}`);
   const n = result.normalized;
   // The tool asks the validator not to read a state from the text, so the FL
@@ -160,7 +172,8 @@ function shape(providerResult, given, state) {
     missing,
     zip_plus4_given: zipPlus4,
     state_hint_used: hintUsed ? DEFAULT_STATE : null,
-    note: [countyGap ? COUNTY_GAP_NOTE : noteFor(result.status, result, hintUsed), zipPlus4 ? ZIP_PLUS4_NOTE : ''].filter(Boolean).join(' '),
+    note: [result.stateMismatch ? STATE_MISMATCH_NOTE : '', countyGap ? COUNTY_GAP_NOTE : noteFor(result.status, result, hintUsed), zipPlus4 ? ZIP_PLUS4_NOTE : ''].filter(Boolean).join(' '),
+    state_mismatch: Boolean(result.stateMismatch),
   };
 }
 
@@ -208,7 +221,9 @@ async function executeAddressTool(toolName, input) {
   // Only an explicit state field is checked; the address text is never read.
   const state = given.state ? normalizeState(given.state) : '';
   if (given.state && !state) {
-    return invalidInput(`"${given.state.slice(0, 30)}" is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.`);
+    // The rejected value is not echoed: a misplaced street or name in this
+    // field must not reach a log or a health event.
+    return invalidInput(`The state field is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.`);
   }
   const result = await validateAddress({
     addressLines: providerLines(given),
