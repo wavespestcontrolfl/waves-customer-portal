@@ -573,17 +573,31 @@ export function customerPropertyCountLabel(propertyCount) {
   return `${n} properties`;
 }
 
-// The saved property a stated street line names: same house number and same first street
-// word, ignoring case and punctuation. Exactly one match, else '' (the caller keeps the
-// default). Dispatch "Book it" passes the address stated on the call (defaultAddressLine1).
-export function propertyIdForStatedAddress(properties = [], statedLine1 = '') {
-  const key = (line) => {
-    const m = String(line || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').match(/\b(\d+[a-z]?)\s+([a-z0-9]+)/);
-    return m ? `${m[1]} ${m[2]}` : '';
-  };
-  const wanted = key(statedLine1);
-  if (!wanted) return '';
-  const hits = properties.filter((p) => p && key(p.address_line1) === wanted);
+// The saved property a stated street line names. The WHOLE street must agree (house number
+// and every street word, with the usual suffix and direction abbreviations folded: "12 N Oak
+// Rd" is "12 North Oak Road", never "12 North Pine Road"), and so must the unit: both none,
+// or the same. Exactly one match, else '' (the usual default stands and the person chooses).
+// Dispatch "Book it" passes the address stated on the call (defaultAddressLine1).
+const STREET_WORDS = {
+  st: 'street', str: 'street', rd: 'road', dr: 'drive', ln: 'lane', ave: 'avenue', av: 'avenue', blvd: 'boulevard',
+  ct: 'court', cir: 'circle', pl: 'place', ter: 'terrace', terr: 'terrace', trl: 'trail', pkwy: 'parkway', hwy: 'highway',
+  n: 'north', s: 'south', e: 'east', w: 'west', ne: 'northeast', nw: 'northwest', se: 'southeast', sw: 'southwest',
+};
+const UNIT_RE = /(?:\b(?:apt|apartment|unit|suite|ste|lot|bldg|building)\b\.?\s*|#\s*)([a-z0-9-]+)/;
+function streetAndUnit(line1, line2 = '') {
+  const text = `${line1 || ''} ${line2 || ''}`.toLowerCase();
+  const unit = (text.match(UNIT_RE) || [])[1] || '';
+  const words = String(line1 || '').toLowerCase().replace(UNIT_RE, ' ').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+  return { street: words.map((w) => STREET_WORDS[w] || w).join(' '), unit, numbered: /^\d/.test(words[0] || '') };
+}
+export function propertyIdForStatedAddress(properties = [], statedLine1 = '', statedLine2 = '') {
+  const wanted = streetAndUnit(statedLine1, statedLine2);
+  if (!wanted.numbered || wanted.street.split(' ').length < 2) return '';
+  const hits = properties.filter((p) => {
+    if (!p) return false;
+    const saved = streetAndUnit(p.address_line1, p.address_line2);
+    return saved.street === wanted.street && saved.unit === wanted.unit;
+  });
   return hits.length === 1 ? String(hits[0].id) : '';
 }
 

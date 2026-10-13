@@ -1033,16 +1033,26 @@ describe('lineIsRetiredSale (codex r35 on #4786)', () => {
 describe('propertyIdForStatedAddress', () => {
   const properties = [
     { id: 'p-primary', is_primary: true, address_line1: '100 Example Loop' },
-    { id: 'p-second', address_line1: '12 Test Ln, Unit 4' },
+    { id: 'p-second', address_line1: '12 N Test Ln' },
+    { id: 'p-unit', address_line1: '40 Sample Rd', address_line2: 'Unit 4' },
   ];
-  it('finds the one saved property with the stated house number and street, ignoring case and suffix style', () => {
-    expect(propertyIdForStatedAddress(properties, '12 TEST Lane')).toBe('p-second');
-    expect(propertyIdForStatedAddress(properties, '100 example loop')).toBe('p-primary');
+  it('finds the one saved property with the same whole street, folding case, punctuation and abbreviations', () => {
+    expect(propertyIdForStatedAddress(properties, '12 North TEST Lane')).toBe('p-second');
+    expect(propertyIdForStatedAddress(properties, '100 example loop.')).toBe('p-primary');
+    expect(propertyIdForStatedAddress(properties, '40 Sample Road, Unit 4')).toBe('p-unit');
+    expect(propertyIdForStatedAddress(properties, '40 Sample Road', 'Apt 4')).toBe('p-unit');
   });
-  it('returns nothing for no match, two matches or no stated address, so the usual default stands', () => {
+  it('a different street word or a different unit is another property: nothing is selected', () => {
+    expect(propertyIdForStatedAddress(properties, '12 North Pine Lane')).toBe('');
+    expect(propertyIdForStatedAddress(properties, '12 South Test Lane')).toBe('');
+    expect(propertyIdForStatedAddress(properties, '40 Sample Road, Unit 2')).toBe('');
+    expect(propertyIdForStatedAddress(properties, '40 Sample Road')).toBe('');
+  });
+  it('returns nothing for no match, two matches, or a line that is not a numbered street', () => {
     expect(propertyIdForStatedAddress(properties, '77 Other Road')).toBe('');
-    expect(propertyIdForStatedAddress([...properties, { id: 'p-third', address_line1: '12 Test Lane' }], '12 Test Lane')).toBe('');
+    expect(propertyIdForStatedAddress([...properties, { id: 'p-dup', address_line1: '100 Example Loop' }], '100 Example Loop')).toBe('');
     expect(propertyIdForStatedAddress(properties, '')).toBe('');
     expect(propertyIdForStatedAddress(properties, 'Test Lane')).toBe('');
+    expect(propertyIdForStatedAddress(properties, '100')).toBe('');
   });
 });
