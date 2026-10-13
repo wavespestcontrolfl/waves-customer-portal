@@ -3557,7 +3557,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // A resumed task never uses tool search: the saved search blocks are
     // stripped on load and the request runs on the ordinary list (tool-search.js).
     const searchQueries = new Map();
-    let heldDefinitions = []; // discover_capabilities results held while a server search is pending
     if (req.ibResumedTask) {
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
@@ -3635,7 +3634,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     let stepLimitReached = false; // the final, tool-less round ran: the request used every step
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const finalRound = round === MAX_TOOL_ROUNDS - 1;
-      ({ tools, held: heldDefinitions } = ToolSearch.releaseHeld(tools, heldDefinitions, currentMessages));
       stepLimitReached = finalRound;
       const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
@@ -3730,8 +3728,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           errorMessage = result.error;
         } else if (platformEnabled && toolUse.name === ActionRegistry.DISCOVERY_TOOL.name) {
           const discovered = ActionRegistry.discover(toolUse.input, actionScope);
-          result = ToolSearch.discoverResult(discovered.result, [...currentMessages, { role: 'assistant', content: response.content }], toolSearch);
-          ({ tools, held: heldDefinitions } = ToolSearch.holdDiscovered(tools, heldDefinitions, discovered.definitions.map(apiToolDefinition), toolSearch));
+          result = discovered.result;
+          tools = ToolSearch.mergeDiscoveredTools(tools, discovered.definitions.map(apiToolDefinition), toolSearch);
           gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
@@ -3902,7 +3900,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
-          content: JSON.stringify(result),
+          content: ToolSearch.toolResultContent(toolUse.name, result, tools, toolSearch),
           ...(failed ? { is_error: true } : {}),
         });
 

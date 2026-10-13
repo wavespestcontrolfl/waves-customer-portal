@@ -32,6 +32,12 @@
  * assistant content of call 1 with the search blocks stripped
  * (stripServerSearchBlocks), a plain user text turn, and the ordinary tools
  * list (no search tool, no defer_loading). Both requests are synthetic text.
+ *   railway run node ops/agents/ib-tool-search-smoke.js --execute --discover-shape
+ * --discover-shape is a different two-request run: call 1 forces
+ * discover_capabilities; call 2 answers it with the tool_result the ROUTE would
+ * build (toolResultContent: the JSON text, then a tool_reference for a found
+ * tool that is deferred in the list), with the same tools and no tool_choice.
+ * It prints whether the model then called or named that tool.
  * Without --execute it prints the tools shape (counts, no API call).
  */
 const Anthropic = require('@anthropic-ai/sdk');
@@ -39,7 +45,7 @@ const MODELS = require('../../server/config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../../server/services/llm/anthropic-wire');
 const ActionRegistry = require('../../server/services/intelligence-bar/action-registry');
 const apiToolDefinition = require('../../server/services/intelligence-bar/tool-definition');
-const { stripServerSearchBlocks } = require('../../server/services/intelligence-bar/tool-search');
+const { stripServerSearchBlocks, toolResultContent } = require('../../server/services/intelligence-bar/tool-search');
 
 // The model is resolved exactly as the route does (the `MODEL` constant in
 // server/routes/admin-intelligence-bar.js, not exported):
@@ -101,6 +107,44 @@ function resumeRequest(first) {
   return { tools, messages };
 }
 
+const DISCOVER_PROMPT = 'Find the tool that lists review stats. Use discover_capabilities.';
+const DISCOVER_QUERY = 'review stats';
+const DISCOVER_TARGET = 'get_review_stats';
+
+// Call 2 of --discover-shape: the tool_result the route builds for the real
+// discover() result on the search path (content array with tool_reference blocks).
+function discoverRequest(first, tools) {
+  const call = first.content.find((block) => block.type === 'tool_use' && block.name === 'discover_capabilities');
+  const result = ActionRegistry.discover({ query: DISCOVER_QUERY }, { role: 'admin', context: 'dashboard', fullAccess: true }).result;
+  const content = toolResultContent('discover_capabilities', result, tools, true);
+  console.log(`discover answer content: ${Array.isArray(content) ? content.map((part) => (part.type === 'text' ? 'text' : `reference:${part.tool_name}`)).join(', ') : 'string (no deferred tool found)'}`);
+  return {
+    tools,
+    messages: [
+      { role: 'user', content: DISCOVER_PROMPT },
+      { role: 'assistant', content: first.content },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: call.id, content }] },
+    ],
+  };
+}
+
+async function discoverShape(client, model, source, tools) {
+  const first = await send(client, 'call 1 (forced discover)', model, source, {
+    tools, tool_choice: { type: 'tool', name: 'discover_capabilities' }, messages: [{ role: 'user', content: DISCOVER_PROMPT }],
+  });
+  if (!first) return 1;
+  if (!first.content.some((block) => block.type === 'tool_use' && block.name === 'discover_capabilities')) {
+    console.log('call 2 skipped: call 1 did not call discover_capabilities.');
+    return 1;
+  }
+  const second = await send(client, 'call 2 (discover answer)', model, source, discoverRequest(first, tools));
+  if (!second) return 1;
+  const called = second.content.some((block) => block.type === 'tool_use' && block.name === DISCOVER_TARGET);
+  const named = second.content.some((block) => block.type === 'text' && block.text.includes(DISCOVER_TARGET));
+  console.log(`call 2 ${called ? 'CALLED' : named ? 'NAMED' : 'did not call or name'} ${DISCOVER_TARGET}`);
+  return 0;
+}
+
 async function main() {
   const tools = buildTools();
   const deferred = tools.filter((tool) => tool.defer_loading === true).length;
@@ -115,6 +159,7 @@ async function main() {
   }
   const { model, source } = resolveModel();
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (process.argv.includes('--discover-shape')) return discoverShape(client, model, source, tools);
   const first = await send(client, 'call 1', model, source, { tools, messages: [{ role: 'user', content: PROMPT }] });
   if (!first) return 1;
   if (!process.argv.includes('--resume-shape')) return 0;

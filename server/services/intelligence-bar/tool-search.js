@@ -53,26 +53,17 @@ function finishesTurn(response, toolUses) {
   return toolUses.length === 0 && response.stop_reason !== 'pause_turn';
 }
 
-// discover_capabilities stays eager on the search path (the route to actions
-// that are not callable tools, such as owner-workflow ones). A tool it finds
-// must be callable on the next round, so its schema has to be loaded: a
-// deferred definition stays hidden from the model until a search references
-// it. A found tool that is deferred is therefore REPLACED in place by its
-// loaded definition; a found tool that is not in `tools` yet is appended. A
-// tool name appears once either way.
-function mergeDiscoveredTools(tools, definitions) {
-  const found = new Map(definitions.map(definition => [definition.name, definition]));
+// Off the search path a discover_capabilities result adds the definitions it
+// found to `tools` at once (as it always did); a tool name appears once. On the
+// search path nothing is added: the array never changes (toolResultContent).
+function mergeDiscoveredTools(tools, definitions, toolSearch) {
+  if (toolSearch) return tools;
   const present = new Set(tools.map(tool => tool.name));
-  let changed = false;
-  const merged = tools.map((tool) => {
-    if (tool.defer_loading !== true || !found.has(tool.name)) return tool;
-    changed = true;
-    return found.get(tool.name);
-  });
-  for (const [name, definition] of found) {
-    if (!present.has(name)) { merged.push(definition); changed = true; }
+  const added = [];
+  for (const definition of definitions) {
+    if (!present.has(definition.name)) { present.add(definition.name); added.push(definition); }
   }
-  return changed ? merged : tools;
+  return added.length ? [...tools, ...added] : tools;
 }
 
 // The messages after a round: the assistant content unchanged, then the
@@ -105,29 +96,49 @@ function observeServerToolSearches(content, gapCollector, queries = new Map()) {
 }
 
 const isSearchBlock = block => SEARCH_BLOCK_TYPES.has(block?.type);
+const isReference = block => block?.type === 'tool_reference';
 const hasSearchBlock = message => message.role === 'assistant' && Array.isArray(message.content) && message.content.some(isSearchBlock);
+const hasReferenceResult = message => message.role === 'user' && Array.isArray(message.content)
+  && message.content.some(block => block?.type === 'tool_result' && Array.isArray(block.content) && block.content.some(isReference));
+const needsStrip = message => hasSearchBlock(message) || hasReferenceResult(message);
 const asBlocks = content => (typeof content === 'string' ? [{ type: 'text', text: content }] : content);
 
 // Applied wherever a saved checkpoint is loaded for a resume. Removes every
 // `server_tool_use` and `tool_search_tool_result` block from every assistant
-// message, resolved or not; an assistant message left with no content is
-// dropped; two adjacent messages of the same role that this leaves are merged
-// in order (a string becomes a text block). A trailing assistant message whose
-// tool_use blocks have no tool_result is left to the existing resume code,
-// exactly as for a task that never searched. Never mutates its input; the same
-// array comes back when there is nothing to strip.
+// message, resolved or not, and every `tool_reference` block from the content
+// of every `tool_result` (a discover_capabilities result carries them on the
+// search path; the resumed request runs on the ordinary list, where a reference
+// would name a tool that is not deferred). An assistant message left with no
+// content is dropped; two adjacent messages of the same role that this leaves
+// are merged in order (a string becomes a text block). A trailing assistant
+// message whose tool_use blocks have no tool_result is left to the existing
+// resume code, exactly as for a task that never searched. Never mutates its
+// input; the same array comes back when there is nothing to strip.
 //
 // An assistant turn that holds `thinking` / `redacted_thinking` blocks must go
 // back to the API unchanged, or not carry them: a signed thinking block inside
 // a modified turn is rejected (400). So every assistant message this function
 // REWRITES (blocks removed, or merged with a neighbor) also loses its thinking
-// blocks. Messages it does not touch keep theirs.
+// blocks. Messages it does not touch keep theirs. User messages hold no
+// thinking blocks, so rewriting them needs no such rule.
 const isThinkingBlock = block => block?.type === 'thinking' || block?.type === 'redacted_thinking';
 const withoutThinking = content => asBlocks(content).filter(block => !isThinkingBlock(block));
 
+// A tool_result whose content was the JSON text plus references goes back to
+// the plain JSON string it was before the references were added, so the resume
+// code that reads discovered names from that string still works. The text
+// block is always there; the fallback only keeps the content non-empty.
+const NO_RESULT_TEXT = 'The saved result had no text.';
+function withoutReferences(block) {
+  if (block?.type !== 'tool_result' || !Array.isArray(block.content) || !block.content.some(isReference)) return block;
+  const rest = block.content.filter(part => !isReference(part));
+  if (rest.length === 0) return { ...block, content: NO_RESULT_TEXT };
+  return { ...block, content: rest.length === 1 && rest[0].type === 'text' ? rest[0].text : rest };
+}
+
 function strippedContent(message) {
-  if (!hasSearchBlock(message)) return message.content;
-  return message.content.filter(block => !isSearchBlock(block) && !isThinkingBlock(block));
+  if (hasSearchBlock(message)) return message.content.filter(block => !isSearchBlock(block) && !isThinkingBlock(block));
+  return hasReferenceResult(message) ? message.content.map(withoutReferences) : message.content;
 }
 
 function mergedContent(previous, content, role) {
@@ -136,7 +147,7 @@ function mergedContent(previous, content, role) {
 }
 
 function stripServerSearchBlocks(messages) {
-  if (!messages.some(hasSearchBlock)) return messages;
+  if (!messages.some(needsStrip)) return messages;
   const kept = [];
   for (const message of messages) {
     const content = strippedContent(message);
@@ -150,9 +161,8 @@ function stripServerSearchBlocks(messages) {
 
 // A tool search (server_tool_use) that has no result yet anywhere in the
 // history. Doc (server-tools, "Mixing server tools and client tools in one
-// turn"): the result can arrive in the NEXT response, and the continuation
-// must "keep the same `tools` array", so nothing may change the array while one
-// is pending.
+// turn"): the result can arrive in the NEXT response, and text after the
+// client results would end the turn with the call unresolved.
 function hasPendingServerSearch(messages) {
   const open = new Set();
   for (const message of messages) {
@@ -164,25 +174,29 @@ function hasPendingServerSearch(messages) {
   return open.size > 0;
 }
 
-// What discover_capabilities found. Off the search path the definitions merge
-// at once (as before). On the search path they are HELD and merged only at a
-// round boundary where no server search is pending (releaseHeld).
-function holdDiscovered(tools, held, definitions, toolSearch) {
-  return toolSearch ? { tools, held: [...held, ...definitions] } : { tools: mergeDiscoveredTools(tools, definitions), held };
-}
-
-// Called before every request: merge the held definitions once nothing is pending.
-function releaseHeld(tools, held, messages) {
-  if (held.length === 0 || hasPendingServerSearch(messages)) return { tools, held };
-  return { tools: mergeDiscoveredTools(tools, held), held: [] };
-}
-
-// The discover result says the found tools are "loaded". When a server search is
-// still pending in this turn the definitions arrive one step later, so the
-// result says not to call them in this step.
-const HELD_NOTE = 'A tool search is still running in this turn, so the tools listed here become callable only after it finishes. Do not call them in this step.';
-function discoverResult(result, messages, toolSearch) {
-  return toolSearch && hasPendingServerSearch(messages) ? { ...result, note: `${result.note} ${HELD_NOTE}` } : result;
+// discover_capabilities on the search path. Docs (tool-search tool, "Custom tool
+// search implementation"): "You can implement your own tool search logic ...
+// by returning `tool_reference` blocks from a custom tool. When Claude calls
+// your custom search tool, return a standard `tool_result` with
+// `tool_reference` blocks in the content array", and "Every tool referenced
+// must have a corresponding tool definition in the top-level `tools`
+// parameter, normally with `defer_loading: true`." So on the search path the
+// `tools` array NEVER changes during a request (the continuation needs the same
+// tools): a found tool that is deferred in `tools` is expanded by the API from
+// a reference in this result. The content is the JSON text block first, then
+// one reference per found capability that is a deferred tool in `tools`; an
+// eager tool, an owner-workflow action (not a tool) and a name absent from
+// `tools` get none. Only the JSON text is ever stored or logged: callers keep
+// `result` for that. Without references (or off the search path) the content is
+// the plain JSON string, as before.
+function toolResultContent(toolName, result, tools, toolSearch) {
+  const text = JSON.stringify(result);
+  if (!toolSearch || toolName !== ActionRegistry.DISCOVERY_TOOL.name) return text;
+  const deferred = new Set(tools.filter(tool => tool.defer_loading === true).map(tool => tool.name));
+  const references = (Array.isArray(result?.capabilities) ? result.capabilities : [])
+    .filter(capability => capability?.availability === 'loaded' && deferred.has(capability.id))
+    .map(capability => ({ type: 'tool_reference', tool_name: capability.id }));
+  return references.length ? [{ type: 'text', text }, ...references] : text;
 }
 
 // Text added after client tool results ends the assistant turn. While a
@@ -195,4 +209,4 @@ function withTurnEndingText(messages, text) {
 }
 
 module.exports = {
-  withTurnEndingText, hasPendingServerSearch, holdDiscovered, releaseHeld, discoverResult, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };
+  withTurnEndingText, hasPendingServerSearch, toolResultContent, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };

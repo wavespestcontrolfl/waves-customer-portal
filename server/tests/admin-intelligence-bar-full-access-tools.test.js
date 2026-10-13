@@ -157,55 +157,61 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
     { content: [{ type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: domain ? { query, domain } : { query } }], usage: {}, stop_reason: 'tool_use' },
     { content: [{ type: 'text', text: 'ok' }], usage: {} },
   ];
-  const discoverResult = requests => JSON.parse(requests[1].messages[requests[1].messages.length - 1].content
-    .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc').content);
+  // The JSON result, from the plain string or from the text block of the array form.
+  const discoverResult = (requests) => {
+    const content = requests[1].messages[requests[1].messages.length - 1].content
+      .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc').content;
+    return JSON.parse(Array.isArray(content) ? content[0].text : content);
+  };
 
-  test('discover_capabilities on the search path still reports an owner-workflow action, which never becomes a tool', async () => {
+  const resultBlock = (requests, index = 1) => requests[index].messages[requests[index].messages.length - 1].content
+    .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc');
+
+  test('discover_capabilities on the search path reports an owner-workflow action with no reference, and the tools never change', async () => {
     const { requests } = await ask('owner', 'dashboard', discoverTurns('request instant payout', 'banking'));
     const payout = discoverResult(requests).capabilities.find(c => c.id === 'request_instant_payout');
     expect(payout).toMatchObject({ approval: 'confirmed_endpoint', availability: 'requires_existing_owner_workflow' });
-    // The workflow action itself never becomes a tool; other tools the same
-    // search found are loaded in place, so the names do not change.
-    expect(names(requests[1].tools)).toEqual(names(requests[0].tools));
+    expect(requests[1].tools).toEqual(requests[0].tools);
     expect(names(requests[1].tools)).not.toContain('request_instant_payout');
+    const content = resultBlock(requests).content;
+    expect(Array.isArray(content) ? content.filter(part => part.type === 'tool_reference').map(part => part.tool_name) : []).not.toContain('request_instant_payout');
   });
 
-  test('discover_capabilities finding a deferred tool loads its schema: one definition, no longer deferred', async () => {
+  test('a found deferred tool comes back as a tool_reference after the JSON text; request 2 has the same tools', async () => {
     const { requests } = await ask('owner', 'dashboard', discoverTurns('review stats'));
-    expect(discoverResult(requests).capabilities.map(c => c.id)).toContain('get_review_stats');
-    const copies = requests[1].tools.filter(t => t.name === 'get_review_stats');
-    expect(copies).toHaveLength(1);
-    expect(copies[0].defer_loading).toBeUndefined();
-    expect(copies[0].input_schema).toBeDefined();
-    expect(requests[0].tools.find(t => t.name === 'get_review_stats').defer_loading).toBe(true);
-    expect(names(requests[1].tools)).toEqual(names(requests[0].tools));
-    expect(new Set(names(requests[1].tools)).size).toBe(requests[1].tools.length);
+    const content = resultBlock(requests).content;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content[0].type).toBe('text');
+    expect(JSON.parse(content[0].text).capabilities.map(c => c.id)).toContain('get_review_stats');
+    expect(content.slice(1)).toEqual(expect.arrayContaining([{ type: 'tool_reference', tool_name: 'get_review_stats' }]));
+    expect(content.slice(1).every(part => part.type === 'tool_reference')).toBe(true);
+    // Every reference names a deferred tool in `tools`, which did not change.
+    expect(requests[1].tools).toEqual(requests[0].tools);
+    for (const part of content.slice(1)) expect(requests[1].tools.find(t => t.name === part.tool_name).defer_loading).toBe(true);
   });
 
-  test('a discover result is held while a server search is pending, then loaded once at the next boundary', async () => {
+  test('mixed rounds: the tools array is identical on every request of the live request', async () => {
+    const search = (id) => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'review stats' } });
+    const resolved = (id) => ({ type: 'tool_search_tool_result', tool_use_id: id, content: { type: 'tool_search_tool_search_result', tool_references: [] } });
     const turns = [
-      { content: [{ type: 'server_tool_use', id: 'srvtoolu_m', name: 'tool_search_tool_bm25', input: { query: 'review stats' } },
-        { type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: { query: 'review stats' } }], usage: {}, stop_reason: 'tool_use' },
-      { content: [{ type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_m', content: { type: 'tool_search_tool_search_result', tool_references: [] } },
-        { type: 'tool_use', id: 'toolu_e', name: 'offer_choices', input: { options: ['A', 'B'] } }], usage: {}, stop_reason: 'tool_use' },
+      // A server search pending next to a discover call.
+      { content: [search('srvtoolu_m'), { type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: { query: 'review stats' } }], usage: {}, stop_reason: 'tool_use' },
+      // The search resolves in the same response as a client call.
+      { content: [resolved('srvtoolu_m'), { type: 'tool_use', id: 'toolu_e', name: 'offer_choices', input: { options: ['A', 'B'] } }], usage: {}, stop_reason: 'tool_use' },
       { content: [{ type: 'text', text: 'ok' }], usage: {} },
     ];
     const { requests } = await ask('owner', 'dashboard', turns);
     expect(requests).toHaveLength(3);
-    // Request 2 continues the pending search with the SAME tools, and the discover result says to wait.
-    expect(requests[1].tools).toEqual(requests[0].tools);
-    expect(discoverResult(requests).note).toMatch(/still running in this turn/);
-    // Request 3: the search is resolved, so the found tool is loaded, once, not deferred.
-    const copies = requests[2].tools.filter(t => t.name === 'get_review_stats');
-    expect(copies).toHaveLength(1);
-    expect(copies[0].defer_loading).toBeUndefined();
-    expect(requests[2].tools).toHaveLength(requests[0].tools.length);
+    for (const request of requests.slice(1)) expect(request.tools).toEqual(requests[0].tools);
   });
 
-  test('with no search pending, a discover result loads on the very next request and says nothing extra', async () => {
+  test('off the search path the found definition is still merged at once and the result stays a string', async () => {
+    delete process.env.GATE_IB_TOOL_SEARCH;
     const { requests } = await ask('owner', 'dashboard', discoverTurns('review stats'));
+    expect(typeof resultBlock(requests).content).toBe('string');
+    expect(requests[1].tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
     expect(requests[1].tools.find(t => t.name === 'get_review_stats').defer_loading).toBeUndefined();
-    expect(discoverResult(requests).note).not.toMatch(/still running/);
+    expect(requests[0].tools.some(t => t.name === 'get_review_stats')).toBe(false);
   });
 
   test('a search error block does not crash the request', async () => {
@@ -346,6 +352,25 @@ describe('a resumed task runs on the ordinary tool list', () => {
     const { requests } = await resume('owner');
     expectOrdinaryResume(requests[0]);
     expect(blocksOf(requests[0].messages).filter(b => b.type === 'tool_use').map(b => b.id)).toEqual(['toolu_u']);
+  });
+
+  test('(d) a saved discover result with tool_reference blocks: references stripped, the called tool loaded once', async () => {
+    const found = JSON.stringify({ status: 'capabilities_found', capabilities: [{ id: 'get_review_stats', availability: 'loaded' }] });
+    resumeWith([
+      { role: 'user', content: 'review numbers please' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_d1', name: 'discover_capabilities', input: { query: 'review stats' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d1', content: [{ type: 'text', text: found }, { type: 'tool_reference', tool_name: 'get_review_stats' }] }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_d2', name: 'get_review_stats', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d2', content: '{}' }] },
+    ]);
+    const { requests } = await resume('owner');
+    const request = requests[0];
+    expectOrdinaryResume(request);
+    expect(JSON.stringify(request.messages)).not.toContain('tool_reference');
+    const discoverResult = blocksOf(request.messages).find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_d1');
+    expect(discoverResult.content).toBe(found);
+    expect(request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
+    expect(request.tools.find(t => t.name === 'get_review_stats').defer_loading).toBeUndefined();
   });
 
   test('a login that lost full access resumes on the ordinary list, and an owner-only tool call is refused by the existing guard', async () => {

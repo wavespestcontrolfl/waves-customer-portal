@@ -149,18 +149,13 @@ describe('stripServerSearchBlocks', () => {
   });
 });
 
-describe('mergeDiscoveredTools', () => {
-  test('a found deferred tool is loaded in place; a new one is appended; names stay unique', () => {
-    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }, { name: 'd', defer_loading: true }];
-    const out = ToolSearch.mergeDiscoveredTools(tools, [{ name: 'b' }, { name: 'c' }, { name: 'c' }]);
-    expect(out).toEqual([{ name: 'a' }, { name: 'b' }, { name: 'd', defer_loading: true }, { name: 'c' }]);
-    expect(tools).toEqual([{ name: 'a' }, { name: 'b', defer_loading: true }, { name: 'd', defer_loading: true }]);
-  });
-
-  test('nothing to load: the same array comes back', () => {
-    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
-    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'a' }])).toBe(tools);
-    expect(ToolSearch.mergeDiscoveredTools(tools, [])).toBe(tools);
+describe('mergeDiscoveredTools (off the search path only)', () => {
+  test('appends the names not present, once each; the search path never changes the array', () => {
+    const tools = [{ name: 'a' }, { name: 'b' }];
+    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'b' }, { name: 'c' }, { name: 'c' }], false)).toEqual([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    expect(tools).toEqual([{ name: 'a' }, { name: 'b' }]);
+    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'a' }], false)).toBe(tools);
+    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'c' }], true)).toBe(tools);
   });
 });
 
@@ -201,43 +196,17 @@ describe('stripServerSearchBlocks and thinking blocks', () => {
   });
 });
 
-describe('held discover results', () => {
+describe('hasPendingServerSearch', () => {
   const use = id => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'q' } });
   const res = id => ({ type: 'tool_search_tool_result', tool_use_id: id, content: { type: 'tool_search_tool_search_result', tool_references: [] } });
   const msgs = (...blocks) => [{ role: 'user', content: 'q' }, { role: 'assistant', content: blocks }];
 
-  test('hasPendingServerSearch: a call without a result is pending until a result with its id appears, even later', () => {
+  test('a call without a result is pending until a result with its id appears, even in a later message', () => {
     expect(ToolSearch.hasPendingServerSearch(msgs(use('s1')))).toBe(true);
     expect(ToolSearch.hasPendingServerSearch(msgs(use('s1'), res('s1')))).toBe(false);
     expect(ToolSearch.hasPendingServerSearch([...msgs(use('s1')), { role: 'assistant', content: [res('s1')] }])).toBe(false);
     expect(ToolSearch.hasPendingServerSearch([...msgs(use('s1'), res('s1'), use('s2'))])).toBe(true);
     expect(ToolSearch.hasPendingServerSearch([{ role: 'user', content: 'q' }])).toBe(false);
-  });
-
-  test('holdDiscovered: merges at once off the search path, holds on it', () => {
-    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
-    const found = [{ name: 'b' }, { name: 'c' }];
-    expect(ToolSearch.holdDiscovered(tools, [], found, false)).toEqual({ tools: [{ name: 'a' }, { name: 'b' }, { name: 'c' }], held: [] });
-    const held = ToolSearch.holdDiscovered(tools, [{ name: 'z' }], found, true);
-    expect(held.tools).toBe(tools);
-    expect(held.held).toEqual([{ name: 'z' }, ...found]);
-  });
-
-  test('releaseHeld: nothing held or a search pending keeps tools and held; otherwise merges and clears', () => {
-    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
-    const held = [{ name: 'b' }];
-    expect(ToolSearch.releaseHeld(tools, [], msgs(res('s1')))).toEqual({ tools, held: [] });
-    const pending = ToolSearch.releaseHeld(tools, held, msgs(use('s1')));
-    expect(pending.tools).toBe(tools);
-    expect(pending.held).toBe(held);
-    expect(ToolSearch.releaseHeld(tools, held, msgs(use('s1'), res('s1')))).toEqual({ tools: [{ name: 'a' }, { name: 'b' }], held: [] });
-  });
-
-  test('discoverResult adds the wait note only on the search path with a search pending', () => {
-    const result = { status: 'capabilities_found', note: 'Use only the listed executors.' };
-    expect(ToolSearch.discoverResult(result, msgs(use('s1')), true).note).toMatch(/still running in this turn/);
-    expect(ToolSearch.discoverResult(result, msgs(use('s1')), false)).toBe(result);
-    expect(ToolSearch.discoverResult(result, msgs(use('s1'), res('s1')), true)).toBe(result);
   });
 });
 
@@ -264,5 +233,63 @@ describe('withTurnEndingText', () => {
     const b = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] }];
     expect(ToolSearch.withTurnEndingText(a, 'NOTE')).toBe(a);
     expect(ToolSearch.withTurnEndingText(b, 'NOTE')).toBe(b);
+  });
+});
+
+describe('toolResultContent (discover_capabilities on the search path)', () => {
+  const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map(([id, availability]) => ({ id, availability })) });
+  const tools = [{ name: 'eager_tool' }, { name: 'deferred_tool', defer_loading: true }, { name: 'other_deferred', defer_loading: true }];
+
+  test('a found deferred tool gets a reference after the JSON text block', () => {
+    const result = found(['deferred_tool', 'loaded']);
+    const content = ToolSearch.toolResultContent('discover_capabilities', result, tools, true);
+    expect(content).toEqual([{ type: 'text', text: JSON.stringify(result) }, { type: 'tool_reference', tool_name: 'deferred_tool' }]);
+  });
+
+  test('an eager tool, an owner-workflow action and a name absent from tools get no reference', () => {
+    const result = found(['eager_tool', 'loaded'], ['request_instant_payout', 'requires_existing_owner_workflow'], ['not_in_tools', 'loaded']);
+    expect(ToolSearch.toolResultContent('discover_capabilities', result, tools, true)).toBe(JSON.stringify(result));
+  });
+
+  test('several found tools each get one reference, in order', () => {
+    const content = ToolSearch.toolResultContent('discover_capabilities', found(['other_deferred', 'loaded'], ['deferred_tool', 'loaded']), tools, true);
+    expect(content.slice(1).map(part => part.tool_name)).toEqual(['other_deferred', 'deferred_tool']);
+  });
+
+  test('off the search path, for another tool, or for an error result: the plain JSON string', () => {
+    const result = found(['deferred_tool', 'loaded']);
+    expect(ToolSearch.toolResultContent('discover_capabilities', result, tools, false)).toBe(JSON.stringify(result));
+    expect(ToolSearch.toolResultContent('query_customers', result, tools, true)).toBe(JSON.stringify(result));
+    expect(ToolSearch.toolResultContent('discover_capabilities', { error: 'x', code: 'invalid_input' }, tools, true)).toBe('{"error":"x","code":"invalid_input"}');
+  });
+});
+
+describe('stripServerSearchBlocks and tool_reference blocks in tool_result content', () => {
+  const call = { type: 'tool_use', id: 'toolu_d', name: 'discover_capabilities', input: { query: 'q' } };
+  const text = { type: 'text', text: '{"status":"capabilities_found"}' };
+  const messages = refs => [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d', content: [text, ...refs] }] }];
+
+  test('references are removed and the JSON text goes back to a plain string', () => {
+    const input = messages([{ type: 'tool_reference', tool_name: 'get_review_stats' }]);
+    const before = JSON.stringify(input);
+    const out = ToolSearch.stripServerSearchBlocks(input);
+    expect(out[2].content).toEqual([{ type: 'tool_result', tool_use_id: 'toolu_d', content: text.text }]);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(out[1]).toBe(input[1]);
+  });
+
+  test('a tool_result left with no content gets a short text, never an empty array', () => {
+    const input = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d', content: [{ type: 'tool_reference', tool_name: 'x' }] }] }];
+    const content = ToolSearch.stripServerSearchBlocks(input)[2].content[0].content;
+    expect(typeof content).toBe('string');
+    expect(content.length).toBeGreaterThan(0);
+  });
+
+  test('a history with a plain string result has nothing to strip: same array', () => {
+    const plain = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d', content: '{}' }] }];
+    expect(ToolSearch.stripServerSearchBlocks(plain)).toBe(plain);
   });
 });
