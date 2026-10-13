@@ -2911,7 +2911,7 @@ async function officeRescheduleLink(svc) {
 // Final eligibility stays owned by the public /reschedule/:token page (e.g.
 // a missed same-day visit still rebooks there) — this endpoint only picks
 // WHICH visit the link points to.
-router.post('/reschedule-link', requireAdmin, async (req, res) => {
+async function rescheduleLinkHandler(req, res) {
   try {
     const last10 = fullPhoneLast10(req.body?.phone);
     if (!last10) {
@@ -2919,33 +2919,9 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     }
 
     const customerId = req.body?.customerId;
-    let customerIds = [];
-    if (customerId && UUID_RE.test(String(customerId))) {
-      const customer = await db('customers')
-        .where({ id: customerId })
-        .whereNull('deleted_at')
-        .first('id', 'phone', 'account_id');
-      if (!customer) return res.status(404).json({ error: 'Customer not found' });
-      if (fullPhoneLast10(customer.phone) !== last10) {
-        return res.status(400).json({ error: 'phone must match the selected customer' });
-      }
-      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
-    } else {
-      const matches = await db('customers')
-        .whereNull('deleted_at')
-        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
-        .select('id', 'account_id');
-      if (!matches.length) {
-        return res.status(404).json({ error: 'No customer found for that number' });
-      }
-      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
-      if (accountKeys.length > 1) {
-        return res.status(409).json({
-          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
-        });
-      }
-      customerIds = await customerIdsForAccount(accountKeys[0]);
-    }
+    const account = await reserviceAccountIds(customerId, last10);
+    if (account.error) return res.status(account.status).json({ error: account.error });
+    const { customerIds } = account;
     if (!customerIds.length) {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
@@ -2990,7 +2966,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     logger.error(`reschedule-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/reschedule-link', requireAdmin, (req, res) => rescheduleLinkHandler(req, res));
 
 // POST /api/admin/communications/reservice-link  { phone, customerId? }
 // Composer helper: resolve the recipient's self-serve /reservice/:token short
@@ -3005,7 +2982,50 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     (services/reservice-scheduler.js) so the composer can't text a
 //     link that lands on the not-eligible page. Final eligibility stays
 //     owned by the public page — plan state can change after the text.
-router.post('/reservice-link', requireAdmin, async (req, res) => {
+// The account's customer ids a re-service link is built for: the selected
+// customer's account (their phone must match), else the one account the number
+// names. Returns { customerIds } or { status, error } (the route's own words).
+async function reserviceAccountIds(customerId, last10) {
+  if (customerId && UUID_RE.test(String(customerId))) {
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'phone', 'account_id');
+    if (!customer) return { status: 404, error: 'Customer not found' };
+    if (fullPhoneLast10(customer.phone) !== last10) return { status: 400, error: 'phone must match the selected customer' };
+    return { customerIds: await customerIdsForAccount(customer.account_id || customer.id) };
+  }
+  const matches = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .select('id', 'account_id');
+  if (!matches.length) return { status: 404, error: 'No customer found for that number' };
+  const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+  if (accountKeys.length > 1) {
+    return { status: 409, error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first' };
+  }
+  return { customerIds: await customerIdsForAccount(accountKeys[0]) };
+}
+
+// The first row, in order, with an eligible re-service lane. A lookup FAILURE
+// aborts the whole scan (Codex round-21 P2): never "no lanes, try the next
+// sibling", which could text a link for a different property than the operator
+// picked. Returns { eligibleId, lanes } (eligibleId null when none) or { lookupFailed }.
+async function firstEligibleReserviceRow(orderedIds, loadLanes) {
+  for (const id of orderedIds) {
+    let rowLanes;
+    try {
+      rowLanes = await loadLanes(id);
+    } catch (lookupErr) {
+      logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
+      return { lookupFailed: true };
+    }
+    if (rowLanes.length) return { eligibleId: id, lanes: rowLanes };
+  }
+  return { eligibleId: null, lanes: [] };
+}
+
+async function reserviceLinkHandler(req, res) {
   try {
     const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
@@ -3069,24 +3089,9 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     const orderedIds = selectedId
       ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
       : [...customerIds].sort();
-    let eligibleId = null;
-    let lanes = [];
-    for (const id of orderedIds) {
-      // Codex round-21 P2: a lookup FAILURE aborts the whole scan (500) — never "no lanes, try the next
-      // sibling", which could text a link for a different property than the operator picked.
-      let rowLanes;
-      try {
-        rowLanes = await loadEligibleReserviceLanesStrict(id);
-      } catch (lookupErr) {
-        logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
-        return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
-      }
-      if (rowLanes.length) {
-        eligibleId = id;
-        lanes = rowLanes;
-        break;
-      }
-    }
+    const scan = await firstEligibleReserviceRow(orderedIds, loadEligibleReserviceLanesStrict);
+    if (scan.lookupFailed) return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
+    const { eligibleId, lanes } = scan;
     if (!eligibleId) {
       return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
     }
@@ -3106,7 +3111,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/reservice-link', requireAdmin, (req, res) => reserviceLinkHandler(req, res));
 
 // Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
 // a link build — the gate-wrapped engine path emails the ask now and nothing
@@ -3586,24 +3592,27 @@ async function consultationLeadOnlyResponse(kind, last10, leadId) {
   return { status: 200, body: customerLinkResponse(kind, undefined, result, leadOnly.lead.first_name || '') };
 }
 
-router.post('/customer-link', requireAdmin, async (req, res) => {
+// A /customer-link request's own fields, judged in the route's order: the kind
+// (one the composer builds), a full 10-digit phone, and — for the Quick Links
+// review ask only — its delivery channel (owner ruling 2026-09-03: sms | email
+// | both). Returns { kind, last10, channel } or { status, error }.
+function customerLinkRequest(body, builderByKind) {
+  const kind = String(body.kind || '');
+  if (!(kind in builderByKind)) return { status: 400, error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` };
+  const last10 = fullPhoneLast10(body.phone);
+  if (!last10) return { status: 400, error: 'Enter a full 10-digit phone number first' };
+  const channel = kind === 'review_request' ? String(body.channel || 'sms') : undefined;
+  if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) return { status: 400, error: 'channel must be one of sms, email, both' };
+  return { kind, last10, channel };
+}
+
+async function customerLinkHandler(req, res) {
   try {
     const body = req.body || {};
-    const kind = String(body.kind || '');
     const builderByKind = composerLinkBuilders(body);
-    if (!(kind in builderByKind)) {
-      return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
-    }
-
-    const last10 = fullPhoneLast10(body.phone);
-    if (!last10) {
-      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
-    }
-    // Quick Links review channel (owner ruling 2026-09-03): sms | email | both.
-    const channel = kind === 'review_request' ? String(body.channel || 'sms') : undefined;
-    if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
-      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
-    }
+    const request = customerLinkRequest(body, builderByKind);
+    if (request.error) return res.status(request.status).json({ error: request.error });
+    const { kind, last10, channel } = request;
     if (kind === 'statement') {
       const answer = await statementLinkInsert(require('../services/composer-customer-links'), last10, body.customerId);
       return res.status(answer.status).json(answer.body);
@@ -3652,7 +3661,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     logger.error(`customer-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
-});
+}
+router.post('/customer-link', requireAdmin, (req, res) => customerLinkHandler(req, res));
 
 // GET /api/admin/communications/link-library
 // The Insert Link sheet's full searchable list (office review links computed
@@ -4785,5 +4795,26 @@ router._internals = {
 };
 
 module.exports = router;
+
+// The Insert Link builders, callable without an HTTP request: the Intelligence
+// Bar's create_customer_link runs the SAME handler the composer's Insert Link
+// sheet posts to (recipient resolution, owner rules, per-kind builders) and
+// reads its answer as { status, body } instead of an Express response.
+function collectedReply() {
+  const out = { status: 200, body: null };
+  const res = {
+    status(code) { out.status = code; return res; },
+    json(body) { out.body = body; return out; },
+  };
+  return { res, out };
+}
+async function runLinkHandler(handler, body) {
+  const { res, out } = collectedReply();
+  await handler({ body: body || {} }, res);
+  return out;
+}
+module.exports.customerLinkInsert = (body) => runLinkHandler(customerLinkHandler, body);
+module.exports.rescheduleLinkInsert = (body) => runLinkHandler(rescheduleLinkHandler, body);
+module.exports.reserviceLinkInsert = (body) => runLinkHandler(reserviceLinkHandler, body);
 // Test seam for the technician texting scope.
 router._technicianCustomerGuard = technicianCustomerGuard;

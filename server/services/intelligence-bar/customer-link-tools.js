@@ -1,0 +1,225 @@
+/**
+ * Intelligence Bar — Customer links (the composer's Insert Link sheet)
+ * server/services/intelligence-bar/customer-link-tools.js
+ *
+ * One carded write that gives the bar the links the Communications composer
+ * can insert for a customer, through the SAME route-owned handler the
+ * composer posts to — never a second builder:
+ *
+ *   create_customer_link     — one of the Insert Link kinds (reschedule,
+ *                              re-service, pay balance, latest estimate,
+ *                              referral, consultation, appointment page, prep
+ *                              guide, service report, receipt, project report;
+ *                              the card request link, the payer statement and the
+ *                              contract signing link stay composer-only — a card
+ *                              request can enroll a saved card for Auto Pay, the
+ *                              statement resolves from the payer's AP phone
+ *                              and the contract send needs the composer's own
+ *                              Insert Link state (contractId) to activate). Runs admin-communications.js's
+ *                              /customer-link, /reschedule-link or
+ *                              /reservice-link handler (recipient resolution,
+ *                              owner rules, per-kind builders, plain-word
+ *                              refusals) and hands back { url, line }.
+ *                              Nothing is sent.
+ *
+ * It follows the write-gates.js two-step: unconfirmed → a PREVIEW (reads
+ * only); the route fingerprints it and the operator approves on the card;
+ * confirmed → the mint, reported from what the handler returned.
+ *
+ * Sending a minted link: a text is a customer contact, so the bar's own text
+ * tools stay the only senders. The composer's send seam re-verifies and
+ * records some kinds at send time (a card request's one-text-ever claim, a
+ * prepared contract's activation, prep-guide and statement sent marks, a
+ * project report's delivery claim, a consultation's lead binding), and that
+ * bookkeeping lives in the composer's /sms route only — so those kinds are
+ * texted from the Communications composer, and comms-tools' send_sms refuses
+ * a body carrying one (customerLinkSendRefusal). Review requests keep
+ * trigger_review_request; the Auto Pay setup link stays on the Customers page
+ * button (and the composer).
+ */
+const db = require('../../models/db');
+const logger = require('../logger');
+const { UUID_RE } = require('./task-context');
+const { maskPhone } = require('./closeout-repair-tools');
+
+const COMPOSER_ONLY = 'Text it from the Communications composer (Insert Link does the rest: the send is verified and recorded there). The bar\'s send_sms refuses a text carrying this link.';
+const ANY_SENDER = 'Text it with send_sms on the Communications page, or draft_sms elsewhere and let the operator send; the recipient must be this customer\'s own number.';
+
+// The Insert Link kinds, in the composer's own vocabulary. `route`: which
+// admin-communications.js handler builds it. `builds`: what the confirmed run
+// creates, in plain words for the card. `sendHow`: who may text it (above).
+const KINDS = {
+  // Inside the self-serve move notice window the composer's handler also
+  // stamps the office's approval on the visit (office_move_approved_for —
+  // approveOfficeMove), so the customer can move it online; the card must
+  // say so, like every write it commits (ib-write-tools checklist 4).
+  reschedule: { label: 'Reschedule link', route: 'rescheduleLinkInsert', builds: 'a link to move their soonest upcoming visit online; if that visit is inside the self-service notice window, confirming also records the office\'s approval for the customer to move it', sendHow: ANY_SENDER },
+  reservice: { label: 'Re-service link', route: 'reserviceLinkInsert', builds: 'their self-serve link to book a free between-visit re-service (active recurring plan required)', sendHow: ANY_SENDER },
+  pay_balance: { label: 'Pay balance link', route: 'customerLinkInsert', builds: 'the pay page for the oldest open self-pay invoice on the account (the page offers the rest of the balance)', sendHow: ANY_SENDER },
+  estimate: { label: 'Latest estimate link', route: 'customerLinkInsert', builds: 'a tracked link to the newest open estimate on the account', sendHow: ANY_SENDER },
+  referral: { label: 'Referral link', route: 'customerLinkInsert', builds: 'their personal referral link (their referral code is created if they have none)', sendHow: ANY_SENDER },
+  consultation: { label: 'Free consultation link', route: 'customerLinkInsert', builds: 'a 14-day pick-a-time page for their open lead', sendHow: COMPOSER_ONLY },
+  appointment: { label: 'Appointment page link', route: 'customerLinkInsert', builds: 'the appointment page for the soonest upcoming visit on the account', sendHow: ANY_SENDER },
+  prep_guide: { label: 'Upcoming visit prep link', route: 'customerLinkInsert', builds: 'the prep guide page for their upcoming visit', sendHow: COMPOSER_ONLY },
+  service_report: { label: 'Latest service report link', route: 'customerLinkInsert', builds: 'the latest completed-visit report on the account', sendHow: ANY_SENDER },
+  receipt: { label: 'Latest receipt link', route: 'customerLinkInsert', builds: 'the latest paid receipt on the account', sendHow: ANY_SENDER },
+  project_report: { label: 'Project report link', route: 'customerLinkInsert', builds: 'the latest project report (WDO, termite, specialty) on the account', sendHow: COMPOSER_ONLY },
+};
+const KIND_NAMES = Object.keys(KINDS);
+
+// Fields the composer handlers return beside url/line that the operator can use.
+const LINK_FACT_FIELDS = ['balance', 'estimate', 'appointment', 'prep', 'report', 'receipt', 'projectReport', 'expiresAt', 'lanes', 'immediateOnly', 'standalone'];
+
+const CUSTOMER_LINK_TOOLS = [
+  {
+    name: 'create_customer_link',
+    description: `Build one of the customer links the Communications composer's Insert Link sheet offers, for ONE customer, exactly as that sheet builds it: reschedule, reservice, pay_balance, estimate, referral, consultation, appointment, prep_guide, service_report, receipt, project_report. The first call returns a PREVIEW and builds nothing: the customer, their number, what the link is and how it may be sent. The operator approves on the confirmation card; the confirmed run builds the link and returns url, line (a ready SMS sentence) and the link's facts (balance, estimate, appointment, expiry). NOTHING IS SENT by this tool. A kind with nothing to link (no open balance, no upcoming visit, no open estimate, no active plan, link switched off) is refused with the plain reason.
+Sending: reschedule, reservice, pay_balance, estimate, referral, appointment, service_report and receipt links may ride send_sms (Communications page) or a draft_sms the operator sends. consultation, prep_guide and project_report links are texted from the Communications composer only — its send verifies and records them (claims, sent marks); send_sms refuses a text carrying one. Not here: review requests (trigger_review_request), Auto Pay setup (the Customers page button), card request links (the Communications composer / visit card only: building one can enroll a saved card for Auto Pay), payer statement links and contract signing links (composer only — the statement resolves from the payer's AP phone, and a contract link only activates through the composer's own Insert Link flow). Admin-only.
+Use for: "get Henderson a pay link", "send Smith the link to their estimate", "build a referral link for Garcia", "I need the prep guide link for their visit"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string', format: 'uuid', description: 'The customer (from query_customers / get_customer_detail)' },
+        kind: { type: 'string', enum: KIND_NAMES, description: 'Which link to build' },
+      },
+      required: ['customer_id', 'kind'],
+    },
+    _sideEffects: true,
+  },
+];
+
+const last10 = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+const fullUsNumber = (value) => { const d = String(value || '').replace(/\D/g, ''); return d.length === 10 || (d.length === 11 && d.startsWith('1')); };
+const fullName = (row) => [row?.first_name, row?.last_name].filter(Boolean).join(' ') || null;
+
+async function liveCustomer(customerId) {
+  const id = String(customerId || '').trim().toLowerCase();
+  if (!UUID_RE.test(id)) return { error: 'A valid customer_id is required', code: 'invalid_target' };
+  const row = await db('customers').where({ id }).whereNull('deleted_at')
+    .first('id', 'first_name', 'last_name', 'phone');
+  if (!row) return { error: 'Customer not found', code: 'customer_not_found' };
+  return { customer: row };
+}
+
+// ── create_customer_link ────────────────────────────────────────
+
+// The preview with the customer row it was built from: { plan, customer }.
+// `plan` is the preview, or the plain refusal (an `error` object).
+async function deriveLinkPlan(input) {
+  const kind = String(input.kind || '');
+  const spec = KINDS[kind];
+  if (!spec) return { plan: { error: `kind must be one of ${KIND_NAMES.join(', ')}`, code: 'invalid_target' } };
+  const found = await liveCustomer(input.customer_id);
+  if (found.error) return { plan: found };
+  const { customer } = found;
+  // Same full-number rule as the composer handlers' fullPhoneLast10 (exactly
+  // ten digits, or eleven starting with 1): a card is never offered for a
+  // number the confirmed handler would refuse.
+  if (!fullUsNumber(customer.phone)) return { plan: { error: 'This customer has no full 10-digit US phone on file — customer links are built for their own number.', code: 'no_phone' } };
+  const digits = last10(customer.phone);
+  const plan = {
+    preview: true,
+    kind,
+    label: spec.label,
+    customer_id: customer.id,
+    customer_name: fullName(customer),
+    phone: maskPhone(customer.phone),
+    builds: `${spec.label}: ${spec.builds}, for this customer's own number.`,
+    sends: 'Nothing is sent by this step. If there is nothing to link, the confirmed run refuses with the reason.',
+    send_how: spec.sendHow,
+    _version: { customer_id: customer.id, kind, phone_last10: digits },
+    note: 'PREVIEW ONLY — no link exists yet. Confirm builds exactly this link.',
+  };
+  return { plan, customer };
+}
+
+async function linkPlan(input) {
+  return (await deriveLinkPlan(input)).plan;
+}
+
+// The approved card's _version rides to the confirmed run (the route's
+// VERIFIED_VERSION_PARAMS hands the fingerprint-verified preview's _version
+// as _verified_*_version); the commit re-derives its own and refuses on any
+// difference, so a customer whose number changed after the card is
+// never acted on — and a call with no pin never commits.
+function pinnedVersionRefusal(pinned, live, noun) {
+  if (!pinned) return { error: 'Use the confirmation card to approve this change.' };
+  if (JSON.stringify(live) !== JSON.stringify(pinned)) {
+    return { error: `What this ${noun} would do changed after the card was shown — nothing was done. Ask again for a fresh confirmation card.`, preview_changed: true };
+  }
+  return null;
+}
+
+async function buildLink(input) {
+  const { plan, customer } = await deriveLinkPlan(input);
+  if (plan.error) return plan;
+  const drift = pinnedVersionRefusal(input._verified_link_version, plan._version, 'link');
+  if (drift) return drift;
+  const spec = KINDS[plan.kind];
+  // The composer handlers cross-check the phone against the selected
+  // customer and expand to the account; the bar always sends the row's own
+  // number, so the owner rules that fire on a typed number apply unchanged.
+  const answer = await require('../../routes/admin-communications')[spec.route]({
+    phone: customer.phone, customerId: plan.customer_id, kind: plan.kind,
+  });
+  // The handlers catch their own exceptions and answer 500, possibly after a
+  // side effect was recorded (a tracked short link, a referral code, an office
+  // move approval). That is an unknown outcome, never a definite "blocked":
+  // thrown here so the confirmed run's catch reports outcome_unknown.
+  if (!answer || answer.status >= 500) {
+    throw Object.assign(new Error('customer link handler failed'), { code: `handler_${answer?.status || 'no_answer'}` });
+  }
+  const body = answer.body || {};
+  if (answer.status !== 200 || !body.url) {
+    return {
+      error: body.error || 'Nothing to link for this customer',
+      blocked: true,
+      code: body.code || `link_${answer.status}`,
+      kind: plan.kind,
+      customer_id: plan.customer_id,
+    };
+  }
+  const facts = Object.fromEntries(LINK_FACT_FIELDS.filter((f) => body[f] !== undefined && body[f] !== null).map((f) => [f, body[f]]));
+  return {
+    success: true,
+    kind: plan.kind,
+    label: spec.label,
+    customer_id: plan.customer_id,
+    customer_name: plan.customer_name,
+    url: body.url,
+    line: String(body.line || '').trim(),
+    ...facts,
+    sent: false,
+    send_how: spec.sendHow,
+  };
+}
+
+// ── dispatcher ──────────────────────────────────────────────────
+
+async function executeCustomerLinkTool(toolName, input = {}, actionContext = {}) {
+  // Admin-only like the requireAdmin routes these mirror; the route and
+  // registry refuse a technician too.
+  if (actionContext && actionContext.isAdmin === false) {
+    return { error: 'Customer links are limited to admin accounts', code: 'permission_denied' };
+  }
+  try {
+    switch (toolName) {
+      case 'create_customer_link':
+        // Only /confirm-action sets confirmed (route-derived, never a model param).
+        return input.confirmed === true ? await buildLink(input) : await linkPlan(input);
+      default: return { error: `Unknown tool: ${toolName}` };
+    }
+  } catch (err) {
+    logger.error(`[intelligence-bar:customer-links] ${toolName} failed (${err.code || err.name || 'error'})`);
+    // A throw after an approval may follow a committed write (a referral code,
+    // a tracked short link, an office move approval):
+    // never invite a retry as if nothing happened.
+    if (input.confirmed === true) {
+      return { outcome_unknown: true, code: 'execution_interrupted',
+        error: 'The link build was interrupted — it may or may not have been built, and its side effects (a referral code, a tracked link, an office move approval) may have been recorded. Check before trying again. Nothing was sent.' };
+    }
+    return { error: 'Could not prepare the customer link' };
+  }
+}
+
+module.exports = { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool, CUSTOMER_LINK_KINDS: KINDS };
