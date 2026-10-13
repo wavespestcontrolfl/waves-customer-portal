@@ -29,6 +29,54 @@ Tool modules live in `server/services/intelligence-bar/{context}-tools.js`,
 one file per context. The `context` parameter drives which tools load and
 which system-prompt extension applies — no page-specific endpoints.
 
+**Full-access exception (owner ruling 2026-10-12, `GATE_IB_TOOL_SEARCH`).**
+Other admins, technicians, the tech context and the `agent_estimate` rail
+follow the mapping below: the page list plus `discover_capabilities`, and a
+`discover_capabilities` result merges the definitions it found into `tools` at
+once. With the gate off, the owner follows the mapping too.
+
+The search path is one login and one kind of request: a full-access login
+(`ibFullAccess`, the owner) on an ordinary admin page, on the platform path
+(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a model that accepts
+Anthropic's tool search (`MODELS.anthropicSupportsToolSearch`: Opus, Sonnet and
+Haiku 4.5 and later, Fable, Mythos; Opus 4.1 and earlier and any unknown id do
+not) AND does NOT think by default (`MODELS.anthropicThinksByDefault`), on a
+FRESH request. Both model conditions sit in `modelTakesToolSearch`
+(`tool-search.js`). With an unsupported model, or a thinking model, the bar
+keeps the ordinary list, as with the gate off: an unsupported model would
+reject the request, and a history with search blocks and thinking blocks
+cannot be rewritten. A
+resumed task (`/tasks/:id/resume`, `/tasks/:id/select-target`) always runs on
+the ordinary list. On the search path `initialTools` (with `scope.toolSearch`,
+set by `toolSearchWanted` in `tool-search.js`) keeps the page list as the eager
+tools, with `discover_capabilities` still in it as the route to owner-workflow
+actions that are not tools. It adds the API's own tool search
+(`tool_search_tool_bm25_20251119`, no beta header) and sends every other action
+`allowed()` accepts (not `confirmed_endpoint`) with `defer_loading: true`,
+sorted by name. Anthropic documents tool-selection accuracy dropping past 30 to
+50 active tools, so the owner's active set stays page-sized. Deferred tools sit
+outside the cached prefix and carry no `cache_control`.
+
+Inside one live request `tools` never changes. Search blocks
+(`server_tool_use`, `tool_search_tool_result`) are not `tool_use`: the loop
+never executes them and passes the assistant content back unchanged;
+`pause_turn` continues the turn. A `discover_capabilities` result
+(`toolResultContent`) is `tool_reference` blocks only, at most 5, never mixed
+with other content (the API rejects that with a 400), and the API expands them
+from the deferred definitions already in `tools`. When the result also holds an
+owner-workflow action, it is the plain JSON string instead.
+
+When a task continues after a card or an interruption, `stripServerSearchBlocks`
+rewrites the saved checkpoint as it is loaded: search blocks and
+`tool_reference` blocks are removed (a references-only result becomes the JSON a
+plain discover result has, so a tool found just before an interruption is
+restored). The resumed request keeps `discover_capabilities`, and the existing
+restoration loads the tools the history called or discovered. A history that
+somehow holds search blocks AND thinking blocks (a model change between the
+request and the resume) is not rewritten: `continuationError` refuses the resume
+with `not_resumable`. Live shape checks: `ops/agents/ib-tool-search-smoke.js`
+(`--resume-shape`, `--discover-shape`).
+
 ## Context → Tools Mapping
 
 | Context | Route(s) | Extra tool module |
@@ -70,7 +118,8 @@ a "which value?" question, returned as `choices` (plain strings) on `/query`;
 display only, a tap sends exactly the button text as ordinary operator text
 and never confirms a write). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
-their UI-confirm card.
+their UI-confirm card. A full-access login also reaches the rest through the
+API's tool search (see the full-access exception above).
 Customer links ride every admin context too (`customer-link-tools.js`,
 admin-only, carded): `create_customer_link` builds any kind the composer's
 Insert Link sheet offers (except review request, Auto Pay, which has its own tool
