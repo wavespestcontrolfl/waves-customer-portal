@@ -256,9 +256,9 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   test('the decision-point pair (hold + release card) commits in ONE transaction: the card is written by afterArm inside armDisclaimedNumberHold', () => {
     const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
     // afterArm runs inside the arm transaction, after the hold row and the no-text marks, before return
-    expect(holds).toMatch(/const recorded = await recordDisclaimedNumberHold\(\{ phone, customerId, callLogId, conn: trx \}\);[^]*?if \(noTextHold\) \{[^]*?\}\s*(?:\/\/[^\n]*\n\s*)*if \(afterArm\) await afterArm\(trx\);\s*return recorded;/);
+    expect(holds).toMatch(/const recorded = await recordDisclaimedNumberHold\(\{ phone, customerId, callLogId, conn: trx \}\);[^]*?if \(noTextHold\) \{[^]*?\}\s*(?:\/\/[^\n]*\n\s*)*if \(afterArm\) await afterArm\(trx, \{ heldAt: recorded\.heldAt \}\);\s*return recorded;/);
     // the processor hands the card write to afterArm and never files the decision-point card separately
-    expect(src).toContain('afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,');
+    expect(src).toContain('afterArm: item ? async (trx, arming) => writeTextNumberCard(trx, item, { refresh: false, heldAt: arming?.heldAt }) : null,');
     expect(src).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction }))) return abandonToPeer('the disclaimed-number hold write');");
     expect(src).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext }))) return abandonToPeer('the disclaimed-number hold write');");
     expect(src).not.toMatch(/armCallbackNumberHoldAtDecision\(\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);\s*if \(aniCannotText\([^)]*\)\) await fileTextNumberCard/);
@@ -437,8 +437,14 @@ describe('card-to-hold binding is stamped where the card is filed', () => {
     const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const at = processor.indexOf('const writeTextNumberCard = async (trx, item');
     const section = processor.slice(at, at + 3200);
-    const stamp = section.indexOf("stampOpenNoTextCards(trx, call.id)");
+    const stamp = section.indexOf("stampOpenNoTextCards(trx, call.id, { phone: contactPhone, heldAt: heldAt || armingHeldAt })");
     expect(stamp).toBeGreaterThan(section.indexOf('.onConflict('));
     expect(stamp).toBeLessThan(section.indexOf('await syncCallReviewStatus(trx, call.id);'));
+  });
+
+  test('the card write is bound to the arming of THIS pass: afterArm hands the held_at in, and the helper remembers it', () => {
+    const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(processor).toContain('afterArm: item ? async (trx, arming) => writeTextNumberCard(trx, item, { refresh: false, heldAt: arming?.heldAt }) : null,');
+    expect(processor).toContain('armingHeldAt = armed?.heldAt ?? armingHeldAt;');
   });
 });

@@ -59,19 +59,26 @@ async function backfill(conn, { apply = false } = {}) {
   return { rows, ambiguous, apply, unstampedAfter: unmatched.rows[0].n - (apply ? 0 : rows.length) };
 }
 
-module.exports = { backfill, CANDIDATES_SQL, AMBIGUOUS_SQL };
+// What the script prints: card ids, call ids and counts only. A phone number never reaches the console
+// (an operator's terminal and scrollback are not a place for customer numbers).
+function reportLines({ rows, ambiguous, unstampedAfter }, apply) {
+  const out = [];
+  for (const r of rows) out.push(`${apply ? 'stamped' : 'would stamp'} card ${r.card_id} (call ${r.call_log_id}): ${r.bindings.length} line(s)`);
+  for (const r of ambiguous) out.push(`unbound: ambiguous card ${r.card_id} (call ${r.call_log_id}) fits more than one candidate; left unstamped`);
+  out.push(`${apply ? 'Stamped' : 'Would stamp'} ${rows.length} card(s). Ambiguous: ${ambiguous.length}. Cards left without bindings (no hold within 5 minutes on the same line, or ambiguous): ${unstampedAfter}.`);
+  if (!apply) out.push('Dry run. Re-run with --apply to write.');
+  return out;
+}
+
+module.exports = { backfill, reportLines, CANDIDATES_SQL, AMBIGUOUS_SQL };
 
 if (require.main === module) {
   require('dotenv').config();
   const db = require('../server/models/db');
   const apply = process.argv.includes('--apply');
   backfill(db, { apply })
-    .then(({ rows, ambiguous, unstampedAfter }) => {
-      for (const r of rows) console.log(`${apply ? 'stamped' : 'would stamp'} card ${r.card_id} (call ${r.call_log_id}): ${r.bindings.map((b) => b.line_e164).join(', ')}`);
-      for (const r of ambiguous) console.log(`unbound: ambiguous card ${r.card_id} (call ${r.call_log_id}) fits more than one candidate; left unstamped`);
-      console.log(`${apply ? 'Stamped' : 'Would stamp'} ${rows.length} card(s). Cards left without bindings (no hold within 5 minutes on the same line, or ambiguous): ${unstampedAfter}.`);
-      if (!apply) console.log('Dry run. Re-run with --apply to write.');
-    })
-    .catch((err) => { console.error(err.message); process.exitCode = 1; })
+    .then((result) => { for (const line of reportLines(result, apply)) console.log(line); })
+    // The code only: a database error message can quote a bound value.
+    .catch((err) => { console.error(`backfill failed: ${err.code || err.name || 'error'}`); process.exitCode = 1; })
     .finally(() => db.destroy());
 }

@@ -40,8 +40,9 @@ describe('armDisclaimedNumberHold afterArm', () => {
     expect(afterArm).toHaveBeenCalledTimes(1);
     // hold row first (the INSERT raw), the no-text marks, then afterArm last — all inside the transaction
     const kinds = log.map((l) => l[0]);
-    expect(kinds[0]).toBe('raw');
-    expect(log[0][1]).toMatch(/INSERT INTO disclaimed_number_holds/);
+    expect(log[0][1]).toBe('SELECT pg_advisory_xact_lock(hashtext(?))'); // the line lock comes before any hold row
+    expect(kinds[1]).toBe('raw');
+    expect(log[1][1]).toMatch(/INSERT INTO disclaimed_number_holds/);
     expect(kinds.filter((k) => k === 'update')).toHaveLength(2);
     expect(kinds[kinds.length - 1]).toBe('afterArm');
     expect(committed).toBe(true);
@@ -63,7 +64,45 @@ describe('armDisclaimedNumberHold afterArm', () => {
     const out = await Holds.armDisclaimedNumberHold({ phone: '+19415551234', callLogId: 7, procToken: 'tok', noTextHold: true, afterArm, conn });
     expect(out).toEqual({ recorded: false, claimLost: true });
     expect(afterArm).not.toHaveBeenCalled();
-    expect(log).toEqual([]);
+    expect(log.map((l) => l[1])).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?))']); // only the lock: no hold, no card
+  });
+
+  test('lock order (#6292 r7): per-call triage lock, then the line lock, then the claim fence, then the hold row', async () => {
+    const { lockTriageCall } = require('../utils/triage-locks');
+    const log = [];
+    lockTriageCall.mockImplementationOnce(async () => { log.push(['triage-lock']); });
+    const trx = fakeTrx(log);
+    const traced = (table) => { log.push(['table', table]); return trx(table); };
+    traced.raw = trx.raw;
+    const conn = { transaction: async (fn) => fn(traced) };
+    await Holds.armDisclaimedNumberHold({ phone: '(941) 555-1234', callLogId: 7, procToken: 'tok', conn });
+    const steps = log.map((l) => {
+      if (l[0] === 'triage-lock') return 'triage-lock';
+      if (l[0] === 'table') return `table:${l[1]}`;
+      return l[1].startsWith('SELECT pg_advisory_xact_lock') ? `line-lock:${l[2][0]}` : 'hold-upsert';
+    });
+    expect(steps).toEqual(['triage-lock', 'line-lock:no_text_line:+19415551234', 'table:call_log', 'hold-upsert']);
+  });
+
+  test('the arming returns its held_at, and afterArm receives it', async () => {
+    const trx = fakeTrx([]);
+    trx.raw = async (sql) => (/INSERT INTO/.test(sql) ? { rows: [{ held_at: '2030-02-01 10:00:00.123456+00' }] } : { rows: [] });
+    const conn = { transaction: async (fn) => fn(trx) };
+    const afterArm = jest.fn(async () => {});
+    const out = await Holds.armDisclaimedNumberHold({ phone: '+19415551234', callLogId: 7, procToken: 'tok', afterArm, conn });
+    expect(out.heldAt).toBe('2030-02-01 10:00:00.123456+00');
+    expect(afterArm).toHaveBeenCalledWith(expect.anything(), { heldAt: '2030-02-01 10:00:00.123456+00' });
+  });
+
+  test('source pin: armDisclaimedNumberHold takes lockNoTextLines after lockTriageCall and before the hold upsert', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
+    const body = src.slice(src.indexOf('async function armDisclaimedNumberHold('));
+    const triage = body.indexOf('await lockTriageCall(trx, callLogId)');
+    const line = body.indexOf('await lockNoTextLines(trx, [holdPhoneKey(phone)])');
+    const upsert = body.indexOf('await recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx })');
+    expect(triage).toBeGreaterThan(-1);
+    expect(line).toBeGreaterThan(triage);
+    expect(upsert).toBeGreaterThan(line);
   });
 });
 
@@ -186,22 +225,33 @@ describe('lockNoTextLines / callLineRows', () => {
 });
 
 describe('card <-> hold binding SQL', () => {
-  test('stampOpenNoTextCards appends a { line_e164, held_at } binding for every active hold of the call, once', async () => {
+  test('stampOpenNoTextCards appends ONE { line_e164, held_at } binding: the arming the card is filed for', async () => {
     const raw = jest.fn(async () => ({ rows: [] }));
-    await Holds.stampOpenNoTextCards({ raw }, 'call-1');
+    await Holds.stampOpenNoTextCards({ raw }, 'call-1', { phone: '(941) 555-1234', heldAt: '2030-02-01 10:00:00.123456+00' });
     const [sql, params] = raw.mock.calls[0];
     expect(sql).toContain("jsonb_build_object('line_e164', h.phone_e164, 'held_at', h.held_at::text)");
     expect(sql).toContain("t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')");
-    expect(sql).toContain('h.cleared_at IS NULL');
+    expect(sql).toContain('h.cleared_at IS NULL AND h.phone_e164 = ? AND h.held_at = ?::timestamptz');
     expect(sql).toContain("COALESCE(t.payload->'hold_bindings', '[]'::jsonb) || fresh.elems"); // appended, never replaced
-    expect(sql).toContain('NOT EXISTS'); // idempotent
+    expect(sql).toContain('NOT EXISTS'); // idempotent: the same arming appends nothing
     expect(sql).not.toContain('ani_phone'); // no phone matching at all: the hold row names the line
-    expect(params).toEqual(['call-1']);
+    expect(params).toEqual(['+19415551234', '2030-02-01 10:00:00.123456+00', 'call-1']);
+  });
+
+  test('without a held_at the line\'s current active hold of the call is bound; without a line nothing is', async () => {
+    const raw = jest.fn(async () => ({ rows: [] }));
+    await Holds.stampOpenNoTextCards({ raw }, 'call-1', { phone: '+19415551234' });
+    expect(raw.mock.calls[0][0]).not.toContain('h.held_at = ?');
+    expect(raw.mock.calls[0][1]).toEqual(['+19415551234', 'call-1']);
+    raw.mockClear();
+    await Holds.stampOpenNoTextCards({ raw }, 'call-1');
+    await Holds.stampOpenNoTextCards({ raw }, 'call-1', { phone: 'relay' });
+    expect(raw).not.toHaveBeenCalled();
   });
 
   test('no call: nothing runs', async () => {
     const raw = jest.fn();
-    await Holds.stampOpenNoTextCards({ raw }, null);
+    await Holds.stampOpenNoTextCards({ raw }, null, { phone: '+19415551234' });
     expect(raw).not.toHaveBeenCalled();
   });
 

@@ -120,8 +120,12 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   on that card, then reloads. **Lock order for every line release** (`releaseNoTextHold`, shared by the open-card
   and closed-card paths): the per-call `lockTriageCall`, then a phone-wide
   `pg_advisory_xact_lock(hashtext('no_text_line:' || E.164))` for each line the call holds (sorted), and only then
-  the hold rows and visit rows. Two staff releasing one shared line from cards on different calls now queue on the
-  phone lock instead of taking row locks in opposite orders. **Which lines:** a call can hold several lines. The
+  the hold rows and visit rows. The ARMING path takes the same lock in the same order: `armDisclaimedNumberHold`
+  (the one writer that arms or re-arms a no-text hold, and the card write it carries) takes `lockTriageCall`, then
+  `lockNoTextLines` for its line, then the claim fence and the hold upsert. So a release of line L that began first
+  cannot clear a hold another call arms on L after it (the arm waits for the release to commit), and a release that
+  starts after the arm sees the new hold with its card. Two staff releasing one shared line from cards on different
+  calls queue on the phone lock instead of taking row locks in opposite orders. **Which lines:** a call can hold several lines. The
   panel sends `line_e164` with the request: only that line is released, on the call and on every other call that holds
   it, and a line the call does not actively hold is a 409 `NO_TEXT_LINE_NOT_HELD`. The inbox card sends no line and
   releases EVERY line the call ACTIVELY holds (each under its own phone lock, sorted), never "the newest" and never a line the call already released (that line may have been re-held by another call); with none active the card still resolves and `lines_released` is empty; for the usual
@@ -136,9 +140,11 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   **What counts as a no-text hold:** a hold row (one per line and call) with a `text_number_differs` card bound to its
   CURRENT arming. The binding is exact per (line, arming): the card carries
   `payload.hold_bindings = [{ line_e164, held_at }, ...]`, the hold row's own canonical `phone_e164` and full-precision
-  `held_at`. A call can hold several lines but has one open text card, so `stampOpenNoTextCards` APPENDS a binding for
-  every active hold of the call on each card write (in the transaction that files or refreshes the card; a refresh keeps
-  the list via `refreshedCardPayload`). The card is built before the hold row gets `held_at = now()`, so no `created_at`
+  `held_at`. A call can hold several lines but has one open text card, so `stampOpenNoTextCards` APPENDS one binding per
+  card write: the line and arming that write is for (`afterArm` hands in the `held_at` the arm returned), never every
+  active hold of the call. An ownership-only hold on another line of the same call stays unbound, so a card filed for
+  Y cannot release X. A card write for an arming it already lists appends nothing; a refresh keeps the list via
+  `refreshedCardPayload`. The card is built before the hold row gets `held_at = now()`, so no `created_at`
   comparison can bind them, and no phone matching is involved for stamped cards (the hold row names the line). A hold
   released and re-armed later (ownership-only, or a new no-text pass) has a new `held_at`, so an older closed card no
   longer binds: the hold is not listed and "Line can get texts" does not clear it. One predicate
@@ -157,8 +163,8 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   agree. Limit: a hold row keeps only its latest `held_at`, so earlier armings of one (call, line) cannot be counted;
   the close time and the one-card-per-arming check are what rule out a later re-arm. To make legacy cards exact, the
   owner runs the one-time backfill (dry run is the default; do not skip the dry run):
-  `node scripts/backfill-no-text-card-bindings.js` lists the cards it would stamp, the cards it reports as
-  `unbound: ambiguous`, and how many stay unbound; `node scripts/backfill-no-text-card-bindings.js --apply` writes
+  `node scripts/backfill-no-text-card-bindings.js` lists the cards it would stamp (card id, call id, number of lines;
+  it never prints a phone number), the cards it reports as `unbound: ambiguous`, and how many stay unbound; `node scripts/backfill-no-text-card-bindings.js --apply` writes
   the bindings in one transaction. It stamps each unambiguous legacy card with the hold of its own call and line
   armed within 5 minutes of it, skips ambiguous ones, is idempotent and skips stamped cards. The Postgres suite
   `no-text-held-lines-postgres.test.js` pins all of this with the processor's real order (card first, hold after).

@@ -80,7 +80,7 @@ postgres('held lines SQL against PostgreSQL', () => {
   async function armNoText(callId, phone = X, { cardAt = '2030-02-01T09:59:59Z', heldAt = HELD, close = 'resolved' } = {}) {
     const cardId = await insertCard(callId, cardAt, { ani: phone });
     await insertHold(callId, phone, heldAt);
-    await Holds.stampOpenNoTextCards(database, callId);
+    await Holds.stampOpenNoTextCards(database, callId, { phone });
     if (close) await database('triage_items').where({ id: cardId }).update({ status: close });
     return cardId;
   }
@@ -111,7 +111,7 @@ postgres('held lines SQL against PostgreSQL', () => {
     const cardId = await armNoText(callId, X, { close: null });
     await database('disclaimed_number_holds').where({ source_call_log_id: callId }).update({ cleared_at: new Date() });
     await Holds.recordDisclaimedNumberHold({ phone: X, callLogId: callId, conn: database }); // re-armed while the card is still open
-    await Holds.stampOpenNoTextCards(database, callId);
+    await Holds.stampOpenNoTextCards(database, callId, { phone: X });
     expect((await bindings(cardId))).toHaveLength(2); // appended, never replaced
     await database('triage_items').where({ id: cardId }).update({ status: 'dismissed' });
     expect((await listed()).map((l) => l.card_id)).toEqual([cardId]);
@@ -123,7 +123,7 @@ postgres('held lines SQL against PostgreSQL', () => {
     await insertHold(callId, Y, '2030-02-01T10:30:00.5Z'); // the call now also holds Y
     // the processor's refresh rewrites the single open card from the Y pass: ani_phone becomes Y, bindings stay
     await database('triage_items').where({ id: cardId }).update({ payload: Holds.refreshedCardPayload(database, JSON.stringify({ ani_phone: Y, note: 'refreshed' })) });
-    await Holds.stampOpenNoTextCards(database, callId);
+    await Holds.stampOpenNoTextCards(database, callId, { phone: Y });
     expect((await bindings(cardId)).map((b) => b.line_e164).sort()).toEqual([X, Y]);
     await database('triage_items').where({ id: cardId }).update({ status: 'resolved' });
     const byPhone = Object.fromEntries((await listed()).map((l) => [l.phone_e164, l.card_id]));
@@ -133,6 +133,42 @@ postgres('held lines SQL against PostgreSQL', () => {
     expect((await listed()).map((l) => l.phone_e164)).toEqual([X]);
     const other = randomUUID();
     expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: other, clearedBy: 't', reason: 'verified_same_number', conn: database })).toEqual([callId]);
+  });
+
+  test('a no-text card binds only the line it was filed for: an ownership-only hold X on the same call stays unbound and cannot be cleared with it', async () => {
+    const callId = randomUUID();
+    await insertHold(callId, X, '2030-02-01T09:00:00Z'); // earlier pass: "not my number" on X, no text card
+    const cardId = await insertCard(callId, T('2030-02-01T10:00:00Z'), { ani: Y });
+    const yHeld = await Holds.recordDisclaimedNumberHold({ phone: Y, callLogId: callId, conn: database }); // the new no-text arming
+    await Holds.stampOpenNoTextCards(database, callId, { phone: Y, heldAt: yHeld.heldAt });
+    expect((await bindings(cardId)).map((b) => b.line_e164)).toEqual([Y]);
+    // a refresh for the same arming appends nothing
+    await Holds.stampOpenNoTextCards(database, callId, { phone: Y, heldAt: yHeld.heldAt });
+    expect(await bindings(cardId)).toHaveLength(1);
+    await database('triage_items').where({ id: cardId }).update({ status: 'resolved' });
+    expect((await listed()).map((l) => l.phone_e164)).toEqual([Y]);
+    expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: randomUUID(), clearedBy: 't', reason: 'verified_same_number', conn: database })).toEqual([]);
+    const boundPairs = await Holds.boundCardsForActiveHolds(database, callId);
+    expect(boundPairs.map((p) => p.phone_e164)).toEqual([Y]);
+    expect((await database('disclaimed_number_holds').where({ phone_e164: X }).first()).cleared_at).toBeNull();
+  });
+
+  test('the backfill prints card ids, call ids and counts only: no phone number, no 10-digit run', async () => {
+    const { backfill, reportLines } = require('../../scripts/backfill-no-text-card-bindings');
+    const one = randomUUID();
+    const two = randomUUID();
+    await insertCard(one, T('2030-02-01T10:00:00Z'), { status: 'resolved', ani: '+19415551234' });
+    await insertHold(one, X, T('2030-02-01T10:00:04Z'));
+    await insertCard(two, T('2030-02-01T10:00:00Z'), { status: 'resolved', ani: '+19415557777' });
+    await insertCard(two, T('2030-02-01T10:01:00Z'), { status: 'resolved', ani: '+19415557777' });
+    await insertHold(two, Y, T('2030-02-01T10:00:30Z'));
+    for (const apply of [false, true]) {
+      const text = reportLines(await backfill(database, { apply }), apply).join('\n');
+      const withoutIds = text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '<id>');
+      expect(withoutIds).not.toMatch(/\d{10,}/);
+      expect(withoutIds).not.toContain('+1');
+      expect(withoutIds).toContain('unbound: ambiguous');
+    }
   });
 
   describe('legacy cards (no bindings): a 5-minute window on the canonical line, never a wildcard', () => {
@@ -241,16 +277,16 @@ postgres('held lines SQL against PostgreSQL', () => {
     expect(await listed()).toEqual([]);
   });
 
-  test('a call with two lines and a card for each: the newer card, stamped while X was still held, binds both; the older still binds X', async () => {
+  test('a call with two lines and a card for each: each card binds only its own line', async () => {
     const callId = randomUUID();
     const cx = await armNoText(callId, X);
     const cy = await armNoText(callId, Y, { heldAt: '2030-02-02T10:00:00.5Z', cardAt: '2030-02-02T09:59:59Z' });
     expect((await bindings(cx)).map((b) => b.line_e164)).toEqual([X]);
-    expect((await bindings(cy)).map((b) => b.line_e164).sort()).toEqual([X, Y]);
+    expect((await bindings(cy)).map((b) => b.line_e164)).toEqual([Y]);
     const byPhone = Object.fromEntries((await listed()).map((l) => [l.phone_e164, l.card_id]));
-    expect(byPhone).toEqual({ [X]: cy, [Y]: cy }); // the newest bound card is each line's release surface
+    expect(byPhone).toEqual({ [X]: cx, [Y]: cy }); // each line's release surface is the card filed for it
     const pairs = await Holds.boundCardsForActiveHolds(database, callId);
-    expect(pairs.map((p) => [p.phone_e164, p.card_id])).toEqual([[X, cy], [X, cx], [Y, cy]]); // newest card first within a line
+    expect(pairs.map((p) => [p.phone_e164, p.card_id])).toEqual([[X, cx], [Y, cy]]);
   });
 
   test('one row per line, newest hold first; calls_on_line and line_since come from every call on it; the cap applies to lines', async () => {
