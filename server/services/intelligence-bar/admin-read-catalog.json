@@ -2,9 +2,9 @@
   "version": 1,
   "source": "docs/intelligence-bar-capabilities.json",
   "counts": {
-    "census_get_endpoints": 626,
+    "census_get_endpoints": 627,
     "excluded_by_rule": 43,
-    "excluded_by_review": 533,
+    "excluded_by_review": 534,
     "unresolvable_template": 15,
     "in_catalog": 35
   },
