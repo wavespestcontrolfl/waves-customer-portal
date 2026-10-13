@@ -2528,6 +2528,29 @@ condition, so no instruction that waits for drying, including one followed by a
 water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
 `holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
 "ended" note past it; the key is absent when there is no claim).
+A pre-emergent whose label allows 14 days for its water (a water-in window over
+168 hours, owner 2026-10-09) is a long-window water-in: one sentence
+"Today’s treatment needs about ½ inch of water by <date>." and "Rain and your
+regular watering both count.", with no minutes; `waterInBy` and `expiresAt` are
+completion plus that window. It never merges with a short water-in on the same
+visit: the short one keeps its own amount and deadline in `waterInBy`, the long
+sentence follows as a fourth line ("In all, it needs about ½ inch of water by
+<date>. Rain and your regular watering both count."), so `lines` is then at
+most four sentences, and `expiresAt` is the LONG deadline (or `null` beside a
+hold that waits for drying). Such a visit, and only such a visit, also carries
+the optional key `reportV2.banner.later` `{ at, state, lines }`: `at` is the
+short deadline (the same ISO instant as `waterInBy`), `state` is `water_in` or
+`hold_then_water_in`, and `lines` are the two long-window sentences as on a
+long-only visit (after an until-dry hold line, without its clock time, when the
+visit has one). It is frozen with the instruction; nothing is recomputed at
+read time. The live banner prints `later.lines` in place of `lines` once `at`
+has passed (and drops `forecastLine`, `observedRain` and `setupLine`, which are
+about the short run), until `expiresAt`, so a deadline that has passed is never
+shown as current. LIVE VIEW ONLY: the key is removed from every printed / PDF
+render, which keeps `lines` as written at the visit. The key is absent when the
+frozen block is malformed, and once rain has covered the water-in
+(`state: 'water_in_by_rain'`, below). No new route, token, privacy or
+rate-limit surface; `reportV2.aftercare` is unchanged by it.
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
