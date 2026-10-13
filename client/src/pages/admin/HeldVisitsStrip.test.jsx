@@ -43,7 +43,7 @@ describe('HeldVisitsStrip', () => {
 
   it('says an off-hour time cannot be booked as is', () => {
     render(<HeldVisitsStrip heldVisits={[{ ...timed, minutes: 870, time_label: '2:30 PM' }]} onBook={() => {}} />);
-    expect(screen.getByText('Visits start on the hour. Agree a whole-hour time with the caller before you book; the form does not take 2:30 PM.')).toBeInTheDocument();
+    expect(screen.getByText('Visits start on the hour. Agree a whole-hour time with the caller; the form does not take 2:30 PM and opens with no time selected.')).toBeInTheDocument();
   });
 
   it('links Open call to the call in Communications', () => {

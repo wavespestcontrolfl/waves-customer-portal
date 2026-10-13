@@ -325,9 +325,9 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   const held = {
     call_log_id: 'call-held', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM',
     caller_name: 'Pat Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' },
-    service: 'General Pest Control', call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-1', notes: null, call_sid: 'CAsynthetic001',
+    service: 'General Pest Control', call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-1', notes: null,
   };
-  const offHour = { ...held, call_log_id: 'call-off-hour', minutes: 870, time_label: '2:30 PM', customer_id: null, call_sid: null };
+  const offHour = { ...held, call_log_id: 'call-off-hour', minutes: 870, time_label: '2:30 PM', customer_id: null };
   vi.mocked(adminFetch).mockImplementation(async (url) => {
     if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [held, offHour] };
     if (url === '/admin/customers/cust-1') return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' } } };
@@ -336,12 +336,12 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
   expect(await screen.findByText('From calls, not on the calendar')).toBeInTheDocument();
   expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-14');
-  // An off-hour slot is not prefilled (visits start on the hour) and the agreed time rides in the notes; no call id means no marker.
+  // An off-hour slot is not prefilled: the form must make the person pick a time, and the agreed time rides in the notes.
   fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[1]);
   await screen.findByRole('dialog');
   expect(appointmentModalState.props).toMatchObject({
-    defaultDate: '2026-10-14',
-    defaultInternalNotes: 'Time agreed on the call: 2:30 PM. Visits start on the hour: agree a whole-hour time with the caller.',
+    defaultDate: '2026-10-14', requireTimeChoice: true,
+    defaultInternalNotes: 'Booked from a phone call. Call ID: call-off-hour. Time agreed on the call: 2:30 PM. Visits start on the hour: agree a whole-hour time with the caller.',
   });
   expect(appointmentModalState.props.defaultWindowStart).toBeUndefined();
   act(() => appointmentModalState.props.onClose());
@@ -350,7 +350,7 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   expect(appointmentModalState.props).toMatchObject({
     defaultDate: '2026-10-14', defaultWindowStart: '11:00', defaultCustomer: expect.objectContaining({ id: 'cust-1', firstName: 'Pat', lastName: 'Sample' }),
     // The call marker rides into the visit's internal notes, so the booked visit carries the call.
-    defaultInternalNotes: 'Booked from a phone call. Call SID: CAsynthetic001.',
+    defaultInternalNotes: 'Booked from a phone call. Call ID: call-held.', requireTimeChoice: false,
   });
 });
 
@@ -358,7 +358,7 @@ it('only the newest Book it click opens the form when an earlier customer lookup
   const row = (id, customerId) => ({
     call_log_id: id, kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: `Caller ${id}`,
     phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
-    call_at: '2026-10-12T14:30:00.000Z', customer_id: customerId, notes: null, call_sid: `CA${id}`,
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: customerId, notes: null,
   });
   let releaseSlow;
   const slow = new Promise((resolve) => { releaseSlow = resolve; });
@@ -376,14 +376,14 @@ it('only the newest Book it click opens the form when an earlier customer lookup
   expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
   await act(async () => { releaseSlow(); await slow; });
   expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
-  expect(appointmentModalState.props.defaultInternalNotes).toContain('CAsecond');
+  expect(appointmentModalState.props.defaultInternalNotes).toContain('Call ID: second.');
 });
 
 it('a Book it lookup still pending when the day changes does not open the form', async () => {
   const held = {
     call_log_id: 'call-late', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: 'Pat Sample',
     phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
-    call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-slow', notes: null, call_sid: 'CAlate',
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-slow', notes: null,
   };
   let releaseSlow;
   const slow = new Promise((resolve) => { releaseSlow = resolve; });

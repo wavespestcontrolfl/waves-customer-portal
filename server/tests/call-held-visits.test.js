@@ -211,68 +211,44 @@ describe('order and gate', () => {
   });
 });
 
-// A visit the office books by hand (or through "Book it") carries no call reference, and an
-// unlinked call has no customer to match: the caller's number or the stated address clears it.
-describe('a hand booking after the call clears the row', () => {
-  const unlinkedDayOnly = () => call({ ai_extraction_enriched: dayOnly() });
-
-  it('clears on a later visit, on the promised day, under a customer who carries the caller number', () => {
-    const booked = visit({ customer_id: 'cust-new', customer_phone: '(941) 555-0100' });
-    expect(run([unlinkedDayOnly()], [booked])).toEqual([]);
-    expect(run([call()], [booked])).toEqual([]); // a confirmed slot too
-    // An unrelated later booking that shares the phone, on another day, is not this promise.
-    const otherDay = visit({ customer_id: 'cust-new', customer_phone: '(941) 555-0100', sched_date: '2026-10-16' });
-    expect(run([unlinkedDayOnly()], [otherDay])).toHaveLength(1);
-    expect(run([call()], [otherDay])).toHaveLength(1);
-    expect(run([unlinkedDayOnly()], [visit({ customer_id: 'cust-new', customer_secondary_phone: '+19415550100' })])).toEqual([]);
+describe('the call marker', () => {
+  it('clears on "Call ID: <call_log id>" in internal notes ("Book it" prefills it), under any customer and date', () => {
+    const booked = visit({ customer_id: 'cust-household', internal_notes: 'Booked from a phone call. Call ID: call-1.', sched_date: '2026-10-20' });
+    expect(run([call()], [booked])).toEqual([]);
+    expect(run([call({ ai_extraction_enriched: dayOnly() })], [booked])).toEqual([]);
+    // A call row with no Twilio SID still clears on its id.
+    expect(run([call({ twilio_call_sid: null })], [booked])).toEqual([]);
+    expect(run([call()], [visit({ customer_id: 'cust-household', internal_notes: 'Call ID: call-2.' })])).toHaveLength(1);
   });
 
-  it('clears on a later visit at the stated address', () => {
-    expect(run([unlinkedDayOnly()], [visit({ customer_id: 'cust-new', visit_address: '12 Test Ln' })])).toEqual([]);
+  it('still clears on the pipeline SID marker, in either notes column', () => {
+    expect(run([call()], [visit({ customer_id: 'cust-x', internal_notes: 'Call SID: CAsynthetic001.', sched_date: '2026-10-20' })])).toEqual([]);
+    expect(run([call()], [visit({ customer_id: 'cust-x', notes: 'Call SID: CAsynthetic001.', sched_date: '2026-10-20' })])).toEqual([]);
   });
 
-  it('does not clear on another number and address, an older visit, or a cancelled one', () => {
-    const other = visit({ customer_id: 'cust-x', customer_phone: '+19415550199', visit_address: '99 Other Road' });
-    expect(run([unlinkedDayOnly()], [other])).toHaveLength(1);
-    const older = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', created_at: '2026-10-12T14:00:00Z' });
-    expect(run([unlinkedDayOnly()], [older])).toHaveLength(1);
-    const cancelled = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', status: 'cancelled' });
-    expect(run([unlinkedDayOnly()], [cancelled])).toHaveLength(1);
-  });
-
-  it('a skipped visit is not a booking, for the caller rule and for the linked customer', () => {
-    const skipped = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', status: 'skipped' });
-    expect(run([unlinkedDayOnly()], [skipped])).toHaveLength(1);
-    expect(run([call({ customer_id: 'cust-1' })], [visit({ status: 'skipped' })])).toHaveLength(1);
-  });
-
-  it('the address must be the same property: another unit, city or ZIP keeps the row', () => {
-    const at = (over) => visit({ customer_id: 'cust-new', visit_address: '12 Test Lane', visit_city: 'Bradenton', visit_zip: '34205', ...over });
-    expect(run([unlinkedDayOnly()], [at({})])).toEqual([]);
-    expect(run([unlinkedDayOnly()], [at({ visit_city: 'Venice', visit_zip: '34285' })])).toHaveLength(1);
-    expect(run([unlinkedDayOnly()], [at({ visit_address_line2: 'Unit 4' })])).toEqual([]); // call stated no unit
-    const unitCall = call({ ai_extraction_enriched: dayOnly({ property: { service_address: { street_line_1: '12 Test Lane', street_line_2: 'Unit 2', city: 'Bradenton', postal_code: '34205' } } }) });
-    expect(run([unitCall], [at({ visit_address_line2: 'Unit 4' })])).toHaveLength(1);
-    expect(run([unitCall], [at({ visit_address_line2: 'Unit 2' })])).toEqual([]);
-  });
-
-  it('an outbound call matches on the number Waves dialed', () => {
-    const outbound = call({ direction: 'outbound-api', ai_extraction_enriched: dayOnly() });
-    expect(run([outbound], [visit({ customer_id: 'cust-new', customer_phone: '+19415550111' })])).toEqual([]);
-    expect(run([outbound], [visit({ customer_id: 'cust-new', customer_phone: '+19415550100' })])).toHaveLength(1);
+  it('nothing is inferred from a shared phone number or a matching address', () => {
+    const lookalike = visit({ customer_id: 'cust-other', customer_phone: '+19415550100', visit_address: '12 Test Lane', visit_city: 'Bradenton', visit_zip: '34205' });
+    expect(run([call()], [lookalike])).toHaveLength(1);
+    expect(run([call({ ai_extraction_enriched: dayOnly() })], [lookalike])).toHaveLength(1);
   });
 });
 
-describe('the call marker and unit-first addresses', () => {
-  it('clears on the Call SID marker in internal notes ("Book it" prefills it there), under any customer', () => {
-    const booked = visit({ customer_id: 'cust-household', internal_notes: 'Booked from a phone call. Call SID: CAsynthetic001.', sched_date: '2026-10-20' });
-    expect(run([call()], [booked])).toEqual([]);
-    expect(run([call({ ai_extraction_enriched: dayOnly() })], [booked])).toEqual([]);
-    expect(run([call()], [visit({ customer_id: 'cust-household', internal_notes: 'Call SID: CAother.' })])).toHaveLength(1);
+describe('only a real conversation holds a visit', () => {
+  it.each([
+    ['a voicemail row', { processing_status: 'voicemail' }],
+    ['a spam row', { processing_status: 'spam' }],
+    ['a voicemail lead', { processing_status: 'processed', answered_by: 'voicemail' }],
+  ])('never holds a CONFIRMED slot from %s', (_name, over) => {
+    expect(run([call(over)])).toEqual([]);
   });
 
-  it('gives the row the call id "Book it" writes', () => {
-    expect(run([call()])[0].call_sid).toBe('CAsynthetic001');
+  it('never holds a confirmed slot the extraction marks as voicemail or spam', () => {
+    expect(run([call({ ai_extraction_enriched: extraction({ meta: { is_voicemail: true } }) })])).toEqual([]);
+    expect(run([call({ ai_extraction_enriched: extraction({ spam_verdict: { spam_kind: 'solicitation' } }) })])).toEqual([]);
+  });
+
+  it('keeps a confirmed slot on a call whose customer or lead creation failed', () => {
+    expect(run([call({ processing_status: 'customer_creation_failed' })])).toHaveLength(1);
   });
 });
 
@@ -281,10 +257,6 @@ describe('a confirmed promise has a time', () => {
     const linked = call({ customer_id: 'cust-1' }); // agreed 11:00 AM
     expect(run([linked], [visit({ window_start: '15:00:00' })])).toHaveLength(1);
     expect(run([linked], [visit({ window_start: '12:00:00' })])).toEqual([]);
-    // The hand-booking rule keeps the same tolerance.
-    const byPhone = (window_start) => visit({ customer_id: 'cust-new', customer_phone: '+19415550100', window_start });
-    expect(run([call()], [byPhone('16:00:00')])).toHaveLength(1);
-    expect(run([call()], [byPhone('10:00:00')])).toEqual([]);
   });
 
   it('a day-only ask is answered by any live visit that day', () => {
@@ -293,14 +265,13 @@ describe('a confirmed promise has a time', () => {
   });
 });
 
-describe('legacy rows and letter case', () => {
+describe('legacy rows', () => {
   it('a visit with no status is an open visit and clears the row', () => {
     expect(run([call({ customer_id: 'cust-1' })], [visit({ status: null })])).toEqual([]);
-    expect(run([call({ ai_extraction_enriched: dayOnly() })], [visit({ customer_id: 'cust-new', status: null, customer_phone: '+19415550100' })])).toEqual([]);
   });
 
-  it('the address match ignores letter case', () => {
-    expect(run([call({ ai_extraction_enriched: dayOnly() })], [visit({ customer_id: 'cust-new', visit_address: '12 TEST LANE', visit_city: 'BRADENTON', visit_zip: '34205' })])).toEqual([]);
+  it('a skipped visit is not a booking', () => {
+    expect(run([call({ customer_id: 'cust-1' })], [visit({ status: 'skipped' })])).toHaveLength(1);
   });
 });
 

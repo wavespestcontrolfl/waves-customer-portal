@@ -60,7 +60,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                 </div>
                 {offHour(row) && (
                   <div className="text-ink-secondary">
-                    Visits start on the hour. Agree a whole-hour time with the caller before you book; the form does not take {row.time_label}.
+                    Visits start on the hour. Agree a whole-hour time with the caller; the form does not take {row.time_label} and opens with no time selected.
                   </div>
                 )}
               </div>

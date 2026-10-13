@@ -3344,3 +3344,41 @@ describe('address ask by role', () => {
     expect(triageCalls(fetcher).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// Dispatch "Book it" on a held visit with no agreed whole-hour time (GATE_CALL_HELD_VISIT).
+describe('requireTimeChoice', () => {
+  it('opens with no time selected and cannot be saved until the person picks one', async () => {
+    const { fetcher } = installModalFetch();
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={futureDate()}
+      requireTimeChoice
+      defaultInternalNotes="Booked from a phone call. Call ID: call-held."
+      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />);
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    const time = screen.getByRole('option', { name: 'Choose a time' }).closest('select');
+    expect(time.value).toBe('');
+    // The other fields are ready; only the time is missing.
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(submit.disabled).toBe(true);
+
+    fireEvent.change(time, { target: { value: '14:00' } });
+    expect(screen.queryByRole('option', { name: 'Choose a time' })).toBeNull();
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    const body = JSON.parse(schedulePosts(fetcher)[0][1].body);
+    expect(JSON.stringify(body)).toContain('14:00');
+    expect(JSON.stringify(body)).toContain('Call ID: call-held.');
+  });
+
+  it('a form opened the normal way keeps its preselected time and can be saved', async () => {
+    installModalFetch();
+    renderBooking();
+    await addOneSeasonalService();
+    expect(screen.queryByRole('option', { name: 'Choose a time' })).toBeNull();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+  });
+});

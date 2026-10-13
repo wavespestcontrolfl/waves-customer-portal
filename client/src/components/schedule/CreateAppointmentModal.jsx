@@ -1493,7 +1493,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1951,7 +1951,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     ? `${_rounded.getFullYear()}-${String(_rounded.getMonth() + 1).padStart(2, '0')}-${String(_rounded.getDate()).padStart(2, '0')}`
     : _ymd;
   const [apptDate, setApptDate] = useState(defaultDate || _defaultDate);
-  const [windowStart, setWindowStart] = useState(normalizeHourTime(defaultWindowStart || _hhmm, _hhmm));
+  const [windowStart, setWindowStartValue] = useState(normalizeHourTime(defaultWindowStart || _hhmm, _hhmm));
+  // requireTimeChoice (Dispatch "Book it" on a call with no agreed whole-hour time): the form
+  // has no agreed time to open on, so the person must pick one before it can be saved. Every
+  // way of setting the time (the selector, a suggested slot) counts as that choice.
+  const [timeChosen, setTimeChosen] = useState(!requireTimeChoice);
+  const setWindowStart = (value) => { setWindowStartValue(value); setTimeChosen(true); };
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
   const [techId, setTechId] = useState(defaultTechId || '');
   const [techs, setTechs] = useState([]);
@@ -4908,7 +4913,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
   // primary before the operator was shown the choice.
-  const canSubmit = canSubmitAppointments({
+  const canSubmit = timeChosen && canSubmitAppointments({
     selectedCustomer,
     services,
     bookingPropertyState,
@@ -6337,7 +6342,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
             <div>
               <label style={labelStyle}>Time</label>
-              <select value={windowStart} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
+              <select value={timeChosen ? windowStart : ''} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} disabled={partialCommitLocked} className="waves-sq-date" style={inputStyle}>
+                {!timeChosen && <option value="" disabled>Choose a time</option>}
                 {HOURLY_TIME_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}

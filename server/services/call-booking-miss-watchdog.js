@@ -184,9 +184,11 @@ function rowCarriesCall(row, call) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
   // The marker sits in either notes column: the call pipeline writes it to internal_notes on
   // the visits it books, and the Dispatch "Book it" action prefills it there.
-  if (!call.twilio_call_sid) return false;
-  const marker = `Call SID: ${call.twilio_call_sid}`;
-  return String(row.notes || '').includes(marker) || String(row.internal_notes || '').includes(marker);
+  // Two marker forms: the Twilio SID (the pipeline's), and the call_log id, which every call
+  // has ("Book it" writes that one; a call row can lack a SID).
+  const text = `${row.notes || ''}\n${row.internal_notes || ''}`;
+  if (call.id && text.includes(`Call ID: ${call.id}`)) return true;
+  return !!call.twilio_call_sid && text.includes(`Call SID: ${call.twilio_call_sid}`);
 }
 
 function rowClearsSlot(row, call, slot) {
@@ -448,7 +450,8 @@ async function runInner({ now = new Date() } = {}) {
   const bookedRows = await db('scheduled_services')
     .where(function bookedEvidence() {
       this.whereIn('source_call_log_id', callIds);
-      if (sidPatterns.length) this.orWhereRaw('(notes LIKE ANY(?) OR internal_notes LIKE ANY(?))', [sidPatterns, sidPatterns]);
+      const markerPatterns = [...sidPatterns, ...callIds.map((id) => `%Call ID: ${id}%`)];
+      this.orWhereRaw('(notes LIKE ANY(?) OR internal_notes LIKE ANY(?))', [markerPatterns, markerPatterns]);
       if (customerIds.length) {
         this.orWhere(function ownCustomerOnDate() {
           this.whereIn('customer_id', customerIds)
