@@ -860,29 +860,55 @@ const CUSTOMER_PARAM_RE = /^customer_?id$/i;
 // pattern, or the build fails: a pattern that carries a customer id must be
 // customer-scoped, and an invoice id must be invoice-scoped, so a customer
 // task can never read another customer's record through the general read.
+const KEY_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
+
+// Each check returns a message, or null when the row is consistent.
+function idParamProblem(row) {
+  const segments = rules.splitPath(row.endpoint);
+  for (const [index, segment] of segments.entries()) {
+    if (!rules.isParam(segment)) continue;
+    const name = segment.slice(1);
+    const afterParent = parent => segments[index - 1] === parent;
+    if ((afterParent('customers') || CUSTOMER_PARAM_RE.test(name)) && (row.scope !== 'customer' || row.scopeParam !== name)) {
+      return `param :${name} carries a customer id, so the row must be scope "customer" with scopeParam "${name}"`;
+    }
+    if (afterParent('invoices') && !CUSTOMER_PARAM_RE.test(name) && (row.scope !== 'invoice' || row.scopeParam !== name)) {
+      return `param :${name} carries an invoice id, so the row must be scope "invoice" with scopeParam "${name}"`;
+    }
+  }
+  return null;
+}
+
+function scopeParamProblem(row) {
+  if (row.scope === 'broad') return row.scopeParam === undefined ? null : 'a broad row has no scopeParam';
+  return typeof row.scopeParam === 'string' && KEY_NAME_RE.test(row.scopeParam) ? null : 'scopeParam must name the parameter that carries the id';
+}
+
+function paramKindProblem(row, names) {
+  const kinds = row.params === undefined ? {} : row.params;
+  if (!kinds || typeof kinds !== 'object' || Array.isArray(kinds)) return 'params must be an object of parameter kinds';
+  const bad = Object.entries(kinds).find(([name, kind]) => kind !== 'text' || !names.includes(name));
+  if (bad) return `params.${bad[0]} must be "text" and name a parameter of the pattern`;
+  return row.scope !== 'broad' && kinds[row.scopeParam] === 'text' ? 'the scope parameter cannot be free text' : null;
+}
+
+function queryProblem(row, names) {
+  if (row.query !== undefined && (!Array.isArray(row.query) || row.query.some(key => typeof key !== 'string' || !KEY_NAME_RE.test(key)) || new Set(row.query).size !== row.query.length)) {
+    return 'query must be a list of distinct key names';
+  }
+  // An id carried in the query string can only be sent when the row lets that key through.
+  if (row.scope !== 'broad' && !names.includes(row.scopeParam) && !(row.query || []).includes(row.scopeParam)) {
+    return `the scope parameter ${row.scopeParam} is read from the query string, so the row's query list must include it`;
+  }
+  return null;
+}
+
 function validateReviewedRow(row) {
   const fail = message => { throw new Error(`admin-read-reviewed.json ${row.endpoint}: ${message}`); };
   if (!Object.hasOwn(ROW_SCOPES, row.scope)) fail(`scope must be one of ${Object.keys(ROW_SCOPES).join(', ')}`);
-  const segments = rules.splitPath(row.endpoint);
   const names = rules.patternParams(row.endpoint);
-  const after = (parent, index) => segments[index - 1] === parent && rules.isParam(segments[index]);
-  segments.forEach((segment, index) => {
-    if (!rules.isParam(segment)) return;
-    const name = segment.slice(1);
-    if (after('customers', index) || CUSTOMER_PARAM_RE.test(name)) {
-      if (row.scope !== 'customer' || row.scopeParam !== name) fail(`param :${name} carries a customer id, so the row must be scope "customer" with scopeParam "${name}"`);
-    } else if (after('invoices', index) && (row.scope !== 'invoice' || row.scopeParam !== name)) {
-      fail(`param :${name} carries an invoice id, so the row must be scope "invoice" with scopeParam "${name}"`);
-    }
-  });
-  if (row.scope === 'broad' && row.scopeParam !== undefined) fail('a broad row has no scopeParam');
-  if (row.scope !== 'broad' && !(typeof row.scopeParam === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(row.scopeParam))) fail('scopeParam must name the parameter that carries the id');
-  const kinds = row.params === undefined ? {} : row.params;
-  if (!kinds || typeof kinds !== 'object' || Array.isArray(kinds)) fail('params must be an object of parameter kinds');
-  for (const [name, kind] of Object.entries(kinds)) {
-    if (kind !== 'text' || !names.includes(name)) fail(`params.${name} must be "text" and name a parameter of the pattern`);
-  }
-  if (row.scope !== 'broad' && kinds[row.scopeParam] === 'text') fail('the scope parameter cannot be free text');
+  const problem = idParamProblem(row) || scopeParamProblem(row) || paramKindProblem(row, names) || queryProblem(row, names);
+  if (problem) fail(problem);
 }
 
 function loadReviewed() {
@@ -958,7 +984,27 @@ const HARD_SIGNAL_RE = /^(write:|outside|signed_url|credential_|response:|writes
 // no path parameter says so.
 const QUERY_CUSTOMER_RE = /\bquery\.(?:customer_?id)\b|\{[^{}]*\bcustomer_?id\b[^{}]*\}\s*=\s*(?:req\.)?query\b/i;
 function readsCustomerFromQuery() {
-  return [...followedSources].some(text => QUERY_CUSTOMER_RE.test(text));
+  return [...followedSources].some(entry => QUERY_CUSTOMER_RE.test(entry.slice(entry.indexOf('\n') + 1)));
+}
+
+// Query keys the handler chain reads: req.query.name, req.query['name'], a
+// destructuring of req.query, and `query.name` inside a helper that was handed
+// req.query. A reviewed row's query list may hold only keys seen here.
+function followedQueryKeys() {
+  const keys = new Set();
+  const add = name => { if (/^[A-Za-z_$][\w$]*$/.test(name)) keys.add(name); };
+  for (const entry of followedSources) {
+    const text = entry.slice(entry.indexOf('\n') + 1); // the entry starts with its file path
+    for (const m of text.matchAll(/\b(?:req\.)?query\??\.([A-Za-z_$][\w$]*)/g)) add(m[1]);
+    for (const m of text.matchAll(/\b(?:req\.)?query\??\.?\[\s*['"]([A-Za-z_$][\w$]*)['"]\s*\]/g)) add(m[1]);
+    for (const m of text.matchAll(/\{([^{}]*)\}\s*=\s*(?:req\.)?query\b/g)) {
+      m[1].split(',').map(part => part.trim().split(/[:=\s]/)[0]).filter(Boolean).forEach(add);
+    }
+    for (const alias of text.matchAll(/\b([A-Za-z_$][\w$]*)\s*=\s*(?:req\.)?query\b(?![.\[(])/g)) {
+      for (const m of text.matchAll(new RegExp(`\\b${alias[1].replace(/\$/g, '\\$')}\\??\\.([A-Za-z_$][\\w$]*)`, 'g'))) add(m[1]);
+    }
+  }
+  return [...keys].sort();
 }
 
 function chainHash() {
@@ -985,7 +1031,7 @@ function judgeRoute(entry, reviewed, opaqueMounts) {
   [...functions, ...middleware].forEach((item) => {
     analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
   });
-  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), hash: chainHash(), queryCustomer: readsCustomerFromQuery() };
+  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), hash: chainHash(), queryCustomer: readsCustomerFromQuery(), queryKeys: followedQueryKeys() };
   const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal));
   if (hard.length) return { safe: false, kind: 'review', reason: `scan: ${hard.join(', ')}`, ...scan };
   return { safe: true, ...scan };
@@ -1007,6 +1053,19 @@ function checkReview(fingerprint, row) {
   if (!same(row.signals, fingerprint.signals)) return 'review is stale: scan signals changed';
   if (!same(row.unresolved, fingerprint.unresolved)) return 'review is stale: unresolved callees changed';
   return null;
+}
+
+// What the scan saw must agree with the row: a handler that reads a customer id
+// from the query is not broad, and a listed query key must be one it reads.
+function assertRowMatchesScan(endpoint, row, verdicts) {
+  if (row.scope === 'broad' && verdicts.some(verdict => verdict.queryCustomer)) {
+    throw new Error(`admin-read-reviewed.json ${endpoint}: the handler reads a customer id from the query string, so the row must be scope "customer"`);
+  }
+  const seenKeys = new Set(verdicts.flatMap(verdict => verdict.queryKeys || []));
+  const unseen = (row.query || []).filter(key => !seenKeys.has(key));
+  if (unseen.length) {
+    throw new Error(`admin-read-reviewed.json ${endpoint}: query key(s) ${unseen.join(', ')} not read by the handler chain (the scan saw: ${[...seenKeys].join(', ') || 'none'})`);
+  }
 }
 
 // ── census → catalog ─────────────────────────────────────────────────────
@@ -1096,9 +1155,7 @@ function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
     const notAdmitted = checkReview(fingerprint, reviewed.reviewed.get(routeKey(endpoint)));
     if (notAdmitted) { excluded.review.push({ endpoint, reason: notAdmitted, fingerprint }); continue; }
     const row = reviewed.reviewed.get(routeKey(endpoint));
-    if (row.scope === 'broad' && verdicts.some(({ verdict }) => verdict.queryCustomer)) {
-      throw new Error(`admin-read-reviewed.json ${endpoint}: the handler reads a customer id from the query string, so the row must be scope "customer"`);
-    }
+    assertRowMatchesScan(endpoint, row, verdicts.map(({ verdict }) => verdict));
     admittedRoutes.push(...matches);
     const pattern = `/${uniqueParamNames(nameParams(segments, matches[0].match || matches[0])).join('/')}`;
     if (rules.denyReason(pattern)) { excluded.rule.push({ endpoint, reason: rules.denyReason(pattern) }); continue; }
@@ -1114,6 +1171,7 @@ function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
       scope: row.scope,
       ...(row.scope === 'broad' ? {} : { scopeParam: row.scopeParam }),
       ...(row.params && Object.keys(row.params).length ? { paramKinds: row.params } : {}),
+      query: [...(row.query || [])],
     });
   }
   const unique = new Map();
@@ -1191,7 +1249,7 @@ function main() {
       const normalized = `/${rules.splitPath(endpoint).map(seg => (rules.isParam(seg) ? ':param' : seg)).join('/')}`;
       const verdicts = matchRoutes(rules.splitPath(normalized), table).map(match => judgeRoute(match, reviewed, opaqueMounts));
       const hard = verdicts.filter(v => !v.safe).map(v => v.reason);
-      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, ...endpointFingerprint(verdicts) }));
+      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, queryKeys: [...new Set(verdicts.flatMap(v => v.queryKeys || []))].sort(), ...endpointFingerprint(verdicts) }));
     }
     return;
   }

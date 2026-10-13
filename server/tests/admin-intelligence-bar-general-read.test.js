@@ -74,6 +74,7 @@ jest.mock('../services/llm-dispatch-metrics', () => {
 const express = require('express');
 const config = require('../config');
 const logger = require('../services/logger');
+const { ADMIN_READ_HEADER } = require('../utils/redact-request-url');
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const intelligenceRouter = require('../routes/admin-intelligence-bar');
 
@@ -135,7 +136,7 @@ test('the owner login reads through the request token, and the token is stored a
   const seen = [];
   scriptModel([
     toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
-    (request) => { seen.push(request.tools.map(t => t.name)); return toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: 'abc-1' }, query: { limit: 5 } }); },
+    (request) => { seen.push(request.tools.map(t => t.name)); return toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: 'abc-1' } }); },
     { content: [{ type: 'text', text: 'The timeline has one visit.' }] },
   ]);
   await withServer(async (baseUrl) => {
@@ -149,7 +150,7 @@ test('the owner login reads through the request token, and the token is stored a
   expect(loopbackCalls).toHaveLength(1);
   expect(loopbackCalls[0].headers.Authorization).toBe(OWNER);
   expect(new URL(loopbackCalls[0].url).pathname).toBe(`/api${ENTRY.endpoint.replace(`:${ENTRY.params[0]}`, 'abc-1')}`);
-  expect(new URL(loopbackCalls[0].url).searchParams.get('limit')).toBe('5');
+  expect(loopbackCalls[0].headers[ADMIN_READ_HEADER]).toBe('1');
 
   const stored = JSON.stringify({
     inserts: mockInsert.mock.calls, events: mockToolEvent.mock.calls, checkpoints: mockCheckpoint.mock.calls,

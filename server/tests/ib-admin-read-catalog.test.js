@@ -111,7 +111,7 @@ describe('the scope of a reviewed row', () => {
     expect(() => validateReviewedRow(plain({ scope: 'broad' }))).not.toThrow();
     expect(() => validateReviewedRow(plain({ scope: 'broad', scopeParam: 'id' }))).toThrow(/no scopeParam/);
     expect(() => validateReviewedRow(plain({ scope: 'customer' }))).toThrow(/scopeParam must name/);
-    expect(() => validateReviewedRow(plain({ scope: 'customer', scopeParam: 'customerId' }))).not.toThrow();
+    expect(() => validateReviewedRow(plain({ scope: 'customer', scopeParam: 'customerId', query: ['customerId'] }))).not.toThrow();
   });
   test('a param kind is "text" and names a parameter of the pattern', () => {
     const named = extra => ({ ...row(extra), endpoint: '/admin/job-forms/templates/by-service/:serviceType', scope: 'broad' });
@@ -126,6 +126,29 @@ describe('the scope of a reviewed row', () => {
     const key = 'GET /admin/schedule/next-visit';
     const wrong = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), scope: 'broad', scopeParam: undefined });
     expect(() => buildCatalog({ reviewed: { exclude: full.exclude, reviewed: wrong } })).toThrow(/reads a customer id from the query string/);
+  });
+  test('a query list is a list of distinct key names, and a scope id read from the query must be in it', () => {
+    const plain = extra => ({ ...row(extra), endpoint: '/admin/payers', scope: 'broad' });
+    expect(() => validateReviewedRow(plain({ query: ['days', 'search'] }))).not.toThrow();
+    expect(() => validateReviewedRow(plain({ query: 'days' }))).toThrow(/list of distinct key names/);
+    expect(() => validateReviewedRow(plain({ query: ['days', 'days'] }))).toThrow(/list of distinct key names/);
+    expect(() => validateReviewedRow(plain({ query: ['a b'] }))).toThrow(/list of distinct key names/);
+    const nextVisit = extra => ({ ...row(extra), endpoint: '/admin/schedule/next-visit', scope: 'customer', scopeParam: 'customerId' });
+    expect(() => validateReviewedRow(nextVisit({}))).toThrow(/query list must include it/);
+    expect(() => validateReviewedRow(nextVisit({ query: ['customerId'] }))).not.toThrow();
+  });
+  test('the build fails when a row lists a query key the handler chain does not read', () => {
+    const full = loadReviewed();
+    const key = 'GET /admin/csr/overview';
+    const bad = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), query: ['days', 'email'] });
+    expect(() => buildCatalog({ reviewed: { exclude: full.exclude, reviewed: bad } })).toThrow(/query key\(s\) email not read by the handler chain/);
+    const ok = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), query: ['days'] });
+    expect(buildCatalog({ reviewed: { exclude: full.exclude, reviewed: ok } }).output.entries.find(entry => entry.endpoint === '/admin/csr/overview').query).toEqual(['days']);
+  });
+  test('a row with no query list forwards no query at all', () => {
+    expect(committed.entries.find(entry => entry.endpoint === '/admin/payers/ar-aging').query).toEqual([]);
+    expect(committed.entries.find(entry => entry.endpoint === '/admin/payers').query).toEqual(['includeInactive', 'search']);
+    for (const entry of committed.entries) expect(Array.isArray(entry.query)).toBe(true);
   });
   test('the build fails when a row does not use the catalog pattern', () => {
     const full = loadReviewed();
@@ -210,6 +233,12 @@ router.get('/inline-writes', async (req, res) => { const { loadThing } = require
 router.get('/chained-writes', async (req, res) => { res.json(await require('./fx-svc-writes').loadThing(req.query.id)); });
 router.get('/unresolved', async (req, res) => { res.json(await vendor.lookup(req.query.id)); });
 router.get('/signed', async (req, res) => { res.json({ url: await getSignedUrl(req.client, req.command) }); });
+module.exports = router;
+`,
+  'fx-router-query.js': `const express = require('express');
+const db = require('./fx-db');
+const router = express.Router();
+router.get('/keys', async (req, res) => { const { alpha, beta: renamed = 1 } = req.query; const gamma = req.query.gamma; const q = req.query; res.json(await db('things').where({ id: alpha, b: renamed, g: gamma, d: req.query['delta'], e: q.epsilon }).first()); });
 module.exports = router;
 `,
   'fx-callbacks.js': `const db = require('./fx-db');
@@ -305,6 +334,10 @@ module.exports = router;
       const reviewed = { exclude: new Map(), reviewed: new Map([[`GET /admin/fx${routePath}`, row]]) };
       expect({ routePath, safe: judgeRoute(entry, reviewed, []).safe }).toEqual({ routePath, safe: false });
     }
+  });
+
+  test('the query keys a handler reads are collected: dot, bracket, destructuring and an alias', () => {
+    expect(judgeIn('fx-router-query.js', '/keys').queryKeys).toEqual(['alpha', 'beta', 'delta', 'epsilon', 'gamma']);
   });
 
   test('a handler with an unresolvable call is not admitted until a row names exactly those callees', () => {

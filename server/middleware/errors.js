@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const logger = require('../services/logger');
-const { redactRequestUrl } = require('../utils/redact-request-url');
+const { redactRequestUrlFor } = require('../utils/redact-request-url');
 
 // req.body is logged on every unhandled error, and a key-based denylist kept
 // leaking PII through keys it didn't anticipate — admin SMS payloads
@@ -78,7 +78,7 @@ function redactSensitiveBody(value, depth = 0, seen = new WeakSet()) {
 function errorHandler(err, req, res, next) {
   // Public bearer tokens ride the PATH (/api/pay/<token>, …) — redact before
   // logging or the error log becomes a reusable-credential store.
-  logger.error(`${req.method} ${redactRequestUrl(req.originalUrl || req.path || '')}: ${err.message}`, {
+  logger.error(`${req.method} ${redactRequestUrlFor(req, req.originalUrl || req.path || '')}: ${err.message}`, {
     stack: err.stack,
     body: redactSensitiveBody(req.body),
   });

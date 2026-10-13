@@ -132,7 +132,7 @@ function redactRequestPath(rawPath) {
  * percent escapes cannot make the logger throw while handling a request.
  * Covers BOTH the query string and token-bearing path segments.
  */
-function redactRequestUrl(rawUrl) {
+function redactRequestUrl(rawUrl, { maskAllQuery = false } = {}) {
   if (typeof rawUrl !== 'string') return rawUrl;
   const queryStart = rawUrl.indexOf('?');
   if (queryStart < 0) return redactRequestPath(rawUrl);
@@ -140,7 +140,7 @@ function redactRequestUrl(rawUrl) {
   const fragmentStart = rawUrl.indexOf('#', queryStart + 1);
   const queryEnd = fragmentStart < 0 ? rawUrl.length : fragmentStart;
   const prefix = `${redactRequestPath(rawUrl.slice(0, queryStart))}?`;
-  const suffix = rawUrl.slice(queryEnd);
+  const suffix = maskAllQuery && fragmentStart >= 0 ? `#${REDACTED}` : rawUrl.slice(queryEnd);
   const query = rawUrl.slice(queryStart + 1, queryEnd);
 
   const redactedQuery = query.split('&').map((part) => {
@@ -149,6 +149,9 @@ function redactRequestUrl(rawUrl) {
     const rawValue = equals < 0 ? '' : part.slice(equals + 1);
     const decodedKey = decodeQueryPart(rawKey);
 
+    // Every value masked, keys kept. A part with no "=" is masked whole (it is
+    // a key and a value at once).
+    if (maskAllQuery) return equals < 0 ? REDACTED : `${rawKey}=${REDACTED}`;
     if (!isSensitiveQueryKey(decodedKey) && !looksLikeJwt(rawValue)) return part;
     return `${rawKey}=${REDACTED}`;
   }).join('&');
@@ -156,7 +159,30 @@ function redactRequestUrl(rawUrl) {
   return `${prefix}${redactedQuery}${suffix}`;
 }
 
+// The Intelligence Bar's general admin read (services/intelligence-bar/
+// admin-read-tools.js) sends its loopback GET with this header. The query
+// filters on it are chosen by the model and can hold a name, phone or email
+// the key-based rules above do not know ("email", "phone", "name"), so the
+// request logs mask EVERY query value for such a request. The header only
+// ever REDUCES what is logged: a caller who sends it themselves hides their
+// own query values from the log and gains nothing else.
+const ADMIN_READ_HEADER = 'x-ib-admin-read';
+
+function isAdminReadRequest(req) {
+  const value = req?.headers?.[ADMIN_READ_HEADER];
+  return (Array.isArray(value) ? value[0] : value) === '1';
+}
+
+// The request's URL as it may be logged: the redactor above, with every query
+// value masked when the request carries the admin-read marker.
+function redactRequestUrlFor(req, rawUrl = req?.originalUrl || req?.url || '') {
+  return redactRequestUrl(rawUrl, { maskAllQuery: isAdminReadRequest(req) });
+}
+
 module.exports = {
+  ADMIN_READ_HEADER,
+  isAdminReadRequest,
+  redactRequestUrlFor,
   REDACTED,
   isSensitiveQueryKey,
   redactRequestPath,

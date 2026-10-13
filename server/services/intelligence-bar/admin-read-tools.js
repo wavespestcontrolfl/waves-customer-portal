@@ -26,6 +26,7 @@
 const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
+const { ADMIN_READ_HEADER } = require('../../utils/redact-request-url');
 const { newState, redactSecrets, redactString } = require('../../utils/signed-link-redaction');
 const catalog = require('./admin-read-catalog.json');
 
@@ -56,7 +57,7 @@ Use for: "which screen shows X", "what can I read about Y", before any read_admi
   },
   {
     name: ADMIN_READ_DATA_TOOL,
-    description: `Read what an admin screen reads: one GET to a reviewed admin endpoint, as the logged-in owner, returning the JSON the screen gets (capped at 12,000 characters; long lists are cut to the first items with the total). Fallback only: use a purpose-built tool when one has the data. Call find_admin_reads first to get the exact endpoint pattern; pass it unchanged in "endpoint" (for example /admin/customers/:id/timeline) and give each :name in "params" (letters, digits, dot, dash, underscore; never a slash or a URL; a parameter the finder lists in text_params, such as a service name, may also hold spaces and punctuation up to 120 characters). Filters go in "query" as plain values. An endpoint that is not on the reviewed list is refused. Never tell the operator to open a screen for data this can read. It reads only; it cannot change anything.`,
+    description: `Read what an admin screen reads: one GET to a reviewed admin endpoint, as the logged-in owner, returning the JSON the screen gets (capped at 12,000 characters; long lists are cut to the first items with the total). Fallback only: use a purpose-built tool when one has the data. Call find_admin_reads first to get the exact endpoint pattern; pass it unchanged in "endpoint" (for example /admin/customers/:id/timeline) and give each :name in "params" (letters, digits, dot, dash, underscore; never a slash or a URL; a parameter the finder lists in text_params, such as a service name, may also hold spaces and punctuation up to 120 characters). Filters go in "query" as plain values, only the keys find_admin_reads lists as query_keys for that endpoint. An endpoint that is not on the reviewed list is refused. Never tell the operator to open a screen for data this can read. It reads only; it cannot change anything.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -66,7 +67,7 @@ Use for: "which screen shows X", "what can I read about Y", before any read_admi
           additionalProperties: { type: 'string', maxLength: 80 },
         },
         query: {
-          type: 'object', description: 'Optional filters sent as query-string values, e.g. { "status": "open", "limit": 25 }.',
+          type: 'object', description: 'Optional filters sent as query-string values. Only the keys find_admin_reads lists as query_keys for the endpoint are accepted, e.g. { "days": 30 }.',
           additionalProperties: { anyOf: [{ type: 'string', maxLength: 200 }, { type: 'number' }, { type: 'boolean' }] },
         },
       },
@@ -125,6 +126,7 @@ function findAdminReads(input) {
     : [];
   const matches = ranked.slice(0, MAX_MATCHES).map(({ entry }) => ({
     endpoint: entry.endpoint, params: entry.params, label: entry.label, screen: entry.screens.join(', '),
+    query_keys: [...(entry.query || [])],
     ...(entry.paramKinds ? { text_params: Object.keys(entry.paramKinds) } : {}),
   }));
   return {
@@ -144,6 +146,16 @@ function loopbackOrigin() {
   return Number.isInteger(port) && port > 0 && port < 65536 ? `http://${LOOPBACK_HOST}:${port}` : null;
 }
 
+function undeclaredQueryKeys(entry, query) {
+  if (query === undefined || query === null || typeof query !== 'object' || Array.isArray(query)) return null;
+  const allowed = entry.query || [];
+  const extra = Object.keys(query).filter(key => !allowed.includes(key));
+  if (!extra.length) return null;
+  return allowed.length
+    ? `Query key(s) not allowed for this endpoint: ${extra.slice(0, 5).join(', ')}. Allowed: ${allowed.join(', ')}.`
+    : 'This endpoint takes no query filters. Remove "query".';
+}
+
 // The catalog pattern, the filled path and the query string, or a refusal.
 function buildRequestPath(endpoint, input) {
   const entry = typeof endpoint === 'string' ? BY_ENDPOINT.get(endpoint) : null;
@@ -152,6 +164,10 @@ function buildRequestPath(endpoint, input) {
   }
   const filled = rules.fillPattern(entry.endpoint, input.params === undefined ? {} : input.params, entry.paramKinds || {});
   if (filled.error) return { refusal: refusal(filled.error, 'invalid_input') };
+  // Only the query keys the reviewed row declares are forwarded; the model
+  // cannot add a filter the review did not see the handler read.
+  const refused = undeclaredQueryKeys(entry, input.query);
+  if (refused) return { refusal: refusal(refused, 'invalid_input', { allowed_query: [...(entry.query || [])] }) };
   const search = rules.buildSearch(input.query);
   if (search.error) return { refusal: refusal(search.error, 'invalid_input') };
   const segments = rules.splitPath(filled.path);
@@ -290,7 +306,7 @@ async function fetchAdminRead(entry, path, search, authorization) {
   try {
     const response = await fetch(`${origin}/api${path}${search}`, {
       method: 'GET',
-      headers: { Authorization: authorization, Accept: 'application/json' },
+      headers: { Authorization: authorization, Accept: 'application/json', [ADMIN_READ_HEADER]: '1' },
       redirect: 'manual',
       signal: AbortSignal.timeout(READ_TIMEOUT_MS),
     });

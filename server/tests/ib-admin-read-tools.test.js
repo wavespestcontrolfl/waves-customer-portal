@@ -11,6 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const logger = require('../services/logger');
 const config = require('../config');
 const rules = require('../utils/admin-read-rules');
+const { ADMIN_READ_HEADER } = require('../utils/redact-request-url');
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const registry = require('../services/intelligence-bar/action-registry');
 const { executeAdminReadTool, MAX_RESULT_CHARS } = require('../services/intelligence-bar/admin-read-tools');
@@ -23,6 +24,7 @@ const FIND = 'find_admin_reads';
 
 const ONE_PARAM = catalog.entries.find(entry => entry.params.length === 1);
 const NO_PARAM = catalog.entries.find(entry => entry.params.length === 0);
+const QUERY_ENTRY = catalog.entries.find(entry => entry.endpoint === '/admin/payers');
 const ownerContext = (extra = {}) => ({ fullAccess: true, isAdmin: true, staffAuthorization: AUTH, ...extra });
 
 function jsonResponse(status, body, headers = { 'content-type': 'application/json; charset=utf-8' }) {
@@ -49,14 +51,15 @@ const callsOf = () => global.fetch.mock.calls;
 
 describe('the path builder', () => {
   test('fills a catalog pattern and sends one loopback GET with the request token', async () => {
-    const result = await read({ endpoint: ONE_PARAM.endpoint, params: { [ONE_PARAM.params[0]]: 'abc-123' }, query: { limit: 5, status: 'open', all: true } });
+    const result = await read({ endpoint: ONE_PARAM.endpoint, params: { [ONE_PARAM.params[0]]: 'abc-123' } });
     expect(result).toMatchObject({ status: 200, endpoint: ONE_PARAM.endpoint, data: { ok: true }, truncated: false });
     expect(callsOf()).toHaveLength(1);
     const [url, options] = callsOf()[0];
     const parsed = new URL(url);
     expect(parsed.origin).toBe(ORIGIN);
     expect(parsed.pathname).toBe(`/api${ONE_PARAM.endpoint.replace(`:${ONE_PARAM.params[0]}`, 'abc-123')}`);
-    expect(Object.fromEntries(parsed.searchParams)).toEqual({ limit: '5', status: 'open', all: 'true' });
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({});
+    expect(options.headers[ADMIN_READ_HEADER]).toBe('1');
     expect(options.method).toBe('GET');
     expect(options.headers.Authorization).toBe(AUTH);
     expect(options.redirect).toBe('manual');
@@ -119,11 +122,15 @@ describe('the path builder', () => {
     expect(callsOf()).toHaveLength(0);
   });
 
-  test('caps a query value at 200 characters and keeps filter keys such as a[b]', async () => {
-    await read({ endpoint: NO_PARAM.endpoint, query: { note: 'x'.repeat(500), 'filter[status]': 'open' } });
+  test('caps a query value at 200 characters', async () => {
+    await read({ endpoint: QUERY_ENTRY.endpoint, query: { search: 'x'.repeat(500), includeInactive: true } });
     const search = new URL(callsOf()[0][0]).searchParams;
-    expect(search.get('note')).toHaveLength(200);
-    expect(search.get('filter[status]')).toBe('open');
+    expect(search.get('search')).toHaveLength(200);
+    expect(search.get('includeInactive')).toBe('true');
+  });
+
+  test('keeps bracketed filter keys such as a[b] in the query builder', () => {
+    expect(rules.buildSearch({ 'filter[status]': 'open' })).toEqual({ search: '?filter%5Bstatus%5D=open' });
   });
 
   test('a parameter that looks like a host or a file name is refused, and the origin never moves', async () => {
@@ -483,7 +490,7 @@ describe('find_admin_reads', () => {
     expect(result.matches.length).toBeGreaterThan(0);
     expect(result.matches.length).toBeLessThanOrEqual(10);
     for (const match of result.matches) {
-      expect(Object.keys(match).sort()).toEqual(['endpoint', 'label', 'params', 'screen']);
+      expect(Object.keys(match).filter(key => key !== 'text_params').sort()).toEqual(['endpoint', 'label', 'params', 'query_keys', 'screen']);
       expect(catalog.entries.some(entry => entry.endpoint === match.endpoint)).toBe(true);
     }
     expect(callsOf()).toHaveLength(0);
@@ -762,5 +769,38 @@ describe('own-domain links and public token routes', () => {
     const handAdded = new Set(['og']);
     expect(PUBLIC_TOKEN_ROUTE_SEGMENTS.filter(segment => !derived.includes(segment) && !handAdded.has(segment))).toEqual([]);
     expect(index).toContain("app.use('/og'");
+  });
+});
+
+// Pre-push audit P1: the model chooses the query filters, and the loopback
+// request is logged. Only the keys the reviewed row declares are forwarded.
+describe('declared query keys', () => {
+  test('an undeclared key is refused with the allowed keys, and nothing is sent', async () => {
+    const result = await read({ endpoint: QUERY_ENTRY.endpoint, query: { search: 'ants', email: 'pat@example.test' } });
+    expect(result).toMatchObject({ code: 'invalid_input', allowed_query: ['includeInactive', 'search'] });
+    expect(result.error).toContain('email');
+    expect(result.error).toContain('Allowed: includeInactive, search');
+    expect(callsOf()).toHaveLength(0);
+  });
+  test('a declared key is forwarded', async () => {
+    await read({ endpoint: QUERY_ENTRY.endpoint, query: { search: 'ants' } });
+    expect(new URL(callsOf()[0][0]).searchParams.get('search')).toBe('ants');
+  });
+  test('an endpoint whose row declares no query forwards none', async () => {
+    const result = await read({ endpoint: NO_PARAM.endpoint, query: { status: 'open' } });
+    expect(result).toMatchObject({ code: 'invalid_input', allowed_query: [] });
+    expect(result.error).toMatch(/takes no query filters/);
+    expect(callsOf()).toHaveLength(0);
+    await read({ endpoint: NO_PARAM.endpoint, query: {} });
+    expect(callsOf()).toHaveLength(1);
+  });
+  test('find_admin_reads lists the allowed keys', async () => {
+    const result = await executeAdminReadTool(FIND, { query: 'payers' }, ownerContext());
+    const payers = result.matches.find(match => match.endpoint === QUERY_ENTRY.endpoint);
+    expect(payers.query_keys).toEqual(['includeInactive', 'search']);
+    expect(result.matches.find(match => match.endpoint === NO_PARAM.endpoint)?.query_keys ?? []).toEqual([]);
+  });
+  test('the id a customer-scoped read carries in the query is a declared key', () => {
+    expect(catalog.entries.find(entry => entry.endpoint === '/admin/schedule/next-visit').query).toEqual(['customerId']);
   });
 });
