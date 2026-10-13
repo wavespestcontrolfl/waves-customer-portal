@@ -341,8 +341,8 @@ function makeMoveGuard({ service, best, config = {} }) {
     // At most N automatic moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
-    // GATE_AUTO_DISPATCH_PROOFREADER: the preferences the move was scored on still stand.
-    await require('./proofreader/nightly').assertPreferencesUnchanged(trx, service, config, refuse);
+    // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
+    await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;

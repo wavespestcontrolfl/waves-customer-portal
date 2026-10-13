@@ -175,7 +175,7 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
     const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
-    return { answer, move, entry: entry || null };
+    return { answer, move, entry: entry || null, recordPrint: recordPrint(record) };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
@@ -220,8 +220,10 @@ const keyFor = (service) => noticeKey(service.id, toDateStr(service.scheduled_da
 // nobody is asked (Codex #6313 r12: a later run could get an allow and make
 // the move the person refused). A notice the system closed (the visit left
 // the placement) carries the resolved title and decides nothing.
-async function personHeld(conn, service) {
-  const row = await conn('notifications')
+async function personHeld(conn, service, { lock = false } = {}) {
+  const query = conn('notifications');
+  if (lock) query.forShare();
+  const row = await query
     .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [keyFor(service)])
     .whereNotNull('done_at')
@@ -311,7 +313,7 @@ async function checkMove({ service, best, run }, deps = {}) {
   }
   if (answer.verdict === 'allow') {
     state.allowed += 1;
-    return { allowed: true, audit: auditOf(answer) };
+    return { allowed: true, audit: auditOf(answer), recordPrint: asked.recordPrint };
   }
   if (answer.verdict === 'hold') {
     state.held += 1;
@@ -326,9 +328,10 @@ async function checkMove({ service, best, run }, deps = {}) {
 // The write options of an approved move: the slot the model read and no
 // other. The SLOT_TAKEN fallback would land a slot nobody checked, so a
 // checked move has none; a taken slot waits for the next run. `proofread`
-// reaches the unit mover's member guard (assertNotGrouped).
+// reaches the unit mover's member guard (assertNotGrouped), and with
+// `approvedRecordPrint` the move guard (assertStillApproved).
 function writeOptions(checked, fallback) {
-  return checked ? { alternateCandidates: [], proofread: true } : fallback;
+  return checked ? { alternateCandidates: [], proofread: true, approvedRecordPrint: checked.recordPrint || null } : fallback;
 }
 
 // A write refusal that says the visit or its customer changed while the
@@ -337,16 +340,41 @@ function changedDuringCheck(err, description) {
   return Object.assign(err, { supersededDuringCheck: description });
 }
 
-// apply.js makeMoveGuard, on the move transaction: the customer's stored day,
-// time and blackout preferences are hard rules, and a model call takes up to
-// two minutes. They are read again FOR SHARE and compared with the ones the
-// move was scored on (Codex #6313 r15, r17). Only a proofread move is asked.
-async function assertPreferencesUnchanged(trx, service, config, refuse) {
-  if (config.proofread !== true || !config.prefs) return;
-  const { getCustomerSchedulingPreferences } = require('../preferences');
-  const now = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, trx, { lock: true });
-  if (preferencesPrint(now) !== preferencesPrint(config.prefs)) {
-    throw changedDuringCheck(refuse(service.id, 'has new customer scheduling preferences since the move was checked'), 'The customer\'s scheduling preferences changed while the move was checked');
+// apply.js makeMoveGuard, on the move transaction and before the write: what
+// the approval stood on still stands. A model call takes up to two minutes
+// and the reads after it are not atomic with the write, so each is made once
+// more here (Codex #6313 r15 to r18). Only a proofread move is asked.
+//   1. The customer's stored day, time and blackout preferences (hard rules)
+//      are the ones the move was scored on. The preference writers' own
+//      advisory lock is tried first, so a first row cannot be inserted
+//      meanwhile; a writer holding it means a change is under way. Tried,
+//      never waited on: the move already holds the visit's row.
+//   2. No person marked the visit's notice done.
+//   3. The customer record is the one the model was shown.
+// A difference refuses the move as superseded. A read that fails throws an
+// ordinary error: the move fails closed and the run reports it.
+async function assertStillApproved(trx, service, config, refuse) {
+  if (config.proofread !== true) return;
+  const superseded = (why, description) => changedDuringCheck(refuse(service.id, why), description);
+  const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['property-preferences', String(service.customer_id)]);
+  if (!(lock && lock.rows && lock.rows[0] && lock.rows[0].locked === true)) {
+    throw superseded('has its customer preferences open for a change', 'The customer\'s scheduling preferences were being changed while the move was checked');
+  }
+  if (config.prefs) {
+    const { getCustomerSchedulingPreferences } = require('../preferences');
+    const now = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, trx, { lock: true });
+    if (preferencesPrint(now) !== preferencesPrint(config.prefs)) {
+      throw superseded('has new customer scheduling preferences since the move was checked', 'The customer\'s scheduling preferences changed while the move was checked');
+    }
+  }
+  if (await personHeld(trx, service, { lock: true })) {
+    throw superseded('has a held-move notice a person marked done', 'A person marked the held-move notice done while the move was checked');
+  }
+  if (!config.approvedRecordPrint) return;
+  const again = await require('./index').buildCustomerRecord(trx, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
+  if (readFailed(again)) throw new Error(`service ${service.id}: the customer record could not be read before the move`);
+  if (recordPrint(again) !== config.approvedRecordPrint) {
+    throw superseded('has a customer record that changed since the move was checked', 'The customer record changed while the move was checked');
   }
 }
 
@@ -563,6 +591,6 @@ function tallyOf(state) {
 }
 
 module.exports = {
-  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, assertPreferencesUnchanged, preferencesPrint, dropNotice, approvedSlotTaken, closeNotices, raiseNotices, statusAfterNotices, tallyOf,
+  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, assertStillApproved, preferencesPrint, dropNotice, approvedSlotTaken, closeNotices, raiseNotices, statusAfterNotices, tallyOf,
   _internals: { whyFor, detailFor, plannedMove },
 };

@@ -129,7 +129,7 @@ describe('checkMove', () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks', reason: 'Nothing limits the day.' }));
     expect(got).toEqual({
-      allowed: true, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
+      allowed: true, recordPrint: expect.any(String), audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
     });
     expect(run.proofreader).toMatchObject({ calls: 1, allowed: 1, held: 0, unsure: 0 });
     expect(run.proofreader.notices.size).toBe(0);
@@ -308,7 +308,7 @@ describe('checkMove', () => {
 describe('the write of a checked move', () => {
   const fallback = { alternateCandidates: ['a', 'b'], rescore: () => {} };
   test('a checked move lands on the approved slot only: no alternates, no re-evaluation', () => {
-    expect(nightly.writeOptions({ allowed: true }, fallback)).toEqual({ alternateCandidates: [], proofread: true });
+    expect(nightly.writeOptions({ allowed: true, recordPrint: 'p1' }, fallback)).toEqual({ alternateCandidates: [], proofread: true, approvedRecordPrint: 'p1' });
   });
 
   test('a visit that joined a stop of two or more after the check is refused at the write', () => {
@@ -319,33 +319,71 @@ describe('the write of a checked move', () => {
     expect(() => nightly.assertNotGrouped([{ id: 's1' }, { id: 's2' }], undefined, refuse, 's1')).not.toThrow();
   });
 
-  describe('the customer\'s stored preferences at the write', () => {
+  describe('the move transaction asks once more that the approval still stands', () => {
     const refuse = (id, why) => new Error(`${id} ${why}`);
-    const prefs = { preferred_day_indexes: [], blackout: null };
-    const trxOf = (row) => {
-      const calls = [];
-      const chain = { where: () => chain, forShare: () => { calls.push('forShare'); return chain; }, first: async () => row };
-      return Object.assign(() => chain, { calls });
-    };
     const scored = () => require('../services/auto-dispatch/preferences').normalizePreferences(undefined, SERVICE.service_type);
+    // The move transaction: the advisory lock, the preference row, the notice row.
+    const trxOf = ({ locked = true, prefsRow, notice = null } = {}) => {
+      const calls = [];
+      const trx = (table) => {
+        const chain = {
+          where: () => chain, whereRaw: () => chain, whereNotNull: () => chain, whereNot: () => chain,
+          forShare: () => { calls.push(`forShare:${table}`); return chain; },
+          first: async () => (table === 'notifications' ? notice : prefsRow),
+        };
+        return chain;
+      };
+      trx.raw = async (sql, bindings) => { calls.push(['raw', sql, bindings]); return { rows: [{ locked }] }; };
+      trx.calls = calls;
+      return trx;
+    };
+    const proofreaderIndex = require('../services/auto-dispatch/proofreader');
+    const approved = () => ({ proofread: true, prefs: scored(), approvedRecordPrint: null });
+    const guard = (trx, config = approved()) => nightly.assertStillApproved(trx, SERVICE, config, refuse);
+    const superseded = (err) => nightly.approvedSlotTaken({ allowed: true }, err);
+    afterEach(() => jest.restoreAllMocks());
 
-    test('unchanged: the move goes on, and the row was read FOR SHARE on the move transaction', async () => {
-      const trx = trxOf(undefined);
-      await expect(nightly.assertPreferencesUnchanged(trx, SERVICE, { proofread: true, prefs: scored() }, refuse)).resolves.toBeUndefined();
-      expect(trx.calls).toEqual(['forShare']);
+    test('nothing changed: the move goes on; the preference writers\' lock was tried and both rows read FOR SHARE', async () => {
+      const trx = trxOf();
+      await expect(guard(trx)).resolves.toBeUndefined();
+      expect(trx.calls[0]).toEqual(['raw', expect.stringContaining('pg_try_advisory_xact_lock'), ['property-preferences', 'c1']]);
+      expect(trx.calls.slice(1)).toEqual(['forShare:property_preferences', 'forShare:notifications']);
     });
 
-    test('a new preferred day since the check refuses the move as superseded, not as a failure', async () => {
-      const trx = trxOf({ preferred_day: 'tuesday' });
-      const err = await nightly.assertPreferencesUnchanged(trx, SERVICE, { proofread: true, prefs: scored() }, refuse).catch((e) => e);
-      expect(err.message).toMatch(/new customer scheduling preferences/);
-      expect(nightly.approvedSlotTaken({ allowed: true }, err)).toEqual({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked' });
+    test('a preference writer holds the lock: superseded, nothing is waited on', async () => {
+      const err = await guard(trxOf({ locked: false })).catch((e) => e);
+      expect(superseded(err)).toMatchObject({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: expect.stringContaining('were being changed') });
+    });
+
+    test('a new preferred day since the check: superseded, not a failure', async () => {
+      const err = await guard(trxOf({ prefsRow: { preferred_day: 'tuesday' } })).catch((e) => e);
+      expect(superseded(err)).toEqual({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked' });
+    });
+
+    test('a person marked the notice done after the last read: superseded', async () => {
+      const err = await guard(trxOf({ notice: { id: 'n9' } })).catch((e) => e);
+      expect(superseded(err)).toMatchObject({ reason_description: 'A person marked the held-move notice done while the move was checked' });
+    });
+
+    test('the customer record is built again on the transaction: a new entry is superseded, the same record passes', async () => {
+      const build = jest.spyOn(proofreaderIndex, 'buildCustomerRecord');
+      const print = async () => { const run = runOf(); return (await check(run, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }))).recordPrint; };
+      const config = { ...approved(), approvedRecordPrint: await print() };
+      build.mockResolvedValue(RECORD);
+      await expect(guard(trxOf(), config)).resolves.toBeUndefined();
+      build.mockResolvedValue({ ...RECORD, entries: [...RECORD.entries, { id: 'E2', channel: 'text', from: 'customer', at: 'now', text: 'Not Thursday.' }] });
+      expect(superseded(await guard(trxOf(), config).catch((e) => e))).toMatchObject({ reason_description: 'The customer record changed while the move was checked' });
+      // A record that cannot be read is a failure the run reports, never "superseded".
+      build.mockResolvedValue({ ...RECORD, unread: [{ channel: 'text', reason: 'read_failed' }] });
+      expect(superseded(await guard(trxOf(), config).catch((e) => e))).toBeNull();
     });
 
     test('a move that was not proofread reads nothing', async () => {
       const trx = jest.fn();
-      await nightly.assertPreferencesUnchanged(trx, SERVICE, { prefs }, refuse);
+      trx.raw = jest.fn();
+      await nightly.assertStillApproved(trx, SERVICE, { prefs: scored() }, refuse);
       expect(trx).not.toHaveBeenCalled();
+      expect(trx.raw).not.toHaveBeenCalled();
     });
   });
 
