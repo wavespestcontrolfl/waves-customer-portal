@@ -190,7 +190,10 @@ function noteFor(status, changed, given, result) {
   if (status === STATUSES.NOT_ATTEMPTED || status === STATUSES.API_UNAVAILABLE) {
     return 'The address could NOT be verified. Say so, and ask the operator for the ZIP and the exact spelling. Do not guess a ZIP or fix the spelling yourself.';
   }
-  const usable = status === STATUSES.VALIDATED_ACCEPT || status === STATUSES.CORRECTED;
+  // An incompletely read unit withholds the save instruction: the advice
+  // line below says to read the full unit back first.
+  const matched = status === STATUSES.VALIDATED_ACCEPT || status === STATUSES.CORRECTED;
+  const usable = matched && !given.unitIncomplete;
   const unitUnverified = unitUnverifiedAfterCorrection(status, given);
   const context = { status, changed, given, result };
   const parts = [];
@@ -200,6 +203,7 @@ function noteFor(status, changed, given, result) {
   if (unitUnverified) parts.push(`Google replaced part of this address, and it cannot be told whether the unit "${given.unit}" was among the replaced parts. Do not save yet: read the normalized address AND the unit back to the operator and ask if both are right before saving.`);
   else if (status === STATUSES.CORRECTED && !changed.some(c => c.input)) parts.push('Google replaced part of this address but the replaced part cannot be shown here (it may be the unit). Do not save yet: read the normalized address and the unit back to the operator and ask if both are right.');
   else if (usable) parts.push('Save Google\'s normalized spelling, city and ZIP, not the input.');
+  else if (matched) parts.push('Google matched the street, city and ZIP.');
   else if (status === STATUSES.OUT_OF_SERVICE_AREA) parts.push('Tell the operator it is outside the service area, and save nothing until they decide.');
   else parts.push('Do not save this address yet. Show the operator what Google returned and what is missing or unconfirmed, and ask.');
   for (const [applies, text] of ADVICE) if (applies(context)) parts.push(text(context));

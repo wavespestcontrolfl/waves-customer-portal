@@ -361,6 +361,8 @@ describe('check_address round 2 cases', () => {
       expect(out.unit_incomplete).toBe(true);
       expect(out.note).toMatch(/more unit parts/);
       expect(out.note).not.toMatch(/keep "/);
+      expect(out.note).not.toMatch(/^Save |Save Google/);
+      expect(out.note).toMatch(/Do not save yet/);
     }
   });
   test.each(['100 Example Way, Bldg 2 Apt 4, Sarasota, FL 34236', '100 Example Way Apt 4, Sarasota, FL 34236', '100 Example Way #12, Sarasota, FL 34236', '100 Example Way, Sarasota, FL 34236',
