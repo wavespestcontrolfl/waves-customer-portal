@@ -16,7 +16,7 @@
  * paid for. A run asks at most config.proofreaderMaxCalls times; past that a
  * move waits for the next run.
  *
- * THE NOTICE. One per visit (or grouped stop) and date (dedupe key below), written once: a
+ * THE NOTICE. One per visit (or grouped stop) and placement (dedupe key below), written once: a
  * later run that is still unsure about the same visit writes nothing, a
  * notice a person marked done included. It is raised for an "unknown" a
  * person can settle from the record (the model was unsure, or part of the
@@ -59,7 +59,13 @@ const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'schedu
 const OPEN_STATUSES = ['pending', 'confirmed'];
 const textOrNull = (value) => (value == null || value === '' ? null : String(value));
 
-const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
+// One notice per visit (or grouped stop) and PLACEMENT: the date, and the
+// arrival time and technician (a stop: a short print of every member's). A
+// notice closed because the placement changed must not swallow an unsure
+// move on the new placement (Codex #6313 r5); on the same placement the key
+// repeats, so a notice a person marked done is not written again.
+const noticeKey = (id, date, placement) => `${KEY_PREFIX}${id}:${date}:${placement}`;
+const shortPrint = (text) => require('crypto').createHash('sha256').update(text).digest('hex').slice(0, 12);
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 
 // The run's own tally and the notices it will raise at its end.
@@ -173,6 +179,8 @@ async function ask({ service, best }, { conn, proofreader, state }) {
 // What the model was shown, as one comparable value.
 function recordPrint(record) {
   const hash = require('crypto').createHash('sha256');
+  // The services at the stop are part of what the model judged (r5).
+  hash.update(`${(record.serviceTypes || []).join('|')}\n`);
   for (const row of record.entries) hash.update(`${row.channel}|${row.from}|${row.at}|${row.text}\n`);
   return `${record.entries.length}:${record.unread.length}:${hash.digest('hex')}`;
 }
@@ -193,7 +201,9 @@ function collectNotice(state, service, { answer, move, entry, stop }) {
   const date = toDateStr(service.scheduled_date);
   // A grouped stop is one notice, whichever member the run tried to move: two
   // members that both qualify describe the same stop (Codex #6313 r3).
-  const key = noticeKey(stop && service.visit_id ? `visit-${service.visit_id}` : service.id, date);
+  const key = stop && service.visit_id
+    ? noticeKey(`visit-${service.visit_id}`, date, shortPrint(stop))
+    : noticeKey(service.id, date, `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
   if (!date || state.notices.has(key)) return;
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,

@@ -129,6 +129,21 @@ describe('checkMove', () => {
     expect(same.proofreadMove).toHaveBeenCalledTimes(1);
   });
 
+  test('a service changed at the stop while the model read: the allow does not stand', async () => {
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    proofreader.buildCustomerRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce({ ...RECORD, serviceTypes: ['Lawn Care'] });
+    expect(await check(runOf(), proofreader)).toMatchObject({ allowed: false, audit: { why: 'record_changed' } });
+  });
+
+  test('an unsure move on a new placement of the same visit and date is a new notice', async () => {
+    const run = runOf();
+    const proofreader = proofreaderOf({ verdict: 'unknown', why: 'model_unsure' });
+    await check(run, proofreader);
+    await nightly.checkMove({ service: { ...SERVICE, window_start: '13:00' }, best: BEST, run }, { conn: conn(), proofreader });
+    await nightly.checkMove({ service: { ...SERVICE, window_start: '13:00' }, best: BEST, run }, { conn: conn(), proofreader });
+    expect([...run.proofreader.notices.keys()]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1', 'auto-dispatch-proofreader:s1:2026-10-20:13:00:t1']);
+  });
+
   test('hold: the visit stays, no notice, and the quote never reaches the audit', async () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'hold', why: 'quoted_statement', entry_id: 'E1', quote: 'never come on Thursdays', reason: 'Thursday breaks it.' }));
@@ -142,7 +157,7 @@ describe('checkMove', () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'unknown', why }));
     expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { verdict: 'unknown', why } });
-    expect([...run.proofreader.notices.keys()]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20']);
+    expect([...run.proofreader.notices.keys()]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1']);
   });
 
   test.each(['model_failed', 'bad_answer'])('unknown (%s): the visit stays and no notice is collected (the next run asks again)', async (why) => {
@@ -272,7 +287,7 @@ describe('raiseNotices', () => {
     expect(title).toBe("Schedule — check a held move of Pat Sample's visit");
     expect(body).toBe('Move from Oct 20 to Oct 22 held; the record says “never come on Thursdays”');
     expect(opts).toMatchObject({
-      bell: true, dedupeKey: 'auto-dispatch-proofreader:s1:2026-10-20', link: '/admin/dispatch?tab=schedule&date=2026-10-20&appointment=s1',
+      bell: true, dedupeKey: 'auto-dispatch-proofreader:s1:2026-10-20:09:00:t1', link: '/admin/dispatch?tab=schedule&date=2026-10-20&appointment=s1',
       metadata: { scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-10-20', windowStart: '09:00', technicianId: 't1', kind: 'model_unsure', proposedDate: '2026-10-22' },
     });
     // Written once: a later run that is still unsure must not reopen a notice a person closed.
@@ -350,7 +365,7 @@ describe('raiseNotices', () => {
     };
     expect(await nightly.raiseNotices(await collect(), { conn: stopConn(members) })).toBe(1);
     // One notice for the stop, keyed by the stop: a second member held in the same run adds none.
-    expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-proofreader:visit-v1:2026-10-20');
+    expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toMatch(/^auto-dispatch-proofreader:visit-v1:2026-10-20:[0-9a-f]{12}$/);
     const both = runOf();
     for (const id of ['s1', 's2']) {
       await nightly.checkMove({ service: { ...SERVICE, id, visit_id: 'v1' }, best: BEST, run: both }, { conn: stopConn(members), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
