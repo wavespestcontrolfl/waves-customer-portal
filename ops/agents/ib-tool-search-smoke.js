@@ -35,8 +35,9 @@
  *   railway run node ops/agents/ib-tool-search-smoke.js --execute --discover-shape
  * --discover-shape is a different two-request run: call 1 forces
  * discover_capabilities; call 2 answers it with the tool_result the ROUTE would
- * build (toolResultContent: the JSON text, then a tool_reference for a found
- * tool that is deferred in the list), with the same tools and no tool_choice.
+ * build (toolResultContent: tool_reference blocks ONLY, up to 5, for the found
+ * tools that are deferred in the list; the JSON string when the result also
+ * holds an owner-workflow action), with the same tools and no tool_choice.
  * It prints whether the model then called or named that tool.
  * Without --execute it prints the tools shape (counts, no API call).
  */
@@ -117,7 +118,7 @@ function discoverRequest(first, tools) {
   const call = first.content.find((block) => block.type === 'tool_use' && block.name === 'discover_capabilities');
   const result = ActionRegistry.discover({ query: DISCOVER_QUERY }, { role: 'admin', context: 'dashboard', fullAccess: true }).result;
   const content = toolResultContent('discover_capabilities', result, tools, true);
-  console.log(`discover answer content: ${Array.isArray(content) ? content.map((part) => (part.type === 'text' ? 'text' : `reference:${part.tool_name}`)).join(', ') : 'string (no deferred tool found)'}`);
+  console.log(`discover answer content: ${Array.isArray(content) ? content.map((part) => `reference:${part.tool_name}`).join(', ') : 'JSON string (no references)'}`);
   return {
     tools,
     messages: [

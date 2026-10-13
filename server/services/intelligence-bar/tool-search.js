@@ -124,15 +124,19 @@ const asBlocks = content => (typeof content === 'string' ? [{ type: 'text', text
 const isThinkingBlock = block => block?.type === 'thinking' || block?.type === 'redacted_thinking';
 const withoutThinking = content => asBlocks(content).filter(block => !isThinkingBlock(block));
 
-// A tool_result whose content was the JSON text plus references goes back to
-// the plain JSON string it was before the references were added, so the resume
-// code that reads discovered names from that string still works. The text
-// block is always there; the fallback only keeps the content non-empty.
+// A tool_result on the search path holds tool_reference blocks ONLY (never
+// mixed with other content, see toolResultContent). On a resume the references
+// cannot stay (the resumed list is the ordinary one), so the result becomes a
+// short text naming what was found, so the resumed model still knows. The
+// resume code that reads discovered names from a discover result does a
+// JSON.parse inside a try, so this text is skipped by it without throwing; the
+// tools the history CALLED are loaded from the tool_use blocks.
 const NO_RESULT_TEXT = 'The saved result had no text.';
 function withoutReferences(block) {
   if (block?.type !== 'tool_result' || !Array.isArray(block.content) || !block.content.some(isReference)) return block;
   const rest = block.content.filter(part => !isReference(part));
-  if (rest.length === 0) return { ...block, content: NO_RESULT_TEXT };
+  const names = block.content.filter(isReference).map(part => part.tool_name).filter(Boolean);
+  if (rest.length === 0) return { ...block, content: names.length ? `Tools found: ${names.join(', ')}.` : NO_RESULT_TEXT };
   return { ...block, content: rest.length === 1 && rest[0].type === 'text' ? rest[0].text : rest };
 }
 
@@ -183,20 +187,33 @@ function hasPendingServerSearch(messages) {
 // parameter, normally with `defer_loading: true`." So on the search path the
 // `tools` array NEVER changes during a request (the continuation needs the same
 // tools): a found tool that is deferred in `tools` is expanded by the API from
-// a reference in this result. The content is the JSON text block first, then
-// one reference per found capability that is a deferred tool in `tools`; an
-// eager tool, an owner-workflow action (not a tool) and a name absent from
-// `tools` get none. Only the JSON text is ever stored or logged: callers keep
-// `result` for that. Without references (or off the search path) the content is
-// the plain JSON string, as before.
+// a reference in this result.
+//
+// References are NEVER mixed with other content. The live API answers a
+// tool_result that holds both with 400 "Tool definitions/code execution
+// functions cannot be mixed with other content" (smoke run, --discover-shape).
+// So the content is one of two forms:
+//  - references ONLY, when every capability the model has to READ is already a
+//    tool: the deferred ones found, in discover()'s ranking order, at most
+//    MAX_DISCOVER_REFERENCES. An eager tool needs no reference (its definition
+//    is already in context), and a name absent from `tools` gets none.
+//  - the plain JSON string otherwise: when the result holds any capability that
+//    is not a loaded tool (an owner-workflow action, availability
+//    `requires_existing_owner_workflow`), the model must read that answer, so it
+//    gets the JSON and no references. The deferred tools named in that JSON are
+//    then reached through the server tool search by name (the prompt line says
+//    to search). Off the search path the content is always the JSON string.
+// Only the JSON text is ever stored or logged: callers keep `result` for that.
+const MAX_DISCOVER_REFERENCES = 5;
 function toolResultContent(toolName, result, tools, toolSearch) {
   const text = JSON.stringify(result);
   if (!toolSearch || toolName !== ActionRegistry.DISCOVERY_TOOL.name) return text;
+  const capabilities = Array.isArray(result?.capabilities) ? result.capabilities : [];
+  if (capabilities.some(capability => capability?.availability !== 'loaded')) return text;
   const deferred = new Set(tools.filter(tool => tool.defer_loading === true).map(tool => tool.name));
-  const references = (Array.isArray(result?.capabilities) ? result.capabilities : [])
-    .filter(capability => capability?.availability === 'loaded' && deferred.has(capability.id))
+  const references = capabilities.filter(capability => deferred.has(capability.id))
     .map(capability => ({ type: 'tool_reference', tool_name: capability.id }));
-  return references.length ? [{ type: 'text', text }, ...references] : text;
+  return references.length ? references.slice(0, MAX_DISCOVER_REFERENCES) : text;
 }
 
 // Text added after client tool results ends the assistant turn. While a

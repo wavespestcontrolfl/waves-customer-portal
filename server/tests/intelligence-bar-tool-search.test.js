@@ -239,21 +239,186 @@ describe('withTurnEndingText', () => {
 describe('toolResultContent (discover_capabilities on the search path)', () => {
   const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map(([id, availability]) => ({ id, availability })) });
   const tools = [{ name: 'eager_tool' }, { name: 'deferred_tool', defer_loading: true }, { name: 'other_deferred', defer_loading: true }];
+  const many = Array.from({ length: 8 }, (_, i) => ({ name: `deferred_${i}`, defer_loading: true }));
 
-  test('a found deferred tool gets a reference after the JSON text block', () => {
-    const result = found(['deferred_tool', 'loaded']);
-    const content = ToolSearch.toolResultContent('discover_capabilities', result, tools, true);
-    expect(content).toEqual([{ type: 'text', text: JSON.stringify(result) }, { type: 'tool_reference', tool_name: 'deferred_tool' }]);
+  test('a result made only of tools returns tool_reference blocks ONLY, never mixed with text', () => {
+    const content = ToolSearch.toolResultContent('discover_capabilities', found(['deferred_tool', 'loaded']), tools, true);
+    expect(content).toEqual([{ type: 'tool_reference', tool_name: 'deferred_tool' }]);
   });
 
-  test('an eager tool, an owner-workflow action and a name absent from tools get no reference', () => {
-    const result = found(['eager_tool', 'loaded'], ['request_instant_payout', 'requires_existing_owner_workflow'], ['not_in_tools', 'loaded']);
+  test('the references keep discover()\'s ranking order and stop at five', () => {
+    const result = found(...many.map(tool => [tool.name, 'loaded']));
+    const content = ToolSearch.toolResultContent('discover_capabilities', result, many, true);
+    expect(content.map(part => part.tool_name)).toEqual(['deferred_0', 'deferred_1', 'deferred_2', 'deferred_3', 'deferred_4']);
+    expect(content.every(part => part.type === 'tool_reference')).toBe(true);
+    const reversed = found(['other_deferred', 'loaded'], ['deferred_tool', 'loaded']);
+    expect(ToolSearch.toolResultContent('discover_capabilities', reversed, tools, true).map(part => part.tool_name)).toEqual(['other_deferred', 'deferred_tool']);
+  });
+
+  test('eager tools need no reference: they are skipped, the deferred ones are referenced', () => {
+    const content = ToolSearch.toolResultContent('discover_capabilities', found(['eager_tool', 'loaded'], ['deferred_tool', 'loaded']), tools, true);
+    expect(content).toEqual([{ type: 'tool_reference', tool_name: 'deferred_tool' }]);
+    const result = found(['eager_tool', 'loaded'], ['not_in_tools', 'loaded']);
     expect(ToolSearch.toolResultContent('discover_capabilities', result, tools, true)).toBe(JSON.stringify(result));
   });
 
-  test('several found tools each get one reference, in order', () => {
-    const content = ToolSearch.toolResultContent('discover_capabilities', found(['other_deferred', 'loaded'], ['deferred_tool', 'loaded']), tools, true);
-    expect(content.slice(1).map(part => part.tool_name)).toEqual(['other_deferred', 'deferred_tool']);
+  test('a result that also holds an owner-workflow action is the JSON string, with no references', () => {
+    const result = found(['deferred_tool', 'loaded'], ['request_instant_payout', 'requires_existing_owner_workflow']);
+    const content = ToolSearch.toolResultContent('discover_capabilities', result, tools, true);
+    expect(content).toBe(JSON.stringify(result));
+    expect(typeof content).toBe('string');
+  });
+
+  test('off the search path, for another tool, or for an error result: the plain JSON string', () => {
+    const result = found(['deferred_tool', 'loaded']);
+    expect(ToolSearch.toolResultContent('discover_capabilities', result, tools, false)).toBe(JSON.stringify(result));
+    expect(ToolSearch.toolResultContent('query_customers', result, tools, true)).toBe(JSON.stringify(result));
+    expect(ToolSearch.toolResultContent('discover_capabilities', { error: 'x', code: 'invalid_input' }, tools, true)).toBe('{"error":"x","code":"invalid_input"}');
+  });
+});
+
+describe('stripServerSearchBlocks and tool_reference blocks in tool_result content', () => {
+  const call = { type: 'tool_use', id: 'toolu_d', name: 'discover_capabilities', input: { query: 'q' } };
+  const ref = tool_name => ({ type: 'tool_reference', tool_name });
+  const messages = content => [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d', content }] }];
+
+  test('a references-only result becomes a short "Tools found" text; the input is not mutated', () => {
+    const input = messages([ref('get_review_stats'), ref('draft_review_reply')]);
+    const before = JSON.stringify(input);
+    const out = ToolSearch.stripServerSearchBlocks(input);
+    expect(out[2].content).toEqual([{ type: 'tool_result', tool_use_id: 'toolu_d', content: 'Tools found: get_review_stats, draft_review_reply.' }]);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(out[1]).toBe(input[1]);
+  });
+
+  test('the resume code that reads discovered names does not throw on that text', () => {
+    const text = ToolSearch.stripServerSearchBlocks(messages([ref('a'), ref('b')]))[2].content[0].content;
+    // Same shape as the route: JSON.parse inside a try, falling back to [].
+    const names = (() => { try { return JSON.parse(text)?.capabilities || []; } catch { return []; } })();
+    expect(names).toEqual([]);
+  });
+
+  test('a tool_result left with no names and no text gets a short text, never an empty array', () => {
+    const content = ToolSearch.stripServerSearchBlocks(messages([{ type: 'tool_reference' }]))[2].content[0].content;
+    expect(typeof content).toBe('string');
+    expect(content.length).toBeGreaterThan(0);
+  });
+
+  test('a history with a plain string result has nothing to strip: same array', () => {
+    const plain = messages('{}');
+    expect(ToolSearch.stripServerSearchBlocks(plain)).toBe(plain);
+  });
+});
+
+// Codex round 8: a signed thinking block inside a rewritten assistant turn is rejected.
+describe('stripServerSearchBlocks and thinking blocks', () => {
+  const search = [
+    { type: 'server_tool_use', id: 'srvtoolu_t1', name: 'tool_search_tool_bm25', input: { query: 'x' } },
+    { type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_t1', content: { type: 'tool_search_tool_search_result', tool_references: [] } },
+  ];
+  const thinking = { type: 'thinking', thinking: 'plan', signature: 'sig' };
+  const redacted = { type: 'redacted_thinking', data: 'opaque' };
+
+  test('a rewritten assistant message loses its thinking blocks', () => {
+    const messages = [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: [thinking, redacted, ...search, { type: 'text', text: 'answer' }] },
+    ];
+    const out = ToolSearch.stripServerSearchBlocks(messages);
+    expect(out[1].content).toEqual([{ type: 'text', text: 'answer' }]);
+    expect(messages[1].content).toHaveLength(5);
+  });
+
+  test('an untouched assistant message keeps its thinking blocks, by identity', () => {
+    const untouched = { role: 'assistant', content: [thinking, { type: 'tool_use', id: 'toolu_1', name: 'a', input: {} }] };
+    const messages = [
+      { role: 'user', content: 'q' }, untouched,
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] },
+      { role: 'assistant', content: [...search, { type: 'text', text: 'done' }] },
+    ];
+    expect(ToolSearch.stripServerSearchBlocks(messages)[1]).toBe(untouched);
+  });
+
+  test('a message that held only thinking and search blocks is dropped', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search] }, { role: 'user', content: 'more' }];
+    const out = ToolSearch.stripServerSearchBlocks(messages);
+    expect(out).toHaveLength(1);
+    expect(out[0].role).toBe('user');
+  });
+});
+
+describe('hasPendingServerSearch', () => {
+  const use = id => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'q' } });
+  const res = id => ({ type: 'tool_search_tool_result', tool_use_id: id, content: { type: 'tool_search_tool_search_result', tool_references: [] } });
+  const msgs = (...blocks) => [{ role: 'user', content: 'q' }, { role: 'assistant', content: blocks }];
+
+  test('a call without a result is pending until a result with its id appears, even in a later message', () => {
+    expect(ToolSearch.hasPendingServerSearch(msgs(use('s1')))).toBe(true);
+    expect(ToolSearch.hasPendingServerSearch(msgs(use('s1'), res('s1')))).toBe(false);
+    expect(ToolSearch.hasPendingServerSearch([...msgs(use('s1')), { role: 'assistant', content: [res('s1')] }])).toBe(false);
+    expect(ToolSearch.hasPendingServerSearch([...msgs(use('s1'), res('s1'), use('s2'))])).toBe(true);
+    expect(ToolSearch.hasPendingServerSearch([{ role: 'user', content: 'q' }])).toBe(false);
+  });
+});
+
+// Pre-push audit: the step-limit note must not end a turn whose server search is unresolved.
+describe('withTurnEndingText', () => {
+  const pendingUse = { type: 'server_tool_use', id: 'srvtoolu_p1', name: 'tool_search_tool_bm25', input: { query: 'x' } };
+  const result = { type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' };
+  const call = { type: 'tool_use', id: 'toolu_1', name: 'a', input: {} };
+
+  test('adds the text after the client tool results', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] }, { role: 'user', content: [result] }];
+    const out = ToolSearch.withTurnEndingText(messages, 'NOTE');
+    expect(out[2].content).toEqual([result, { type: 'text', text: 'NOTE' }]);
+    expect(messages[2].content).toEqual([result]);
+  });
+
+  test('adds nothing while a server search of the turn is unresolved', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [pendingUse, call] }, { role: 'user', content: [result] }];
+    expect(ToolSearch.withTurnEndingText(messages, 'NOTE')).toBe(messages);
+  });
+
+  test('a string or assistant tail is left alone', () => {
+    const a = [{ role: 'user', content: 'q' }];
+    const b = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] }];
+    expect(ToolSearch.withTurnEndingText(a, 'NOTE')).toBe(a);
+    expect(ToolSearch.withTurnEndingText(b, 'NOTE')).toBe(b);
+  });
+});
+
+describe('toolResultContent (discover_capabilities on the search path)', () => {
+  const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map(([id, availability]) => ({ id, availability })) });
+  const tools = [{ name: 'eager_tool' }, { name: 'deferred_tool', defer_loading: true }, { name: 'other_deferred', defer_loading: true }];
+  const many = Array.from({ length: 8 }, (_, i) => ({ name: `deferred_${i}`, defer_loading: true }));
+
+  test('a result made only of tools returns tool_reference blocks ONLY, never mixed with text', () => {
+    const content = ToolSearch.toolResultContent('discover_capabilities', found(['deferred_tool', 'loaded']), tools, true);
+    expect(content).toEqual([{ type: 'tool_reference', tool_name: 'deferred_tool' }]);
+  });
+
+  test('the references keep discover()\'s ranking order and stop at five', () => {
+    const result = found(...many.map(tool => [tool.name, 'loaded']));
+    const content = ToolSearch.toolResultContent('discover_capabilities', result, many, true);
+    expect(content.map(part => part.tool_name)).toEqual(['deferred_0', 'deferred_1', 'deferred_2', 'deferred_3', 'deferred_4']);
+    expect(content.every(part => part.type === 'tool_reference')).toBe(true);
+    const reversed = found(['other_deferred', 'loaded'], ['deferred_tool', 'loaded']);
+    expect(ToolSearch.toolResultContent('discover_capabilities', reversed, tools, true).map(part => part.tool_name)).toEqual(['other_deferred', 'deferred_tool']);
+  });
+
+  test('eager tools need no reference: they are skipped, the deferred ones are referenced', () => {
+    const content = ToolSearch.toolResultContent('discover_capabilities', found(['eager_tool', 'loaded'], ['deferred_tool', 'loaded']), tools, true);
+    expect(content).toEqual([{ type: 'tool_reference', tool_name: 'deferred_tool' }]);
+    const result = found(['eager_tool', 'loaded'], ['not_in_tools', 'loaded']);
+    expect(ToolSearch.toolResultContent('discover_capabilities', result, tools, true)).toBe(JSON.stringify(result));
+  });
+
+  test('a result that also holds an owner-workflow action is the JSON string, with no references', () => {
+    const result = found(['deferred_tool', 'loaded'], ['request_instant_payout', 'requires_existing_owner_workflow']);
+    const content = ToolSearch.toolResultContent('discover_capabilities', result, tools, true);
+    expect(content).toBe(JSON.stringify(result));
+    expect(typeof content).toBe('string');
   });
 
   test('off the search path, for another tool, or for an error result: the plain JSON string', () => {

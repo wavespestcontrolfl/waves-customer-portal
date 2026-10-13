@@ -157,12 +157,9 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
     { content: [{ type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: domain ? { query, domain } : { query } }], usage: {}, stop_reason: 'tool_use' },
     { content: [{ type: 'text', text: 'ok' }], usage: {} },
   ];
-  // The JSON result, from the plain string or from the text block of the array form.
-  const discoverResult = (requests) => {
-    const content = requests[1].messages[requests[1].messages.length - 1].content
-      .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc').content;
-    return JSON.parse(Array.isArray(content) ? content[0].text : content);
-  };
+  // The JSON result (the plain string form; a references-only result has no JSON).
+  const discoverResult = (requests) => JSON.parse(requests[1].messages[requests[1].messages.length - 1].content
+    .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc').content);
 
   const resultBlock = (requests, index = 1) => requests[index].messages[requests[index].messages.length - 1].content
     .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc');
@@ -173,21 +170,20 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
     expect(payout).toMatchObject({ approval: 'confirmed_endpoint', availability: 'requires_existing_owner_workflow' });
     expect(requests[1].tools).toEqual(requests[0].tools);
     expect(names(requests[1].tools)).not.toContain('request_instant_payout');
-    const content = resultBlock(requests).content;
-    expect(Array.isArray(content) ? content.filter(part => part.type === 'tool_reference').map(part => part.tool_name) : []).not.toContain('request_instant_payout');
+    // A result holding an owner-workflow action is the JSON string, with no references.
+    expect(typeof resultBlock(requests).content).toBe('string');
   });
 
-  test('a found deferred tool comes back as a tool_reference after the JSON text; request 2 has the same tools', async () => {
+  test('a result made of tools comes back as tool_reference blocks only (max 5); request 2 has the same tools', async () => {
     const { requests } = await ask('owner', 'dashboard', discoverTurns('review stats'));
     const content = resultBlock(requests).content;
     expect(Array.isArray(content)).toBe(true);
-    expect(content[0].type).toBe('text');
-    expect(JSON.parse(content[0].text).capabilities.map(c => c.id)).toContain('get_review_stats');
-    expect(content.slice(1)).toEqual(expect.arrayContaining([{ type: 'tool_reference', tool_name: 'get_review_stats' }]));
-    expect(content.slice(1).every(part => part.type === 'tool_reference')).toBe(true);
+    expect(content.every(part => part.type === 'tool_reference')).toBe(true);
+    expect(content.length).toBeLessThanOrEqual(5);
+    expect(content.map(part => part.tool_name)).toContain('get_review_stats');
     // Every reference names a deferred tool in `tools`, which did not change.
     expect(requests[1].tools).toEqual(requests[0].tools);
-    for (const part of content.slice(1)) expect(requests[1].tools.find(t => t.name === part.tool_name).defer_loading).toBe(true);
+    for (const part of content) expect(requests[1].tools.find(t => t.name === part.tool_name).defer_loading).toBe(true);
   });
 
   test('mixed rounds: the tools array is identical on every request of the live request', async () => {
@@ -355,11 +351,11 @@ describe('a resumed task runs on the ordinary tool list', () => {
   });
 
   test('(d) a saved discover result with tool_reference blocks: references stripped, the called tool loaded once', async () => {
-    const found = JSON.stringify({ status: 'capabilities_found', capabilities: [{ id: 'get_review_stats', availability: 'loaded' }] });
+    const found = 'Tools found: get_review_stats.';
     resumeWith([
       { role: 'user', content: 'review numbers please' },
       { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_d1', name: 'discover_capabilities', input: { query: 'review stats' } }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d1', content: [{ type: 'text', text: found }, { type: 'tool_reference', tool_name: 'get_review_stats' }] }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d1', content: [{ type: 'tool_reference', tool_name: 'get_review_stats' }] }] },
       { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_d2', name: 'get_review_stats', input: {} }] },
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_d2', content: '{}' }] },
     ]);

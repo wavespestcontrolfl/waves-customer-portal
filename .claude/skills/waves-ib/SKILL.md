@@ -50,8 +50,9 @@ blocks when the checkpoint is loaded, and the resumed request keeps
 `discover_capabilities` for everyone. Other admins, technicians, the tech
 context and the `agent_estimate` rail always follow the mapping below and keep
 On this path `tools` never changes during a request: a
-`discover_capabilities` result carries a `tool_reference` block for each found
-deferred tool and the API expands it (`toolResultContent`); off the path it
+`discover_capabilities` result is `tool_reference` blocks only (max 5, never mixed
+with text; the plain JSON when it also holds an owner-workflow action) and the API
+expands them (`toolResultContent`); off the path it
 still merges the found definitions at once. `discover()`. Smoke check: `ops/agents/ib-tool-search-smoke.js`.
 
 ## Context → Tools Mapping
