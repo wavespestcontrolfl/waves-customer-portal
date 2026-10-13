@@ -220,6 +220,22 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(labels(card(preview))).toContain('Visits: books none — book the first visit on the calendar after, and schedule the one-time work: German Roach Cleanout, Wasp Nest Removal');
   });
+  test('round 56: the card shows the service address (linked property first, else the estimate snapshot)', async () => {
+    seed({ estimate: { address: '12 Synthetic Lane, Venice, FL 34285' } });
+    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Service address: 12 Synthetic Lane, Venice, FL 34285');
+    seed({ estimate: { address: '12 Synthetic Lane, Venice, FL 34285', property_id: 'prop-7' } });
+    tables.customer_properties = [{ id: 'prop-7', customer_id: CUSTOMER_ID, active: true, is_primary: true, address_line1: '7 Other Court', city: 'Nokomis', state: 'FL', zip: '34275' }];
+    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Service address: 7 Other Court, Nokomis, FL, 34275');
+    tables.customer_properties = [];
+    seed({ estimate: { address: null } });
+    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Service address: none on the estimate — check the customer page');
+  });
+  test('round 56: a recurring estimate (monthly total) that names no recurring service refuses', async () => {
+    seed({ estimate: { monthly_total: 90, estimate_data: {} } });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result).toMatchObject({ code: 'recurring_unnamed' });
+    expect(result.error).toMatch(/names no recurring service/);
+  });
   test('round 44: with no persisted aggregate the headline one-time total is the sum of the itemized lines, never $0', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
     dryEffects = () => [

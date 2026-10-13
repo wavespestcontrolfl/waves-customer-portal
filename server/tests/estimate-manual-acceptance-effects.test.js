@@ -981,6 +981,13 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     expect(broken.transaction.mock.calls.length).toBeGreaterThan(0);
     expect(effects.find((e) => e.kind === 'one_time_line')).toMatchObject({ name: 'Wasp Nest Removal', amount: 100, taxable: true });
   });
+  test('round 56: a mapped $500 installation for Building A and a raw one for Building B are two charges, not mirrors', async () => {
+    const recurring = { service: 'termite_bait', label: 'Termite Bait Stations', monthly: 50, visitsPerYear: 4, detail: 'Building B', installation: { price: 500, taxable: false } };
+    const mapped = { service: 'termite_bait', name: 'Termite Bait Installation', price: 500, detail: 'Building A' };
+    const world = rawOnly([recurring], { result: { oneTime: { items: [mapped] }, lineItems: [recurring] } });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.taxable])).toEqual([['Termite Bait Installation', 500, true], ['Termite Bait Stations installation', 500, undefined]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

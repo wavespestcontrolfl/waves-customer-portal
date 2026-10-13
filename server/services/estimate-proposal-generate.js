@@ -1230,9 +1230,13 @@ function installationMirror(pool, line, rounded) {
   // Repeated same-price installations (Building A / Building B) pair by
   // stated scope first, so rows persisted in the opposite order still meet
   // their own mirror (codex #6113 r54).
+  // Two stated scopes that differ (Building A vs Building B) are two
+  // charges, never mirrors: the fallback pairs only when one side states
+  // no scope (codex #6113 r56).
   const lineDetail = scopeIncludes(line)[0];
   const sameDetail = (entry) => lineDetail !== undefined && scopeIncludes(entry.item)[0] === lineDetail;
-  return pool.find((entry) => matches(entry) && sameDetail(entry)) || pool.find(matches);
+  const oneSideSilent = (entry) => lineDetail === undefined || scopeIncludes(entry.item)[0] === undefined;
+  return pool.find((entry) => matches(entry) && sameDetail(entry)) || pool.find((entry) => matches(entry) && oneSideSilent(entry));
 }
 // The mapped installation copy already listed and its raw installation
 // mirror reconcile taxability like any twin (codex #6113 r51): contradictory
@@ -1256,7 +1260,8 @@ function installationRowsToWork(installationRows, fromOneTime, taxabilityMap, ou
     const mirror = installationMirror(pool, line, rounded);
     if (mirror) { mirror.used = true; reconcileInstallationTaxability(out, mirror.item, line, taxabilityMap); continue; }
     out.work.push({
-      label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
+      // The row's customer-facing copy (label / display.name), never the internal service key (codex 1A-ii r20).
+      label: `${rawLineLabel(line, 'Service').slice(0, 140)} installation`.slice(0, 160),
       amount: rounded,
       taxable: commercialTaxableDefault(line.service || line.name, line.installation?.taxable ?? line.taxable, { taxabilityMap, oneTime: true }),
       includes: [],

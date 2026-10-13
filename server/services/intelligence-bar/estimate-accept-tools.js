@@ -274,6 +274,18 @@ async function propertyLinkRefusal(estimate, customerId) {
   return primary ? null : refuse('Add or link the service address on the customer page first.', 'property_not_linked');
 }
 
+// The service address the card shows (codex #6113 r56): the linked property
+// (customer_properties) first, else the estimate's own address snapshot, so
+// two open quotes at different properties read apart on the card.
+async function serviceAddress(estimate) {
+  if (estimate.property_id) {
+    const p = await db('customer_properties').where({ id: estimate.property_id }).first();
+    if (p && p.address_line1) return [p.address_line1, p.address_line2, p.city, p.state, p.zip].filter(Boolean).join(', ');
+  }
+  const snapshot = String(estimate.address || estimate.service_address || '').trim();
+  return snapshot || null;
+}
+
 async function loadCustomer(customerId) {
   const customer = await db('customers').where({ id: customerId }).first();
   return customer ? { customer } : refuse('No customer with that id.', 'customer_not_found');
@@ -552,6 +564,7 @@ function cardLines(preview) {
   const oneTime = e.one_time_total > 0 ? `, ${money(e.one_time_total)} one-time` : '';
   return [
     { kind: 'customer', label: `Accepts ${e.label} for ${preview.customer_name || preview.customer_id}: ${money(e.monthly_total)}${preview.per_application_lane ? ' a month equivalent' : ' a month'}${oneTime}` },
+    { kind: 'customer', label: `Service address: ${e.address || 'none on the estimate — check the customer page'}` },
     ...serviceAndBillLines(preview),
     ...(preview.lawn_profile ? [{ kind: 'customer', label: preview.lawn_profile }] : []),
     ...oneTimeLines(preview),
@@ -605,7 +618,13 @@ async function cardPins({ estimate, customer, converts }) {
   };
 }
 
-function buildPreview({ estimate, estimateData, label, customer, customerId, monthlyRate, effects, pins }) {
+// The estimate header: the same aggregate the effect collector validates
+// against (the row's onetime_total, else the engine's oneTime.total, else the
+// itemized lines), so the header and the lines agree.
+function previewEstimate({ estimate, label, monthlyRate, effects, address }) {
+  return { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: AcceptEffects.oneTimeAggregateTotal(estimate) ?? itemizedOneTimeTotal(effects), address };
+}
+function buildPreview({ estimate, estimateData, label, customer, customerId, monthlyRate, effects, pins, address = null }) {
   const conv = effectOf(effects, 'conversion');
   const converts = conv?.recurring === true;
   const cust = effectOf(effects, 'customer');
@@ -625,7 +644,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     // The same aggregate the effect collector validates against: the row's
     // onetime_total, else the engine's oneTime.total (a legacy row can carry
     // the charge only there), so the header and the lines agree.
-    estimate: { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: AcceptEffects.oneTimeAggregateTotal(estimate) ?? itemizedOneTimeTotal(effects) },
+    estimate: previewEstimate({ estimate, label, monthlyRate, effects, address }),
     converts,
     services: converts ? startedServices(estimateData, PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate })) : [],
     bill: converts ? billFromEffects(effects) : null,
@@ -675,7 +694,13 @@ async function planAccept(input, actionContext = {}) {
   const dry = await dryRunAccept(estimate, actionContext);
   if (dry.error) return dry;
   const pins = await cardPins({ estimate, customer, converts });
-  const preview = buildPreview({ estimate, estimateData, label, customer, customerId, monthlyRate, effects: dry.effects, pins });
+  const address = await serviceAddress(estimate);
+  const preview = buildPreview({ estimate, estimateData, label, customer, customerId, monthlyRate, effects: dry.effects, pins, address });
+  // A recurring accept that names no program would start billing the card
+  // cannot describe (codex #6113 r56): refuse it to the estimate page.
+  if (preview.converts && !preview.services.length) {
+    return refuse('This estimate bills monthly but names no recurring service the card can show, so the bar cannot say what program starts or what to schedule. Accept it from the estimate page.', 'recurring_unnamed');
+  }
   preview.card_lines = cardLines(preview);
   return preview;
 }
