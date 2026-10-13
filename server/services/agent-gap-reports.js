@@ -537,12 +537,16 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
   }
 
   // Two queries are the same ask when the word sets behind their dedupe key
-  // (wordKeyOf) overlap by at least half of the smaller set.
+  // (wordKeyOf) share at least two words and at least half of the smaller
+  // set. One shared word is never enough ("payroll export" and "customer
+  // export" are different asks); one-word queries must be equal.
   function sameAsk(a, b) {
-    const left = new Set(wordKeyOf(a).split(' '));
-    const right = new Set(wordKeyOf(b).split(' '));
+    const left = new Set(wordKeyOf(a).split(' ').filter(Boolean));
+    const right = new Set(wordKeyOf(b).split(' ').filter(Boolean));
+    const smaller = Math.min(left.size, right.size);
     const shared = [...left].filter((word) => right.has(word)).length;
-    return shared > 0 && shared >= Math.min(left.size, right.size) / 2;
+    if (smaller <= 1) return smaller === 1 && left.size === right.size && shared === 1;
+    return shared >= 2 && shared >= smaller / 2;
   }
 
   function pendingSignals() {

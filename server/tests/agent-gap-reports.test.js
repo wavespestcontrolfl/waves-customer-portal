@@ -488,6 +488,15 @@ describe('agent-gap-reports', () => {
       expect(insertedRows.map((row) => row.summary).sort()).toEqual(['export payroll hours', 'refund a card payment']);
     });
 
+    test('two short asks that share one word are different asks', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'payroll export' }, MISS, { fromToolSearch: true });
+      collector.discovery({ query: 'customer export' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows.map((row) => row.summary).sort()).toEqual(['customer export', 'payroll export']);
+    });
+
     test('with no discover_capabilities search, the tool-search miss is recorded', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
