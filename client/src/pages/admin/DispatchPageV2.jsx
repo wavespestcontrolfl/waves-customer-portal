@@ -707,6 +707,10 @@ export default function DispatchPageV2({
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [heldVisits, setHeldVisits] = useState([]);
+  // Only the newest Book it click opens the form, and only while its day is still on
+  // screen: a slower customer lookup from an earlier click, or from a day the operator
+  // has left, must not open it.
+  const bookHeldSeq = useRef(0);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
   // The visit the Edit / prepay modal last saved (fresh object per save):
   // the list view re-verifies that row on the refresh it triggers, unlike
@@ -815,6 +819,9 @@ export default function DispatchPageV2({
 
   // "From calls, not on the calendar" strip (GATE_CALL_HELD_VISIT). Fail-soft:
   // any error or an off gate leaves the list empty and the page unchanged.
+  // A new date, view or tab drops any pending Book it lookup with the old rows
+  // (a plain refresh of the same day does not).
+  useEffect(() => { bookHeldSeq.current += 1; }, [date, viewMode, activeTab]);
   useEffect(() => {
     if (viewMode !== "day" || activeTab !== "board") {
       setHeldVisits([]);
@@ -891,9 +898,6 @@ export default function DispatchPageV2({
   // Book it: open the New appointment modal on the held day and time. The
   // customer is preloaded only when the call is linked to one; if that lookup
   // fails the modal still opens and the person picks the customer.
-  // Only the newest Book it click opens the form: a slower customer lookup from an
-  // earlier click must not open it on that earlier caller.
-  const bookHeldSeq = useRef(0);
   const bookHeldVisit = useCallback(async (row) => {
     const seq = ++bookHeldSeq.current;
     // Visits start on the hour. An off-hour slot (2:30 PM) is not prefilled:

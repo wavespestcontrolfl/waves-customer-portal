@@ -378,3 +378,25 @@ it('only the newest Book it click opens the form when an earlier customer lookup
   expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
   expect(appointmentModalState.props.defaultInternalNotes).toContain('CAsecond');
 });
+
+it('a Book it lookup still pending when the day changes does not open the form', async () => {
+  const held = {
+    call_log_id: 'call-late', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: 'Pat Sample',
+    phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-slow', notes: null, call_sid: 'CAlate',
+  };
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url === '/admin/schedule/held-visits?date=2026-10-14') return { heldVisits: [held] };
+    if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [] };
+    if (url === '/admin/customers/cust-slow') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Book it' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-15'));
+  await act(async () => { releaseSlow(); await slow; });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});

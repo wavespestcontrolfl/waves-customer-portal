@@ -292,3 +292,14 @@ describe('a confirmed promise has a time', () => {
     expect(run([linked], [visit({ window_start: '15:00:00' })])).toEqual([]);
   });
 });
+
+describe('legacy rows and letter case', () => {
+  it('a visit with no status is an open visit and clears the row', () => {
+    expect(run([call({ customer_id: 'cust-1' })], [visit({ status: null })])).toEqual([]);
+    expect(run([call({ ai_extraction_enriched: dayOnly() })], [visit({ customer_id: 'cust-new', status: null, customer_phone: '+19415550100' })])).toEqual([]);
+  });
+
+  it('the address match ignores letter case', () => {
+    expect(run([call({ ai_extraction_enriched: dayOnly() })], [visit({ customer_id: 'cust-new', visit_address: '12 TEST LANE', visit_city: 'BRADENTON', visit_zip: '34205' })])).toEqual([]);
+  });
+});

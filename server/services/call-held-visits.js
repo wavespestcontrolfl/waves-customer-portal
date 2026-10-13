@@ -68,6 +68,9 @@ function parseExtraction(raw) {
   }
 }
 
+// A visit that is on the calendar or done. A legacy row with no status is an open visit, as
+// everywhere else in the schedule; a skipped, cancelled or rescheduled one is not a booking.
+const isLive = (status) => status == null || LIVE_STATUSES.has(status);
 const externalPhone = (call) => (String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone) || null;
 
 // The office booked this caller after the call: a visit that is on the calendar or done
@@ -80,7 +83,7 @@ const externalPhone = (call) => (String(call.direction || '').startsWith('outbou
 function bookedForCallerAfterCall(row, call, extraction, dateET) {
   // On the promised day only: a later visit on another day (a recurring visit generated after
   // the call, another service) is not this promise. That needs the call reference.
-  if (!LIVE_STATUSES.has(row.status) || row.sched_date !== dateET) return false;
+  if (!isLive(row.status) || row.sched_date !== dateET) return false;
   const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
   const callAt = call.created_at ? new Date(call.created_at).getTime() : NaN;
   if (!Number.isFinite(rowAt) || !Number.isFinite(callAt) || rowAt <= callAt) return false;
@@ -149,7 +152,7 @@ function clearedByBooking({ call, extraction, kind, slot }, bookedRows, { dateET
   // window tolerance (rowClearsSlot), so a morning lawn visit never hides an unbooked afternoon
   // slot. A day-only ask has no time: any live visit that day answers it.
   const atTheTime = (row) => kind !== 'confirmed' || rowClearsSlot(row, call, slot);
-  const ownOnDay = (row) => !!call.customer_id && row.customer_id === call.customer_id && LIVE_STATUSES.has(row.status) && row.sched_date === dateET;
+  const ownOnDay = (row) => !!call.customer_id && row.customer_id === call.customer_id && isLive(row.status) && row.sched_date === dateET;
   const namesake = (row) => kind === 'confirmed' && !!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot);
   return bookedRows.some((row) => rowCarriesCall(row, call)
     || namesake(row)
@@ -272,6 +275,8 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
             if (phoneForms.length) {
               this.whereRaw(`${digits('cu.phone')} = ANY(?)`, [phoneForms]).orWhereRaw(`${digits('cu.secondary_phone')} = ANY(?)`, [phoneForms]);
             }
+            // The patterns are digits and spaces only ("12 %", "% 12 %"), so letter case cannot
+            // drop a row here; the pure matcher normalizes case.
             if (houseNumbers.length) this.orWhereRaw(`${visitAddress} LIKE ANY(?)`, [houseNumbers]);
           });
         });
