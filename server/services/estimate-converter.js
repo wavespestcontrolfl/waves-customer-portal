@@ -8677,7 +8677,11 @@ const EstimateConverter = {
       recurringScheduleCheck = { ok: false, gaps: [], error: 'verification_failed' };
       logger.warn(`[estimate-converter] recurring schedule verification failed for estimate ${estimateId}: ${err.message}`);
     }
-    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, recurringScheduleOk=${recurringScheduleCheck.ok}, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
+    // A carded preview runs this inside a rolled-back transaction: its log
+    // line says so, so production logs never claim a conversion that was
+    // never committed (codex #6113 r60).
+    const dryRunLabel = opts.sideEffects && opts.sideEffects.dryRun === true ? 'DRY RUN (rolled back, nothing converted): ' : '';
+    logger.info(`[estimate-converter] ${dryRunLabel}Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, recurringScheduleOk=${recurringScheduleCheck.ok}, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
 
     const membershipEmail = {
       customerId,

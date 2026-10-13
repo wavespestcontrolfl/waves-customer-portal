@@ -555,6 +555,9 @@ function visitsInstruction(preview) {
   const jobs = (preview.one_time_lines || []).filter((l) => l.consequence === 'schedule_and_invoice_by_hand')
     .map((l) => (Number(l.visits) > 1 ? `${l.name} (all ${l.visits} visits)` : l.name));
   const programs = (preview.services || []).map((s) => s.service);
+  // No recurring program: only the one-time work is scheduled, never an
+  // unnamed first visit beside it (codex #6113 r60).
+  if (!programs.length && jobs.length) return `schedule the one-time work: ${jobs.join(', ')}`;
   const first = programs.length > 1
     ? `book the first visit of each new service on the calendar after (${programs.join(', ')})`
     : 'book the first visit on the calendar after';
