@@ -363,10 +363,12 @@ describe('check_address round 2 cases', () => {
       expect(out.note).not.toMatch(/keep "/);
     }
   });
-  test.each(['100 Example Way, Bldg 2 Apt 4, Sarasota, FL 34236', '100 Example Way Apt 4, Sarasota, FL 34236', '100 Example Way #12, Sarasota, FL 34236', '100 Example Way, Sarasota, FL 34236'])('%s has a complete unit reading', async (address) => {
+  test.each(['100 Example Way, Bldg 2 Apt 4, Sarasota, FL 34236', '100 Example Way Apt 4, Sarasota, FL 34236', '100 Example Way #12, Sarasota, FL 34236', '100 Example Way, Sarasota, FL 34236',
+    '100 Space Coast Blvd, Sarasota, FL 34236', '100 Lot Rd, Sarasota, FL 34236', '100 Unit Way Unit B, Sarasota, FL 34236'])('%s has a complete unit reading', async (address) => {
     validateAddress.mockResolvedValue(google());
     const out = await run({ address });
     expect(out.unit_incomplete).toBe(false);
+    expect(out.note).not.toMatch(/more unit parts/);
   });
   test('a comma-free address with no readable state says FL was assumed', async () => {
     validateAddress.mockResolvedValue(google());
