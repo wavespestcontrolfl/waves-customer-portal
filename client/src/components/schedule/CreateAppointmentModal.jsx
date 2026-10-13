@@ -1908,7 +1908,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           setBookingPropertyState('hidden');
         }
       })
-      .catch(() => { if (!cancelled) setBookingPropertyState('error'); });
+      .catch(() => {
+        if (cancelled) return;
+        // The saved properties could not be read: a stated address cannot be checked, so the
+        // person must confirm the saved address before the form can be saved.
+        setAddressChoiceNeeded(!!String(defaultAddressLine1 || '').trim());
+        setBookingPropertyState('error');
+      });
     return () => { cancelled = true; };
   }, [selectedCustomer?.id, propertyRefresh]);
 

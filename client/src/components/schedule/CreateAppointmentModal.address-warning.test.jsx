@@ -69,6 +69,8 @@ const PREPAY_PREVIEW = {
 function installModalFetch({
   // The customer's saved properties; 2+ complete rows open the property picker.
   properties = [],
+  // The properties request fails (a 500).
+  propertiesFail = false,
   firstScheduleRequest,
   secondScheduleRequest,
   submitAddressRequest,
@@ -176,6 +178,7 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({ id: 'unexpected-later-appointment' }));
     }
     if (url.includes('/properties?context=appointment_address')) {
+      if (propertiesFail) return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
       return Promise.resolve(jsonResponse({ properties, canChangeAppointmentAddress: properties.length > 1 }));
     }
     if (url.includes('/schedule-source')) {
@@ -3465,5 +3468,20 @@ describe('defaultAddressLine1 / defaultAddressLine2', () => {
     await addOneSeasonalService();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
     expect(screen.queryByText(/is not this customer's saved address/)).toBeNull();
+  });
+
+  it('a failed property load still asks for the confirmation when the call stated an address', async () => {
+    installModalFetch({ propertiesFail: true });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" defaultAddressLine1="40 Sample Road"
+      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />);
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(await screen.findByRole('button', { name: 'Book at the saved address' })).toBeTruthy();
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Book at the saved address' }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
   });
 });
