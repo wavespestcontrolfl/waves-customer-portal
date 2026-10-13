@@ -250,26 +250,54 @@ function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 }
 
-// Email delivery: the account holder's own address (the link saves a
-// payment method on THEIR account, so the billing-contact override does
-// not apply), honoring the customer-level email opt-out. The template
-// library owns the audit row, suppressions, and provider retry; an
-// inactive/missing template throws there and is surfaced as a dark lever
-// (same shape as the SMS template lever). Never throws.
-async function emailSetupLink({ customer, customerId, request, secureUrl, trigger }) {
-  const to = String(customer.email || '').trim();
-  if (!isEmailLike(to)) return skip('no_customer_email');
-  // Fail closed: an unreadable preference is not an enabled one (GH Codex
-  // #3867 P2) — an opted-out customer must never get this optional email
-  // because the prefs read blipped. Retryable skip instead.
+// Pre-send checks the delivery paths run before anything is built, shared
+// with autopayDeliveryPreflight so the two can never disagree. Each returns
+// the skip reason, or null when the channel passes.
+//
+// Email: the account holder's own address (the link saves a payment method on
+// THEIR account, so the billing-contact override does not apply), honoring the
+// customer-level email opt-out. Fail closed: an unreadable preference is not
+// an enabled one (GH Codex #3867 P2) — an opted-out customer must never get
+// this optional email because the prefs read blipped. Retryable skip instead.
+async function emailPrecheckReason(customer, customerId) {
+  if (!isEmailLike(String(customer.email || '').trim())) return 'no_customer_email';
   let prefs;
   try {
     prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
   } catch (err) {
     logger.warn(`[autopay-setup-link] notification_prefs lookup failed for customer ${customerId}: ${err.message}`);
-    return skip('email_prefs_check_uncertain');
+    return 'email_prefs_check_uncertain';
   }
-  if (prefs?.email_enabled === false) return skip('email_opted_out');
+  return prefs?.email_enabled === false ? 'email_opted_out' : null;
+}
+
+// SMS: a phone on file, then the third lever, surfaced instead of silently
+// blocked in the pipeline (GH Codex #3726 r1 P1): original_message_type
+// 'autopay_setup_link' classifies as an Auto Pay customer SMS, which
+// sendCustomerMessage refuses unless GATE_AUTOPAY_CUSTOMER_SMS is on.
+function smsPrecheckReason(customer) {
+  if (!customer.phone) return 'no_customer_phone';
+  if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return 'autopay_sms_gate_off';
+  return null;
+}
+
+function setupLinkEmailPayload(customer, secureUrl, expiresAt) {
+  return {
+    first_name: customer.first_name || 'there',
+    secure_link: secureUrl,
+    expires_on: expiresAt
+      ? new Date(expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
+      : '',
+  };
+}
+
+// Email delivery: the template library owns the audit row, suppressions, and
+// provider retry; an inactive/missing template throws there and is surfaced
+// as a dark lever (same shape as the SMS template lever). Never throws.
+async function emailSetupLink({ customer, customerId, request, secureUrl, trigger }) {
+  const to = String(customer.email || '').trim();
+  const precheck = await emailPrecheckReason(customer, customerId);
+  if (precheck) return skip(precheck);
 
   const EmailTemplateLibrary = require('./email-template-library');
   let result;
@@ -277,13 +305,7 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
     result = await EmailTemplateLibrary.sendTemplate({
       templateKey: EMAIL_TEMPLATE_KEY,
       to,
-      payload: {
-        first_name: customer.first_name || 'there',
-        secure_link: secureUrl,
-        expires_on: request.expires_at
-          ? new Date(request.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
-          : '',
-      },
+      payload: setupLinkEmailPayload(customer, secureUrl, request.expires_at),
       recipientType: 'customer',
       recipientId: customerId,
       // Every office click is a deliberate (re)send — a customer who lost the
@@ -309,12 +331,150 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
   return markSent(request, customerId, 'email', trigger);
 }
 
+// A stand-in for the bearer URL in the delivery preflight: it renders the
+// same template as a real send without minting a row (never a real token).
+const PREFLIGHT_LINK_PATH = '/secure/preflight-check';
+
+// The messaging policy's read-only verdict for the setup text: the validators
+// sendCustomerMessage runs before it touches a provider (send window,
+// suppression / STOP, consent for the card_request purpose, contact
+// compliance), on the same input shape, same order, nothing sent or written.
+// Returns the skip reason the send result would carry, or null.
+async function smsPolicyReason({ customer, customerId, trigger }) {
+  const { normalizeRecipient } = require('./messaging/send-customer-message');
+  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
+  const { checkSendWindow } = require('./messaging/validators/send-window');
+  const { checkContactCompliance } = require('./messaging/compliance-contact-checks');
+  const input = {
+    to: normalizeRecipient(customer.phone),
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'card_request',
+    customerId,
+    identityTrustLevel: 'phone_matches_customer',
+    ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
+    metadata: { trigger, original_message_type: TEMPLATE_KEY },
+  };
+  const policy = require('./messaging/policy').resolvePolicy(input.audience, input.purpose);
+  let state = await loadContactState(input);
+  state = await loadSuppressionState(input, state);
+  // The send fails open on an unreadable suppression read (the sms_enabled
+  // gate still stands); a preflight that offers a send must not.
+  if (state.lookupFailed || state.suppressionLookupFailed) return 'sms_policy_check_uncertain';
+  for (const check of [checkSendWindow, checkSuppression, checkConsentForPurpose, checkContactCompliance]) {
+    const verdict = await check(input, policy, state);
+    if (verdict.ok) continue;
+    const lookupFailed = verdict.code === 'CONSENT_LOOKUP_FAILED' || verdict.code === 'SUPPRESSION_LOOKUP_FAILED';
+    return lookupFailed ? 'sms_policy_check_uncertain' : (verdict.reason || 'send_blocked');
+  }
+  return null;
+}
+
+// The CACHED line type only (phone_line_types) — never the paid Twilio Lookup
+// the send's check_line_type makes on a miss. Same gate and same blocked
+// reason as that validator; a miss passes (the send would look it up), an
+// unreadable cache fails closed here where the send fails open.
+async function smsLineTypeReason(phone) {
+  if (!require('../config/feature-gates').isEnabled('proactiveLineTypeLookup')) return null;
+  const { readCachedLineType, NON_SMS_LINE_TYPES, blockResult } = require('./messaging/validators/line-type');
+  const cached = await readCachedLineType(require('./messaging/send-customer-message').normalizeRecipient(phone));
+  if (cached.state === 'error') return 'sms_line_type_check_uncertain';
+  return cached.state === 'hit' && NON_SMS_LINE_TYPES.has(cached.lineType) ? blockResult(cached.lineType).reason : null;
+}
+
+async function smsDeliveryPreflight({ customer, customerId, trigger }) {
+  const precheck = smsPrecheckReason(customer);
+  if (precheck) return { ok: false, reason: precheck };
+  // The same getTemplate renderTemplate calls, with the template-issue audit
+  // off (a read must not write) and the base row only (no variant roll).
+  const body = await require('../routes/admin-sms-templates').getTemplate(
+    TEMPLATE_KEY,
+    { first_name: customer.first_name || 'there', secure_link: portalUrl(PREFLIGHT_LINK_PATH) },
+    {},
+    { audit: false, noVariants: true },
+  );
+  if (!body) return { ok: false, reason: 'template_inactive' };
+  const reason = await smsPolicyReason({ customer, customerId, trigger }) || await smsLineTypeReason(customer.phone);
+  return reason ? { ok: false, reason } : { ok: true };
+}
+
+async function emailDeliveryPreflight({ customer, customerId }) {
+  const precheck = await emailPrecheckReason(customer, customerId);
+  if (precheck) return { ok: false, reason: precheck };
+  // The template library's own no-send guard chain: template + version active,
+  // required variables, and the recipient's email_suppressions on the
+  // template's stream. A thrown error is an unreadable check, not a verdict.
+  let verdict;
+  try {
+    verdict = await require('./email-template-library').preflightTemplateSend({
+      templateKey: EMAIL_TEMPLATE_KEY,
+      to: String(customer.email || '').trim(),
+      payload: setupLinkEmailPayload(customer, portalUrl(PREFLIGHT_LINK_PATH), new Date(Date.now() + LINK_TTL_MS)),
+    });
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] email template preflight failed for customer ${customerId}: ${String(err?.code || err?.name || 'error')}`);
+    return { ok: false, reason: 'email_template_check_uncertain' };
+  }
+  if (verdict.ok) return { ok: true };
+  return { ok: false, reason: isTemplateLeverError({ code: verdict.code, message: verdict.reason }) ? 'email_template_inactive' : (verdict.reason || 'send_blocked') };
+}
+
+/**
+ * Read-only: could `delivery` ('sms' | 'email') deliver the setup link right
+ * now? Returns { ok: true } or { ok: false, reason }, where `reason` is the
+ * skip reason requestAutopaySetupLink returns today for that condition:
+ *   sms   no_customer_phone, autopay_sms_gate_off, template_inactive, the
+ *         messaging pipeline's own reason (STOP / suppression / consent /
+ *         send window / cached landline), sms_policy_check_uncertain,
+ *         sms_line_type_check_uncertain
+ *   email no_customer_email, email_prefs_check_uncertain, email_opted_out,
+ *         email_template_inactive, "Suppressed: ..." (email_suppressions),
+ *         email_template_check_uncertain
+ * 'inline' (and anything else) always passes — it sends nothing. Never mints
+ * a link, sends, writes, or pays for a Twilio Lookup (only the CACHED line
+ * type is read), and never throws: an unreadable check fails closed.
+ * `customer` is optional (loaded by id when omitted); `trigger` mirrors the
+ * request ('admin' = an office click, which the send window exempts).
+ */
+async function autopayDeliveryPreflight({ customerId, customer = null, delivery = 'inline', trigger = 'admin' } = {}) {
+  if (delivery !== 'sms' && delivery !== 'email') return { ok: true };
+  try {
+    const holder = customer || await db('customers').where({ id: customerId }).first();
+    if (!holder || holder.deleted_at) return { ok: false, reason: 'customer_not_found' };
+    return delivery === 'sms'
+      ? await smsDeliveryPreflight({ customer: holder, customerId, trigger })
+      : await emailDeliveryPreflight({ customer: holder, customerId });
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] ${delivery} delivery preflight failed for customer ${customerId}: ${String(err?.code || err?.name || 'error')}`);
+    return { ok: false, reason: `${delivery}_delivery_check_uncertain` };
+  }
+}
+
+// requestAutopaySetupLink's `requireDeliverable` guard: the skip to return
+// before any row is written, or null to carry on (guard off, or inline).
+async function undeliverableSkip({ requireDeliverable, customerId, customer, delivery, trigger }) {
+  if (requireDeliverable !== true || delivery === 'inline') return null;
+  const preflight = await autopayDeliveryPreflight({ customerId, customer, delivery, trigger });
+  return preflight.ok ? null : skip(preflight.reason);
+}
+
 /**
  * The one entry point (operator surfaces only). Returns
  *   { requested, action: 'link_created' | 'sent' | 'auto_secured' | 'skipped', reason, channel?, secureUrl?, expiresAt? }
  * ('sent' carries channel: 'sms' | 'email'.) Never throws.
+ *
+ * `requireDeliverable` (default false; only `true` opts in): when true and delivery is 'sms' or
+ * 'email', autopayDeliveryPreflight runs after eligibility and the saved-card
+ * auto-secure step and BEFORE any link row is inserted, reused or retired; a
+ * channel that could not deliver returns skip(reason) with NO secureUrl /
+ * expiresAt and nothing written or touched. The default keeps the mint-first
+ * order on purpose: the Customers button shows the returned secureUrl on a
+ * skipped send so the office can copy the link by hand. A caller that never
+ * wants a link without a deliverable channel (an Intelligence Bar confirm
+ * card) opts in.
  */
-async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin' }) {
+async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin', requireDeliverable }) {
   try {
     if (!['inline', 'sms', 'email'].includes(delivery)) delivery = 'inline';
     const eligibility = await setupLinkIneligibility(customerId);
@@ -383,6 +543,9 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
         return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
       }
     }
+
+    const undeliverable = await undeliverableSkip({ requireDeliverable, customerId, customer, delivery, trigger });
+    if (undeliverable) return undeliverable;
 
     // Dedup on the LIVE row — pending OR mid-completion (partial unique
     // index: one live standalone row per customer; a completing row is a
@@ -455,12 +618,8 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       return { ...emailed, ...linkMeta };
     }
 
-    if (!customer.phone) return skip('no_customer_phone', linkMeta);
-    // Third lever, surfaced instead of silently blocked in the pipeline
-    // (GH Codex #3726 r1 P1): original_message_type 'autopay_setup_link'
-    // classifies as an Auto Pay customer SMS, which sendCustomerMessage
-    // refuses unless GATE_AUTOPAY_CUSTOMER_SMS is on.
-    if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return skip('autopay_sms_gate_off', linkMeta);
+    const smsPrecheck = smsPrecheckReason(customer);
+    if (smsPrecheck) return skip(smsPrecheck, linkMeta);
     const { renderTemplate } = require('./appointment-card-request');
     const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY);
     if (!body) return skip('template_inactive', linkMeta);
@@ -1293,6 +1452,7 @@ module.exports = {
   isAutopaySetupLinkEnabled,
   setupLinkIneligibility,
   requestAutopaySetupLink,
+  autopayDeliveryPreflight,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,

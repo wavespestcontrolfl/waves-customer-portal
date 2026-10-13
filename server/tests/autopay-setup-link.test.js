@@ -88,9 +88,26 @@ jest.mock('../services/stripe', () => ({
 const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
+  normalizeRecipient: (phone) => (String(phone || '').replace(/\D/g, '').length === 10 ? `+1${String(phone).replace(/\D/g, '')}` : phone),
+}));
 const mockSendTemplate = jest.fn(async () => ({ sent: true }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockSendTemplate(...a) }));
+const mockPreflightTemplateSend = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: (...a) => mockSendTemplate(...a),
+  preflightTemplateSend: (...a) => mockPreflightTemplateSend(...a),
+}));
+// The delivery preflight reads the template through getTemplate (audit off,
+// base row only); the real consent / suppression / send-window validators
+// run against the db mock above. Only the cached line type is stubbed.
+const mockGetSmsTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/preflight-check');
+jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: (...a) => mockGetSmsTemplate(...a) }));
+const mockReadCachedLineType = jest.fn(async () => ({ state: 'miss' }));
+jest.mock('../services/messaging/validators/line-type', () => {
+  const actual = jest.requireActual('../services/messaging/validators/line-type');
+  return { ...actual, readCachedLineType: (...a) => mockReadCachedLineType(...a) };
+});
 const mockRenderTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/tok');
 jest.mock('../services/appointment-card-request', () => ({ renderTemplate: (...a) => mockRenderTemplate(...a) }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
@@ -98,6 +115,7 @@ jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test
 const gates = require('../config/feature-gates').gates;
 const {
   requestAutopaySetupLink,
+  autopayDeliveryPreflight,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,
@@ -132,12 +150,16 @@ beforeEach(() => {
   mockEnrollConsentedMethod.mockResolvedValue({ enrolled: true });
   mockSendCustomerMessage.mockResolvedValue({ sent: true });
   mockSendTemplate.mockResolvedValue({ sent: true });
+  mockPreflightTemplateSend.mockResolvedValue({ ok: true });
+  mockGetSmsTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/preflight-check');
+  mockReadCachedLineType.mockResolvedValue({ state: 'miss' });
+  gates.proactiveLineTypeLookup = false;
   mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/tok');
   mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-1', method_type: 'card' });
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
   mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
 });
-afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; gates.completionAutopayCharge = false; });
+afterAll(() => { gates.autopaySetupLink = false; gates.acceptAchCapture = false; gates.autopayCustomerSms = false; gates.completionAutopayCharge = false; gates.proactiveLineTypeLookup = false; });
 
 describe('requestAutopaySetupLink — ordered checks', () => {
   it('is inert with the gate off (nothing read, nothing minted, nothing sent)', async () => {
@@ -479,6 +501,210 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
   it('never throws — an unexpected failure is a skip', async () => {
     mockTableHandlers.customers = { first: () => { throw new Error('db down'); } };
     expect((await requestAutopaySetupLink({ customerId: 'cust-1' })).reason).toBe('request_failed');
+  });
+});
+
+describe('autopayDeliveryPreflight — read-only "could this channel deliver" (requireDeliverable)', () => {
+  const rowWrites = () => touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'insert' || c[0] === 'update');
+
+  it('inline always passes and reads nothing', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'inline' })).toEqual({ ok: true });
+    expect(mockDbTouches).toHaveLength(0);
+  });
+
+  it('sms: a healthy customer passes, and nothing is minted, sent or paid for', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'sms' })).toEqual({ ok: true });
+    expect(mockGetSmsTemplate).toHaveBeenCalledWith(
+      'autopay_setup_link',
+      expect.objectContaining({ first_name: 'Pat', secure_link: 'https://portal.test/secure/preflight-check' }),
+      {},
+      { audit: false, noVariants: true },
+    );
+    expect(rowWrites()).toEqual([]);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('sms: no phone, gate off and an inactive template carry the same reasons the send path returns', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: { ...CUSTOMER, phone: null }, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'no_customer_phone' });
+    gates.autopayCustomerSms = false;
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'autopay_sms_gate_off' });
+    gates.autopayCustomerSms = true;
+    mockGetSmsTemplate.mockResolvedValue(null);
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'template_inactive' });
+  });
+
+  it('sms: an active STOP suppression is refused with the pipeline reason', async () => {
+    mockTableHandlers.messaging_suppression = { first: () => ({ phone: '+19415551234', reason: 'opt_out_keyword', created_at: '2026-10-01' }) };
+    const r = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^Recipient is suppressed \(reason: opt_out_keyword/);
+  });
+
+  it('sms: a customer with texts turned off is refused with the consent reason', async () => {
+    mockTableHandlers.notification_prefs = { first: () => ({ customer_id: 'cust-1', sms_enabled: false }) };
+    const r = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toEqual(expect.any(String));
+    expect(r.reason).not.toMatch(/_check_uncertain$/);
+  });
+
+  it('sms: an unreadable consent or suppression read fails closed with a retryable reason', async () => {
+    mockTableHandlers.notification_prefs = { first: () => { throw new Error('db blip'); } };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_policy_check_uncertain' });
+    mockTableHandlers.notification_prefs = {};
+    mockTableHandlers.messaging_suppression = { first: () => { throw new Error('db blip'); } };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_policy_check_uncertain' });
+  });
+
+  it('sms: a CACHED landline or fixed-VoIP line is refused with the validator\'s reason; a miss and a mobile pass', async () => {
+    gates.proactiveLineTypeLookup = true;
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    const landline = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
+    expect(landline.ok).toBe(false);
+    expect(landline.reason).toMatch(/landline.*SMS not deliverable/);
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
+    expect((await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).reason).toMatch(/fixed-VoIP/);
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    mockReadCachedLineType.mockResolvedValue({ state: 'miss' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+  });
+
+  it('sms: with the proactive line-type gate off the cache is not consulted (the send would not look either)', async () => {
+    mockReadCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    expect(mockReadCachedLineType).not.toHaveBeenCalled();
+  });
+
+  it('sms: an unreadable line-type cache fails closed', async () => {
+    gates.proactiveLineTypeLookup = true;
+    mockReadCachedLineType.mockResolvedValue({ state: 'error' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_line_type_check_uncertain' });
+  });
+
+  it('sms: a template read that throws fails closed instead of throwing', async () => {
+    mockGetSmsTemplate.mockRejectedValue(new Error('boom'));
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'sms_delivery_check_uncertain' });
+  });
+
+  it('email: a healthy customer passes through the template library\'s no-send preflight', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' })).toEqual({ ok: true });
+    expect(mockPreflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.autopay_setup_link',
+      to: 'pat@example.com',
+      payload: expect.objectContaining({ first_name: 'Pat', secure_link: 'https://portal.test/secure/preflight-check', expires_on: expect.any(String) }),
+    }));
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(rowWrites()).toEqual([]);
+  });
+
+  it('email: no address, opted out and an unreadable preference carry the send path\'s reasons', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: { ...CUSTOMER, email: 'not-an-email' }, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'no_customer_email' });
+    mockTableHandlers.notification_prefs = { first: () => ({ email_enabled: false }) };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_opted_out' });
+    mockTableHandlers.notification_prefs = { first: () => { throw new Error('db blip'); } };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_prefs_check_uncertain' });
+    expect(mockPreflightTemplateSend).not.toHaveBeenCalled();
+  });
+
+  it('email: an inactive or missing template is email_template_inactive; a suppressed address carries the library\'s reason', async () => {
+    mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'email template payment.autopay_setup_link is paused', code: 'EMAIL_TEMPLATE_DISABLED' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_template_inactive' });
+    mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
+    expect((await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' })).reason).toBe('email_template_inactive');
+    mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'Suppressed: bounce' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'Suppressed: bounce' });
+  });
+
+  it('email: an unreadable template or suppression check fails closed', async () => {
+    mockPreflightTemplateSend.mockRejectedValue(new Error('db blip'));
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'email' }))
+      .toEqual({ ok: false, reason: 'email_template_check_uncertain' });
+  });
+
+  it('loads the customer by id when none is passed; an unknown or archived one is customer_not_found', async () => {
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'sms' })).toEqual({ ok: true });
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, deleted_at: new Date() }) };
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', delivery: 'sms' })).toEqual({ ok: false, reason: 'customer_not_found' });
+  });
+
+  describe('requestAutopaySetupLink({ requireDeliverable })', () => {
+    it('true + a failing channel: refuses BEFORE minting — no row inserted, updated or retired, no link returned', async () => {
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true });
+      expect(r).toEqual({ requested: false, action: 'skipped', reason: 'no_customer_phone' });
+      expect(r.secureUrl).toBeUndefined();
+      expect(r.expiresAt).toBeUndefined();
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('true + a failing channel leaves an EXPIRED pending row alone (not retired) and a live one untouched', async () => {
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, expires_at: PAST }) };
+      mockPreflightTemplateSend.mockResolvedValue({ ok: false, reason: 'Suppressed: bounce' });
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', requireDeliverable: true });
+      expect(r.reason).toBe('Suppressed: bounce');
+      expect(r.secureUrl).toBeUndefined();
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+    });
+
+    it('true + a passing preflight sends exactly as today (row minted, sent, stamped)', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', trigger: 'admin', requireDeliverable: true });
+      expect(r).toEqual(expect.objectContaining({ action: 'sent', channel: 'sms', secureUrl: expect.stringMatching(/\/secure\//) }));
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
+      expect(calls.some((c) => c[0] === 'insert')).toBe(true);
+      expect(calls.some((c) => c[0] === 'update' && c[1].sent_at)).toBe(true);
+    });
+
+    it('true + inline never runs the preflight (nothing to deliver)', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'inline', requireDeliverable: true });
+      expect(r.action).toBe('link_created');
+      expect(mockGetSmsTemplate).not.toHaveBeenCalled();
+      expect(mockPreflightTemplateSend).not.toHaveBeenCalled();
+    });
+
+    it('true: the saved-card auto-secure still runs first (the card covers the ask, preflight never reached)', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-1', stripe_payment_method_id: 'pm_1' });
+      mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date() }) };
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true });
+      expect(r.action).toBe('auto_secured');
+    });
+
+    it('default (omitted or false): a failing channel still MINTS the row and the skip carries the link for copy/paste', async () => {
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
+      for (const opts of [{}, { requireDeliverable: false }]) {
+        mockDbTouches = [];
+        const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', ...opts });
+        expect(r.reason).toBe('no_customer_phone');
+        expect(r.secureUrl).toMatch(/\/secure\//);
+        expect(r.expiresAt).toBeTruthy();
+        expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'insert')).toBe(true);
+        expect(mockGetSmsTemplate).not.toHaveBeenCalled();
+      }
+    });
+
+    it('default: the email path with a suppressed address still mints and returns the link', async () => {
+      mockSendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'Suppressed: bounce' });
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+      expect(r.reason).toBe('Suppressed: bounce');
+      expect(r.secureUrl).toMatch(/\/secure\//);
+      expect(mockPreflightTemplateSend).not.toHaveBeenCalled();
+    });
   });
 });
 
