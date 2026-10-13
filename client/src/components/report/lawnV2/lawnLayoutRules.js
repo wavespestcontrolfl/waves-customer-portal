@@ -75,6 +75,32 @@ export function bannerShowsAnything(banner) {
   return watering || isText(banner.mowHold?.line);
 }
 
+// Live-only sentences about the short run: they end with it.
+const SHORT_RUN_EXTRAS = ['forecastLine', 'observedRain', 'setupLine'];
+const finiteMs = (iso) => { const ms = iso ? Date.parse(iso) : NaN; return Number.isFinite(ms) ? ms : null; };
+
+/**
+ * The banner as it reads at `nowMs`. A visit with a short water-in beside a 14-day one carries banner.later
+ * ({ at, state, lines }, frozen by the server): once the short deadline (`at`) has passed, the live banner prints
+ * only the long line, so a deadline that is over is never shown as current. The live-only sentences about the short
+ * run (forecast, measured rain, sprinkler setup) go with it. A printed page keeps the lines as written at the visit.
+ */
+export function bannerAtNow(banner, nowMs = Date.now(), printing = false) {
+  const later = banner?.later;
+  const laterMs = finiteMs(later?.at);
+  const lines = Array.isArray(later?.lines) ? later.lines.filter(isText) : [];
+  if (printing || laterMs == null || nowMs <= laterMs || !lines.length) return banner;
+  const now = { ...banner, state: later.state || banner.state, lines };
+  SHORT_RUN_EXTRAS.forEach((key) => { delete now[key]; });
+  return now;
+}
+
+/** The next moment the live banner changes (its later phase starts, or it ends), or null when none is ahead. */
+export function bannerNextChangeMs(banner, nowMs = Date.now()) {
+  const ahead = [finiteMs(banner?.later?.at), finiteMs(banner?.expiresAt)].filter((ms) => ms != null && ms > nowMs);
+  return ahead.length ? Math.min(...ahead) : null;
+}
+
 function bannerWateringLines(banner) {
   return Array.isArray(banner?.lines) ? banner.lines.filter(isText) : [];
 }

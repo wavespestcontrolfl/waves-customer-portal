@@ -96,7 +96,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -162,6 +162,7 @@ const WRITE_TWO_STEP = [
   'delete_duplicate_customer',
   'repair_closeout',
   'resend_receipt',
+  'create_customer_link',
   'remove_saved_payment_method',
   'correct_invoice_address',
   'send_invoice',
@@ -661,6 +662,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     }],
     // resend_receipt's preview reads the paid invoice and the receipt resolvers
     // (spied below — their own paths are covered by intelligence-bar-receipt-resend.test.js).
+    // create_customer_link's preview reads only the customer (the composer
+    // handler it runs at commit is never reached unconfirmed).
+    ['customer-link-tools', 'executeCustomerLinkTool', 'create_customer_link', { customer_id: '00000000-0000-0000-0000-00000000f101', kind: 'pay_balance' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f101', first_name: 'Link', last_name: 'Fixture', phone: '9415550100', email: 'link@example.com', deleted_at: null }],
+    }],
     ['receipt-resend-tools', 'executeReceiptResendTool', 'resend_receipt', { invoice_id: '00000000-0000-0000-0000-00000000f001' }, {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f001', invoice_number: 'WPC-2026-0900', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null, paid_at: new Date('2026-10-01T15:00:00Z') }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.com', phone: '9415550100' }],
@@ -1084,6 +1090,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
     // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'send_invoice']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_invoice']);
   });
 });

@@ -346,9 +346,10 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     });
   }, [actions]);
 
-  // Tick for the expiry countdown — the server enforces the 10-minute TTL
-  // on the claim, so an un-refreshed card must go visibly stale instead of
-  // offering a Confirm that can only 409.
+  // Tick for the expiry countdown — the server enforces the card's TTL (10 or
+  // 60 minutes by tool; the deadline comes from expiresInMs) on the claim, so
+  // an un-refreshed card must go visibly stale instead of offering a Confirm
+  // that can only 409.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!actions || actions.length === 0) return undefined;

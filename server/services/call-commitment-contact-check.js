@@ -145,6 +145,12 @@ function callWitnessQuery(conn, { customerId, callId, from, to, id = null }) {
     .whereIn('cl.source', STAFF_CALL_SOURCES)
     .whereNot('cl.id', callId)
     .whereRaw(personCallBackSql('cl'))
+    // Under GATE_CALLBACK_SPAM_CLOSES_PARENT a call back is a witness only
+    // once its pass has settled it as not spam (the resolvers' rule, r40):
+    // read here for a NEW close and again by contactCloseStands, so a close
+    // on a callback since reprocessed to spam, or back in a pass, no longer
+    // stands and the lapse arm's reopen is not undone (codex #6271 r51 P1).
+    .modify((b) => { if (isEnabled('callbackSpamClosesParent')) b.whereRaw(commitments.settledNonSpamCallbackSql('cl')); })
     // A prefilter only: a call that started before the floor can end after
     // it, and never ends before it started; witnessAt decides exactly.
     .where('cl.created_at', '>', new Date(from.getTime() - DAY_MS))

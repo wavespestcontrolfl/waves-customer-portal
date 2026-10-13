@@ -83,10 +83,12 @@ function copyIsClean(text) {
   return typeof text === 'string' && text.trim().length > 0 && !BANNED_COPY.test(text);
 }
 
-// Only a plain water-in instruction can carry either piece.
+// Only a plain water-in instruction can carry either piece. A long-window
+// water-in already says rain counts and asks for no run, so neither sentence
+// ("run the watering above") applies to it.
 function isPlainWaterIn(instruction) {
   return !!instruction && typeof instruction === 'object' && instruction.state === 'water_in'
-    && !instruction.holdUntil && !instruction.holdUntilLabel;
+    && !instruction.holdUntil && !instruction.holdUntilLabel && instruction.longWindow !== true;
 }
 
 // ── 1. Frozen at completion ─────────────────────────────────────────────

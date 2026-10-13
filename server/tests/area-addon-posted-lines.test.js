@@ -441,7 +441,11 @@ describe('the Intelligence Bar never books an area add-on by name', () => {
   test('every booking path of the bar asks that pricer', () => {
     expect(src.split('await ibBookingPricing(').length - 1).toBeGreaterThanOrEqual(4);
     const fn = src.slice(src.indexOf('async function ibBookingPricing('));
-    expect(fn.indexOf("startsWith('area_addon_')")).toBeLessThan(fn.indexOf('isAlwaysFreeServiceType(serviceType)'));
+    // The free-visit check reads the resolved catalog name (#6309); the add-on
+    // refusal must still come first.
+    const freeCheck = fn.indexOf('isAlwaysFreeServiceType(bookedType)');
+    expect(freeCheck).toBeGreaterThan(-1);
+    expect(fn.indexOf("startsWith('area_addon_')")).toBeLessThan(freeCheck);
   });
 });
 

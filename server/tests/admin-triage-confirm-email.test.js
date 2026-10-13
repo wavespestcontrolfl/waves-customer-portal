@@ -34,6 +34,7 @@ jest.mock('../middleware/admin-auth', () => ({
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 const mockPropagateCustomerEmailChange = jest.fn(async () => ({}));
 const mockResendPendingConfirmation = jest.fn(async () => {});
