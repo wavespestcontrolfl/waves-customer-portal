@@ -620,175 +620,204 @@ async function findSavedMethodForAutoSecure(customerId) {
  * wants a link without a deliverable channel (an Intelligence Bar confirm
  * card) opts in.
  */
+// ── requestAutopaySetupLink, as named steps (the order of effects, top to bottom) ──
+
+// What the locked enrollment's refusal reasons mean as skips — the same skips the
+// unlocked eligibility checks would have produced.
+const ENROLLMENT_SKIPS = new Map([
+  ['customer_deleted', 'customer_not_found'],
+  ['autopay_already_active', 'autopay_already_active'],
+  ['lane_changed', 'unsupported_billing_lane'],
+  ['autopay_paused', 'autopay_paused'],
+]);
+// An opt-out that won the race, or no readable consent moment: fall through to a
+// fresh link (fresh checkbox) rather than refusing.
+const ENROLLMENT_FALLS_THROUGH = new Set(['opted_out_after_authorization', 'no_consent_moment']);
+
+// The ORIGINAL consent's moment rides into enrollment (pre-push Codex P0): the
+// unlocked opt-out read can race a disable that commits right after it —
+// enrollConsentedMethod's in-lock guard then refuses opted_out_after_authorization
+// instead of overwriting the opt-out. A valid Date, or null (no readable moment →
+// do not auto-enroll blind; mint a link for a fresh checkbox instead).
+async function consentMoment(customerId, saved) {
+  let authorizedAt = null;
+  try {
+    const consentRow = await db('payment_method_consents')
+      .where({ customer_id: customerId, stripe_payment_method_id: saved.stripe_payment_method_id })
+      .orderBy('created_at', 'desc')
+      .first('created_at');
+    authorizedAt = consentRow?.created_at ? new Date(consentRow.created_at) : null;
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] consent moment lookup failed for customer ${customerId}: ${err.message}`);
+  }
+  if (!(authorizedAt instanceof Date) || Number.isNaN(authorizedAt.getTime())) {
+    logger.info(`[autopay-setup-link] no consent moment for saved pm ${saved.id} — minting a fresh link instead of auto-enrolling`);
+    return null;
+  }
+  return authorizedAt;
+}
+
+// The final result an enrollment outcome stands for, or null to carry on to a link.
+function enrollmentResult(enrollment) {
+  const reason = enrollment?.reason;
+  if (enrollment?.enrolled || reason === 'already_enrolled') return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
+  if (ENROLLMENT_SKIPS.has(reason)) return skip(ENROLLMENT_SKIPS.get(reason));
+  if (ENROLLMENT_FALLS_THROUGH.has(reason)) return null;
+  return skip(`enrollment_refused:${reason || 'unknown'}`);
+}
+
+// Step 2 — the saved card. A consented, chargeable saved card covers the ask:
+// enroll it and send nothing (mirrors the visit lane's auto-secure, minus the row:
+// there is no visit to mark satisfied). An OPT-OUT is sacred (see
+// findSavedMethodForAutoSecure): that customer gets a fresh link and a fresh
+// checkbox instead. allowAutoSecure === false: enrolling turns Auto Pay on for the
+// account (a billing change) — a caller that must never make it gets a skip, before
+// anything is enrolled, minted or sent. Returns a final result, or null (no card, or
+// carry on to a link).
+async function savedCardStep({ customerId, trigger, allowAutoSecure }) {
+  const saved = await findSavedMethodForAutoSecure(customerId);
+  if (!saved) return null;
+  if (allowAutoSecure === false) return skip('saved_method_available');
+  const authorizedAt = await consentMoment(customerId, saved);
+  // Same locked eligibility as capture completion (GH Codex P2): an archive / lane
+  // move / pause that commits after the unlocked checks is judged under the
+  // customer lock before anything enrolls.
+  const enrollment = authorizedAt
+    ? await enrollUnderCustomerLock({ customerId, paymentMethodId: saved.id, details: { via: PURPOSE, trigger }, authorizedAt })
+    : { enrolled: false, reason: 'no_consent_moment' };
+  return enrollmentResult(enrollment);
+}
+
+// An expired live row retires so a fresh link can mint (expiry takes precedence over
+// status, GH Codex #3726 r3 P2): a pending one at once; a COMPLETING one only once
+// its claim is stale (a live claim's worker may still finish or revert). Returns a
+// skip while a live claim holds the row, else null.
+async function retireExpiredRow(existing) {
+  if (existing.status !== 'completing') {
+    await db('appointment_card_requests').where({ id: existing.id, status: 'pending' }).update({ status: 'expired', updated_at: new Date() });
+    return null;
+  }
+  const claimAge = existing.updated_at ? Date.now() - new Date(existing.updated_at).getTime() : Infinity;
+  if (claimAge <= STALE_CLAIM_MS) return skip('completion_in_progress');
+  await db('appointment_card_requests')
+    .where({ id: existing.id, status: 'completing' })
+    .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
+    .update({ status: 'expired', updated_at: new Date() });
+  return null;
+}
+
+async function insertSetupRequest(customerId, trigger) {
+  const token = crypto.randomBytes(16).toString('base64url');
+  try {
+    const rows = await db('appointment_card_requests')
+      .insert({ kind: KIND, customer_id: customerId, status: 'pending', trigger, token, expires_at: new Date(Date.now() + LINK_TTL_MS) })
+      .returning(['id', 'token', 'expires_at']);
+    return rows && rows[0];
+  } catch (insertErr) {
+    // Lost a race to the partial unique — adopt the winner's row.
+    const winner = await findLiveSetupRequest(customerId);
+    if (!winner) throw insertErr;
+    return winner;
+  }
+}
+
+// Step 4 — mint or reuse the row. Dedup on the LIVE row — pending OR mid-completion
+// (partial unique index: one live standalone row per customer; a completing row is a
+// claim that can revert to pending, so it is live too). A completing row is never
+// retired here unless its claim is stale (the completion tail owns it).
+// Returns { request, existing } or { final } (a skip to return).
+async function mintOrReuseRequest({ customerId, trigger }) {
+  const existing = await findLiveSetupRequest(customerId);
+  let request = existing && !isExpired(existing) ? existing : null;
+  if (existing && !request) {
+    const held = await retireExpiredRow(existing);
+    if (held) return { final: held };
+  }
+  if (!request) request = await insertSetupRequest(customerId, trigger);
+  return { request, existing };
+}
+
+// Step 5 — deliver. 'inline' hands the link back; 'email' and 'sms' send it.
+function deliverInline({ request, existing, linkMeta }) {
+  return { requested: true, action: 'link_created', reason: existing && request.id === existing.id ? 'request_exists' : 'created', ...linkMeta };
+}
+
+async function deliverEmail({ customer, customerId, request, secureUrl, trigger, expectedRecipient, linkMeta }) {
+  const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger, expectedRecipient });
+  return { ...emailed, ...linkMeta };
+}
+
+async function deliverSms({ customer, customerId, request, secureUrl, trigger, expectedRecipient, linkMeta }) {
+  const smsPrecheck = smsPrecheckReason(customer);
+  if (smsPrecheck) return skip(smsPrecheck, linkMeta);
+  const { renderTemplate } = require('./appointment-card-request');
+  // requiredVars: the template editor's own rule (REQUIRED_TEMPLATE_PLACEHOLDERS) applied to the
+  // body the send selects (base or variant), so a row saved before that rule never sends a text
+  // without the link; the rendered body must also carry the URL.
+  const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY, { requiredVars: requiredTemplateVars() });
+  if (!carriesLink(body, secureUrl)) return skip('template_inactive', linkMeta);
+  // The provider-boundary pin: the number texted is the one just re-read.
+  const target = await recipientAtSend({ expectedRecipient, delivery: 'sms', customerId, customer });
+  if (!target) return skip('recipient_changed', linkMeta);
+
+  let result;
+  try {
+    result = await sendCustomerMessage({
+      to: target.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'card_request',
+      customerId,
+      identityTrustLevel: 'phone_matches_customer',
+      // Only ever an explicit office click — never automation.
+      ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
+      metadata: { autopay_setup_request_id: request.id, trigger, original_message_type: TEMPLATE_KEY },
+      ...smsBoundaryPin({ expectedRecipient, customerId }),
+    });
+  } catch (sendErr) {
+    // Provider errors can echo the destination number AND the message
+    // body (which carries the bearer URL) — log only the error class/code,
+    // never the message (pre-push Codex P1).
+    logger.error(`[autopay-setup-link] send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
+    return skip('send_outcome_uncertain', linkMeta);
+  }
+  if (!result?.sent) return smsNotSentSkip(result, linkMeta);
+  const sent = await markSent(request, customerId, 'sms', trigger);
+  return { ...sent, ...linkMeta };
+}
+
+const DELIVER = { inline: deliverInline, email: deliverEmail, sms: deliverSms };
+
 async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin', requireDeliverable, allowAutoSecure = true, expectedRecipient = null }) {
   try {
-    if (!['inline', 'sms', 'email'].includes(delivery)) delivery = 'inline';
+    if (!Object.hasOwn(DELIVER, delivery)) delivery = 'inline';
+    // 1. Eligibility.
     const eligibility = await setupLinkIneligibility(customerId);
     if (eligibility.reason) return skip(eligibility.reason);
     const { customer } = eligibility;
-
-    // A consented, chargeable saved card covers the ask — enroll it and
-    // send nothing (mirrors the visit lane's auto-secure, minus the row:
-    // there is no visit to mark satisfied). An OPT-OUT is sacred (see
-    // findSavedMethodForAutoSecure): that customer gets a fresh link and a
-    // fresh checkbox instead.
-    const saved = await findSavedMethodForAutoSecure(customerId);
-    // allowAutoSecure === false: enrolling a saved card turns Auto Pay on for
-    // the account (a billing change) — a caller that must never make it gets
-    // a skip here, before anything is enrolled, minted or sent.
-    if (saved && allowAutoSecure === false) return skip('saved_method_available');
-    if (saved) {
-      // The ORIGINAL consent's moment rides into enrollment (pre-push Codex
-      // P0): the unlocked opt-out read above can race a disable that commits
-      // right after it — enrollConsentedMethod's in-lock guard then refuses
-      // opted_out_after_authorization instead of overwriting the opt-out.
-      let authorizedAt = null;
-      try {
-        const consentRow = await db('payment_method_consents')
-          .where({ customer_id: customerId, stripe_payment_method_id: saved.stripe_payment_method_id })
-          .orderBy('created_at', 'desc')
-          .first('created_at');
-        authorizedAt = consentRow?.created_at ? new Date(consentRow.created_at) : null;
-      } catch (err) {
-        logger.warn(`[autopay-setup-link] consent moment lookup failed for customer ${customerId}: ${err.message}`);
-      }
-      // No readable authorization moment → do not auto-enroll blind; mint a
-      // link for a fresh checkbox instead.
-      if (!(authorizedAt instanceof Date) || Number.isNaN(authorizedAt.getTime())) {
-        logger.info(`[autopay-setup-link] no consent moment for saved pm ${saved.id} — minting a fresh link instead of auto-enrolling`);
-      }
-      // Same locked eligibility as capture completion (GH Codex P2): an
-      // archive / lane move / pause that commits after the unlocked checks
-      // above is judged under the customer lock before anything enrolls.
-      const enrollment = authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())
-        ? await enrollUnderCustomerLock({
-          customerId,
-          paymentMethodId: saved.id,
-          details: { via: PURPOSE, trigger },
-          authorizedAt,
-        })
-        : { enrolled: false, reason: 'no_consent_moment' };
-      if (enrollment?.enrolled || enrollment?.reason === 'already_enrolled') {
-        return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
-      }
-      // Locked eligibility refusals are the same skips the unlocked checks
-      // would have produced.
-      if (enrollment?.reason === 'customer_deleted') return skip('customer_not_found');
-      if (enrollment?.reason === 'autopay_already_active') return skip('autopay_already_active');
-      if (enrollment?.reason === 'lane_changed') return skip('unsupported_billing_lane');
-      if (enrollment?.reason === 'autopay_paused') return skip('autopay_paused');
-      // An opt-out that won the race, or no readable consent moment: fall
-      // through to a fresh link (fresh checkbox) rather than refusing.
-      if (enrollment?.reason !== 'opted_out_after_authorization' && enrollment?.reason !== 'no_consent_moment') {
-        return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
-      }
-    }
-
+    // 2. The saved card (auto-secure, or the allowAutoSecure:false skip).
+    const savedCard = await savedCardStep({ customerId, trigger, allowAutoSecure });
+    if (savedCard) return savedCard;
+    // 3. Deliverability gate (requireDeliverable, and expectedRecipient before the mint).
     const undeliverable = await undeliverableSkip({ requireDeliverable, expectedRecipient, customerId, customer, delivery, trigger });
     if (undeliverable) return undeliverable;
-
-    // Dedup on the LIVE row — pending OR mid-completion (partial unique
-    // index: one live standalone row per customer; a completing row is a
-    // claim that can revert to pending, so it is live too). An expired
-    // pending row is retired first so a fresh link can mint; a completing
-    // row is never retired here (the completion tail owns it).
-    const existing = await findLiveSetupRequest(customerId);
-    // Expiry takes precedence over status (GH Codex #3726 r3 P2): an expired
-    // pending row retires; an expired COMPLETING row retires only once its
-    // claim is stale (a live claim's worker may still finish or revert).
-    let request = existing && !isExpired(existing) ? existing : null;
-    if (existing && !request) {
-      if (existing.status === 'completing') {
-        const claimAge = existing.updated_at ? Date.now() - new Date(existing.updated_at).getTime() : Infinity;
-        if (claimAge <= STALE_CLAIM_MS) return skip('completion_in_progress');
-        await db('appointment_card_requests')
-          .where({ id: existing.id, status: 'completing' })
-          .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
-          .update({ status: 'expired', updated_at: new Date() });
-      } else {
-        await db('appointment_card_requests')
-          .where({ id: existing.id, status: 'pending' })
-          .update({ status: 'expired', updated_at: new Date() });
-      }
-    }
-    if (!request) {
-      const token = crypto.randomBytes(16).toString('base64url');
-      try {
-        const rows = await db('appointment_card_requests')
-          .insert({
-            kind: KIND,
-            customer_id: customerId,
-            status: 'pending',
-            trigger,
-            token,
-            expires_at: new Date(Date.now() + LINK_TTL_MS),
-          })
-          .returning(['id', 'token', 'expires_at']);
-        request = rows && rows[0];
-      } catch (insertErr) {
-        // Lost a race to the partial unique — adopt the winner's row.
-        request = await findLiveSetupRequest(customerId);
-        if (!request) throw insertErr;
-      }
-    }
+    // 4. Mint or reuse the row.
+    const minted = await mintOrReuseRequest({ customerId, trigger });
+    if (minted.final) return minted.final;
+    const { request, existing } = minted;
     // The bearer link goes out UNSHORTENED (same ruling as the visit lane:
     // the generic shortener is too weak a credential for a payment page).
     const secureUrl = portalUrl(`/secure/${request.token}`);
     const linkMeta = { secureUrl, expiresAt: request.expires_at || null };
-
     // A row mid-completion is never handed out, texted or stamped (GH Codex
     // #3726 P2, #3812 r4 P2): the customer is finishing right now, its
     // updated_at is the completion lease token — a stamp here would break
     // the worker's guarded final write — and a copied/inserted link would
     // only be refused at send.
     if (request.status === 'completing') return skip('completion_in_progress', linkMeta);
-
-    if (delivery === 'inline') {
-      return { requested: true, action: 'link_created', reason: existing && request.id === existing.id ? 'request_exists' : 'created', ...linkMeta };
-    }
-
-    if (delivery === 'email') {
-      const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger, expectedRecipient });
-      return { ...emailed, ...linkMeta };
-    }
-
-    const smsPrecheck = smsPrecheckReason(customer);
-    if (smsPrecheck) return skip(smsPrecheck, linkMeta);
-    const { renderTemplate } = require('./appointment-card-request');
-    // requiredVars: the template editor's own rule (REQUIRED_TEMPLATE_PLACEHOLDERS) applied to the
-    // body the send selects (base or variant), so a row saved before that rule never sends a text
-    // without the link; the rendered body must also carry the URL.
-    const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY, { requiredVars: requiredTemplateVars() });
-    if (!carriesLink(body, secureUrl)) return skip('template_inactive', linkMeta);
-    // The provider-boundary pin: the number texted is the one just re-read.
-    const target = await recipientAtSend({ expectedRecipient, delivery: 'sms', customerId, customer });
-    if (!target) return skip('recipient_changed', linkMeta);
-
-    let result;
-    try {
-      result = await sendCustomerMessage({
-        to: target.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'card_request',
-        customerId,
-        identityTrustLevel: 'phone_matches_customer',
-        // Only ever an explicit office click — never automation.
-        ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
-        metadata: { autopay_setup_request_id: request.id, trigger, original_message_type: TEMPLATE_KEY },
-        ...smsBoundaryPin({ expectedRecipient, customerId }),
-      });
-    } catch (sendErr) {
-      // Provider errors can echo the destination number AND the message
-      // body (which carries the bearer URL) — log only the error class/code,
-      // never the message (pre-push Codex P1).
-      logger.error(`[autopay-setup-link] send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
-      return skip('send_outcome_uncertain', linkMeta);
-    }
-    if (!result?.sent) return smsNotSentSkip(result, linkMeta);
-    const sent = await markSent(request, customerId, 'sms', trigger);
-    return { ...sent, ...linkMeta };
+    // 5. Deliver.
+    return await DELIVER[delivery]({ customer, customerId, request, existing, secureUrl, trigger, expectedRecipient, linkMeta });
   } catch (err) {
     logger.error(`[autopay-setup-link] request failed for customer ${customerId}: ${err.message}`);
     return skip('request_failed');
