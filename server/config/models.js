@@ -126,10 +126,16 @@ function anthropicAcceptsEffort(model, level) {
 const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5(?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // Does `model` think by default (so its replies can carry thinking blocks even
-// when the caller sends no `thinking` parameter)? The one predicate over the
-// floor list above; the Intelligence Bar's tool search reads it.
+// when the caller sends no `thinking` parameter)? Wider than the floor list on
+// purpose, and fail-safe for new ids: every Claude family numbered 5 or later
+// (Opus, Sonnet, Haiku 5.5 with adaptive thinking on by default, and any
+// family added later), plus Fable and Mythos. The floor list stays the
+// max_tokens rule and is not changed by this. The Intelligence Bar's tool
+// search reads it: a model that thinks by default does not get tool search.
+const ANTHROPIC_THINKS_BY_DEFAULT_RE = /^claude-[a-z]+-[5-9](?![0-9])|^claude-(fable|mythos)-/;
 function anthropicThinksByDefault(model) {
-  return ANTHROPIC_THINKING_FLOOR_RE.test(String(model || ''));
+  const id = String(model || '');
+  return ANTHROPIC_THINKS_BY_DEFAULT_RE.test(id) || ANTHROPIC_THINKING_FLOOR_RE.test(id);
 }
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
