@@ -367,8 +367,8 @@ async function closeResolved(audit, nowDate, enabled) {
 
 // The visit is still open on the placement the check read. A person can move
 // or cancel it between the check and the run's end; that notice would be
-// stale at once and would spend a ring (Codex #6313 r1). An unreadable visit
-// raises nothing: the next run asks again.
+// stale at once and would spend a ring (Codex #6313 r1). Null = the visit
+// could not be read.
 async function stillAsChecked(item, conn) {
   try {
     const row = await conn('scheduled_services').where({ id: item.id }).first('status', 'scheduled_date', 'window_start', 'technician_id');
@@ -376,7 +376,7 @@ async function stillAsChecked(item, conn) {
       && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id;
   } catch (err) {
     logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -403,7 +403,11 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
     for (const item of audit.withinRingBudget([...state.notices.values()], new Set(), Infinity, (row) => row.key)) {
       // Allowance spent: the rest wait for the next run, which asks again.
       if (left <= 0) break;
-      if (!(await stillAsChecked(item, conn))) continue;
+      const asChecked = await stillAsChecked(item, conn);
+      // An unreadable visit (null) raises nothing, and the run reports it:
+      // the visit may still be held with nobody told (Codex #6313 r10).
+      if (asChecked === null) state.noticesFailed += 1;
+      if (!asChecked) continue;
       try {
         // Only a new notice rings and spends a slot; a key that exists is left as it is.
         const written = await raiseOne(item, { raiseAdminAlert, names, audit });

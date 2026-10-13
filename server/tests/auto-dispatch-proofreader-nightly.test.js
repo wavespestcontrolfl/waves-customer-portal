@@ -353,6 +353,8 @@ describe('raiseNotices', () => {
     visitRow = () => row;
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+    // Only a visit that could not be read is a failure the run reports.
+    expect(state.noticesFailed).toBe(row instanceof Error ? 1 : 0);
   });
 
   test('a long answer never pushes the quote or the closing instruction out of the detail', async () => {
