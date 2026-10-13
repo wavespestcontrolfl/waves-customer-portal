@@ -1,5 +1,5 @@
 {
-  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params marks a path parameter as free text ({\"serviceType\": \"text\"}). query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the text of every module-scope constant (and the import statement of every imported binding the resolver cannot follow to a constant) that a followed function references, transitively. freeText lists the response fields that hold unrestricted text a person typed (notes, descriptions, instructions); the runtime scrubber removes pasted credentials from every string, best effort, and this list only tells a reviewer where to look. No behavior depends on it.",
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params marks a path parameter as free text ({\"serviceType\": \"text\"}). query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the module-scope constants declared in the same file as a followed function and referenced by it (transitively within that file), and the import statement text of each imported binding; never the content of an imported file and never anything under server/config/. freeText lists the response fields that hold unrestricted text a person typed (notes, descriptions, instructions); the runtime scrubber removes pasted credentials from every string, best effort, and this list only tells a reviewer where to look. No behavior depends on it.",
   "exclude": [],
   "reviewed": [
     {
@@ -8,7 +8,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "869ea091c62d1696b3ac805fddd52f9a"
+      "hash": "fdfc4e75e660ad68fd886a3da4ee6e78"
     },
     {
       "endpoint": "/admin/communications/ai-auto-reply-status",
@@ -38,7 +38,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "7dfc91dcd31ebaf55f05d88afd4751e1"
+      "hash": "5e718afcf11382ca2fdfa8ae26482348"
     },
     {
       "endpoint": "/admin/customers/:id/autopay-state",
@@ -51,7 +51,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "de4ec4c6c7c927607100eb28ea67c7db"
+      "hash": "61bc08dcdce811d3171d564b621d6401"
     },
     {
       "endpoint": "/admin/customers/:id/credits",
@@ -74,7 +74,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "e859c9f451edd7a036193d33a127289b"
+      "hash": "0475bbf9300cad99ce10d3d31666452a"
     },
     {
       "endpoint": "/admin/discounts/stacking",
@@ -82,7 +82,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "84bbe0708512b528e8bdc695829ba4f5"
+      "hash": "0f051748cdc9c9b152354bd8e9f12e09"
     },
     {
       "endpoint": "/admin/discounts/stats",
@@ -114,7 +114,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "e3f97df488640e7ebef40531a06c2c0e"
+      "hash": "22ae3a6e90e1731542b879a615fe1796"
     },
     {
       "endpoint": "/admin/estimates/source-performance",
@@ -125,7 +125,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "40d92cbf833395e712ce08ff22f2d366"
+      "hash": "6175e7ea103824452658cd90912d42b6"
     },
     {
       "endpoint": "/admin/invoices/:id/attachments",
@@ -134,7 +134,7 @@
       "scopeParam": "id",
       "signals": [],
       "unresolved": [],
-      "hash": "c9f791f77acf5682c5f58fd4a20afdb9"
+      "hash": "4c6e79f68963d1085eddaa277e2e426f"
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
@@ -143,7 +143,7 @@
       "scopeParam": "id",
       "signals": [],
       "unresolved": [],
-      "hash": "0cd17df1fb64f4fcf06f714f55c92fba"
+      "hash": "96f15a81a78285f3484d4d3bb08829b7"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
@@ -152,7 +152,7 @@
       "scopeParam": "id",
       "signals": [],
       "unresolved": [],
-      "hash": "6e7857a365828efae0350d206f5e6f5e"
+      "hash": "b955aa2c143982fe7c885b4892c4c375"
     },
     {
       "endpoint": "/admin/invoices/customers/search",
@@ -163,7 +163,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "808debc151928b0e09a241522f58add8"
+      "hash": "0ee6b168e0e09738a781a1f9481012f5"
     },
     {
       "endpoint": "/admin/invoices/service-records/:customerId",
@@ -172,7 +172,7 @@
       "scopeParam": "customerId",
       "signals": [],
       "unresolved": [],
-      "hash": "8c6de1bd25f97a2b99ae66ae0c41b24f"
+      "hash": "518f53c56a96ccfc9c395c8278a755dc"
     },
     {
       "endpoint": "/admin/invoices/stats",
@@ -180,7 +180,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "76364d2ef8fa67c04d68c4a92b4f7d81"
+      "hash": "5f1baede15ae671322a26b851bf0ac26"
     },
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",
@@ -207,7 +207,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "26163b3683764014113114856e82f8e2"
+      "hash": "8df8df76091d5dbbb71451f2abd9625f"
     },
     {
       "endpoint": "/admin/payers",
@@ -241,7 +241,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "3ecc948085c2316b3dea79c2e4280e29"
+      "hash": "422c2e4533f1f7f9ddac60e09fe88768"
     },
     {
       "endpoint": "/admin/pricing-config/discount-rules",
@@ -350,7 +350,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "51f964f1f76c68b2c7936c5b2923b153"
+      "hash": "b30ef0152427d3828bf50b862de3da03"
     },
     {
       "endpoint": "/admin/route-scorecard/status",
@@ -358,7 +358,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "553a1da464e91de1bab9ae7b30826dd4"
+      "hash": "e6cf50d9fce6839d958d383ef9aa7ad3"
     },
     {
       "endpoint": "/admin/schedule/annual-prepay-availability",
@@ -366,7 +366,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "fb121c837b766e78c7a78f915abe78f0"
+      "hash": "ba82ea574fd8734f90e320a09edb33f4"
     },
     {
       "endpoint": "/admin/schedule/next-visit",
@@ -378,7 +378,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "a165979ff5cc1d93bac3f943c0c2d5d1"
+      "hash": "bd907b8a4a1a71aa228546b03fdd60a9"
     }
   ]
 }

@@ -16,9 +16,44 @@ const census = JSON.parse(fs.readFileSync(CENSUS_FILE, 'utf8'));
 
 jest.setTimeout(60000);
 
+const normalize = endpoint => `/${rules.splitPath(endpoint).map(seg => (rules.isParam(seg) ? ':param' : seg)).join('/')}`;
+
+// The failure other lanes see when their change edits code a reviewed read
+// depends on: in plain words, with the endpoints and the one command.
+function catalogDriftMessage(excluded) {
+  const reviewedKeys = new Set(Object.keys(JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed.reduce((acc, row) => ({ ...acc, [row.endpoint]: 1 }), {})));
+  const stale = excluded.review.filter(item => /^review is stale/.test(item.reason)
+    && [...reviewedKeys].some(endpoint => normalize(endpoint) === normalize(item.endpoint)));
+  if (!stale.length) {
+    return 'The Intelligence Bar read list (server/services/intelligence-bar/admin-read-catalog.json) is out of date. Run `npm run ib:read-catalog` and commit the result (server/services/intelligence-bar/README.md).';
+  }
+  return `A reviewed Intelligence Bar read went stale because its code changed: ${stale.map(item => `${item.endpoint} (${item.reason.replace(/^review is stale: /, '')})`).join('; ')}. `
+    + 'Run `npm run ib:read-catalog` and commit the result; the endpoint leaves the bar\'s read list until someone re-reviews it (server/services/intelligence-bar/README.md).';
+}
+
 test('regenerating the catalog gives the committed file byte for byte', () => {
-  const { output } = buildCatalog();
-  expect(serialize(output)).toBe(fs.readFileSync(OUT_FILE, 'utf8'));
+  const { output, excluded } = buildCatalog();
+  if (serialize(output) !== fs.readFileSync(OUT_FILE, 'utf8')) throw new Error(catalogDriftMessage(excluded));
+});
+
+test('the drift message names the stale endpoints, the reason and the one command', () => {
+  const full = loadReviewed();
+  const key = 'GET /admin/csr/overview';
+  const stale = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), hash: '0'.repeat(32) });
+  const { output, excluded } = buildCatalog({ reviewed: { exclude: full.exclude, reviewed: stale } });
+  expect(serialize(output)).not.toBe(fs.readFileSync(OUT_FILE, 'utf8'));
+  const message = catalogDriftMessage(excluded);
+  expect(message).toBe('A reviewed Intelligence Bar read went stale because its code changed: /admin/csr/overview (the handler chain changed). '
+    + 'Run `npm run ib:read-catalog` and commit the result; the endpoint leaves the bar\'s read list until someone re-reviews it (server/services/intelligence-bar/README.md).');
+});
+
+test('the runtime reads the committed catalog only: a stale row cannot throw there', () => {
+  const root = path.resolve(__dirname, '..', 'services', 'intelligence-bar');
+  for (const file of ['admin-read-tools.js', 'task-context.js']) {
+    const code = fs.readFileSync(path.join(root, file), 'utf8').split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
+    expect(code).not.toMatch(/admin-read-reviewed|build-ib-admin-read-catalog/);
+  }
+  expect(fs.readFileSync(path.join(root, 'admin-read-tools.js'), 'utf8')).toContain("require('./admin-read-catalog.json')");
 });
 
 test('every entry is a GET endpoint the census resolved, with named parameters', () => {
@@ -63,7 +98,6 @@ test('the deny rules refuse each reviewed class of path', () => {
   }
 });
 
-const normalize = endpoint => `/${rules.splitPath(endpoint).map(seg => (rules.isParam(seg) ? ':param' : seg)).join('/')}`;
 
 test('every reviewed row says what was read and carries the fingerprint it was reviewed against', () => {
   const file = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8'));
@@ -402,59 +436,85 @@ module.exports = router;
 
   describe('module-scope constants in the fingerprint', () => {
     const write = (name, text) => fs.writeFileSync(path.join(FIXTURE_DIR, name), text);
-    const router = `const express = require('express');
+    // WINDOW -> BASE are same-file constants; IMPORTED comes from another file.
+    const router = ({ base = 5, unused = 1 } = {}) => `const express = require('express');
 const db = require('./fx-db');
-const { WINDOW } = require('./fx-consts');
+const { IMPORTED } = require('./fx-consts');
+const BASE = ${base};
+const WINDOW = BASE * 2;
+const UNUSED = ${unused};
 const router = express.Router();
-router.get('/windowed', async (req, res) => { const { days } = req.query; res.json(await db('things').where('d', '<', WINDOW + Number(days || 0)).first()); });
+router.get('/windowed', async (req, res) => { const { days } = req.query; res.json(await db('things').where('d', '<', WINDOW + IMPORTED + Number(days || 0)).first()); });
 module.exports = router;
 `;
-    const consts = ({ base = 5, other = 1 } = {}) => `const BASE = ${base};\nconst WINDOW = BASE * 2;\nconst UNUSED = ${other};\nmodule.exports = { WINDOW, UNUSED };\n`;
+    const consts = (value = 3) => `const IMPORTED = ${value};\nmodule.exports = { IMPORTED };\n`;
     const hashFor = () => {
       resetCaches();
       return judgeIn('fx-router-consts.js', '/windowed');
     };
-    beforeEach(() => { write('fx-router-consts.js', router); write('fx-consts.js', consts()); });
+    beforeEach(() => { write('fx-router-consts.js', router()); write('fx-consts.js', consts()); });
     afterAll(() => writeFixtures());
 
-    test('a constant a followed function references is in the hash; an unrelated constant change leaves the row alone', () => {
+    test('a same-file constant a followed function references is in the hash', () => {
       const before = hashFor();
       expect(before).toMatchObject({ safe: true, signals: [], unresolved: [] });
       expect(before.constants.join('\n')).toContain('WINDOW = BASE * 2');
-      const row = rowFor(before);
-      write('fx-consts.js', consts({ other: 99 }));
-      const unrelated = hashFor();
-      expect(unrelated.hash).toBe(before.hash);
-      expect(checkReview(endpointFingerprint([unrelated]), row)).toBeNull();
     });
 
-    test('an edit to the constant the handler names directly makes the review stale', () => {
+    test('an edit to the constant the handler names makes the review stale', () => {
       const before = hashFor();
       const row = rowFor(before);
-      write('fx-consts.js', consts().replace('BASE * 2', 'BASE * 3'));
+      write('fx-router-consts.js', router().replace('BASE * 2', 'BASE * 3'));
       expect(checkReview(endpointFingerprint([hashFor()]), row)).toMatch(/handler chain changed/);
     });
 
-    test('a constant that the referenced constant uses (transitive) makes the review stale', () => {
+    test('a constant the referenced constant uses (transitive, same file) makes the review stale', () => {
       const before = hashFor();
       const row = rowFor(before);
-      write('fx-consts.js', consts({ base: 6 }));
+      write('fx-router-consts.js', router({ base: 6 }));
       const after = hashFor();
       expect(after.constants.join('\n')).toContain('BASE = 6');
       expect(checkReview(endpointFingerprint([after]), row)).toMatch(/handler chain changed/);
     });
 
-    test('an unreferenced constant in the same file stays out of the hash', () => {
-      const before = hashFor();
-      expect(before.constants.join('\n')).not.toContain('UNUSED');
-    });
-
-    test('a constant in the route file itself counts, and so does an import the resolver cannot follow', () => {
-      write('fx-router-consts.js', router.replace("const router = express.Router();", "const LOCAL_CAP = 10;\nconst router = express.Router();").replace('WINDOW + Number', 'WINDOW + LOCAL_CAP + Number'));
+    test('an unreferenced constant in the same file stays out of the hash and the row stays', () => {
       const before = hashFor();
       const row = rowFor(before);
-      expect(before.constants.join('\n')).toContain('LOCAL_CAP = 10');
-      write('fx-router-consts.js', router.replace("const router = express.Router();", "const LOCAL_CAP = 11;\nconst router = express.Router();").replace('WINDOW + Number', 'WINDOW + LOCAL_CAP + Number'));
+      expect(before.constants.join('\n')).not.toContain('UNUSED');
+      write('fx-router-consts.js', router({ unused: 99 }));
+      const after = hashFor();
+      expect(after.hash).toBe(before.hash);
+      expect(checkReview(endpointFingerprint([after]), row)).toBeNull();
+    });
+
+    test('a constant in an imported file is not hashed: only the import statement is', () => {
+      const before = hashFor();
+      const row = rowFor(before);
+      expect(before.constants.join('\n')).toContain("{ IMPORTED } = require('./fx-consts')");
+      write('fx-consts.js', consts(4000));
+      const after = hashFor();
+      expect(after.hash).toBe(before.hash);
+      expect(checkReview(endpointFingerprint([after]), row)).toBeNull();
+    });
+
+    test('editing a file under server/config/ does not stale a row, editing a same-file constant does', () => {
+      const dir = path.join(FIXTURE_DIR, 'server', 'config');
+      fs.mkdirSync(dir, { recursive: true });
+      const gates = value => `const GATES = { fast: ${value} };\nfunction gateOn() { return GATES.fast === true; }\nmodule.exports = { gateOn, GATES };\n`;
+      fs.writeFileSync(path.join(dir, 'fx-gates.js'), gates('true'));
+      write('fx-router-consts.js', router()
+        .replace("const router = express.Router();", "const { gateOn } = require('./server/config/fx-gates');\nconst CAP = 7;\nconst router = express.Router();")
+        .replace('WINDOW + IMPORTED', 'WINDOW + IMPORTED + CAP + (gateOn() ? 1 : 0)'));
+      const before = hashFor();
+      expect(before).toMatchObject({ safe: true, signals: [], unresolved: [] });
+      const row = rowFor(before);
+      expect(before.constants.join('\n')).toContain('CAP = 7');
+      expect(before.constants.join('\n')).not.toContain('GATES');
+      fs.writeFileSync(path.join(dir, 'fx-gates.js'), gates('false').replace('GATES.fast === true', 'GATES.fast === false && true'));
+      const afterConfig = hashFor();
+      expect(afterConfig.hash).toBe(before.hash);
+      expect(checkReview(endpointFingerprint([afterConfig]), row)).toBeNull();
+      write('fx-router-consts.js', fs.readFileSync(path.join(FIXTURE_DIR, 'fx-router-consts.js'), 'utf8').replace('CAP = 7', 'CAP = 8'));
       expect(checkReview(endpointFingerprint([hashFor()]), row)).toMatch(/handler chain changed/);
     });
   });

@@ -565,30 +565,50 @@ function nestedFunctionNames(fn) {
   return names;
 }
 
-// Adds the text of every module-scope constant `name` stands for: the
-// declaration in this file, or, for an imported binding, the constant in the
-// repo file it comes from when the resolver can follow it (an imported
-// function is followed as a function; anything else contributes the import
-// statement's own text). A constant that mentions other constants brings them.
+// WHAT THE REVIEW FINGERPRINT COVERS. The code of the read path and the
+// constants defined beside it:
+//   - the handler, its middleware and every function the scan follows, in any
+//     file (their bodies are hashed);
+//   - the module-scope constants declared in the SAME FILE as a followed
+//     function and referenced by it, transitively within that file (a SQL
+//     fragment, a window, a field list);
+//   - for a name that file imports, the import/require statement's own text,
+//     never the content of the imported file (an imported function is followed
+//     as a function, and then its own same-file constants count).
+// Nothing under server/config/ is hashed, not a function body and not a
+// constant: feature gates, locations and model tables are referenced by name
+// only. Shared configuration changes daily and does not change what a handler
+// reads or writes: a gate that switches a code path switches between branches
+// whose code is hashed here. (The scan still READS config functions for its
+// write / outside-call / credential signals.)
+function isConfigFile(file) {
+  return /(^|\/)server\/config\//.test(path.relative(ROOT, file).split(path.sep).join('/'));
+}
+
 function includeConstant(info, name, visited) {
-  const key = `${info.file}\n${name}`;
   const entry = info.constantDecls.get(name);
-  if (visited.has(key) || !entry) return;
-  visited.add(key);
-  const target = info.requires.get(name);
-  if (target?.file) {
-    const member = target.member || 'default';
-    const source = parseFile(target.file);
-    if (source.constantDecls.has(member)) { includeConstant(source, member, visited); return; }
-    if (exportedFunction(target.file, member)) return;
-  }
+  if (visited.has(name) || !entry) return;
+  visited.add(name);
   followedConstants.add(`${path.relative(ROOT, info.file)}\n${entry.text}`);
-  for (const other of referencedNames(entry.decl.init)) includeConstant(info, other, visited);
+  // An imported binding is its import statement; a local constant brings the
+  // constants it mentions, in this file only.
+  if (!info.requires.has(name)) for (const other of referencedNames(entry.decl.init)) includeConstant(info, other, visited);
 }
 
 function collectConstants(fn, info) {
+  if (isConfigFile(info.file)) return;
   const visited = new Set();
   for (const name of referencedNames(fn)) includeConstant(info, name, visited);
+}
+
+// Constants this big are a churn risk for a reviewed row: listed by
+// `--fingerprint` so a reviewer sees them. No behavior depends on it.
+const LARGE_CONSTANT_BYTES = 4096;
+function largeConstants() {
+  return [...followedConstants].filter(entry => entry.length > LARGE_CONSTANT_BYTES).map((entry) => {
+    const [file, ...rest] = entry.split('\n');
+    return { file, constant: rest.join('\n').split(/[\s=]/)[0], bytes: entry.length };
+  }).sort((a, b) => b.bytes - a.bytes);
 }
 
 function analyze(fn, info, depth, seen = new Set()) {
@@ -596,7 +616,7 @@ function analyze(fn, info, depth, seen = new Set()) {
   if (!fn || seen.has(fn)) return signals;
   seen.add(fn);
   touchedFiles.add(path.relative(ROOT, info.file));
-  followedSources.add(`${path.relative(ROOT, info.file)}\n${info.source.slice(fn.start, fn.end)}`);
+  if (!isConfigFile(info.file)) followedSources.add(`${path.relative(ROOT, info.file)}\n${info.source.slice(fn.start, fn.end)}`);
   collectConstants(fn, info);
   const ctx = { info, depth, seen, signals, sawResponse: false, nested: nestedFunctionNames(fn) };
   walk(fn.body || fn, (node, parent) => visitNode(node, parent, ctx));
@@ -1098,7 +1118,7 @@ function judgeRoute(entry, reviewed, opaqueMounts) {
   [...functions, ...middleware].forEach((item) => {
     analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
   });
-  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), constants: [...followedConstants].sort(), hash: chainHash(), queryCustomer: readsCustomerFromQuery(), queryKeys: followedQueryKeys() };
+  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), constants: [...followedConstants].sort(), largeConstants: largeConstants(), hash: chainHash(), queryCustomer: readsCustomerFromQuery(), queryKeys: followedQueryKeys() };
   const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal));
   if (hard.length) return { safe: false, kind: 'review', reason: `scan: ${hard.join(', ')}`, ...scan };
   return { safe: true, ...scan };
@@ -1316,7 +1336,7 @@ function main() {
       const normalized = `/${rules.splitPath(endpoint).map(seg => (rules.isParam(seg) ? ':param' : seg)).join('/')}`;
       const verdicts = matchRoutes(rules.splitPath(normalized), table).map(match => judgeRoute(match, reviewed, opaqueMounts));
       const hard = verdicts.filter(v => !v.safe).map(v => v.reason);
-      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, queryKeys: [...new Set(verdicts.flatMap(v => v.queryKeys || []))].sort(), constants: [...new Set(verdicts.flatMap(v => v.constants || []))], ...endpointFingerprint(verdicts) }));
+      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, queryKeys: [...new Set(verdicts.flatMap(v => v.queryKeys || []))].sort(), constants: [...new Set(verdicts.flatMap(v => v.constants || []))], largeConstants: verdicts.flatMap(v => v.largeConstants || []), ...endpointFingerprint(verdicts) }));
     }
     return;
   }
