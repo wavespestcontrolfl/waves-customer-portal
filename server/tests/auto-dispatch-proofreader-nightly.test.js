@@ -4,7 +4,11 @@
 // and the record builder have their own suite (auto-dispatch-proofreader).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  // The store's own "a person closed it" rule, as the hold read uses it.
+  _private: { PERSON_DONE_BY_SQL: 'DONE_BY_A_PERSON' },
+}));
 jest.mock('../services/auto-dispatch/audit', () => ({
   ...jest.requireActual('../services/auto-dispatch/audit'),
   ringsLeft: jest.fn(async () => 10),
@@ -29,9 +33,10 @@ const RECORD = {
 // Technician names, and the notification store as the "did a person mark the
 // notice done" read sees it (`doneNotice`: the row it finds, or an Error).
 let doneNotice = null;
+let holdSql = [];
 const conn = () => (table) => {
   const chain = {
-    where: () => chain, whereIn: () => chain, whereRaw: () => chain, whereNotNull: () => chain, whereNot: () => chain,
+    where: () => chain, whereIn: () => chain, whereRaw: (sql) => { if (table === 'notifications') holdSql.push(sql); return chain; }, whereNotNull: () => chain, whereNot: () => chain,
     select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }],
     first: async () => {
       if (table !== 'notifications') return null;
@@ -53,6 +58,7 @@ const check = (run, proofreader) => nightly.checkMove({ service: SERVICE, best: 
 beforeEach(() => {
   jest.clearAllMocks();
   doneNotice = null;
+  holdSql = [];
   audit.ringsLeft.mockResolvedValue(10);
   notifications.notifyAdmin.mockResolvedValue({ id: 'n1' });
 });
@@ -180,6 +186,8 @@ describe('checkMove', () => {
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD', audit: { why: 'person_held' }, broke: false });
     expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
     expect(run.proofreader).toMatchObject({ calls: 0, personHeld: 1 });
+    // Only a person's done holds: a system close (the gate turned off, the visit left) decides nothing.
+    expect(holdSql).toContain('DONE_BY_A_PERSON');
     // Done lands while the model reads: the allow does not move the visit.
     doneNotice = null;
     const slow = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
@@ -360,7 +368,9 @@ describe('raiseNotices', () => {
     });
     // A later run with another proposal rewrites the text, and never rings or reopens.
     expect(opts.refreshOnDedupe).toBe(true);
-    expect(opts.ringOnRefresh()).toBe(false);
+    expect(opts.ringOnRefresh({ title: "Schedule — check a held move of Pat Sample's visit" })).toBe(false);
+    // A notice the system closed (gate off then on, same placement) is open work again: it rings and reopens.
+    expect(opts.ringOnRefresh({ title: nightly.RESOLVED_TITLE })).toBe(true);
     // The visit is read under a row lock, and the notice is written on that same transaction.
     expect(locked).toEqual(['s1']);
     expect(opts.trx.isTrx).toBe(true);

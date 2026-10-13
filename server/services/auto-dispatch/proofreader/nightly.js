@@ -226,6 +226,9 @@ async function personHeld(conn, service) {
     .whereRaw("metadata->>'dedupeKey' = ?", [keyFor(service)])
     .whereNotNull('done_at')
     .whereNot('title', RESOLVED_TITLE)
+    // Done by a person, never by a system close (the gate turned off, the
+    // visit left the placement): notification-service.js's own rule.
+    .whereRaw(require('../../notification-service')._private.PERSON_DONE_BY_SQL)
     .first('id');
   return !!row;
 }
@@ -387,10 +390,12 @@ async function raiseOne(item, { raiseAdminAlert, names, audit, trx }) {
     dedupeKey: item.key,
     // A later run that holds a DIFFERENT proposal for the same placement
     // rewrites the standing notice's text, so a person never judges a
-    // proposal that is no longer the one held (Codex #6313 r13). Quietly: no
-    // ring, no slot, and a notice a person marked done stays done.
+    // proposal that is no longer the one held (Codex #6313 r13). Quietly for
+    // a standing notice: no ring, no slot, and a person's done stays done.
     refreshOnDedupe: true,
-    ringOnRefresh: () => false,
+    // A notice the SYSTEM closed (the gate went off and on again, the visit
+    // left and came back) is open work again: it rings and reopens.
+    ringOnRefresh: (existing) => !!existing && existing.title === RESOLVED_TITLE,
     trx,
     detail: detailFor(item, names),
     metadata: {
