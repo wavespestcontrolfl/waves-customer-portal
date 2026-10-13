@@ -357,7 +357,7 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
     p.account_holder_name && { label: "Named", value: p.account_holder_name },
     ...(Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
       label: i === 0 ? "Account" : `Account (${i + 1})`,
-      value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
+      value: [c.name, c.city, c.matched_phone ? `has the number ${c.matched_phone}` : null, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
     })),
     p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
     p.reason && { label: "Next", value: p.reason },
