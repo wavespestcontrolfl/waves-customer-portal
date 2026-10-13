@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { lockTriageCall } = require('../utils/triage-locks');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -976,8 +976,11 @@ async function transition(req, res, nextStatus) {
   // transitions either. A missing first name is settled on the customer record, which only an admin edits:
   // its Resolve is admin-only (Dismiss stays open to the office).
   if (req.techRole !== 'admin') {
-    const reason = (await db('triage_items').where({ id }).first('reason_code'))?.reason_code;
-    if (ADMIN_ONLY_REASONS.includes(reason) || (reason === 'missing_first_name' && nextStatus === 'resolved')) {
+    const guarded = await db('triage_items').where({ id }).first('reason_code');
+    if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
@@ -986,6 +989,8 @@ async function transition(req, res, nextStatus) {
   // releases (line_e164); the inbox card names none (see releaseNoTextHold).
   const lineCanGetTexts = body.line_can_get_texts === true;
   const lineE164 = (typeof body.line_e164 === 'string' && body.line_e164.trim().slice(0, 40)) || null;
+  // Releasing a named line is the held-lines panel's act, and that panel is admin-only.
+  if (lineE164 && req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
   const expectedUpdatedAt = body.expected_updated_at || null;
   const closed = lineCanGetTexts && nextStatus === 'resolved'
     ? await releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo: req.technicianId, lineE164 })
@@ -2686,7 +2691,8 @@ const HELD_LINES_SQL = `
    ORDER BY held_at DESC
    LIMIT 500`;
 
-router.get('/held-lines', async (_req, res) => {
+// Admin only: it lists up to 500 held numbers with names and has no assignment scope (the triage UI is admin-only).
+router.get('/held-lines', requireAdmin, async (_req, res) => {
   try {
     const { NO_TEXT_CARD_FOR_HOLD_SQL, lineOwnershipBlockSql } = require('../services/disclaimed-number-holds');
     const result = await db.raw(HELD_LINES_SQL

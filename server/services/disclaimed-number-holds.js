@@ -375,7 +375,59 @@ async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, cle
       RETURNING h.source_call_log_id`,
     params,
   );
-  return (result?.rows || []).map((r) => r.source_call_log_id);
+  const clearedCalls = (result?.rows || []).map((r) => r.source_call_log_id);
+  if (clearedCalls.length) await settleSiblingTextCards(conn, { callLogIds: clearedCalls, lineKey: key, releasedFromCallLogId: exceptCallLogId, clearedBy });
+  return clearedCalls;
+}
+
+/**
+ * The calls whose hold on `lineKey` a cross-call release just cleared (#6292 r8): their text_number_differs card
+ * for that line is settled in the same transaction, under the line lock the caller holds.
+ *   1. BIND first: a card with no hold_bindings (a legacy card) gets { line_e164, held_at } of the hold being
+ *      cleared, so its provenance can never again be re-read from a created_at window (a later ownership-only
+ *      re-arm of that call within 5 minutes would otherwise still bind to it).
+ *   2. CLOSE the call's open card (resolved, human, note "line released from <masked> via call <id>", resolved_at)
+ *      unless the card is still bound to another ACTIVE hold of its call: one card can carry several lines, and
+ *      closing it would take the release surface of a line that is still held.
+ *   3. Keep call_log.review_status in step with the cards that closed.
+ * No per-call lock is taken here (the order is call lock, then line lock; taking a second call's lock under a line
+ * lock could cross an arm waiting on that line): every write is a single atomic statement.
+ */
+async function settleSiblingTextCards(conn, { callLogIds, lineKey, releasedFromCallLogId = null, clearedBy = null }) {
+  const ids = callLogIds.map(() => '?').join(', ');
+  await conn.raw(
+    `UPDATE triage_items t
+        SET payload = COALESCE(t.payload, '{}'::jsonb)
+          || jsonb_build_object('hold_bindings', jsonb_build_array(jsonb_build_object('line_e164', h.phone_e164, 'held_at', h.held_at::text)))
+       FROM ${TABLE} h
+      WHERE h.phone_e164 = ? AND h.source_call_log_id IN (${ids})
+        AND t.payload->'hold_bindings' IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL})`,
+    [lineKey, ...callLogIds],
+  );
+  const masked = `***${lineKey.slice(-4)}`;
+  const note = `line released from ${masked} via call ${releasedFromCallLogId || 'another call'}`.slice(0, 500);
+  const closed = await conn.raw(
+    `UPDATE triage_items t
+        SET status = 'resolved', resolution_source = 'human', resolution_note = ?, assigned_to = ?,
+            resolved_at = now(), updated_at = now()
+      WHERE t.call_log_id IN (${ids}) AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
+        AND EXISTS (SELECT 1 FROM ${TABLE} h
+                     WHERE h.phone_e164 = ? AND h.source_call_log_id = t.call_log_id AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
+        AND NOT EXISTS (SELECT 1 FROM ${TABLE} h
+                         WHERE h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
+      RETURNING t.call_log_id`,
+    [note, clearedBy ? String(clearedBy).slice(0, 100) : null, ...callLogIds, lineKey],
+  );
+  const closedCalls = [...new Set((closed?.rows || []).map((r) => r.call_log_id).filter(Boolean))];
+  if (!closedCalls.length) return;
+  await conn.raw(
+    `UPDATE call_log c
+        SET review_status = CASE WHEN EXISTS (SELECT 1 FROM triage_items o WHERE o.call_log_id = c.id AND o.status IN ('open', 'in_progress'))
+                                 THEN 'open' ELSE 'resolved' END,
+            updated_at = now()
+      WHERE c.id IN (${closedCalls.map(() => '?').join(', ')})`,
+    closedCalls,
+  );
 }
 
 /**

@@ -38,7 +38,7 @@ jest.mock('../middleware/admin-auth', () => ({
   // from this same mock at its own require time. Without it here the whole
   // chain throws at require() (undefined route middleware), not inside this
   // test's own code.
-  requireAdmin: (_req, _res, next) => next(),
+  requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 
 const express = require('express');
@@ -721,7 +721,20 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
-  test('technicians can use it exactly as they can the callback_number_needed card (no admin-only gate on either)', async () => {
+  test('releasing a NAMED line (the held-lines panel) is admin only: a technician gets 403 and nothing changes', async () => {
+    mockRole = 'technician';
+    const fx = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true, line_e164: '+19415551234' });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Admin access required' });
+    });
+    expect(fx.tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('open');
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
+  });
+
+  test('technicians can still use the inbox-card release (no line named) exactly as the callback_number_needed card', async () => {
     mockRole = 'technician';
     const cb = await run([cbCard()], 'resolve', 'card-cb');
     expect(cb.tables.triage_items[0].status).toBe('resolved');
@@ -1037,8 +1050,8 @@ describe('line_e164: release the selected line, across calls', () => {
 describe('GET /admin/triage/held-lines', () => {
   const row = { hold_id: 'h1', phone_e164: '+19415551234', held_at: '2030-01-01T10:00:00.000Z', source_call_log_id: CALL_ID, card_id: CARD_ID, card_status: 'resolved', card_updated_at: '2030-01-02T10:00:00.000Z', blocked_by_ownership_card: false };
 
-  test('lists one row per LINE (newest hold) with its bound card, the line\'s blocked flag and the cap after grouping; techs may read it', async () => {
-    mockRole = 'technician';
+  test('lists one row per LINE (newest hold) with its bound card, the line\'s blocked flag and the cap after grouping; admin only', async () => {
+    mockRole = 'admin';
     const fx = fixture();
     wireDb(db, { conn: fx.conn });
     db.raw = jest.fn(async () => ({ rows: [row] }));
@@ -1064,6 +1077,19 @@ describe('GET /admin/triage/held-lines', () => {
     expect(sql).toContain(Holds.lineOwnershipBlockSql('h.phone_e164'));
     expect(sql).not.toContain('__BLOCK__');
     expect(sql).not.toContain('__CARD__');
+  });
+
+  test('a technician gets 403 and the query never runs (it lists up to 500 held numbers with names)', async () => {
+    mockRole = 'technician';
+    const fx = fixture();
+    wireDb(db, { conn: fx.conn });
+    db.raw = jest.fn(async () => ({ rows: [row] }));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/held-lines`);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Admin access required' });
+    });
+    expect(db.raw).not.toHaveBeenCalled();
   });
 
   test('a read error is a 500 with a fixed message (no query text)', async () => {

@@ -159,6 +159,31 @@ describe('clearNoTextHoldsForPhone', () => {
     expect(params).toEqual(['office', 'verified_same_number', '+19415551234']);
   });
 
+  test('clearing a hold on another call binds then closes that call\'s card, with a masked note and review_status kept in step', async () => {
+    const raw = jest.fn(async (sql) => {
+      if (/UPDATE disclaimed_number_holds/.test(sql)) return { rows: [{ source_call_log_id: 'call-b' }] };
+      if (/RETURNING t.call_log_id/.test(sql)) return { rows: [{ call_log_id: 'call-b' }] };
+      return { rows: [] };
+    });
+    await Holds.clearNoTextHoldsForPhone({ phoneE164: '+19415551234', exceptCallLogId: 'call-a', clearedBy: 'tech-1', reason: 'verified_same_number', conn: { raw } });
+    const sqls = raw.mock.calls.map((c) => c[0]);
+    expect(sqls).toHaveLength(4);
+    expect(sqls[1]).toContain("jsonb_build_object('hold_bindings'"); // bind first
+    expect(sqls[1]).toContain("t.payload->'hold_bindings' IS NULL");
+    expect(sqls[2]).toContain("SET status = 'resolved'"); // then close
+    expect(sqls[2]).toContain('NOT EXISTS'); // unless still bound to another active line of the call
+    expect(sqls[3]).toContain('UPDATE call_log c');
+    const note = raw.mock.calls[2][1][0];
+    expect(note).toBe('line released from ***1234 via call call-a');
+    expect(note).not.toContain('941');
+  });
+
+  test('no other call cleared: no card is touched', async () => {
+    const raw = jest.fn(async () => ({ rows: [] }));
+    await Holds.clearNoTextHoldsForPhone({ phoneE164: '+19415551234', exceptCallLogId: 'call-a', reason: 'r', conn: { raw } });
+    expect(raw).toHaveBeenCalledTimes(1);
+  });
+
   test('a non-dialable number clears nothing', async () => {
     const raw = jest.fn();
     expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: 'relay', conn: { raw } })).toEqual([]);

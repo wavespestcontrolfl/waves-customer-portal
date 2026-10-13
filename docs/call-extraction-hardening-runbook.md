@@ -135,7 +135,13 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   active hold on the customer's phone" as held); those visits clear when their line is released. **Shared lines:** the
   release checks the LINE, not only the clicked call: if ANY active hold on the line (a no-text hold, or a call that
   only disclaimed the number) belongs to a call with an unresolved "not my number" card, that line is not released on
-  any call, the card still resolves, and the reply says `release: 'deferred'` with `lines_blocked`. The panel shows
+  any call, the card still resolves, and the reply says `release: 'deferred'` with `lines_blocked`. **Sibling calls:** when a release clears a hold on ANOTHER call, that call's card for the line is settled in the same
+  transaction (`settleSiblingTextCards`): a legacy card is bound to the hold being cleared first (its provenance is then
+  immutable), then the call's open `text_number_differs` card is closed (resolved, note `line released from ***1234 via
+  call <id>`) unless it is still bound to another active line of that call, and `call_log.review_status` follows. A later
+  ownership-only re-arm of that call is then neither listed nor cleared by that card. **Access:** `GET /held-lines` and a
+  resolve that names a line (`line_e164`) are admin-only (403 for technicians); the inbox-card release with no line
+  keeps its existing reach. The panel shows
   the same warning when any call on the line is blocked.
   **What counts as a no-text hold:** a hold row (one per line and call) with a `text_number_differs` card bound to its
   CURRENT arming. The binding is exact per (line, arming): the card carries

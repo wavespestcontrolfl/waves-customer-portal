@@ -44,8 +44,9 @@ postgres('held lines SQL against PostgreSQL', () => {
       UNIQUE (phone_e164, source_call_log_id))`);
     await database.raw(`CREATE TEMP TABLE triage_items (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), call_log_id uuid, reason_code text, status text, payload jsonb,
-      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz)`);
-    await database.raw('CREATE TEMP TABLE call_log (id uuid PRIMARY KEY, created_at timestamptz DEFAULT now(), customer_id uuid)');
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz,
+      resolution_note text, resolution_source text, assigned_to text)`);
+    await database.raw('CREATE TEMP TABLE call_log (id uuid PRIMARY KEY, created_at timestamptz DEFAULT now(), customer_id uuid, review_status text, updated_at timestamptz)');
     await database.raw('CREATE TEMP TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text)');
     Holds = require('../services/disclaimed-number-holds');
     const app = express();
@@ -151,6 +152,44 @@ postgres('held lines SQL against PostgreSQL', () => {
     const boundPairs = await Holds.boundCardsForActiveHolds(database, callId);
     expect(boundPairs.map((p) => p.phone_e164)).toEqual([Y]);
     expect((await database('disclaimed_number_holds').where({ phone_e164: X }).first()).cleared_at).toBeNull();
+  });
+
+  test('a cross-call release binds and closes the sibling call\'s legacy card; a later ownership-only re-arm there is not listed and cannot be cleared by it', async () => {
+    const a = randomUUID();
+    const b = randomUUID();
+    const aCard = await armNoText(a, X, { close: null });
+    // call B: a legacy (unstamped) OPEN card and its hold, armed within the window
+    const bCard = await insertCard(b, T('2030-02-01T10:00:00Z'), { status: 'open' });
+    await insertHold(b, X, T('2030-02-01T10:00:04Z'));
+    expect((await listed()).map((l) => l.calls_on_line)).toEqual([2]);
+    const cleared = await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: a, clearedBy: 'tech-1', reason: 'verified_same_number', conn: database });
+    expect(cleared).toEqual([b]);
+    const row = await database('triage_items').where({ id: bCard }).first();
+    expect(row).toMatchObject({ status: 'resolved', resolution_source: 'human', assigned_to: 'tech-1' });
+    expect(row.resolution_note).toBe(`line released from ***1234 via call ${a}`);
+    expect(row.resolved_at).not.toBeNull();
+    expect(row.payload.hold_bindings).toEqual([{ line_e164: X, held_at: expect.any(String) }]); // provenance now immutable
+    expect(await database('call_log').where({ id: b }).first('review_status')).toEqual({ review_status: 'resolved' });
+    // the releasing call's own card is untouched here (the route closes it)
+    expect((await database('triage_items').where({ id: aCard }).first()).status).toBe('open');
+    // call B re-arms the line for an ownership-only reason within 5 minutes of the old card
+    await database('disclaimed_number_holds').where({ source_call_log_id: b }).update({ cleared_at: null, held_at: T('2030-02-01T10:02:00Z') });
+    await database('triage_items').where({ id: aCard }).update({ status: 'resolved' });
+    expect((await listed()).map((l) => l.source_call_log_id)).toEqual([a]); // B's re-arm is not a no-text hold
+    expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: randomUUID(), clearedBy: 't', reason: 'verified_same_number', conn: database })).toEqual([a]);
+    expect((await database('disclaimed_number_holds').where({ source_call_log_id: b }).first()).cleared_at).toBeNull();
+  });
+
+  test('a sibling card that is still bound to another ACTIVE line of its call stays open, but is bound', async () => {
+    const a = randomUUID();
+    const b = randomUUID();
+    await armNoText(a, X, { close: null });
+    const cardB = await armNoText(b, X, { close: null, heldAt: '2030-02-01T10:00:00.5Z' });
+    await insertHold(b, Y, '2030-02-01T10:30:00.5Z');
+    await Holds.stampOpenNoTextCards(database, b, { phone: Y });
+    expect((await bindings(cardB)).map((x) => x.line_e164).sort()).toEqual([X, Y]);
+    await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: a, clearedBy: 't', reason: 'verified_same_number', conn: database });
+    expect((await database('triage_items').where({ id: cardB }).first()).status).toBe('open'); // Y is still held under it
   });
 
   test('the backfill prints card ids, call ids and counts only: no phone number, no 10-digit run', async () => {

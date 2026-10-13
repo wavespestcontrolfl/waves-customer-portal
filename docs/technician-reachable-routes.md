@@ -573,7 +573,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/triage/:id/verdict` | admin-triage |
 | GET | `/api/admin/triage/auto-routed` | admin-triage |
 | POST | `/api/admin/triage/auto-routed/:callLogId/verdict` | admin-triage |
-| GET | `/api/admin/triage/held-lines` | admin-triage |
 | PATCH | `/api/admin/turf-height/:id/resolve` | admin-turf-height |
 | GET | `/api/admin/turf-height/review` | admin-turf-height |
 | GET | `/api/ai/admin/conversations` | ai-assistant |
