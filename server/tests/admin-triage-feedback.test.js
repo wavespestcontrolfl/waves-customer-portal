@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 
 const { __private } = require('../routes/admin-triage');

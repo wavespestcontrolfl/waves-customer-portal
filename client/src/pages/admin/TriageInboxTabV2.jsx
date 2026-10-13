@@ -15,6 +15,7 @@ import {
 } from "../../components/ui";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import HeldLinesPanel, { HeldLinesChip, useHeldLines } from "./HeldLinesPanel";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
@@ -732,6 +733,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
   // Email-disagreement confirm form draft, keyed by item id — which
   // candidate (or "other") is selected, and the typed value for "other".
   const [emailConfirmDrafts, setEmailConfirmDrafts] = useState({});
+  const held = useHeldLines({ onError: setError }); // "Held lines" panel (no-text lines still blocked for texts)
 
   const load = useCallback((nextMode, nextStatus, nextAutoOnly = false) => {
     setLoading(true);
@@ -869,6 +871,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
       .then(() => {
         setActioning(null);
         setDismissFor(null);
+        if (item.reason_code === "text_number_differs") held.refresh();
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -933,6 +936,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
       .then((res) => {
         setActioning(null);
         if (onDone) onDone(res);
+        // The open Held lines panel shows this card's state and the line's hold: refresh it too.
+        if (item.reason_code === "text_number_differs") held.refresh();
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -962,16 +967,30 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setError(res.callback_number.message || "The line stays blocked for texts: resolve this call's other card first.");
       }
     };
-    if (isOpenState(item.status)) { resolveItem(item, { line_can_get_texts: true }, reportDeferred); return; }
+    // A held-lines row always takes this path (open or closed card): the server releases either way,
+    // and the inbox list plus the panel both reload.
+    if (isOpenState(item.status) && !item.held) { resolveItem(item, { line_can_get_texts: true }, reportDeferred); return; }
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
-      body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true }),
+      body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true, ...(item.line_e164 ? { line_e164: item.line_e164 } : {}) }),
     })
-      .then((res) => { setActioning(null); reportDeferred(res); load(mode, status, autoOnly); })
+      .then((res) => {
+        setActioning(null);
+        // Reload first: load() clears the error banner, so the deferred message must be set after it.
+        load(mode, status, autoOnly);
+        held.refresh();
+        reportDeferred(res);
+      })
       .catch((err) => {
         setActioning(null);
-        if (err?.status === 409) { load(mode, status, autoOnly); setError("This card changed since it loaded — review the refreshed card first."); return; }
+        if (err?.status === 409) {
+          load(mode, status, autoOnly);
+          held.refresh();
+          // NO_TEXT_LINE_NOT_HELD: someone released that line first; the server's own sentence says so.
+          setError(err.code === "NO_TEXT_LINE_NOT_HELD" && err.message ? err.message : "This card changed since it loaded — review the refreshed card first.");
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -1134,6 +1153,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
               </span>
             </button>
           ))}
+          <HeldLinesChip held={held} isAdmin={isAdmin} />
           {(status === "resolved" || status === "dismissed") && (
             <button
               type="button"
@@ -1157,6 +1177,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
           <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {error}
         </div>
       )}
+
+      <HeldLinesPanel held={held} isAdmin={isAdmin} triageMode={isTriage} actioning={actioning} onRelease={setLineCanTextFor} />
 
       {!isTriage && (
         <p className="text-12 text-ink-tertiary -mb-1">
