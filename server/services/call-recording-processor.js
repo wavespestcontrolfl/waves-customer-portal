@@ -1048,6 +1048,12 @@ function isOutboundCall(call = {}) {
 // voicemail. Nothing is sent.
 const CALLBACK_PARENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CALLBACK_SPAM_RULE = 'callback_spam';
+// The parent's standing callback-spam verdict (closeParentOnCallbackSpam's
+// stamp; moved or cleared by reopenParentOnCallbackCorrected), read by the
+// card-filter site so a reprocess of the voicemail files no moot card.
+function callbackVerdictSpam(call) {
+  return isEnabled('callbackSpamClosesParent') && callMetadataObject(call).callback_verdict?.spam === true;
+}
 function callMetadataObject(call) {
   try {
     return typeof call?.metadata === 'string' ? (JSON.parse(call.metadata) || {}) : (call?.metadata || {});
@@ -12708,6 +12714,12 @@ const CallRecordingProcessor = {
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
           // routing reason, so it is never in finalFlags.
           for (const code of noActionCallCards(v2Extraction, { canonicalStreet: extracted?.address_line1 })) unneededCards.add(code);
+          // A voicemail whose office callback reached a solicitor (the standing
+          // callback_verdict, written under the parent lock, so it is current
+          // for this pass): the asks a return call would have answered are
+          // moot and file no card again (CALLBACK_SPAM_MOOT_CODES' contract;
+          // codex #6271 r51 P2). The route decision keeps every flag.
+          if (callbackVerdictSpam(call)) for (const code of CALLBACK_SPAM_MOOT_CODES) unneededCards.add(code);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier

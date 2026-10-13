@@ -689,8 +689,10 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // exhausted, so the processor will not pick it up again. No elapsed-
       // time valve (Codex #5019 r20 P2): every other unfinished state can
       // still be retried and keep the promise, so it never rings.
+      // no_transcription shares the cap (codex #6271 r39/r51): at the cap the
+      // sweep retries neither lane, so both rows are settled.
       .whereRaw(`(processing_status IN (${settledStatuses.map(() => '?').join(', ')})
-        OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) >= ?))`,
+        OR (processing_status IN ('extraction_failed', 'no_transcription') AND COALESCE(extraction_attempts, 0) >= ?))`,
         [...settledStatuses, CALL_EXTRACTION_MAX_ATTEMPTS])
       // Eligibility, not the window, is what keeps a dark-period call from
       // ringing (see module docstring) — a call the /voice webhook did not
