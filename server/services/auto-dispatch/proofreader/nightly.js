@@ -61,7 +61,8 @@ const QUOTE_MAX_CHARS = 1000;
 // The placement a notice is about, as the database prints it.
 const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'scheduledDate'"
   + " AND s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'"
-  + " AND s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'";
+  + " AND s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'"
+  + " AND s.customer_id::text IS NOT DISTINCT FROM notifications.metadata->>'customerId'";
 const OPEN_STATUSES = ['pending', 'confirmed'];
 const textOrNull = (value) => (value == null || value === '' ? null : String(value));
 
@@ -85,7 +86,7 @@ const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
 // and one call can take two minutes (r7).
 function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, personHeld: 0, broke: 0, noticesFailed: 0, notices: new Map(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, personHeld: 0, broke: 0, noticesFailed: 0, notices: new Map(), settled: new Set(),
     deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
@@ -319,6 +320,9 @@ async function checkMove({ service, best, run }, deps = {}) {
   }
   if (answer.verdict === 'hold') {
     state.held += 1;
+    // The check is sure now: an open notice from an earlier unsure night no
+    // longer needs a person (settleNotices, at the run's end).
+    state.settled.add(keyFor(service));
     return stopped('hold', answer);
   }
   state.unsure += 1;
@@ -526,9 +530,12 @@ async function closeResolved(audit, nowDate, enabled) {
 // could not be read.
 async function stillAsChecked(item, conn) {
   try {
-    const row = await conn('scheduled_services').where({ id: item.id }).forUpdate().first('status', 'scheduled_date', 'window_start', 'technician_id');
+    const row = await conn('scheduled_services').where({ id: item.id }).forUpdate().first('status', 'scheduled_date', 'window_start', 'technician_id', 'customer_id');
     return !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
-      && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id;
+      && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id
+      // A customer merge (or its undo) can hand the visit to another customer:
+      // the notice names the one the check read (r20).
+      && textOrNull(row.customer_id) === textOrNull(item.customer_id);
   } catch (err) {
     logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${err.message}`);
     return null;
@@ -547,9 +554,36 @@ async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
  * held move for the shared allowance): raise this run's notices. Returns how
  * many writes rang. Never throws.
  */
+// Close the OPEN notice of each placement the check now holds with a quoted
+// statement: the visit stays and nobody has to decide (Codex #6313 r20). A
+// notice a person marked done is left alone: it still holds the visit
+// (personHeld). A failed write is counted for the run's status.
+async function settleNotices(state, conn) {
+  if (!state.settled.size) return;
+  try {
+    const { doneColumns } = require('../../notification-service')._private;
+    await conn('notifications')
+      .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+      .whereNot('title', RESOLVED_TITLE)
+      .whereNull('done_at')
+      .whereIn(conn.raw("metadata->>'dedupeKey'"), [...state.settled])
+      .update({
+        ...doneColumns({ by: 'auto-dispatch', resolution: 'The move check now holds this move on a statement in the record', keepExisting: true, conn }),
+        title: RESOLVED_TITLE,
+        body: 'The move check is sure now: the visit stays where it is.',
+        detail: null,
+      });
+  } catch (err) {
+    state.noticesFailed += 1;
+    logger.error(`[auto-dispatch] move-check notice settle failed: ${err.message}`);
+  }
+}
+
 async function raiseNotices(state, { conn = require('../../../models/db') } = {}) {
   const audit = require('../audit');
-  if (!state || state.notices.size === 0) return 0;
+  if (!state) return 0;
+  await settleNotices(state, conn);
+  if (state.notices.size === 0) return 0;
   let rang = 0;
   try {
     const { raiseAdminAlert } = require('../../admin-alert-compose');

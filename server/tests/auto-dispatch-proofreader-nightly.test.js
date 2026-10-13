@@ -7,7 +7,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
   // The store's own "a person closed it" rule, as the hold read uses it.
-  _private: { isPersonDoneBy: jest.requireActual('../services/notification-service')._private.isPersonDoneBy },
+  _private: {
+    isPersonDoneBy: jest.requireActual('../services/notification-service')._private.isPersonDoneBy,
+    doneColumns: () => ({ done_at: 'now', done_by: 'auto-dispatch' }),
+  },
 }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   ...jest.requireActual('../services/auto-dispatch/audit'),
@@ -430,7 +433,7 @@ describe('the write of a checked move', () => {
 describe('raiseNotices', () => {
   // The run-end re-read of each visit: by default it is still as the check read it.
   let visitRow;
-  beforeEach(() => { visitRow = (id) => ({ status: 'confirmed', scheduled_date: null, window_start: '09:00', technician_id: 't1', id }); });
+  beforeEach(() => { visitRow = (id) => ({ status: 'confirmed', scheduled_date: null, window_start: '09:00', technician_id: 't1', customer_id: 'c1', id }); });
   const table = () => () => {
     let wanted = null;
     const chain = {
@@ -526,7 +529,8 @@ describe('raiseNotices', () => {
     ['cancelled', { status: 'cancelled', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' }],
     ['moved to another day', { status: 'confirmed', scheduled_date: '2026-10-21', window_start: '09:00', technician_id: 't1' }],
     ['given a new time that day', { status: 'confirmed', scheduled_date: '2026-10-20', window_start: '13:00', technician_id: 't1' }],
-    ['given another technician', { status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't9' }],
+    ['given another technician', { status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't9', customer_id: 'c1' }],
+    ['handed to another customer by a merge', { status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1', customer_id: 'c2' }],
     ['gone', null],
     ['unreadable', new Error('db down')],
   ])('a visit %s since the check raises nothing and spends no slot', async (_name, row) => {
@@ -548,6 +552,23 @@ describe('raiseNotices', () => {
   });
 
 
+  test('a hold on a placement closes its open notice from an earlier unsure night, and never one a person marked done', async () => {
+    const run = runOf();
+    await check(run, proofreaderOf({ verdict: 'hold', why: 'quoted_statement', entry_id: 'E1', quote: 'never come on Thursdays' }));
+    expect([...run.proofreader.settled]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1']);
+    const calls = [];
+    const store = () => { const q = new Proxy({}, { get: (_t, prop) => (prop === 'then' ? undefined : (...args) => { calls.push([prop, ...args]); return prop === 'update' ? Promise.resolve(1) : q; }) }); return q; };
+    store.raw = (sql) => sql;
+    expect(await nightly.raiseNotices(run.proofreader, { conn: store })).toBe(0);
+    expect(calls).toContainEqual(['whereNull', 'done_at']);
+    expect(calls).toContainEqual(['whereIn', "metadata->>'dedupeKey'", ['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1']]);
+    expect(calls.find(([name]) => name === 'update')[1]).toMatchObject({ title: nightly.RESOLVED_TITLE, detail: null });
+    // A store that fails is counted for the run's status.
+    const down = () => { throw new Error('store down'); };
+    await nightly.raiseNotices(run.proofreader, { conn: down });
+    expect(run.proofreader.noticesFailed).toBe(1);
+  });
+
   test('the check turned off: the next run closes every open notice', async () => {
     await nightly.closeNotices(new Date(), { enabled: false });
     const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
@@ -565,6 +586,7 @@ describe('raiseNotices', () => {
     expect(sql).toContain("metadata->>'scheduledDate'");
     expect(sql).toContain("s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'");
     expect(sql).toContain("s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'");
+    expect(sql).toContain("s.customer_id::text IS NOT DISTINCT FROM notifications.metadata->>'customerId'");
     expect(q.whereIn).toHaveBeenCalledWith('s.status', ['pending', 'confirmed']);
   });
 
