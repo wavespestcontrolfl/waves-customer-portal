@@ -206,6 +206,33 @@ describe('POST /admin/communications/reservice-link', () => {
     });
   });
 
+  // The account resolution (reserviceAccountIds): the selected customer must exist, own the typed number,
+  // and a typed number with no pick must name exactly one account.
+  test('a selected customer that is gone is a 404, and one whose phone differs from the typed number is a 400', async () => {
+    wireDb(makeCustomersBuilder({ firstRow: null }));
+    await withServer(async (baseUrl) => {
+      const gone = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
+      expect(gone.status).toBe(404);
+      expect(await gone.json()).toEqual({ error: 'Customer not found' });
+
+      wireDb(makeCustomersBuilder({ firstRow: { id: CUSTOMER_UUID, phone: '9415559999', account_id: 'acct-1' } }));
+      const mismatch = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
+      expect(mismatch.status).toBe(400);
+      expect(await mismatch.json()).toEqual({ error: 'phone must match the selected customer' });
+      expect(loadEligibleReserviceLanesStrict).not.toHaveBeenCalled();
+    });
+  });
+
+  test('409 when the typed number is on file for more than one customer account and no customer was picked', async () => {
+    wireDb(makeCustomersBuilder({ selectResults: [[{ id: CUSTOMER_UUID, account_id: 'acct-1' }, { id: '00000000-0000-0000-0000-000000000001', account_id: 'acct-2' }]] }));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first' });
+      expect(loadEligibleReserviceLanesStrict).not.toHaveBeenCalled();
+    });
+  });
+
   test('404 with "no active recurring plan" when the ONE matched candidate is not eligible', async () => {
     wireDb(soloCustomer());
     loadEligibleReserviceLanesStrict.mockResolvedValue([]); // deleted/inactive/tokenless/lane-less — any of them collapse to []
