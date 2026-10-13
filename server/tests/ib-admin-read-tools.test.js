@@ -601,3 +601,88 @@ describe('links followed by punctuation', () => {
     expect(redactString(text, newState())).toBe(text);
   });
 });
+
+// Codex round 1 P1: relative and scheme-less links in free text (the notes a
+// payer row returns) carry the same bearer tokens as absolute ones.
+describe('links in free text without https://', () => {
+  const { redactString, newState, redactSecrets } = require('../utils/signed-link-redaction');
+  const UUID = '3f2a9c1e-7b44-4d0a-9e51-0c6d2b7a8f13';
+  const OPAQUE = 'Xk9fQ2mLp7RtVw3yZa8Bn4Cd';
+  test.each([
+    [`Send them /pay/${UUID}.`, 'Send them [private link removed].'],
+    [`Pay link (/portal/${OPAQUE}), ok`, 'Pay link ([private link removed]), ok'],
+    [`Text the AP clerk www.example.test/pay/${OPAQUE}!`, 'Text the AP clerk [private link removed]!'],
+    [`Old link example.test/estimate/${UUID}; resend`, 'Old link [private link removed]; resend'],
+    [`Short link /r/${OPAQUE}, thanks`, 'Short link [private link removed], thanks'],
+    [`[Pay](/pay/${UUID})`, '[Pay]([private link removed])'],
+    [`Open /portal/${UUID}?utm=mail now.`, 'Open [private link removed] now.'],
+    [`Use ?token=${OPAQUE}.`, 'Use [signed link removed].'],
+    ['File /files/photo.png?X-Amz-Signature=abc123&x=1.', 'File [signed link removed].'],
+  ])('%s is redacted and keeps its punctuation', (text, expected) => {
+    const state = newState();
+    expect(redactString(text, state)).toBe(expected);
+    expect(state.links + state.privateLinks).toBe(1);
+  });
+  test('a notes field is walked like any other string', () => {
+    const state = newState();
+    const out = redactSecrets({ payers: [{ id: 3, notes: `Customer prefers the link /pay/${UUID}. Net 30.` }] }, state);
+    expect(out.payers[0].notes).toBe('Customer prefers the link [private link removed]. Net 30.');
+  });
+  test.each([
+    'Paid 10/12/2026 and/or by card',
+    'Use 1/2 cup and/or 3/4 cup',
+    'Call 941/555/0100, e.g. St.Pete/Tampa',
+    'See /var/log/application-error-report for details.',
+    'Open /reports/quarterly-summary-final-2026 now',
+    'File QuarterlyRevenueSummaryReport.pdf in /Users/jane/reports/2026_Q3_summary.pdf',
+    'See /blog/how-to-control-fire-ants-in-florida-2026 and /services/pest-control-in-bradenton',
+    'Visit www.example.test or example.test.',
+    'Go to /admin/customers/list',
+    'Filter with ?page=2&sort=name',
+  ])('ordinary text stays: %s', (text) => {
+    const state = newState();
+    expect(redactString(text, state)).toBe(text);
+    expect(state.links + state.privateLinks).toBe(0);
+  });
+});
+
+// Codex round 1 P2: a reviewed row may mark a path parameter as free text.
+describe('free-text path parameters', () => {
+  const TEXT = catalog.entries.find(entry => entry.paramKinds && Object.values(entry.paramKinds).includes('text'));
+  const name = TEXT && Object.keys(TEXT.paramKinds)[0];
+  const readName = value => read({ endpoint: TEXT.endpoint, params: { [name]: value } });
+
+  test('the reviewed service-name endpoint is a text endpoint', () => {
+    expect(TEXT.endpoint).toBe('/admin/job-forms/templates/by-service/:serviceType');
+    expect(TEXT.paramKinds).toEqual({ serviceType: 'text' });
+  });
+  test.each([
+    ['General Pest Control', 'General%20Pest%20Control'],
+    ['Lawn (Quarterly) + Shrubs', 'Lawn%20(Quarterly)%20%2B%20Shrubs'],
+  ])('%s is sent percent-encoded', async (value, encoded) => {
+    const result = await readName(value);
+    expect(result).toMatchObject({ status: 200 });
+    expect(new URL(callsOf()[0][0]).pathname).toBe(`/api/admin/job-forms/templates/by-service/${encoded}`);
+  });
+  test.each([
+    ['a slash', 'Pest/Lawn'], ['a backslash', 'Pest\\Lawn'], ['a dot segment', '..'], ['a single dot', '.'],
+    ['an encoded slash', 'Pest%2fLawn'], ['a percent sign', '100%'], ['a question mark', 'Pest?x=1'], ['a hash', 'Pest#top'],
+    ['a control character', 'Pest\u0007Control'], ['a newline', 'Pest\nControl'], ['a blank', '   '], ['121 characters', 'a'.repeat(121)],
+  ])('refuses %s', async (_label, value) => {
+    expect(await readName(value)).toMatchObject({ code: 'invalid_input' });
+    expect(callsOf()).toHaveLength(0);
+  });
+  test('120 characters pass', async () => {
+    expect(await readName('a'.repeat(120))).toMatchObject({ status: 200 });
+  });
+  test('a text value that spells a denied word still hits the filled-path deny check', async () => {
+    expect(await readName('login')).toMatchObject({ code: 'invalid_input' });
+    expect(callsOf()).toHaveLength(0);
+  });
+  test('every other parameter keeps the strict default', async () => {
+    const strict = catalog.entries.find(entry => entry.params.length === 1 && !entry.paramKinds);
+    for (const value of ['has space', 'a+b', 'x(y)']) {
+      expect(await read({ endpoint: strict.endpoint, params: { [strict.params[0]]: value } })).toMatchObject({ code: 'invalid_input' });
+    }
+  });
+});

@@ -1,10 +1,11 @@
 {
-  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see.",
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params marks a path parameter as free text ({\"serviceType\": \"text\"}).",
   "exclude": [],
   "reviewed": [
     {
       "endpoint": "/admin/call-recordings/stats",
       "reviewed": "Handler + CallRecordingProcessor.getStats, whereNotSandboxCall (relay-protocol.js), reclaimableClaim: COUNT FILTER aggregates over call_log plus a call count grouped by receiving business number; no caller data returned; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "a57bb67d90dd94cbb5742696cc062c2b"
@@ -12,6 +13,7 @@
     {
       "endpoint": "/admin/communications/ai-auto-reply-status",
       "reviewed": "Handler: one system_config key (ai_sms_auto_reply), returns a boolean; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "c4b7f0c3c92b3c1195581444beac2af6"
@@ -19,6 +21,7 @@
     {
       "endpoint": "/admin/communications/blocked-numbers",
       "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "985989fb0d179a5938c5eca3e6d18b10"
@@ -26,6 +29,7 @@
     {
       "endpoint": "/admin/csr/overview",
       "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "7059057e1ae6a2d3743aa5b85f1703f8"
@@ -33,6 +37,8 @@
     {
       "endpoint": "/admin/customers/:id/autopay-state",
       "reviewed": "Handler + isPaused (autopay-eligibility.js): customers explicit autopay columns (payment method is an internal uuid) and the last 20 autopay_log rows (details is JSON that passes through run-time key redaction); read end to end.",
+      "scope": "customer",
+      "scopeParam": "id",
       "signals": [],
       "unresolved": [],
       "hash": "ab2cf0e7941c1dfe1354594af0b1fba2"
@@ -40,6 +46,8 @@
     {
       "endpoint": "/admin/customers/:id/credits",
       "reviewed": "Handler + CustomerCredit.getBalance / getLedger (customer-credit.js): customers.account_credits and customer_credit_ledger select, limit 100; read end to end.",
+      "scope": "customer",
+      "scopeParam": "id",
       "signals": [],
       "unresolved": [],
       "hash": "e71e12a96e3fff0e01fdeb59722d5a5c"
@@ -47,6 +55,7 @@
     {
       "endpoint": "/admin/discounts",
       "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "12251870847f65db542b70090446b234"
@@ -54,6 +63,7 @@
     {
       "endpoint": "/admin/discounts/stacking",
       "reviewed": "Handler + discountStackingLive (feature-gates.js): returns one boolean from an env gate; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "84bbe0708512b528e8bdc695829ba4f5"
@@ -61,6 +71,7 @@
     {
       "endpoint": "/admin/discounts/stats",
       "reviewed": "Handler: discounts select of id, name, key, times_applied, total_discount_given, is_active, summed in memory; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "ef251df869f4ec60318799f6c67276f5"
@@ -68,6 +79,7 @@
     {
       "endpoint": "/admin/dispatch/products/catalog",
       "reviewed": "Handler + stripCatalogOwnerPricing: select from products_catalog where active (product, label and price columns; no credential column); read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "78333c11e3258fe367df197c367e0597"
@@ -75,6 +87,7 @@
     {
       "endpoint": "/admin/dispatch/technicians",
       "reviewed": "Handler + applyAssignable (technician-eligibility.js): assignable technicians (id, name, role) with an absence filter; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "86e399cc7bc039f9f255e1ad5dd70e05"
@@ -82,6 +95,7 @@
     {
       "endpoint": "/admin/estimates/source-performance",
       "reviewed": "Handler + sourcePerformance (estimate-source-performance.js): estimates cohort (explicit columns) and estimate_learning_events, bucketed by source in memory, no customer fields returned; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "fd6c0553d4bb0714581a780c8d99b287"
@@ -89,6 +103,8 @@
     {
       "endpoint": "/admin/invoices/:id/attachments",
       "reviewed": "Handler + InvoiceAttachments.list (invoice-attachments.js): selects id, invoice_id, file_name, mime_type, file_size_bytes, created_at only (no s3_key, no URL); read end to end.",
+      "scope": "invoice",
+      "scopeParam": "id",
       "signals": [],
       "unresolved": [],
       "hash": "3bd84c7fe0e1b3ad82c56eb89ae58514"
@@ -96,6 +112,8 @@
     {
       "endpoint": "/admin/invoices/:id/credit-context",
       "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end.",
+      "scope": "invoice",
+      "scopeParam": "id",
       "signals": [],
       "unresolved": [],
       "hash": "7883200c0cac79e04a63fb6301a154fb"
@@ -103,6 +121,8 @@
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
       "reviewed": "Handler + getInvoiceDisplayedAddress / loadDisplayedInvoiceAddress / invoiceCustomerAddress / invoiceAddressSnapshot (invoice-address.js): invoices and customers address selects, in-memory merge; read end to end.",
+      "scope": "invoice",
+      "scopeParam": "id",
       "signals": [],
       "unresolved": [],
       "hash": "d32e6b8d06fe1c4a41b441616e8f1bef"
@@ -110,6 +130,7 @@
     {
       "endpoint": "/admin/invoices/customers/search",
       "reviewed": "Handler: customers select with an explicit column list (id, names, phone, email, tier, address) and limit 10; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "79f3307ba54b89383e1a6ca2bbce2bd4"
@@ -117,6 +138,8 @@
     {
       "endpoint": "/admin/invoices/service-records/:customerId",
       "reviewed": "Handler: service_records joined to technicians, explicit columns, limit 20; read end to end.",
+      "scope": "customer",
+      "scopeParam": "customerId",
       "signals": [],
       "unresolved": [],
       "hash": "cd9c1d103b9b4bf5265f024ff8bc6c43"
@@ -124,6 +147,7 @@
     {
       "endpoint": "/admin/invoices/stats",
       "reviewed": "InvoiceService.getStats (invoice.js): COUNT/SUM FILTER selects over invoices and estimate_deposits, no row data returned; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "8282cce130d8f87628b9c313b435a17e"
@@ -131,6 +155,10 @@
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",
       "reviewed": "Handler: one active job_form_templates row (form sections JSON) by service type; read end to end.",
+      "scope": "broad",
+      "params": {
+        "serviceType": "text"
+      },
       "signals": [],
       "unresolved": [],
       "hash": "0db1d4a7e424579cfba2467f08ce1fb5"
@@ -138,6 +166,8 @@
     {
       "endpoint": "/admin/neighborhood-access/customers/:customerId/properties",
       "reviewed": "Handler + propertyViews: customer_properties, neighborhoods and neighborhood_access reads mapped to label, address, gate label, access type, code, instructions, status. Gate and access codes are kept by owner decision (owner login); read end to end.",
+      "scope": "customer",
+      "scopeParam": "customerId",
       "signals": [],
       "unresolved": [],
       "hash": "a33bbf80c882566c197d6663dc4a371f"
@@ -145,6 +175,7 @@
     {
       "endpoint": "/admin/payers",
       "reviewed": "Handler + PayerService.listPayers (payer.js): select * from payers (no credential column in the table: names, AP contact, billing address, terms, tax-exempt cert number, Stripe customer id), limit 500; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "1c83180897e6746be6a1044adc2c9ebf"
@@ -152,6 +183,7 @@
     {
       "endpoint": "/admin/payers/:id",
       "reviewed": "Handler + PayerService.getPayer (payer.js): single payers row by integer id; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "f02d41df77a9102a248b95a3bed6409d"
@@ -159,6 +191,7 @@
     {
       "endpoint": "/admin/payers/ar-aging",
       "reviewed": "Handler + computePayerArAging / summarize / ageStatement (payer-ar.js): payer_statements joined to payers, explicit columns, aggregated in memory; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "7e74aa7dc2d8d072bf1a19fe2e2f7dad"
@@ -166,6 +199,7 @@
     {
       "endpoint": "/admin/pricing-config/discount-rules",
       "reviewed": "Handler: service_discount_rules select, empty on error; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "a16f87e98f37d48925132a24dde6f4b4"
@@ -173,6 +207,7 @@
     {
       "endpoint": "/admin/pricing-config/lawn-brackets",
       "reviewed": "Handler: lawn_pricing_brackets select grouped by track in memory, empty on error; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "4e41d21def4b123bad4f730400019df3"
@@ -180,6 +215,7 @@
     {
       "endpoint": "/admin/pricing/offers",
       "reviewed": "Handler: select from offer_packages (pricing offer text and prices); read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "4a53c249acf3afc492b6900b48533283"
@@ -187,6 +223,7 @@
     {
       "endpoint": "/admin/pricing/upsell-rules",
       "reviewed": "Handler: select from upsell_rules; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "4f141549122f7c0f51b5944f203d4a46"
@@ -194,6 +231,7 @@
     {
       "endpoint": "/admin/protocols/equipment",
       "reviewed": "Handler: equipment_checklists select, checklist JSON parsed in memory; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "413f84c37e7a9ded11e69776b19e53ee"
@@ -201,6 +239,7 @@
     {
       "endpoint": "/admin/protocols/scripts",
       "reviewed": "Handler: communication_scripts select by scenario and service line; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "dfe04999871ed06c088ed70b42fcce67"
@@ -208,6 +247,7 @@
     {
       "endpoint": "/admin/protocols/seasonal-index",
       "reviewed": "Handler: seasonal_pest_index select by month and service line; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "6d884e1c319c1fc79b629e7a068f87e9"
@@ -215,6 +255,7 @@
     {
       "endpoint": "/admin/referrals/payouts",
       "reviewed": "Handler: referral_payouts left-joined to referral_promoters (first_name, last_name, customer_phone), optional status filter; the table has no credential column; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "b15b142a314fc94095016f217f3921bb"
@@ -222,6 +263,7 @@
     {
       "endpoint": "/admin/revenue/settings",
       "reviewed": "Handler: latest company_financials row (cost and margin settings; technicians get a field subset); read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "faac4621c49d70f3cb087216955245b3"
@@ -229,6 +271,7 @@
     {
       "endpoint": "/admin/route-scorecard/status",
       "reviewed": "Handler + routeScorecardEnabled (day-scorecard.js): returns one boolean from an env gate; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "553a1da464e91de1bab9ae7b30826dd4"
@@ -236,6 +279,7 @@
     {
       "endpoint": "/admin/schedule/annual-prepay-availability",
       "reviewed": "Handler + isEnabled: returns two gate booleans; read end to end.",
+      "scope": "broad",
       "signals": [],
       "unresolved": [],
       "hash": "d7c2c785d0bde3cf9f7a8d618a8663d6"
@@ -243,6 +287,8 @@
     {
       "endpoint": "/admin/schedule/next-visit",
       "reviewed": "Handler + scopeToAssignedTech / technicianCurrentVisitFilter: next scheduled_services row (id, date, service type) for one customer, technician tokens scoped; read end to end.",
+      "scope": "customer",
+      "scopeParam": "customerId",
       "signals": [],
       "unresolved": [],
       "hash": "453d11b9564dbda427244c26991c1a6f"

@@ -851,8 +851,43 @@ function routeKey(full) {
   return `GET ${rules.splitPath(full).map(s => (rules.isParam(s) ? ':param' : s)).map(s => `/${s}`).join('')}`;
 }
 
+// The record kinds a reviewed row can scope a read to, and the Intelligence
+// Bar task-context key each one is checked under (task-context.js RECORDS).
+const ROW_SCOPES = { broad: null, customer: 'customer_id', invoice: 'invoice_id' };
+const CUSTOMER_PARAM_RE = /^customer_?id$/i;
+
+// A row's scope and param kinds must be stated and consistent with its
+// pattern, or the build fails: a pattern that carries a customer id must be
+// customer-scoped, and an invoice id must be invoice-scoped, so a customer
+// task can never read another customer's record through the general read.
+function validateReviewedRow(row) {
+  const fail = message => { throw new Error(`admin-read-reviewed.json ${row.endpoint}: ${message}`); };
+  if (!Object.hasOwn(ROW_SCOPES, row.scope)) fail(`scope must be one of ${Object.keys(ROW_SCOPES).join(', ')}`);
+  const segments = rules.splitPath(row.endpoint);
+  const names = rules.patternParams(row.endpoint);
+  const after = (parent, index) => segments[index - 1] === parent && rules.isParam(segments[index]);
+  segments.forEach((segment, index) => {
+    if (!rules.isParam(segment)) return;
+    const name = segment.slice(1);
+    if (after('customers', index) || CUSTOMER_PARAM_RE.test(name)) {
+      if (row.scope !== 'customer' || row.scopeParam !== name) fail(`param :${name} carries a customer id, so the row must be scope "customer" with scopeParam "${name}"`);
+    } else if (after('invoices', index) && (row.scope !== 'invoice' || row.scopeParam !== name)) {
+      fail(`param :${name} carries an invoice id, so the row must be scope "invoice" with scopeParam "${name}"`);
+    }
+  });
+  if (row.scope === 'broad' && row.scopeParam !== undefined) fail('a broad row has no scopeParam');
+  if (row.scope !== 'broad' && !(typeof row.scopeParam === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(row.scopeParam))) fail('scopeParam must name the parameter that carries the id');
+  const kinds = row.params === undefined ? {} : row.params;
+  if (!kinds || typeof kinds !== 'object' || Array.isArray(kinds)) fail('params must be an object of parameter kinds');
+  for (const [name, kind] of Object.entries(kinds)) {
+    if (kind !== 'text' || !names.includes(name)) fail(`params.${name} must be "text" and name a parameter of the pattern`);
+  }
+  if (row.scope !== 'broad' && kinds[row.scopeParam] === 'text') fail('the scope parameter cannot be free text');
+}
+
 function loadReviewed() {
   const raw = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8'));
+  (raw.reviewed || []).forEach(validateReviewedRow);
   return {
     exclude: new Map((raw.exclude || []).map(row => [row.route, row.reason])),
     reviewed: new Map((raw.reviewed || []).map(row => [routeKey(row.endpoint), row])),
@@ -918,6 +953,14 @@ function appLabel({ arg, info }) {
 // answers with a file stays out.
 const HARD_SIGNAL_RE = /^(write:|outside|signed_url|credential_|response:|writes_process_state|no_json_response)/;
 
+// A handler that takes the customer from the query string (req.query.customerId,
+// const { customer_id } = req.query) needs a customer-scoped row even though
+// no path parameter says so.
+const QUERY_CUSTOMER_RE = /\bquery\.(?:customer_?id)\b|\{[^{}]*\bcustomer_?id\b[^{}]*\}\s*=\s*(?:req\.)?query\b/i;
+function readsCustomerFromQuery() {
+  return [...followedSources].some(text => QUERY_CUSTOMER_RE.test(text));
+}
+
 function chainHash() {
   return crypto.createHash('sha256').update([...followedSources].sort().join('\n=====\n')).digest('hex').slice(0, 32);
 }
@@ -942,7 +985,7 @@ function judgeRoute(entry, reviewed, opaqueMounts) {
   [...functions, ...middleware].forEach((item) => {
     analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
   });
-  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), hash: chainHash() };
+  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), hash: chainHash(), queryCustomer: readsCustomerFromQuery() };
   const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal));
   if (hard.length) return { safe: false, kind: 'review', reason: `scan: ${hard.join(', ')}`, ...scan };
   return { safe: true, ...scan };
@@ -1052,9 +1095,14 @@ function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
     const fingerprint = endpointFingerprint(verdicts.map(({ verdict }) => verdict));
     const notAdmitted = checkReview(fingerprint, reviewed.reviewed.get(routeKey(endpoint)));
     if (notAdmitted) { excluded.review.push({ endpoint, reason: notAdmitted, fingerprint }); continue; }
+    const row = reviewed.reviewed.get(routeKey(endpoint));
+    if (row.scope === 'broad' && verdicts.some(({ verdict }) => verdict.queryCustomer)) {
+      throw new Error(`admin-read-reviewed.json ${endpoint}: the handler reads a customer id from the query string, so the row must be scope "customer"`);
+    }
     admittedRoutes.push(...matches);
     const pattern = `/${uniqueParamNames(nameParams(segments, matches[0].match || matches[0])).join('/')}`;
     if (rules.denyReason(pattern)) { excluded.rule.push({ endpoint, reason: rules.denyReason(pattern) }); continue; }
+    if (row.endpoint !== pattern) throw new Error(`admin-read-reviewed.json ${row.endpoint}: the row must use the catalog pattern ${pattern}`);
     reviewAid.push({ endpoint, unresolved: [...new Set(verdicts.flatMap(({ verdict }) => verdict.unresolved || []))],
       touched: [...new Set(verdicts.flatMap(({ verdict }) => verdict.touched || []))] });
     entries.push({
@@ -1063,6 +1111,9 @@ function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
       screens: [...group.screens].sort(),
       handlers: [...group.handlers].sort(),
       label: labelFor(pattern, [...group.handlers].sort()),
+      scope: row.scope,
+      ...(row.scope === 'broad' ? {} : { scopeParam: row.scopeParam }),
+      ...(row.params && Object.keys(row.params).length ? { paramKinds: row.params } : {}),
     });
   }
   const unique = new Map();
@@ -1166,4 +1217,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };
+module.exports = { validateReviewedRow, resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };

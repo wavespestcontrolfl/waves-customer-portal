@@ -435,7 +435,7 @@ test('every record reader carries a selector the task-context guards recognize',
 });
 
 test('every tool with a non-none scope is a PII tool, every reviewed PII tool is non-none, and only reviewed kinds have scopes', () => {
-  const { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
+  const { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES, SCOPE_NONE_PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
   const { scopeOf, scopesFor, validScope } = require('../services/intelligence-bar/scope-policy');
   const policy = require('../services/intelligence-bar/action-policy.json');
   for (const name of REVIEWED_PII_TOOL_NAMES) {
@@ -445,12 +445,16 @@ test('every tool with a non-none scope is a PII tool, every reviewed PII tool is
   // The route redacts telemetry for the derived set, so a reader that returns
   // customer identities is covered by its scope class, not by a hand-kept list.
   for (const name of Object.keys(policy)) {
-    expect({ name, pii: PII_TOOL_NAMES.has(name) }).toEqual({ name, pii: policy[name].scope !== 'none' });
+    expect({ name, pii: PII_TOOL_NAMES.has(name) }).toEqual({ name, pii: policy[name].scope !== 'none' || SCOPE_NONE_PII_TOOL_NAMES.has(name) });
   }
   for (const name of ['get_ar_aging', 'get_outstanding_balances', 'get_top_revenue_customers', 'get_open_commitments', 'get_truck_status', 'find_schedule_gaps']) {
     expect(PII_TOOL_NAMES.has(name)).toBe(true);
   }
   expect(PII_TOOL_NAMES.has('get_kpi_snapshot')).toBe(false);
+  // A scope-none tool with free-form input is a PII tool by name (find_admin_reads takes names and phones).
+  expect(policy.find_admin_reads.scope).toBe('none');
+  expect(PII_TOOL_NAMES.has('find_admin_reads')).toBe(true);
+  for (const name of SCOPE_NONE_PII_TOOL_NAMES) expect({ name, scope: policy[name].scope }).toEqual({ name, scope: 'none' });
   for (const kind of [undefined, '', 'write', 'READ', 'internal-write']) {
     expect(scopesFor(kind)).toEqual([]);
     expect(validScope({ kind, scope: 'none' })).toBe(false);

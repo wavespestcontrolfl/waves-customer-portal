@@ -14,6 +14,11 @@
  *     holds the access  ->  "[private link removed]". A readable content slug
  *     ("pest-control-services") and a slug under a public content path
  *     (/blog/..., /services/...) stay. Bare id fields are not URLs and stay.
+ *     The same two checks cover a link with no scheme (www.example.test/pay/<token>,
+ *     example.test/pay/<token>), a relative path in text (/pay/<token>,
+ *     /portal/<token>) and a bare query string that carries a credential
+ *     (?token=...). Readable text stays: dates (10/12/2026), fractions,
+ *     and/or, and file-like paths made of words.
  *  3. Credential fields: the VALUE under any object key that names a
  *     credential (token, secret, password, pin, signature, hash, session, ...;
  *     see credential-fields.js) at any depth  ->  "[removed]". Gate and access
@@ -79,13 +84,71 @@ function isPrivateLink(text) {
 
 // Sentence and Markdown punctuation after a link is not part of it.
 const TRAILING_PUNCTUATION_RE = /[).,;:!?\]}>*_~`'"]+$/;
+function splitTail(match) {
+  const tail = (match.match(TRAILING_PUNCTUATION_RE) || [''])[0];
+  return { link: tail ? match.slice(0, -tail.length) : match, tail };
+}
+
+// Links with no "https://" in front: "www.example.test/pay/<token>" and
+// "example.test/pay/<token>". A candidate is judged exactly like an absolute
+// link (parsed with https:// put in front); one that is neither signed nor
+// private is left as it was, so ordinary dotted words stay.
+const HOST_LINK_RE = /(?<![\w@./:-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:[/?#][^\s"'<>\\]*)?/gi;
+// A relative link: "/pay/<token>", "/portal/<token>?x=1". The "/" must not
+// follow a word character, "/", ":" or "." (so "10/12/2026", "and/or" and the
+// inside of an absolute URL are not starts).
+const RELATIVE_LINK_RE = /(?<![\w/:.@-])\/[A-Za-z0-9._~%@+=-]*(?:\/[A-Za-z0-9._~%@+=-]*)*(?:[?#][^\s"'<>\\]*)?/g;
+// A bare query string that carries a credential: "?token=...", "?sig=...&x=1".
+const BARE_QUERY_RE = /(?<![\w/])\?[A-Za-z0-9_.[\]-]+=[^\s"'<>\\]*/g;
+
+// Words joined by - or _ ("quarterly-summary-final-2026") read as a name, not a token.
+function readableName(run) {
+  const parts = run.split(/[-_]/);
+  return parts.length >= 3 && parts.every(part => /^(?:[A-Za-z]{2,}|\d{1,4})$/.test(part)) && parts.filter(part => /^[A-Za-z]{3,}$/.test(part)).length >= 2;
+}
+
+function relativeLinkVerdict(link) {
+  let url;
+  try { url = new URL(link, 'https://relative.invalid'); } catch { return null; }
+  if (carriesCredential(url.search) || carriesCredential(url.hash.replace(/^#/, ''))) return REDACTED_LINK;
+  const segments = url.pathname.split('/').filter(Boolean);
+  const publicPage = PUBLIC_CONTENT_SEGMENTS.has((segments[0] || '').toLowerCase());
+  let rest;
+  try { rest = decodeURIComponent(`${url.pathname} ${url.search} ${url.hash}`); } catch { return REDACTED_PRIVATE_LINK; }
+  const random = (run, index) => {
+    if (UUID_RE.test(run) || /^[0-9a-fA-F]{24,}$/.test(run)) return true;
+    if (!looksRandom(run) || readableName(run) || publicPage) return false;
+    // A lone first segment is a page name unless it holds a digit.
+    return segments.length > 1 || index > 0 || /\d/.test(run);
+  };
+  return (rest.match(TOKEN_RUN_RE) || []).some(run => random(run, segments.findIndex(segment => segment.includes(run)))) ? REDACTED_PRIVATE_LINK : null;
+}
+
 function redactString(text, state) {
-  return text.replace(URL_IN_TEXT_RE, (match) => {
-    const tail = (match.match(TRAILING_PUNCTUATION_RE) || [''])[0];
-    const link = tail ? match.slice(0, -tail.length) : match;
-    if (isSignedLink(link)) { state.links += 1; return REDACTED_LINK + tail; }
-    if (isPrivateLink(link)) { state.privateLinks += 1; return REDACTED_PRIVATE_LINK + tail; }
+  const count = (verdict) => { if (verdict === REDACTED_LINK) state.links += 1; else state.privateLinks += 1; return verdict; };
+  const absolute = text.replace(URL_IN_TEXT_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    if (isSignedLink(link)) return count(REDACTED_LINK) + tail;
+    if (isPrivateLink(link)) return count(REDACTED_PRIVATE_LINK) + tail;
     return match;
+  });
+  const hosted = absolute.replace(HOST_LINK_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    if (!/[/?#]/.test(link) && !/^www\./i.test(link)) return match;
+    let candidate;
+    try { candidate = new URL(`https://${link}`); } catch { return match; }
+    if (isSignedLink(candidate.href)) return count(REDACTED_LINK) + tail;
+    if (isPrivateLink(candidate.href)) return count(REDACTED_PRIVATE_LINK) + tail;
+    return match;
+  });
+  const relative = hosted.replace(RELATIVE_LINK_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    const verdict = link.length > 1 ? relativeLinkVerdict(link) : null;
+    return verdict ? count(verdict) + tail : match;
+  });
+  return relative.replace(BARE_QUERY_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    return carriesCredential(link.slice(1)) && /=[^&]/.test(link) ? count(REDACTED_LINK) + tail : match;
   });
 }
 

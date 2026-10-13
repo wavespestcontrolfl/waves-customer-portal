@@ -235,3 +235,48 @@ test('the legacy tool list never offers them, whatever the login', () => {
     }
   }
 });
+
+// Codex round 1 P1: the finder's free-form query can hold a name, phone or
+// email, so find_admin_reads is a PII tool although its scope is none.
+describe('find_admin_reads carries PII in its query', () => {
+  const PHONE = '941-555-0100';
+  const NAME = 'Zelda Syntheticname';
+  // Query rows, tool events and log lines (the task checkpoint holds the live conversation and is outside this rule).
+  const everythingKept = () => JSON.stringify({
+    inserts: mockInsert.mock.calls, events: mockToolEvent.mock.calls,
+    logs: Object.values(logger).flatMap(fn => fn.mock.calls),
+  });
+
+  test('a finder-only request stores and logs no query words', async () => {
+    scriptModel([
+      toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
+      toolUse('t2', 'find_admin_reads', { query: `${NAME} ${PHONE} autopay` }),
+      { content: [{ type: 'text', text: 'Found the autopay read.' }] },
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, OWNER, { prompt: `find the autopay screen data for ${NAME} ${PHONE}`, context: 'dashboard', session_id: 'session-1' });
+      expect(status).toBe(200);
+    });
+    expect(mockToolEvent.mock.calls.some(([event]) => event.toolName === 'find_admin_reads')).toBe(true);
+    const toolLog = logger.info.mock.calls.find(([message]) => message === '[intelligence-bar] Tool call: find_admin_reads');
+    expect(toolLog[1]).toEqual({ fields: ['query'], confirmed: false });
+    const queryRows = mockInsert.mock.calls.map(call => JSON.stringify(call));
+    expect(queryRows.some(row => row.includes('redacted'))).toBe(true);
+    expect(everythingKept()).not.toContain(PHONE);
+    expect(everythingKept()).not.toContain(NAME);
+  });
+
+  test('/execute logs the field names, not the query words', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await realFetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST', headers: { Authorization: OWNER, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'find_admin_reads', params: { query: `${NAME} ${PHONE} autopay` } }),
+      });
+      expect(res.status).toBe(200);
+    });
+    const executed = logger.info.mock.calls.find(([message]) => message === '[intelligence-bar] Executed action: find_admin_reads');
+    expect(executed[1]).toEqual({ fields: ['query'] });
+    expect(everythingKept()).not.toContain(PHONE);
+    expect(everythingKept()).not.toContain(NAME);
+  });
+});

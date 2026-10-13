@@ -7,7 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  buildCatalog, serialize, routerRoutes, judgeRoute, endpointFingerprint, checkReview, resetCaches, loadReviewed, OUT_FILE, REVIEWED_FILE, CENSUS_FILE,
+  buildCatalog, serialize, routerRoutes, judgeRoute, validateReviewedRow, endpointFingerprint, checkReview, resetCaches, loadReviewed, OUT_FILE, REVIEWED_FILE, CENSUS_FILE,
 } = require('../../scripts/build-ib-admin-read-catalog');
 const rules = require('../utils/admin-read-rules');
 
@@ -79,11 +79,60 @@ test('every reviewed row says what was read and carries the fingerprint it was r
     expect(Array.isArray(row.signals)).toBe(true);
     expect(Array.isArray(row.unresolved)).toBe(true);
     expect(row.hash).toMatch(/^[0-9a-f]{32}$/);
+    expect(['broad', 'customer', 'invoice']).toContain(row.scope);
+    expect(() => validateReviewedRow(row)).not.toThrow();
   }
   for (const row of file.exclude) {
     expect(row.route).toMatch(/^GET \/admin\//);
     expect(row.reason.trim().length).toBeGreaterThan(10);
   }
+});
+
+describe('the scope of a reviewed row', () => {
+  const base = { reviewed: 'fixture review, read end to end', signals: [], unresolved: [], hash: '0'.repeat(32) };
+  const row = extra => ({ endpoint: '/admin/customers/:id/credits', ...base, ...extra });
+  test('a pattern with a customer id parameter must be customer-scoped to that parameter', () => {
+    expect(() => validateReviewedRow(row({ scope: 'customer', scopeParam: 'id' }))).not.toThrow();
+    expect(() => validateReviewedRow(row({ scope: 'broad' }))).toThrow(/carries a customer id/);
+    expect(() => validateReviewedRow(row({ scope: 'invoice', scopeParam: 'id' }))).toThrow(/carries a customer id/);
+    expect(() => validateReviewedRow(row({ scope: 'customer', scopeParam: 'other' }))).toThrow(/carries a customer id/);
+    expect(() => validateReviewedRow(row({}))).toThrow(/scope must be one of/);
+    expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'id' }), endpoint: '/admin/invoices/service-records/:customerId' })).toThrow(/carries a customer id/);
+    expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'customerId' }), endpoint: '/admin/invoices/service-records/:customerId' })).not.toThrow();
+  });
+  test('a pattern with an invoice id parameter must be invoice-scoped', () => {
+    const invoice = extra => ({ ...row(extra), endpoint: '/admin/invoices/:id/credit-context' });
+    expect(() => validateReviewedRow(invoice({ scope: 'invoice', scopeParam: 'id' }))).not.toThrow();
+    expect(() => validateReviewedRow(invoice({ scope: 'broad' }))).toThrow(/carries an invoice id/);
+    expect(() => validateReviewedRow(invoice({ scope: 'customer', scopeParam: 'id' }))).toThrow(/carries an invoice id/);
+  });
+  test('a broad row names no scope parameter; any other row must name one', () => {
+    const plain = extra => ({ ...row(extra), endpoint: '/admin/payers' });
+    expect(() => validateReviewedRow(plain({ scope: 'broad' }))).not.toThrow();
+    expect(() => validateReviewedRow(plain({ scope: 'broad', scopeParam: 'id' }))).toThrow(/no scopeParam/);
+    expect(() => validateReviewedRow(plain({ scope: 'customer' }))).toThrow(/scopeParam must name/);
+    expect(() => validateReviewedRow(plain({ scope: 'customer', scopeParam: 'customerId' }))).not.toThrow();
+  });
+  test('a param kind is "text" and names a parameter of the pattern', () => {
+    const named = extra => ({ ...row(extra), endpoint: '/admin/job-forms/templates/by-service/:serviceType', scope: 'broad' });
+    expect(() => validateReviewedRow(named({ params: { serviceType: 'text' } }))).not.toThrow();
+    expect(() => validateReviewedRow(named({ params: { serviceType: 'free' } }))).toThrow(/must be "text"/);
+    expect(() => validateReviewedRow(named({ params: { other: 'text' } }))).toThrow(/must be "text"/);
+    expect(() => validateReviewedRow(named({ params: ['serviceType'] }))).toThrow(/object of parameter kinds/);
+    expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'text' } }) })).toThrow(/cannot be free text/);
+  });
+  test('the build fails when a handler that reads a customer id from the query is reviewed as broad', () => {
+    const full = loadReviewed();
+    const key = 'GET /admin/schedule/next-visit';
+    const wrong = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), scope: 'broad', scopeParam: undefined });
+    expect(() => buildCatalog({ reviewed: { exclude: full.exclude, reviewed: wrong } })).toThrow(/reads a customer id from the query string/);
+  });
+  test('the build fails when a row does not use the catalog pattern', () => {
+    const full = loadReviewed();
+    const key = 'GET /admin/customers/:param/credits';
+    const renamed = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), endpoint: '/admin/customers/:customerId/credits', scopeParam: 'customerId' });
+    expect(() => buildCatalog({ reviewed: { exclude: full.exclude, reviewed: renamed } })).toThrow(/must use the catalog pattern/);
+  });
 });
 
 test('the committed catalog is exactly the reviewed list minus what the scan or a changed chain drops', () => {

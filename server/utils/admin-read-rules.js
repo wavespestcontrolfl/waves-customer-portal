@@ -11,6 +11,12 @@
 
 // A path parameter value: no slash, no percent sign, no whitespace.
 const PARAM_VALUE_RE = /^[A-Za-z0-9_.-]{1,80}$/;
+// A reviewed row may mark a path parameter as free text (a service name such as
+// "General Pest Control (Quarterly)"). Text keeps the strict limits that matter
+// for a path: bounded length, no control characters, no separator or escape
+// character, never a dot segment. It is still percent-encoded when filled.
+const TEXT_PARAM_MAX = 120;
+const TEXT_PARAM_FORBIDDEN_RE = /[\u0000-\u001f\u007f/\\?#%]/;
 const QUERY_KEY_RE = /^[A-Za-z0-9_.[\]-]{1,60}$/;
 const MAX_QUERY_KEYS = 20;
 const MAX_QUERY_VALUE = 200;
@@ -63,9 +69,13 @@ function segmentDenyReason(segment, isLast) {
 }
 
 // Why a path pattern (or concrete path) is outside the catalog, or null.
-function denyReason(path) {
+// `encodedParams` is for a path filled from a pattern that has free-text
+// parameters: those values are percent-encoded, so "%XX" escapes are allowed
+// (and only well-formed ones); every other rule applies to the encoded path.
+function denyReason(path, { encodedParams = false } = {}) {
   const text = String(path || '');
-  if (!text.startsWith('/admin/') || text.includes('?') || text.includes('#') || text.includes('%')
+  const badEscape = encodedParams ? /%(?![0-9A-Fa-f]{2})/.test(text) : text.includes('%');
+  if (!text.startsWith('/admin/') || text.includes('?') || text.includes('#') || badEscape
     || text.includes('\\') || text.includes('//')) return 'not_a_plain_admin_path';
   const lowered = text.toLowerCase();
   if (DENIED_PREFIXES.some(prefix => lowered === prefix || lowered.startsWith(`${prefix}/`))) return 'denied_prefix';
@@ -86,7 +96,16 @@ function patternParams(pattern) {
 
 // Fill a catalog pattern. Returns { path } or { error }. Nothing here reads
 // the network; encodeURIComponent is belt and braces over PARAM_VALUE_RE.
-function fillPattern(pattern, params) {
+function validParamValue(text, kind) {
+  if (kind === 'text') {
+    return text.trim().length > 0 && text.length <= TEXT_PARAM_MAX && !TEXT_PARAM_FORBIDDEN_RE.test(text) && !/^\.+$/.test(text);
+  }
+  return PARAM_VALUE_RE.test(text) && !/^\.+$/.test(text);
+}
+
+// `kinds` maps a parameter name to 'text' for a parameter a reviewed row marked
+// as free text; every other parameter keeps the strict default.
+function fillPattern(pattern, params, kinds = {}) {
   const wanted = patternParams(pattern);
   const given = params && typeof params === 'object' && !Array.isArray(params) ? params : null;
   if (!given) return { error: 'params must be an object of strings' };
@@ -99,7 +118,7 @@ function fillPattern(pattern, params) {
     const value = given[name];
     if (typeof value !== 'string' && typeof value !== 'number') return { error: `Missing param: ${name}` };
     const text = String(value);
-    if (!PARAM_VALUE_RE.test(text) || /^\.+$/.test(text)) return { error: `Param ${name} has characters that are not allowed` };
+    if (!validParamValue(text, kinds && Object.hasOwn(kinds, name) ? kinds[name] : 'strict')) return { error: `Param ${name} has characters that are not allowed` };
     out.push(encodeURIComponent(text));
   }
   return { path: `/${out.join('/')}` };

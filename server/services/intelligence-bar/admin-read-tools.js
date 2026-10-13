@@ -56,7 +56,7 @@ Use for: "which screen shows X", "what can I read about Y", before any read_admi
   },
   {
     name: ADMIN_READ_DATA_TOOL,
-    description: `Read what an admin screen reads: one GET to a reviewed admin endpoint, as the logged-in owner, returning the JSON the screen gets (capped at 12,000 characters; long lists are cut to the first items with the total). Fallback only: use a purpose-built tool when one has the data. Call find_admin_reads first to get the exact endpoint pattern; pass it unchanged in "endpoint" (for example /admin/customers/:id/timeline) and give each :name in "params" (letters, digits, dot, dash, underscore; never a slash or a URL). Filters go in "query" as plain values. An endpoint that is not on the reviewed list is refused. Never tell the operator to open a screen for data this can read. It reads only; it cannot change anything.`,
+    description: `Read what an admin screen reads: one GET to a reviewed admin endpoint, as the logged-in owner, returning the JSON the screen gets (capped at 12,000 characters; long lists are cut to the first items with the total). Fallback only: use a purpose-built tool when one has the data. Call find_admin_reads first to get the exact endpoint pattern; pass it unchanged in "endpoint" (for example /admin/customers/:id/timeline) and give each :name in "params" (letters, digits, dot, dash, underscore; never a slash or a URL; a parameter the finder lists in text_params, such as a service name, may also hold spaces and punctuation up to 120 characters). Filters go in "query" as plain values. An endpoint that is not on the reviewed list is refused. Never tell the operator to open a screen for data this can read. It reads only; it cannot change anything.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -125,6 +125,7 @@ function findAdminReads(input) {
     : [];
   const matches = ranked.slice(0, MAX_MATCHES).map(({ entry }) => ({
     endpoint: entry.endpoint, params: entry.params, label: entry.label, screen: entry.screens.join(', '),
+    ...(entry.paramKinds ? { text_params: Object.keys(entry.paramKinds) } : {}),
   }));
   return {
     status: matches.length ? 'reads_found' : 'no_match',
@@ -149,14 +150,14 @@ function buildRequestPath(endpoint, input) {
   if (!entry || rules.denyReason(entry.endpoint)) {
     return { refusal: refusal('That endpoint is not on the hand-reviewed admin read list. Call find_admin_reads to get an exact endpoint pattern.', 'capability_unimplemented', { hint: 'find_admin_reads' }) };
   }
-  const filled = rules.fillPattern(entry.endpoint, input.params === undefined ? {} : input.params);
+  const filled = rules.fillPattern(entry.endpoint, input.params === undefined ? {} : input.params, entry.paramKinds || {});
   if (filled.error) return { refusal: refusal(filled.error, 'invalid_input') };
   const search = rules.buildSearch(input.query);
   if (search.error) return { refusal: refusal(search.error, 'invalid_input') };
   const segments = rules.splitPath(filled.path);
   // A parameter value that spells a literal segment must not reach a route
   // the catalog does not cover.
-  if (rules.denyReason(filled.path) || BLOCKED_ROUTES.some(route => rules.collidesWithRoute(route, segments, entry.endpoint))) {
+  if (rules.denyReason(filled.path, { encodedParams: Boolean(entry.paramKinds) }) || BLOCKED_ROUTES.some(route => rules.collidesWithRoute(route, segments, entry.endpoint))) {
     return { refusal: refusal('That parameter value points outside the reviewed admin read catalog.', 'invalid_input') };
   }
   return { entry, path: filled.path, search: search.search };
@@ -303,6 +304,16 @@ async function fetchAdminRead(entry, path, search, authorization) {
   }
 }
 
+// The record kind a reviewed row scopes a read to, for the task-context check:
+// { kind: 'customer_id' | 'invoice_id', param, inPath } or null for a broad
+// read (or an endpoint the catalog does not hold).
+const SCOPE_KINDS = { customer: 'customer_id', invoice: 'invoice_id' };
+function scopeBinding(input) {
+  const entry = typeof input?.endpoint === 'string' ? BY_ENDPOINT.get(input.endpoint) : null;
+  const kind = entry ? SCOPE_KINDS[entry.scope] : null;
+  return kind ? { kind, param: entry.scopeParam, inPath: entry.params.includes(entry.scopeParam) } : null;
+}
+
 async function readAdminData(input, actionContext) {
   const authorization = actionContext.staffAuthorization;
   if (typeof authorization !== 'string' || !BEARER_RE.test(authorization)) {
@@ -327,6 +338,6 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
 }
 
 module.exports = {
-  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive,
+  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
 };
