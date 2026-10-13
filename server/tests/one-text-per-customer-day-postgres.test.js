@@ -455,23 +455,30 @@ postgres('one text per customer, address and day', () => {
     afterEach(() => { mockBoundary.real = false; mockBoundary.before = null; });
 
     const pair = (date, extra = {}) => fixture({ date, ...extra, specs: [
-      { start: '10:00', end: '11:00', name: 'Lawn Care' }, // the LATER service is inserted first, so the cron meets it first
+      { start: '10:00', end: '11:00', name: 'Lawn Care' }, // the LATER service is inserted first (rows[0])
       { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
     ] });
 
-    test('24h, later row scanned first: the later row sends the earliest arrival through the real guard and covers the other', async () => {
+    // The scan query has no ORDER BY, so the rows of a day come back in heap order (a vacuum reshuffles it).
+    // Updating the earlier service LAST puts its new tuple after the later one's, so an unordered scan meets
+    // the later service first; the product must send from the earliest row either way.
+    const makeLaterMetFirst = (f) => mockPg('appointment_reminders').where({ scheduled_service_id: f.rows[1].id }).update({ updated_at: new Date() });
+
+    test('24h, two armed rows: ONE merged reminder through the real guard, always sent by the earliest row, whatever order the scan returns', async () => {
       gateOn();
       const f = await pair(nextDate());
+      await makeLaterMetFirst(f);
       await runReminders(f.date);
       const calls = providerCalls(f.phone);
       expect(calls).toHaveLength(1);
-      expect(calls[0][2].appointmentId).toBe(f.rows[0].id); // the later service was scanned and sent first
+      expect(calls[0][2].appointmentId).toBe(f.rows[1].id); // the 09:00 service sends, not the 10:00 one
       expect(calls[0][1]).toMatch(/between 9:00 AM and 11:00 AM/);
       expect(calls[0][1]).toMatch(/Lawn Care/);
       expect(calls[0][1]).toMatch(/Pest Control/);
       expect((await reminderOf(f.rows[0].id)).reminder_24h_sent).toBe(true);
       expect((await reminderOf(f.rows[1].id)).reminder_24h_sent).toBe(true);
-      expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.covered')).toHaveLength(1);
+      // the 10:00 service (rows[0]) is the one covered by the 09:00 service's text
+      expect(await auditFor(f.rows[0].id, 'reminder.one_text_per_day.covered')).toHaveLength(1);
     });
 
     test('24h, a service added after the first reminder sends its own reminder through the real guard', async () => {
@@ -487,13 +494,14 @@ postgres('one text per customer, address and day', () => {
       expect(calls[1][1]).toMatch(/Pest Control/);
     });
 
-    test('72h, later row scanned first: one reminder through the real guard', async () => {
+    test('72h, two armed rows: one reminder through the real guard, always sent by the earliest row', async () => {
       gateOn();
       const f = await pair(nextDate(), { armed72: true });
+      await makeLaterMetFirst(f);
       await runReminders(f.date, threeDaysBefore(f.date));
       const calls = providerCalls(f.phone);
       expect(calls).toHaveLength(1);
-      expect(calls[0][2].appointmentId).toBe(f.rows[0].id); // the later service was scanned and sent first
+      expect(calls[0][2].appointmentId).toBe(f.rows[1].id);
       expect(calls[0][1]).toMatch(/9:00 AM/);
       expect((await reminderOf(f.rows[0].id)).reminder_72h_sent).toBe(true);
       expect((await reminderOf(f.rows[1].id)).reminder_72h_sent).toBe(true);
@@ -584,7 +592,8 @@ postgres('one text per customer, address and day', () => {
     });
     afterEach(() => { mockBoundary.real = false; mockBoundary.before = null; });
 
-    // The 09:00 service is inserted first, so the cron meets it (the sender of the merged text) first.
+    // The scan visits the earliest row first (scanOrder), so the 09:00 service is the sender of the merged text
+    // and rows[1] (10:00) is the other service the hooks and holds act on, whatever the heap order is.
     const earlyFirst = (date) => fixture({ date, specs: [
       { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
       { start: '10:00', end: '11:00', name: 'Lawn Care' },

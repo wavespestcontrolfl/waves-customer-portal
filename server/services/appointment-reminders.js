@@ -1435,6 +1435,22 @@ async function dayReminderRows(row) {
   }
 }
 
+// The order the reminder scan visits its rows. The scan query has no ORDER BY, so rows come back
+// in heap order, which a vacuum reshuffles between two inserts: which row of one customer-day was
+// met first (and so became the sender of the one merged reminder, and whose reschedule link it
+// carries) changed from run to run. With GATE_ONE_TEXT_PER_CUSTOMER_DAY on, the scan visits rows
+// by arrival time, then id, so the sender of a day's reminder is always its earliest live row.
+// Gate off or unreadable gate: the rows exactly as the query returned them.
+function scanOrder(rows) {
+  try {
+    if (!Array.isArray(rows) || !require('../config/feature-gates').oneTextPerCustomerDayLive()) return rows;
+  } catch {
+    return rows;
+  }
+  const at = (r) => new Date(r.appointment_time).getTime();
+  return [...rows].sort((a, b) => (at(a) - at(b)) || String(a.id).localeCompare(String(b.id)));
+}
+
 // What ONE reminder send read for its customer-day, kept per sending row so the
 // text's copy, its service label and the closure after delivery all use the SAME
 // snapshot: { rows, label } (null = the rule does not apply to this send).
@@ -3355,7 +3371,7 @@ const AppointmentReminders = {
     }
 
     try {
-      const reminders = await db('appointment_reminders')
+      const reminders = scanOrder(await db('appointment_reminders')
         .where({ cancelled: false, confirmation_sent: true })
         // Belt-and-braces marker exclusion: a windowless pre-closed
         // placeholder is normally hidden from this scan by its closed flags
@@ -3380,7 +3396,7 @@ const AppointmentReminders = {
             .whereRaw('customers.id = appointment_reminders.customer_id')
             .whereNotNull('customers.deleted_at');
         })
-        .select('*');
+        .select('*'));
 
       for (const r of reminders) {
         // Live-status guard. The reminder row carries its own cancelled flag, but
