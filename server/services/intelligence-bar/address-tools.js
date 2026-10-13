@@ -74,12 +74,16 @@ function givenParts(input) {
   // The locality parser files a trailing direction ("100 17th St W") as the
   // city. A city that is only a direction word is part of the street.
   const directionAsCity = Boolean(parsed.city) && compareKey(parsed.city) in DIRECTION_KEYS;
-  const street = [cleanText(parsed.line1) || withoutUnit[0] || text, directionAsCity ? cleanText(parsed.city) : ''].filter(Boolean).join(' ');
+  // A comma-free whole address ("100 Main St Apt 4 Sarasota FL 34236") only
+  // shows its unit once the locality is parsed off the end.
+  const parsedLine = splitStreetLineUnit(cleanText(parsed.line1) || withoutUnit[0] || text);
+  const unitText = rawUnit || parsedLine.unit;
+  const street = [parsedLine.street || cleanText(parsed.line1) || withoutUnit[0] || text, directionAsCity ? cleanText(parsed.city) : ''].filter(Boolean).join(' ');
   const parsedCity = directionAsCity ? '' : cleanText(parsed.city);
   const stateInCity = !parsed.state && TRAILING_STATE.test(parsedCity);
   return {
     street: normalizeStreetLine(street),
-    unit: normalizeUnitLine(rawUnit),
+    unit: normalizeUnitLine(unitText),
     city: cleanText(input.city) || (stateInCity ? parsedCity.replace(TRAILING_STATE, '') : parsedCity),
     state: normalizeState(cleanText(input.state) || cleanText(parsed.state) || (stateInCity ? 'FL' : '')) || '',
     zip: (cleanText(input.zip) || cleanText(parsed.zip)).slice(0, 5),
@@ -160,8 +164,8 @@ function shape(result, given) {
 // Rounds 2 and 3 of the review on #6297 showed that proving "this write was
 // checked" from a ledger of earlier tool calls does not hold (ordering in
 // one model message, partial updates, units, states). The rule is simpler
-// and total: a write that changes any part of a street address is never
-// committed without a confirm card (owner-direct.js asks changesAddress), so
+// and total: a write that carries address text (street, unit, city, state or
+// ZIP) is never committed without a confirm card (owner-direct.js asks changesAddress), so
 // the operator sees the exact address before it is saved. check_address
 // supplies Google's spelling and ZIP for that card; the prompt tells the
 // model to run it first.
@@ -175,12 +179,31 @@ const WRITE_ADDRESS_FIELDS = {
   update_lead_contact: input => ({ ...input, address_line1: input.address }),
 };
 const ADDRESS_FIELD_NAMES = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+// set_primary_property is deliberately not an address writer here: it takes
+// ids only and chooses among the customer's SAVED properties, so it brings in
+// no new address text (no spelling, no ZIP to guess). Each saved property's
+// address already went through its own card. It stays an owner-direct edit,
+// as the owner-ratified W4 workflow records (docs/intelligence-bar-operator-workflows.md).
 
-// True when the call would save any part of a street address.
+// True when the call carries address text to save.
 function changesAddress(toolName, input) {
   const fields = WRITE_ADDRESS_FIELDS[toolName]?.(input || {});
   if (!fields || typeof fields !== 'object') return false;
   return ADDRESS_FIELD_NAMES.some(name => cleanText(String(fields[name] ?? '')) !== '');
+}
+
+// A state-like word the normalizer does not know, written into the address
+// text itself ("100 Example Way, Sarasota, Flordia 34236"). With three or more
+// comma parts (street, city, state) the last part, minus its ZIP, must be a
+// state; otherwise the check would silently fall back to the FL hint.
+function embeddedStateProblem(text) {
+  const rawUnit = unitAnywhereOnLine(text).toLowerCase();
+  const parts = (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
+    .filter(part => !(rawUnit && ` ${rawUnit} `.includes(` ${part.toLowerCase()} `)));
+  if (parts.length < 3) return null;
+  const candidate = parts[parts.length - 1].replace(/\b\d{5}(?:-\d{4})?\b/g, '').trim();
+  if (!candidate || !/^[A-Za-z .]+$/.test(candidate)) return null;
+  return normalizeState(candidate) ? null : candidate;
 }
 
 async function executeAddressTool(toolName, input) {
@@ -189,8 +212,9 @@ async function executeAddressTool(toolName, input) {
   if (address.length < 3) {
     return { status: 'invalid_input', note: 'check_address needs the street address as heard. Ask the operator for it.' };
   }
-  if (cleanText(input.state) && !normalizeState(cleanText(input.state))) {
-    return { status: 'invalid_input', note: `"${cleanText(input.state).slice(0, 30)}" is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.` };
+  const badState = cleanText(input.state) && !normalizeState(cleanText(input.state)) ? cleanText(input.state) : (!cleanText(input.state) && embeddedStateProblem(address));
+  if (badState) {
+    return { status: 'invalid_input', note: `"${String(badState).slice(0, 30)}" is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.` };
   }
   const given = givenParts({ ...input, address });
   const result = await validateAddress({

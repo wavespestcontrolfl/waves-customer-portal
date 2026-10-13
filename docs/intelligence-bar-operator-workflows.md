@@ -134,7 +134,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 ### W3 Lead first name and customer contact details
 
 - **Tools:** `update_lead_contact`, `update_customer`.
-- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, address, lead source and note fields execute without a card (a notes edit only when the customer has no notes yet, since notes replace; and at most two same-tool direct edits per request, owner ruling 2026-10-02); email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
+- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, lead source and note fields execute without a card (an address field always keeps its card, #6297) (a notes edit only when the customer has no notes yet, since notes replace; and at most two same-tool direct edits per request, owner ruling 2026-10-02); email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
 - **Rulings:** `ib-owner-direct-ruling`, `ib-gap-2-lead-contact-lane`.
 - **Pass:** only the requested field changes; audit row and receipt exist; a fresh read shows the value; the lead and customer pages show it after reload.
 - **Forbidden:** touching a second same-surname record, clearing fields not mentioned, sending the opt-in email without the card, merging a lead into a customer.
@@ -144,7 +144,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 ### W4 Second service property labeled rental
 
 - **Tools:** `add_customer_property`, `update_customer_property`, `set_primary_property`, `switch_appointment_property`.
-- **Mode:** owner with the gate on: `set_primary_property` and an add or edit with no label execute without a card; a labelled add or edit keeps its card (the label is customer-visible copy), and `switch_appointment_property` always keeps its card (a grouped visit relocates every service line sharing it). Everyone else: card.
+- **Mode:** owner with the gate on: `set_primary_property` and an edit with no label and no address field execute without a card; a labelled add or edit keeps its card (the label is customer-visible copy), and so does any add or edit that carries address text (#6297), and `switch_appointment_property` always keeps its card (a grouped visit relocates every service line sharing it). Everyone else: card.
 - **Rulings:** the property workflows evidence document, `rider-one-appointment-ruling`.
 - **Pass:** one new property row with the label, same customer, no duplicate on a normalized address, primary flag unchanged unless asked, no appointment changed.
 - **Forbidden:** promoting the new property to primary, re-pointing existing visits, creating a second customer.
@@ -240,9 +240,9 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone (differs) | card | card | card | refused | refused |
-| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields (notes only over empty notes) (differs) | card | card | card | refused | refused |
-| W4 | `add_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
-| W4 | `update_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
+| W3 | `update_customer` | bare_write_card | direct | direct when only name, phone, lead source and note fields (notes only over empty notes) (differs) | card | card | card | refused | refused |
+| W4 | `add_customer_property` | two_step_card | direct | direct when no label and no address field (differs) | card | card | card | refused | refused |
+| W4 | `update_customer_property` | two_step_card | direct | direct when no label and no address field (differs) | card | card | card | refused | refused |
 | W4 | `set_primary_property` | two_step_card | direct | direct | card | card | card | refused | refused |
 | W4 | `switch_appointment_property` | two_step_card | direct | card (differs) | card | card | card | refused | refused |
 | W5 | `find_available_slots` | read | direct | direct | direct | direct | direct | refused | refused |

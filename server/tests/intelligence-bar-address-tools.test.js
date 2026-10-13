@@ -236,6 +236,8 @@ describe('changesAddress', () => {
     ['update_lead_contact', { lead_id: 'l1', first_name: 'Pat' }],
     ['add_customer_property', { customer_id: 'c1' }],
     ['query_customers', { search: '100 Example Way' }],
+    // Chooses among saved properties by id: no address text comes in.
+    ['set_primary_property', { customer_id: 'c1', property_id: 'p1' }],
   ])('%s without an address field does not', (tool, input) => {
     expect(changesAddress(tool, input)).toBe(false);
   });
@@ -267,6 +269,21 @@ describe('check_address round 2 cases', () => {
     const out = await run({ address: '100 Example Way, Sarasota, FL', zip: '34236' });
     expect(out.changed).toEqual([]);
     expect(out.note).not.toMatch(/No city was given/);
+  });
+  test('a unit inside a comma-free whole address is kept', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way Apt 4 Sarasota FL 34236' });
+    expect(out.unit).toBe('Apt 4');
+    expect(out.changed).toEqual([]);
+  });
+  test('an unrecognized state written into the address text is refused', async () => {
+    const out = await run({ address: '100 Example Way, Sarasota, Flordia 34236' });
+    expect(out.status).toBe('invalid_input');
+    expect(validateAddress).not.toHaveBeenCalled();
+  });
+  test.each(['100 Example Way, Sarasota, FL 34236', '100 Example Way, Apt 4, Sarasota, Florida', '100 Example Way, Sarasota'])('%s has no state problem', async (address) => {
+    validateAddress.mockResolvedValue(google());
+    expect((await run({ address })).status).toBe('validated_accept');
   });
   test('an unrecognized state is refused, not defaulted to FL', async () => {
     const out = await run({ address: '100 Example Way', state: 'Flordia' });
