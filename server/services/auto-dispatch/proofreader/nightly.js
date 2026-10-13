@@ -226,6 +226,17 @@ async function personHeld(conn, service) {
   return !!row;
 }
 
+// A model call takes up to two minutes: a person can mark the notice done
+// meanwhile. Asked again after an allow; an unreadable store holds the visit.
+async function heldSinceAsked(conn, service) {
+  try {
+    return await personHeld(conn, service);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] move proofreader could not re-read the notice of ${service.id}: ${err.message}`);
+    return true;
+  }
+}
+
 function collectNotice(state, service, best, { answer, move, entry }) {
   if (!move || !PERSON_SETTLES[answer.why]) return;
   const date = toDateStr(service.scheduled_date);
@@ -278,6 +289,10 @@ async function checkMove({ service, best, run }, deps = {}) {
   if (answer.why === 'deadline') {
     state.notAsked += 1;
     return stopped('not_asked', answer);
+  }
+  if (answer.verdict === 'allow' && await heldSinceAsked(conn, service)) {
+    state.personHeld += 1;
+    return stopped('person', { ...answer, verdict: 'unknown', why: 'person_held' });
   }
   if (answer.verdict === 'allow') {
     state.allowed += 1;

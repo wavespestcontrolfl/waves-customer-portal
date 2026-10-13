@@ -171,6 +171,11 @@ describe('checkMove', () => {
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD', audit: { why: 'person_held' }, broke: false });
     expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
     expect(run.proofreader).toMatchObject({ calls: 0, personHeld: 1 });
+    // Done lands while the model reads: the allow does not move the visit.
+    doneNotice = null;
+    const slow = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    slow.proofreadMove.mockImplementation(async () => { doneNotice = { id: 'n9' }; return { verdict: 'allow', why: 'nothing_breaks' }; });
+    expect(await check(run, slow)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD' });
     // An unreadable store is never an allow, and the run reports it.
     doneNotice = new Error('db down');
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, audit: { why: 'check_failed' }, broke: true });
