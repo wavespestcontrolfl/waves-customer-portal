@@ -1179,6 +1179,26 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('create_appointment with a close service name: the card and the stored call carry the exact catalog name the proposal resolved', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 125, source: 'stated', serviceId: 'svc-slab', serviceName: 'Slab Pre-Treat Termite Service', bookedServiceType: 'Slab Pre-Treat Termite Service',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'a pre-slab termite treatment', price: 125 } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a pre-slab termite treatment for $125', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'a pre-slab termite treatment', 125, undefined, undefined);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.service_type).toBe('Slab Pre-Treat Termite Service');
+      expect(stored.params._booking_service_id).toBe('svc-slab');
+      expect(body.pendingActions[0].params.service).toBe('Slab Pre-Treat Termite Service');
+    });
+  });
+
   test('create_appointment for a member\'s one-off: the card names the member discount and the list price it came off (owner 2026-09-27)', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     mockIbBookingProposal.mockResolvedValueOnce({
