@@ -731,6 +731,10 @@ describe('product facts for the pest writer', () => {
       expect(line([alpine(['roaches'])], plain)).not.toMatch(/few days|couple of weeks/);
       expect(line([alpine(['roaches'])], plain)).toMatch(/carry it back to their harborage\.$/);
       expect(line([alpine(['ants'])], plain)).toContain('then declines over the next couple of weeks.');
+      // Legacy target keys are ant tags too (Codex r12).
+      expect(line([alpine(['ghost_ant'])], plain)).toContain('couple of weeks');
+      expect(line([alpine(['ants_general'])], plain)).toContain('couple of weeks');
+      expect(line([alpine(['german_roach'])], plain)).not.toMatch(/couple of weeks/);
       // Untagged Alpine fails closed (Codex r7).
       expect(line([alpine([])], plain)).not.toMatch(/few days|couple of weeks/);
       expect(line([alpine(undefined)], plain)).not.toMatch(/few days|couple of weeks/);

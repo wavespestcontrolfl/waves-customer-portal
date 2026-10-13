@@ -416,10 +416,13 @@ function igrLabelDuration(products) {
 // Alpine WSG not recorded for ants: the label gives no time for roaches, so
 // no timeframe is stated for it (owner 2026-10-12). An untagged application
 // counts too: no tag is no proof it was an ant job.
+// Stored targets also come as keys (`ghost_ant`, `ants_general`): an
+// underscore is a word character, so the ant pattern needs it as a space.
+const antTargetWords = (targets) => (Array.isArray(targets) ? targets.map((t) => String(t ?? '').replace(/[_-]+/g, ' ')) : targets);
 const NO_ROACH_TIMEFRAME_PRODUCTS = new Set(['alpine wsg'].map(normalizeProductName));
 function noLabelRoachTimeframe(product) {
   return NO_ROACH_TIMEFRAME_PRODUCTS.has(normalizeProductName(product?.name))
-    && !hasAntTargetEvidence(product);
+    && !hasAntTargetEvidence({ targets: antTargetWords(product?.targets) });
 }
 
 function hasPerimeterBandEvidence(product = {}) {

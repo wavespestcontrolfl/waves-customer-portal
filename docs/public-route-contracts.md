@@ -201,7 +201,8 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
+and the pest PDF key suffix is `-pex5` (2026-10-05, `-pex4`: the Gentrol growth regulator line gained its label's 4-month duration; 2026-10-12, `-pex5`: see the next paragraph).
+**Owner 2026-10-12: the non-repellent line in `expectations.whatToExpect.lines` can omit its timeframe.** When every non-repellent application on the visit is Alpine WSG with no ant target recorded (roach-tagged or untagged; legacy keys such as `ghost_ant` and `ants_general` count as ant targets), the general non-repellent line ends at "…carry it back to their harborage." and omits "Activity can spike for a few days, then declines over the next couple of weeks." The Alpine label states no roach die-off time. No key is added or removed; only that string's content changes. Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the
