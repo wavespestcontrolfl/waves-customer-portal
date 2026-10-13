@@ -131,9 +131,22 @@ describe('create_customer_link', () => {
     expect(preview.auto_secure).toMatch(/enrolls that card/);
     expect(preview.notifies_customer).toBe('may');
     routeExports.customerLinkInsert.mockResolvedValue({ status: 200, body: { kind: 'card_request', url: null, line: '', autoSecured: true, firstName: 'Customer' } });
-    const result = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request', confirmed: true, _verified_link_version: { ...LINK_PIN, kind: 'card_request' } }, { isAdmin: true });
+    // The address the enrollment confirmation would go to is shown masked and pinned (card_request only).
+    expect(preview.enrollment_email).toBe('f•••@example.com');
+    const CARD_PIN = { ...LINK_PIN, kind: 'card_request', email: 'fixture@example.com' };
+    expect(preview._version).toEqual(CARD_PIN);
+    const result = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request', confirmed: true, _verified_link_version: CARD_PIN }, { isAdmin: true });
     expect(result).toMatchObject({ success: true, auto_secured: true, url: null, sent: false });
     expect(result.blocked).toBeUndefined();
+    // The email changed after the card: nothing runs, a fresh card is asked for.
+    routeExports.customerLinkInsert.mockClear();
+    wireCustomer({ ...CUSTOMER, email: 'changed@example.com' });
+    const moved = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request', confirmed: true, _verified_link_version: CARD_PIN }, { isAdmin: true });
+    expect(moved).toMatchObject({ preview_changed: true });
+    expect(routeExports.customerLinkInsert).not.toHaveBeenCalled();
+    // No address on file: the card says so.
+    wireCustomer({ ...CUSTOMER, email: null });
+    expect((await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request' }, { isAdmin: true })).enrollment_email).toBe('none on file');
   });
 
   test('confirmed: runs the composer handler with the row\'s own phone and reports its body; nothing is sent', async () => {

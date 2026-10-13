@@ -3342,6 +3342,12 @@ describe('nestedOwnedLinkRuns', () => {
     ['in a path segment', `https://evil.example/go/portal.wavespestcontrol.com/receipt/${T}`],
     ['backslashed', `https://evil.example/?next=portal.wavespestcontrol.com\\receipt\\${T}`],
     ['mixed case host', `https://evil.example/?next=HTTPS://Portal.WavesPestControl.com/receipt/${T}`],
+    // IDNA: a browser reads these stops as a dot and full-width letters as ASCII.
+    ['with ideographic full stops', `https://evil.example/?next=https://portal\u3002wavespestcontrol\u3002com/receipt/${T}`],
+    ['with full-width full stops', `https://evil.example/?next=https://portal\uFF0Ewavespestcontrol\uFF0Ecom/receipt/${T}`],
+    ['with half-width ideographic stops', `https://evil.example/?next=portal\uFF61wavespestcontrol\uFF61com/receipt/${T}`],
+    ['with a percent-encoded ideographic stop', `https://evil.example/?next=portal%E3%80%82wavespestcontrol%E3%80%82com/receipt/${T}`],
+    ['with full-width letters', `https://evil.example/?next=\uFF50ortal.wavespestcontrol.com/receipt/${T}`],
   ])('finds the owned link nested %s', (_label, text) => {
     expect(nestedOwnedLinkRuns(text).map((run) => run.replace(/\\/g, '/').toLowerCase())).toContain(OWNED.toLowerCase());
   });
@@ -3364,6 +3370,12 @@ describe('nestedOwnedLinkRuns', () => {
 // A body may carry an owned-host link only as itself: it must parse, as a
 // browser would, to an owned host with no userinfo and no owned link nested in
 // its path, query or fragment.
+test('wrappedOwnedLinkIn: an IDNA-variant portal host inside a foreign URL is wrapped; as the link itself it is the portal', () => {
+  const { wrappedOwnedLinkIn } = require('../services/composer-customer-links');
+  expect(wrappedOwnedLinkIn('See https://evil.example/?next=https://portal\u3002wavespestcontrol\u3002com/pay/tok')).toBe(true);
+  expect(wrappedOwnedLinkIn('Pay: https://portal\u3002wavespestcontrol\u3002com/pay/tok')).toBe(false);
+});
+
 describe('wrappedOwnedLinkIn', () => {
   const T = 'AbCdEfGhIjKlMnOpQrSt';
 

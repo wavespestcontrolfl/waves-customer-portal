@@ -948,14 +948,20 @@ function ownedPortalLinkSpans(body) {
 // be the tail of a longer name ("evilportal…", "x.portal…") nor the head of a
 // look-alike ("portal….evil.example"). Over-reports on purpose (fail closed).
 const NESTED_DECODE_PASSES = 3;
+// A browser's URL parser (IDNA) reads full-width letters as ASCII and the
+// ideographic / full-width / half-width full stops as a dot, so
+// "portal。wavespestcontrol。com" opens the portal. The scan reads the text
+// the same way (in every decode pass: the stop can arrive percent-encoded).
+const IDNA_DOTS_RE = /[\u3002\uFF0E\uFF61]/g;
+const asciiHostText = (text) => text.normalize('NFKC').replace(IDNA_DOTS_RE, '.');
 function nestedOwnedLinkRuns(text) {
   const hostAlt = ownedPortalHosts().map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const hostRe = new RegExp(`(?<![A-Za-z0-9.-])(?:${hostAlt})(?![A-Za-z0-9-]|\\.[A-Za-z0-9-])\\.?(?::\\d+)?(?:[/?#][^\\s"'<>]*)?`, 'gi');
   const found = new Set();
-  let view = String(text || '');
+  let view = asciiHostText(String(text || ''));
   for (let pass = 0; pass <= NESTED_DECODE_PASSES; pass += 1) {
     for (const match of view.matchAll(hostRe)) found.add(match[0]);
-    const next = decodeLinkText(view);
+    const next = asciiHostText(decodeLinkText(view));
     if (next === view) break;
     view = next;
   }

@@ -92,6 +92,8 @@ Use for: "get Henderson a pay link", "send Smith the link to their estimate", "b
 
 const last10 = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 const fullUsNumber = (value) => { const d = String(value || '').replace(/\D/g, ''); return d.length === 10 || (d.length === 11 && d.startsWith('1')); };
+// "f•••@example.com": enough for the operator to recognise the address.
+const maskEmail = (address) => address.replace(/^(.)[^@]*/, '$1•••');
 const fullName = (row) => [row?.first_name, row?.last_name].filter(Boolean).join(' ') || null;
 
 async function liveCustomer(customerId) {
@@ -119,6 +121,10 @@ async function deriveLinkPlan(input) {
   // number the confirmed handler would refuse.
   if (!fullUsNumber(customer.phone)) return { plan: { error: 'This customer has no full 10-digit US phone on file — customer links are built for their own number.', code: 'no_phone' } };
   const digits = last10(customer.phone);
+  // An auto-secure enrolls a saved card and its confirmation email goes to the
+  // customer's address on file: that address is shown (masked) and pinned, so
+  // an address changed after the card is never mailed without a fresh card.
+  const email = String(customer.email || '').trim().toLowerCase();
   const plan = {
     preview: true,
     kind,
@@ -133,8 +139,9 @@ async function deriveLinkPlan(input) {
       auto_secure: 'If a consented saved card already covers the visit, confirming enrolls that card for it instead, builds no link, and the Auto Pay enrollment confirmation email may go out — the result says auto_secured.',
       // The authorization contract reads this: a conditional customer email.
       notifies_customer: 'may',
+      enrollment_email: email ? maskEmail(email) : 'none on file',
     } : {}),
-    _version: { customer_id: customer.id, kind, phone_last10: digits },
+    _version: { customer_id: customer.id, kind, phone_last10: digits, ...(spec.autoSecure ? { email } : {}) },
     note: 'PREVIEW ONLY — no link exists yet. Confirm builds exactly this link.',
   };
   return { plan, customer };
