@@ -7,27 +7,28 @@
  * calendar day, and nothing else. It does not read `visit_id`, `service_visits`
  * or `visit_effects`, so it keeps working when visit grouping is deleted.
  *
- * Reminders: the first reminder that is really delivered for a tier closes the
- * same tier on every other live reminder row of that customer-property-day
- * (the same durable `reminder_*_sent` flags every other skip writes) and leaves
- * an audit_log row per closed sibling. The sender's text carries the merged
- * service label and the day's earliest arrival (appointment-reminders.js reads
- * `loadDayRows`). A visit added after the text went keeps its own armed row and
- * sends its own reminder: the rule only closes rows that existed at delivery.
+ * "Already told" is only ever decided from proof of a real, specific delivery:
  *
- * Tracker texts (en route, arrived): a sibling with the same technician whose
- * guard column is already stamped for the day means the customer was told. The
- * second visit's guard is stamped (as the visit-fan-out "covered" stamp does)
- * and an audit_log row is written.
+ *  - Reminders: the sender's own delivery (SMS reached, or the fallback email
+ *    was accepted). After it, the SNAPSHOT that was rendered into the text (the
+ *    members it named, each with the reminder time it quoted) is closed, member
+ *    by member, only while that member is still on the same reminder time. A
+ *    sender that moved while the send was in flight, or a service added during
+ *    it, is not in the snapshot and keeps its own reminder.
+ *  - Tracker texts (en route, arrived): the per-row guard columns are stamped
+ *    BEFORE a send (and even when the text is disabled), so they prove nothing.
+ *    `sendTrackTextOnce` runs the check and the send inside one transaction
+ *    holding an advisory lock on customer + address + day + kind, so two taps
+ *    cannot both stand down, and records an audit_log "delivered" row only after
+ *    the sender returned success. Coverage needs that row from a sibling of the
+ *    same technician, still live on the same day.
  *
  * Every read or write error fails OPEN toward the customer being informed: the
- * text goes out as it does with the gate off. Nothing here ever suppresses the
- * only text of the day: reminders close siblings only AFTER a delivery, and a
- * tracker text is covered only by a sibling guard stamped for the same day.
+ * text goes out as it does with the gate off.
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { oneTextPerCustomerDayLive } = require('../config/feature-gates');
 
@@ -41,6 +42,8 @@ const TRACK_TEXTS = {
   en_route: { stamp: 'track_sms_sent_at', states: ['en_route', 'on_property', 'complete'] },
   arrived: { stamp: 'arrival_sms_sent_at', states: ['on_property', 'complete'] },
 };
+const DELIVERED_ACTION = 'track.one_text_per_day.delivered';
+const COVERED_BY_DAY = Object.freeze({ success: false, suppressed: true, reason: 'covered_by_day' });
 
 // ET calendar day of a row: an explicit `day` (YYYY-MM-DD) wins, else the ET day
 // of its appointment instant. Never reads a pg DATE as a Date (UTC midnight).
@@ -97,6 +100,41 @@ async function loadDayRows(conn, serviceId) {
   return rows.filter((m) => sameTextDay(ref, m));
 }
 
+// Arrival instant a member's reminder quotes: its reminder row's time, else its
+// date + window start. The copy a reminder renders and the slot validator
+// (visit-groups appointmentSendHeld) both read THIS, so the validator accepts
+// exactly the earliest arrival the text states.
+function memberArrivalMs(m) {
+  if (!m || m.windows_preclosed === true) return null;
+  let at = null;
+  if (m.appointment_time) at = new Date(m.appointment_time);
+  else if (m.day && m.window_start) at = parseETDateTime(`${m.day}T${String(m.window_start).slice(0, 8)}`);
+  return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
+}
+
+function earliestArrivalMs(rows) {
+  const times = (Array.isArray(rows) ? rows : []).map(memberArrivalMs).filter((ms) => ms !== null);
+  return times.length ? Math.min(...times) : null;
+}
+
+/**
+ * Extra arrival instants the send-time slot validator accepts for a reminder
+ * about `serviceId`: the earliest live arrival of its customer-day when the
+ * text quotes it. [] with the gate off, one service, or any error (then only
+ * the validator's own candidates apply, so a stale slot is still held).
+ */
+async function dayArrivalCandidates(serviceId) {
+  try {
+    if (!oneTextPerCustomerDayLive()) return [];
+    const rows = await loadDayRows(db, serviceId);
+    const earliest = rows.length > 1 ? earliestArrivalMs(rows) : null;
+    return earliest === null ? [] : [earliest];
+  } catch {
+    return [];
+  }
+}
+
+// The row is still on the reminder time the text quoted for it.
 async function closeSiblingTiers(m, columns, tier, sender) {
   const patch = {};
   const query = db('appointment_reminders')
@@ -131,18 +169,21 @@ async function closeSiblingTiers(m, columns, tier, sender) {
 
 /**
  * After a reminder tier was really delivered for `row` (an appointment_reminders
- * row; `delivered` false does nothing), close that tier on the day's other live reminder rows so they send
- * nothing more. No-op with the gate off. Never throws: a failure leaves the
- * siblings armed, and they text on their own (never silent).
+ * row; `delivered` false does nothing), close that tier on the OTHER members of
+ * `snapshot`: the day's rows exactly as they were read when the text was
+ * rendered. A member is closed only while it is still on the reminder time it
+ * was rendered with; a sender that moved, or a service added, after the render
+ * is not in the snapshot or no longer matches, so it keeps its own reminder. No
+ * snapshot (gate off, one service, unreadable) closes nothing. Never throws: a
+ * failure leaves the siblings armed, and they text on their own (never silent).
  */
-async function closeCoveredReminderTiers(row, tier, delivered = true) {
+async function closeCoveredReminderTiers(row, tier, delivered = true, snapshot = null) {
   const columns = REMINDER_TIER_COLUMNS[tier];
-  if (!delivered || !columns || !row || !row.scheduled_service_id) return 0;
+  if (!delivered || !columns || !row || !row.scheduled_service_id || !Array.isArray(snapshot)) return 0;
   try {
     if (!oneTextPerCustomerDayLive()) return 0;
-    const members = await loadDayRows(db, row.scheduled_service_id);
     let closed = 0;
-    for (const m of members) {
+    for (const m of snapshot) {
       if (m.scheduled_service_id === row.scheduled_service_id || !m.reminder_id) continue;
       if (m.windows_preclosed === true) continue;
       closed += await closeSiblingTiers(m, columns, tier, row);
@@ -155,6 +196,8 @@ async function closeCoveredReminderTiers(row, tier, delivered = true) {
   }
 }
 
+// ---- Tracker texts (en route, arrived) -------------------------------------
+
 async function stampTrackGuard(kind, fence) {
   // Arrival already holds its guard (the CAS claim). En route stamps the covered
   // row the way the visit fan-out's "covered" stamp does, fenced to the attempt.
@@ -162,44 +205,92 @@ async function stampTrackGuard(kind, fence) {
   await db('scheduled_services').where(fence).whereNull(TRACK_TEXTS[kind].stamp).update({ [TRACK_TEXTS[kind].stamp]: new Date() });
 }
 
-/**
- * True when the customer was already texted this kind ("en_route" or "arrived")
- * today for another service at the same address with the same technician. Then
- * the caller sends nothing for `svc`; this stamps the guard and writes the audit
- * row. Gate off, no saved property, no such sibling, or any error: false (send).
- */
-async function trackTextCoveredByDay(svc, kind, { fence = null } = {}) {
+// A sibling of the same technician, still live on this day, with a "delivered"
+// row for this kind and day: proof the customer was really told.
+async function deliveredSibling(trx, ref, kind) {
   const spec = TRACK_TEXTS[kind];
-  if (!spec || !svc || !svc.property_id) return false;
+  const rows = await trx('audit_log as al')
+    .join('scheduled_services as sib', 'sib.id', 'al.resource_id')
+    .where('al.action', DELIVERED_ACTION)
+    .whereRaw("al.metadata->>'kind' = ?", [kind])
+    .whereRaw("al.metadata->>'day' = ?", [ref.day])
+    .where({ 'sib.customer_id': ref.customer_id, 'sib.property_id': ref.property_id })
+    .whereNot('sib.id', ref.id)
+    .whereNotIn('sib.status', ['cancelled', 'skipped', 'rescheduled'])
+    .whereIn('sib.track_state', spec.states)
+    .whereRaw('sib.scheduled_date between ?::date - 1 and ?::date + 1', [ref.day, ref.day])
+    .select('sib.id', 'sib.customer_id', 'sib.property_id', 'sib.technician_id',
+      trx.raw("to_char(sib.scheduled_date, 'YYYY-MM-DD') as day"));
+  return rows.find((r) => sameTextDay(ref, r, { sameTechnician: true })) || null;
+}
+
+async function recordTrackOutcome(trx, ref, kind, covering) {
+  await recordAuditEvent({
+    actor_type: 'system',
+    action: covering ? `track.one_text_per_day.${kind}` : DELIVERED_ACTION,
+    resource_type: 'scheduled_service',
+    resource_id: ref.id,
+    metadata: {
+      kind, customer_id: ref.customer_id, property_id: ref.property_id, day: ref.day,
+      technician_id: ref.technician_id || null,
+      ...(covering ? { covered_by_scheduled_service_id: covering.id } : {}),
+    },
+    trx,
+  });
+}
+
+async function lockTrackDay(trx, ref, kind) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+    [`one-text-day:${kind}:${ref.customer_id}:${ref.property_id}:${ref.day}`]);
+}
+
+/**
+ * Run a tracker text's sender `sendFn` (returns the sender's result) once per
+ * customer, address, technician and day. With the gate on and a saved address,
+ * the check and the send happen under one advisory lock, so a second tap waits
+ * for the first send to finish and then sees its "delivered" row. A sender that
+ * did not return success leaves no row, so the next tap sends. Returns the
+ * sender's result, or COVERED_BY_DAY (a suppressed, handled result) after
+ * stamping the guard and writing an audit row. Gate off, no saved address, or a
+ * failure before the send: the sender runs unlocked, as without the rule.
+ */
+async function sendTrackTextOnce(svc, kind, sendFn, { fence = null } = {}) {
+  let applies = false;
   try {
-    if (!oneTextPerCustomerDayLive()) return false;
-    const ref = await loadRef(db, svc.id);
-    if (!ref) return false;
-    const siblings = await db('scheduled_services as sib')
-      .where({ 'sib.customer_id': ref.customer_id, 'sib.property_id': ref.property_id })
-      .whereNot('sib.id', ref.id)
-      .whereNotIn('sib.status', ['cancelled', 'skipped', 'rescheduled'])
-      .whereIn('sib.track_state', spec.states)
-      .whereNotNull(`sib.${spec.stamp}`)
-      .whereRaw(`(sib.${spec.stamp} AT TIME ZONE 'America/New_York')::date >= sib.scheduled_date`)
-      .whereRaw('sib.scheduled_date between ?::date - 1 and ?::date + 1', [ref.day, ref.day])
-      .select('sib.id', 'sib.customer_id', 'sib.property_id', 'sib.technician_id',
-        db.raw("to_char(sib.scheduled_date, 'YYYY-MM-DD') as day"));
-    const covering = siblings.find((s) => sameTextDay(ref, s, { sameTechnician: true }));
-    if (!covering) return false;
-    await stampTrackGuard(kind, fence);
-    await recordAuditEvent({
-      actor_type: 'system',
-      action: `track.one_text_per_day.${kind}`,
-      resource_type: 'scheduled_service',
-      resource_id: ref.id,
-      metadata: { covered_by_scheduled_service_id: covering.id, customer_id: ref.customer_id, day: ref.day },
+    applies = Boolean(TRACK_TEXTS[kind] && svc && svc.property_id && oneTextPerCustomerDayLive());
+  } catch {
+    applies = false;
+  }
+  if (!applies) return sendFn();
+  const state = { sending: false, done: false, result: null };
+  const send = async () => {
+    state.sending = true;
+    state.result = await sendFn();
+    state.done = true;
+    return state.result;
+  };
+  try {
+    return await db.transaction(async (trx) => {
+      const ref = await loadRef(trx, svc.id);
+      if (!ref) return send();
+      await lockTrackDay(trx, ref, kind);
+      const covering = await deliveredSibling(trx, ref, kind);
+      if (covering) {
+        await stampTrackGuard(kind, fence);
+        await recordTrackOutcome(trx, ref, kind, covering);
+        logger.info(`[one-text-per-day] ${kind} text for ${ref.id} covered by ${covering.id} (delivered text, same customer, address, technician, day)`);
+        return COVERED_BY_DAY;
+      }
+      const result = await send();
+      if (result && result.success === true) await recordTrackOutcome(trx, ref, kind, null);
+      return result;
     });
-    logger.info(`[one-text-per-day] ${kind} text for ${ref.id} covered by ${covering.id} (same customer, address, technician, day)`);
-    return true;
   } catch (err) {
-    logger.error(`[one-text-per-day] ${kind} coverage check failed for ${svc.id} (sending as usual): ${err.message}`);
-    return false;
+    // The sender itself threw: its caller handles that, as without the rule.
+    if (state.sending && !state.done) throw err;
+    logger.error(`[one-text-per-day] ${kind} once-per-day check failed for ${svc.id} (sent as usual): ${err.message}`);
+    // Bookkeeping failed after a real send: never send a second one.
+    return state.sending ? state.result : sendFn();
   }
 }
 
@@ -207,6 +298,8 @@ module.exports = {
   sameTextDay,
   dayOf,
   loadDayRows,
+  earliestArrivalMs,
+  dayArrivalCandidates,
   closeCoveredReminderTiers,
-  trackTextCoveredByDay,
+  sendTrackTextOnce,
 };

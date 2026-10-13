@@ -33,7 +33,7 @@ const {
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
-const { trackTextCoveredByDay } = require('./one-text-per-day');
+const { sendTrackTextOnce } = require('./one-text-per-day');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -468,7 +468,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
       smsOutcome = visitClaim === 'error' ? 'claim_error' : 'claim_in_flight';
     }
   }
-  const mayText = [null, 'owner', 'detached'].includes(visitClaim);
+  const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
   if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route', claimToken))) {
     // Our own lease expired before we could send (a stalled process): a
     // reclaim may own the notice now — never send twice (codex r9).
@@ -479,13 +479,6 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
   // as covered afterwards (visit-groups.fanOutLiveTransition).
   if (!opts.suppressCustomerSms && mayText && guardOpen && smsOutcome !== 'lease_expired') {
     try {
-      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: the customer was already told today
-      // that this technician is on the way to this address. Stamps this row's
-      // guard and audits it; false (send) with the gate off or on any error.
-      if (await trackTextCoveredByDay(svc, 'en_route', { fence: attemptFence })) {
-        smsOutcome = 'covered';
-        return { smsSent, smsOutcome, visitClaim, claimToken };
-      }
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')
         : null;
@@ -507,7 +500,9 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         smsOutcome = 'lease_expired';
         throw Object.assign(new Error('lease expired before send'), { leaseExpired: true });
       }
-      const result = await TwilioService.sendTechEnRoute(
+      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: sent once per customer, address, technician and day,
+      // decided under a lock from a recorded delivery (one-text-per-day.js). Gate off: just the send.
+      const result = await sendTrackTextOnce(svc, 'en_route', () => TwilioService.sendTechEnRoute(
         svc.customer_id,
         techName,
         etaMinutes,
@@ -517,7 +512,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
           notificationEventKey: enRouteNotificationKey(svc, attemptAt),
           scheduledServiceId: svc.id,
         },
-      );
+      ), { fence: attemptFence });
 
       // undefined = deterministic opt-out (tech_en_route off / SMS disabled,
       // twilio.js sendTechEnRoute) — handled, not a retry (codex r9).
@@ -967,10 +962,6 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   const claimed = await claimQuery.update({ arrival_sms_sent_at: claimStamp });
   if (!claimed) return 'not_claimed';
 
-  // GATE_ONE_TEXT_PER_CUSTOMER_DAY: an arrived text already went today for this
-  // address and technician. The claim above stands as "handled".
-  if (await trackTextCoveredByDay(svc, 'arrived')) return 'covered';
-
   // Gate off: the claim stands as "handled" so no later signal re-sends.
   if (!isEnabled('techArrivedSms')) return 'gate_off';
 
@@ -981,7 +972,9 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       ? await db('technicians').where({ id: techId }).first('name')
       : null;
     const techName = tech?.name || 'Your Waves technician';
-    const result = await TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null });
+    // GATE_ONE_TEXT_PER_CUSTOMER_DAY: once per customer, address, technician and day, from a recorded
+    // delivery, not from the claim above (which is stamped before any send). Gate off: just the send.
+    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }));
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);

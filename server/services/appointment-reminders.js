@@ -39,7 +39,7 @@ const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { buildAppointmentLink } = require('./appointment-link');
-const { closeCoveredReminderTiers, loadDayRows } = require('./one-text-per-day');
+const { closeCoveredReminderTiers, loadDayRows, earliestArrivalMs } = require('./one-text-per-day');
 // Canonical service_type normalization — the estimate-backed label recovery
 // compares stored fall-through values against this exact transform; reusing
 // the writer's implementation keeps the two from drifting.
@@ -1435,16 +1435,32 @@ async function dayReminderRows(row) {
   }
 }
 
-// Copy inputs for the ONE reminder of that day: the earliest arrival and every
-// service's card-hold disclosure. Null when dayReminderRows is null.
+// The rows one reminder send read for its customer-day, kept per sending row so
+// the text's copy, its service label and the closure after delivery all use the
+// SAME snapshot (null = the rule does not apply to this send). A later read
+// could name a service the text never mentioned, or a moved sender's new day.
+const daySnapshots = new WeakMap();
+
+function daySnapshotOf(row) {
+  return (row && daySnapshots.get(row)) || null;
+}
+
+// Copy inputs for the ONE reminder of that day: the earliest arrival (the same
+// value the send-time slot validator accepts, via one-text-per-day) and every
+// service's card-hold disclosure. Null when the rule does not apply. Records
+// the snapshot it was built from.
 async function dayReminderCopy(row) {
   const rows = await dayReminderRows(row);
-  if (!rows) return null;
+  let copy = null;
   try {
-    return await reminderCopyFromMembers(rows);
+    const earliest = rows ? earliestArrivalMs(rows) : null;
+    const base = earliest === null ? null : await reminderCopyFromMembers(rows);
+    copy = base ? { ...base, apptTime: new Date(earliest) } : null;
   } catch {
-    return null;
+    copy = null;
   }
+  if (row && typeof row === 'object') daySnapshots.set(row, copy ? rows : null);
+  return copy;
 }
 
 // What a reminder shows and says: the visit-scoped copy when this row owns a
@@ -1473,7 +1489,7 @@ async function liveReminderServiceLabel(row, { visitId = null } = {}) {
     // A strict merge: a partially-failed merge (add-on or estimate-name read
     // down) must not replace a complete persisted label — throw to the stored
     // fallback below instead (codex #3430 r1 P2).
-    const dayRows = await dayReminderRows(row);
+    const dayRows = daySnapshots.has(row) ? daySnapshots.get(row) : await dayReminderRows(row);
     const live = dayRows
       ? await mergeReminderLabels(db, dayRows.map((m) => ({ scheduled_service_id: m.scheduled_service_id, label: m.service_type })), null, true)
       : await buildMergedServiceLabel(db, {
@@ -3613,7 +3629,7 @@ const AppointmentReminders = {
 
             // GATE_ONE_TEXT_PER_CUSTOMER_DAY: the day's other rows are
             // covered by this delivery (no-op with the gate off).
-            await closeCoveredReminderTiers(r, '72h', delivered72);
+            await closeCoveredReminderTiers(r, '72h', delivered72, daySnapshotOf(r));
 
             // Guard on appointment_time: a concurrent move re-arms this row
             // (DB sync trigger / handleReschedule) with the NEW time — an
@@ -3771,7 +3787,7 @@ const AppointmentReminders = {
                     await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: nightClaim.dedupeKey.slice(nightClaim.dedupeKey.lastIndexOf(':') + 1) });
                   }
                 }
-                await closeCoveredReminderTiers(r, '24h', emailDelivered(emailRes));
+                await closeCoveredReminderTiers(r, '24h', emailDelivered(emailRes), daySnapshotOf(r));
                 logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
               }
             }
@@ -3916,7 +3932,7 @@ const AppointmentReminders = {
               }
             }
 
-            await closeCoveredReminderTiers(r, '24h', delivered24);
+            await closeCoveredReminderTiers(r, '24h', delivered24, daySnapshotOf(r));
 
             // Same appointment_time guard as the 72h flag above — a
             // concurrent move re-armed this row for its new time; don't

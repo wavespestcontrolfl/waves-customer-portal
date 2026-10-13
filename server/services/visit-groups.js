@@ -2074,7 +2074,12 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
         return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
       };
       const arrivalStart = await require('./reservation-arrival').arrivalStartForService(db, live);
-      const candidates = [toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null)];
+      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a customer-day reminder quotes the day's earliest live
+      // arrival, which can be an earlier sibling's. One-text-per-day owns that value ([] when off).
+      const candidates = [
+        toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null),
+        ...(await require('./one-text-per-day').dayArrivalCandidates(scheduledServiceId)),
+      ];
       if (live.visit_id) {
         const stopStart = await liveStopStartHHMM(db, live.visit_id);
         if (stopStart) candidates.push(toMs(stopStart));

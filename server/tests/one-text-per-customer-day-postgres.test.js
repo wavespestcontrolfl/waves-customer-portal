@@ -20,10 +20,17 @@ jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
   get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/messaging/send-customer-message', () => ({
-  ...jest.requireActual('../services/messaging/send-customer-message'),
-  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
-}));
+// Stub mode (default): the send boundary is a stub. Real-boundary mode: the REAL sendCustomerMessage runs
+// (validators, the shared slot guard appointmentSendHeld, audit rows) and only the provider call
+// (TwilioService.sendSMS) is a stub.
+const mockBoundary = { real: false };
+jest.mock('../services/messaging/send-customer-message', () => {
+  const actual = jest.requireActual('../services/messaging/send-customer-message');
+  return {
+    ...actual,
+    sendCustomerMessage: jest.fn(async (input) => (mockBoundary.real ? actual.sendCustomerMessage(input) : { sent: true })),
+  };
+});
 jest.mock('../services/twilio', () => ({
   sendSMS: jest.fn(),
   sendTechEnRoute: jest.fn(async () => ({ success: true })),
@@ -112,6 +119,8 @@ postgres('one text per customer, address and day', () => {
     const ids = created.rows;
     if (ids.length) {
       await mockPg('audit_log').whereIn('resource_id', ids).del();
+      await mockPg('messaging_audit_log').whereIn('customer_id', created.customers).del();
+      await mockPg('sms_log').whereIn('customer_id', created.customers).del().catch(() => {});
       await mockPg('short_codes').whereIn('entity_id', ids).del();
       await mockPg('scheduled_services').whereIn('id', ids).update({ visit_id: null });
       await mockPg('service_visits').whereIn('customer_id', created.customers).del();
@@ -189,12 +198,30 @@ postgres('one text per customer, address and day', () => {
   }
 
   const dateOut = (n) => etDateString(addETDays(new Date(), n));
-  const nextDate = () => dateOut(dayCursor++);
+  // Four days apart: the reminder cron scans every row, so one test's rows (a day or two wide) must sit outside
+  // the 24h and 72h bands of the next test's fake clock.
+  const nextDate = () => { const d = dateOut(dayCursor); dayCursor += 4; return d; };
   // 10:30 ET the day before the visit day: the 24h tier, inside the send window.
   const dayBefore = (date) => parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${date}T12:00:00`), -1))}T10:30:00`);
   const textsTo = (phone) => sendCustomerMessage.mock.calls.map((c) => c[0]).filter((a) => a.to === phone);
   const reminderOf = (id) => mockPg('appointment_reminders').where({ scheduled_service_id: id }).first();
   const auditFor = (id, action) => mockPg('audit_log').where({ resource_id: id, action }).select('metadata');
+
+  // A service added to an existing fixture later (same customer, address and technician), with an armed reminder row.
+  async function addService(f, { start, end, name, armed72 = false }) {
+    const [row] = await mockPg('scheduled_services').insert({
+      customer_id: f.customerId, property_id: f.rows[0].property_id, technician_id: technicians[0],
+      service_type: name, scheduled_date: f.date, window_start: start, window_end: end,
+      status: 'confirmed', estimated_duration_minutes: 60,
+    }).returning('*');
+    created.rows.push(row.id);
+    await mockPg('appointment_reminders').insert({
+      scheduled_service_id: row.id, customer_id: f.customerId, appointment_time: parseETDateTime(`${f.date}T${start}:00`),
+      service_type: name, source: 'system_seed', confirmation_sent: true,
+      reminder_72h_sent: !armed72, reminder_24h_sent: false, created_at: new Date(Date.now() - 10 * 86400000),
+    });
+    return row;
+  }
 
   // 10:30 ET three days before the visit day: the 72h tier.
   const threeDaysBefore = (date) => parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${date}T12:00:00`), -3))}T10:30:00`);
@@ -384,6 +411,147 @@ postgres('one text per customer, address and day', () => {
     });
   });
 
+  describe('reminder through the real send boundary (only the provider call is stubbed)', () => {
+    const { appointmentSendHeld } = require('../services/visit-groups');
+    const providerCalls = (phone) => TwilioService.sendSMS.mock.calls.filter((c) => c[0] === phone);
+
+    beforeEach(() => {
+      mockBoundary.real = true;
+      TwilioService.sendSMS.mockImplementation(async () => ({ success: true, sid: `SM${randomUUID().replaceAll('-', '')}`, deliveryOutcome: 'accepted' }));
+    });
+    afterEach(() => { mockBoundary.real = false; });
+
+    const pair = (date, extra = {}) => fixture({ date, ...extra, specs: [
+      { start: '10:00', end: '11:00', name: 'Lawn Care' }, // the LATER service is inserted first, so the cron meets it first
+      { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+    ] });
+
+    test('24h, later row scanned first: the later row sends the earliest arrival through the real guard and covers the other', async () => {
+      gateOn();
+      const f = await pair(nextDate());
+      await runReminders(f.date);
+      const calls = providerCalls(f.phone);
+      expect(calls).toHaveLength(1);
+      expect(calls[0][2].appointmentId).toBe(f.rows[0].id); // the later service was scanned and sent first
+      expect(calls[0][1]).toMatch(/between 9:00 AM and 11:00 AM/);
+      expect(calls[0][1]).toMatch(/Lawn Care/);
+      expect(calls[0][1]).toMatch(/Pest Control/);
+      expect((await reminderOf(f.rows[0].id)).reminder_24h_sent).toBe(true);
+      expect((await reminderOf(f.rows[1].id)).reminder_24h_sent).toBe(true);
+      expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.covered')).toHaveLength(1);
+    });
+
+    test('24h, a service added after the first reminder sends its own reminder through the real guard', async () => {
+      gateOn();
+      const f = await fixture({ date: nextDate(), specs: [{ start: '09:00', end: '10:00', name: 'Quarterly Pest Control' }] });
+      await runReminders(f.date);
+      expect(providerCalls(f.phone)).toHaveLength(1);
+      await addService(f, { start: '10:30', end: '11:30', name: 'Mosquito Control' });
+      await runReminders(f.date);
+      const calls = providerCalls(f.phone);
+      expect(calls).toHaveLength(2);
+      expect(calls[1][1]).toMatch(/Mosquito/);
+      expect(calls[1][1]).toMatch(/Pest Control/);
+    });
+
+    test('72h, later row scanned first: one reminder through the real guard', async () => {
+      gateOn();
+      const f = await pair(nextDate(), { armed72: true });
+      await runReminders(f.date, threeDaysBefore(f.date));
+      const calls = providerCalls(f.phone);
+      expect(calls).toHaveLength(1);
+      expect(calls[0][2].appointmentId).toBe(f.rows[0].id); // the later service was scanned and sent first
+      expect(calls[0][1]).toMatch(/9:00 AM/);
+      expect((await reminderOf(f.rows[0].id)).reminder_72h_sent).toBe(true);
+      expect((await reminderOf(f.rows[1].id)).reminder_72h_sent).toBe(true);
+    });
+
+    test('72h, a service added after the first reminder sends its own reminder through the real guard', async () => {
+      gateOn();
+      const f = await fixture({ date: nextDate(), armed72: true, specs: [{ start: '09:00', end: '10:00', name: 'Quarterly Pest Control' }] });
+      await runReminders(f.date, threeDaysBefore(f.date));
+      expect(providerCalls(f.phone)).toHaveLength(1);
+      await addService(f, { start: '10:00', end: '11:00', name: 'Mosquito Control', armed72: true });
+      await runReminders(f.date, threeDaysBefore(f.date));
+      const calls = providerCalls(f.phone);
+      expect(calls).toHaveLength(2);
+      expect(calls[1][1]).toMatch(/Mosquito/);
+    });
+
+    test('the validator accepts exactly the earliest live arrival and nothing stale; gate off keeps today\'s rule', async () => {
+      const f = await pair(nextDate());
+      const later = f.rows[0];
+      const ms = (hhmm) => parseETDateTime(`${f.date}T${hhmm}:00`).getTime();
+      // gate off: only the row's own arrival
+      await expect(appointmentSendHeld(later.id, ms('09:00'))).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
+      gateOn();
+      await expect(appointmentSendHeld(later.id, ms('09:00'))).resolves.toBe(false);
+      await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
+      await expect(appointmentSendHeld(later.id, ms('08:00'))).resolves.toBe(true);
+      // the earlier sibling moves to 08:00: the quoted 09:00 is stale and held
+      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ window_start: '08:00', window_end: '09:00' });
+      await expect(appointmentSendHeld(later.id, ms('09:00'))).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('08:00'))).resolves.toBe(false);
+      // the earlier sibling is cancelled: only the row's own arrival is left
+      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
+      await expect(appointmentSendHeld(later.id, ms('08:00'))).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
+    });
+  });
+
+  describe('reminder closure covers only what the text named', () => {
+    test('sender moved while the send was in flight: the new day\'s reminders stay armed', async () => {
+      gateOn();
+      const date = nextDate();
+      const f = await fixture({ date, specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+      ] });
+      const nextDay = etDateString(addETDays(parseETDateTime(`${date}T12:00:00`), 1));
+      // a service of the same customer and address on the day the sender is about to move to
+      const [later] = await mockPg('scheduled_services').insert({
+        customer_id: f.customerId, property_id: f.rows[0].property_id, technician_id: technicians[0],
+        service_type: 'Mosquito Control', scheduled_date: nextDay, window_start: '11:00', window_end: '12:00',
+        status: 'confirmed', estimated_duration_minutes: 60,
+      }).returning('*');
+      created.rows.push(later.id);
+      await mockPg('appointment_reminders').insert({
+        scheduled_service_id: later.id, customer_id: f.customerId, appointment_time: parseETDateTime(`${nextDay}T11:00:00`),
+        service_type: 'Mosquito Control', source: 'system_seed', confirmation_sent: true,
+        reminder_72h_sent: true, reminder_24h_sent: false, created_at: new Date(Date.now() - 10 * 86400000),
+      });
+      sendCustomerMessage.mockImplementationOnce(async () => {
+        await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ scheduled_date: nextDay, window_start: '09:00', window_end: '10:00' });
+        return { sent: true };
+      });
+      await runReminders(date);
+      expect(textsTo(f.phone)).toHaveLength(1);
+      // the customer was told the old day: its other service is covered, the new day's reminders are not
+      expect((await reminderOf(f.rows[1].id)).reminder_24h_sent).toBe(true);
+      const untouched = await reminderOf(later.id);
+      expect(untouched.reminder_24h_sent).toBe(false);
+      expect((await reminderOf(f.rows[0].id)).reminder_24h_sent).toBe(false); // the moved sender is re-armed for its new day
+    });
+
+    test('a service added while the send was in flight stays armed and sends its own reminder', async () => {
+      gateOn();
+      const f = await fixture({ date: nextDate(), specs: [{ start: '09:00', end: '10:00', name: 'Quarterly Pest Control' }] });
+      let added;
+      sendCustomerMessage.mockImplementationOnce(async () => {
+        added = await addService(f, { start: '10:30', end: '11:30', name: 'Mosquito Control' });
+        return { sent: true };
+      });
+      await runReminders(f.date);
+      expect(textsTo(f.phone)).toHaveLength(1);
+      expect((await reminderOf(added.id)).reminder_24h_sent).toBe(false);
+      await runReminders(f.date);
+      const sent = textsTo(f.phone);
+      expect(sent).toHaveLength(2);
+      expect(sent[1].body).toMatch(/Mosquito/);
+    });
+  });
+
   describe('on the way and arrived texts', () => {
     const enRoute = (id) => TrackTransitions.markEnRoute(id, { allowFutureDate: true, actorType: 'tech', actorId: technicians[0] });
     const onSite = (id) => TrackTransitions.markOnProperty(id, { actingTechId: technicians[0], allowFutureDate: true });
@@ -483,6 +651,83 @@ postgres('one text per customer, address and day', () => {
       await onSite(f.rows[0].id);
       expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
       expect(texted(TwilioService.sendTechArrived)).toBe(1);
+    });
+
+    // A sender that takes a while, so two taps are both in flight together.
+    const slow = (value, ms = 300) => async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return value;
+    };
+    const twoVisits = () => fixture({ date: etDateString(), specs: [
+      { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+      { start: '10:00', end: '11:00', name: 'Lawn Care' },
+    ] });
+
+    test('gate on, two on-the-way taps in flight together: exactly one text, never zero', async () => {
+      gateOn();
+      const f = await twoVisits();
+      TwilioService.sendTechEnRoute.mockImplementationOnce(slow({ success: true }));
+      await Promise.all([enRoute(f.rows[0].id), enRoute(f.rows[1].id)]);
+      expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      expect(await mockPg('audit_log').whereIn('resource_id', f.rows.map((r) => r.id)).where({ action: 'track.one_text_per_day.delivered' })).toHaveLength(1);
+    });
+
+    test('gate on, two arrivals in flight together: exactly one arrived text, never zero', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      TwilioService.sendTechArrived.mockImplementationOnce(slow({ success: true }));
+      await Promise.all([onSite(f.rows[0].id), onSite(f.rows[1].id)]);
+      expect(texted(TwilioService.sendTechArrived)).toBe(1);
+      const guards = await mockPg('scheduled_services').whereIn('id', f.rows.map((r) => r.id)).select('arrival_sms_sent_at');
+      expect(guards.every((g) => g.arrival_sms_sent_at !== null)).toBe(true);
+    });
+
+    test('gate on, the first arrival send fails while the second waits: the second still sends (never zero)', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      TwilioService.sendTechArrived.mockImplementationOnce(slow({ success: false }, 200));
+      await Promise.all([onSite(f.rows[0].id), onSite(f.rows[1].id)]);
+      expect(texted(TwilioService.sendTechArrived)).toBe(2);
+      expect(await mockPg('audit_log').whereIn('resource_id', f.rows.map((r) => r.id))
+        .where({ action: 'track.one_text_per_day.delivered' }).whereRaw("metadata->>'kind' = 'arrived'")).toHaveLength(1);
+    });
+
+    test('gate on, arrival texts disabled: a stamped sibling whose text never went does not cover the next visit', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      gates.techArrivedSms = false;
+      await onSite(f.rows[0].id);
+      expect(texted(TwilioService.sendTechArrived)).toBe(0);
+      expect((await mockPg('scheduled_services').where({ id: f.rows[0].id }).first('arrival_sms_sent_at')).arrival_sms_sent_at).not.toBeNull();
+      gates.techArrivedSms = true;
+      await onSite(f.rows[1].id);
+      expect(texted(TwilioService.sendTechArrived)).toBe(1);
+    });
+
+    test('gate on: a sibling whose arrived text was suppressed (opt-out) or failed does not cover the next visit', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      TwilioService.sendTechArrived.mockImplementationOnce(async () => ({ success: false, suppressed: true, reason: 'opt_out' }));
+      await onSite(f.rows[0].id);
+      await onSite(f.rows[1].id);
+      expect(texted(TwilioService.sendTechArrived)).toBe(2);
+    });
+
+    test('gate on: a first on-the-way text that was not delivered does not cover the second visit', async () => {
+      gateOn();
+      const f = await twoVisits();
+      TwilioService.sendTechEnRoute.mockImplementationOnce(async () => ({ success: false }));
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
     });
 
     test('gate on: a cancelled sibling that was texted does not cover the live visit', async () => {
