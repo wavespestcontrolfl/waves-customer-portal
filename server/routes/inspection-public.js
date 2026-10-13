@@ -196,7 +196,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox, isInServiceAreaCoarseBox } = require('../services/service-area');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough } = require('../services/service-area');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -701,16 +701,6 @@ async function checkServiceArea(location, address = null) {
   // SOUTH_HILLSBOROUGH_CITIES — Codex #4737 r16 P1): a Hillsborough address
   // in one of those localities (by city, or by its ZIP's city) is in area.
   return { ok: servedSouthHillsborough(county, address), county };
-}
-
-function servedSouthHillsborough(county, address) {
-  if (!/hillsborough/i.test(String(county || ''))) return false;
-  const { SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
-  const { zipToCity } = require('../utils/zip-to-city');
-  const cities = [address?.city, address?.zip ? zipToCity(address.zip) : null]
-    .filter(Boolean)
-    .map((c) => String(c).toLowerCase().trim());
-  return cities.some((c) => SOUTH_HILLSBOROUGH_CITIES.includes(c));
 }
 
 // The ONE place a "final" booking location is ever produced — every caller

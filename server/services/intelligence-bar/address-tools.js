@@ -16,8 +16,7 @@
  */
 
 const { validateAddress, STATUSES } = require('../address-validation');
-const { SOUTH_HILLSBOROUGH_CITIES } = require('../../config/locations');
-const { zipToCity } = require('../../utils/zip-to-city');
+const { servedSouthHillsborough } = require('../service-area');
 const {
   parseRawAddress, normalizeStreetLine, normalizeState, splitStreetLineUnit, splitUnitFirstLine, unitAnywhereOnLine, normalizeUnitLine,
 } = require('../../utils/address-normalizer');
@@ -183,9 +182,8 @@ function noteFor(status, changed, given, result) {
 
 // The provider's county rule knows Manatee, Sarasota and Charlotte only, so it
 // reports the six served south-Hillsborough towns as outside the service area.
-// Same exception as the call pipeline (call-recording-processor.js) and the
-// inspection route: Hillsborough County AND a served town, named by Google's
-// city or by Google's ZIP. The status is re-derived the way the provider
+// The shared predicate (service-area.js servedSouthHillsborough) decides:
+// Hillsborough County AND a served town, by Google's city or ZIP. The status is re-derived the way the provider
 // derives it for an in-area address.
 function servedHillsborough(result, given) {
   // An explicit non-Florida state from the operator is the provider's veto; keep it.
@@ -193,8 +191,7 @@ function servedHillsborough(result, given) {
   if (result.status !== STATUSES.OUT_OF_SERVICE_AREA || !/^hillsborough\b/i.test(cleanText(result.county))) return result;
   const n = result.normalized || {};
   if (normalizeState(n.state) !== DEFAULT_STATE) return result;
-  const towns = [cleanText(n.city).toLowerCase(), cleanText(zipToCity(cleanText(n.postal_code).slice(0, 5)) || '').toLowerCase()];
-  if (!towns.some(town => town && SOUTH_HILLSBOROUGH_CITIES.includes(town))) return result;
+  if (!servedSouthHillsborough(result.county, { city: n.city, zip: n.postal_code })) return result;
   let status = STATUSES.VALIDATED_ACCEPT;
   if (result.hasUnconfirmed) status = STATUSES.CONFIRM_NEEDED;
   else if (result.hasReplaced) status = STATUSES.CORRECTED;

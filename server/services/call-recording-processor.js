@@ -31,8 +31,8 @@ const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
-const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
-const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
+const { resolveLocation } = require('../config/locations');
+const { isInDesotoExclusion, isDesotoLocality, isDesotoZip, isServedSouthHillsboroughTown } = require('./service-area');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1475,8 +1475,7 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   }
   // A served south-Hillsborough town named by city OR by a served ZIP (AV
   // can return a ZIP with no locality), as the inspection route checks it.
-  const servedHillsboroughTown = [...cities, ...zips.map((z) => lower(zipToCity(z)))]
-    .some((c) => c && SOUTH_HILLSBOROUGH_CITIES.includes(c));
+  const servedHillsboroughTown = isServedSouthHillsboroughTown({ cities, zips });
   if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
     if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
     return { reason: 'address_validation_out_of_service_area', county: av.county || null };
