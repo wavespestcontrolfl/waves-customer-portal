@@ -98,12 +98,20 @@ describe('which writes skip the card', () => {
     }
   });
 
-  test('property add/update are direct without a label; a label (customer-visible copy) keeps the card', () => {
-    for (const name of ['add_customer_property', 'update_customer_property']) {
-      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, relationship: 'rental' })).toBe(true);
-      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: '' })).toBe(true);
-      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: 'Beach house' })).toBe(false);
-      expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: '  x ' })).toBe(false);
+  test('a property update is direct without a label; a label (customer-visible copy) keeps the card', () => {
+    const name = 'update_customer_property';
+    expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, relationship: 'rental' })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: '' })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: 'Beach house' })).toBe(false);
+    expect(OwnerDirect.executesWithoutCard(name, { customer_id: A, label: '  x ' })).toBe(false);
+  });
+
+  test('a property add is not on the card-free list and never executes without a card (#6297)', () => {
+    expect(OwnerDirect.OWNER_DIRECT_TOOL_NAMES.has('add_customer_property')).toBe(false);
+    expect(OwnerDirect.OWNER_DIRECT_PROMPT).not.toMatch(/no confirmation card:[^.]*add_customer_property/);
+    for (const input of [{ customer_id: A, relationship: 'rental' }, { customer_id: A, address_line1: '100 Example Way' }]) {
+      expect(OwnerDirect.executesWithoutCard('add_customer_property', input)).toBe(false);
+      expect(OwnerDirect.mayExecuteWithoutCard('add_customer_property', input)).toBe(false);
     }
   });
 

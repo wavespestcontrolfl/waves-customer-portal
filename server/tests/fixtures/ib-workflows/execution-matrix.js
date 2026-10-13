@@ -86,7 +86,6 @@ const KNOWN_DIFFERENCES = [
 const OWNER_DIRECT_CONDITIONS = {
   update_lead_contact: 'lead_id alone',
   update_customer: 'only name, phone, lead source and note fields (notes only over empty notes)',
-  add_customer_property: 'no label and no address field',
   update_customer_property: 'no label',
   reschedule_appointment: 'the pinned visit is ungrouped',
 };
@@ -126,8 +125,9 @@ function ownerGateOnCell(ownerDirect, tool) {
 //     money)
 //   - update_customer_property: direct only with no label, so W4's own
 //     "label it rental" request keeps its card (its schema takes no address)
-//   - add_customer_property: direct only with no label and no address field
-//     (#6297: address text always keeps its card)
+//   - add_customer_property: always a card on the owner login (#6297: every
+//     valid add carries address text, and address text always keeps its card;
+//     the tool is off OWNER_DIRECT_TOOL_NAMES)
 //   - update_customer: direct only for name, phone, lead source and note
 //     fields, notes only over empty notes; email, pipeline stage and (#6297)
 //     every address field keep the card (the scope named name, phone and address)
