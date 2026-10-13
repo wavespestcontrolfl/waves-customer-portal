@@ -190,9 +190,13 @@ const FAMILY_RESPONSIBILITIES = {
 const MAPPED_NET_ALIASES = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
 const RAW_NET_ALIASES = ['manualFinalOneTime', 'oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
 const firstApplicableAlias = (row, aliases) => aliases.find((k) => row[k] !== null && row[k] !== undefined && row[k] !== '');
+// Every finite zero in the first applicable alias is comped, a numeric string
+// ("0.00") included: the amount resolvers accept strings (codex #6113 r38).
 function zeroInFirstAlias(row, aliases) {
   const key = firstApplicableAlias(row, aliases);
-  return key !== undefined && (row[key] === 0 || row[key] === '0');
+  if (key === undefined) return false;
+  const n = Number(row[key]);
+  return Number.isFinite(n) && n === 0;
 }
 const explicitZeroNet = (row = {}) => zeroInFirstAlias(row, MAPPED_NET_ALIASES);
 const explicitZeroNetRaw = (row = {}) => zeroInFirstAlias(row, RAW_NET_ALIASES);
@@ -949,9 +953,11 @@ function carriesInstallationCharge(line) {
   return !programRow(line) && num(line.installation?.price) > 0
     && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0));
 }
+// The first POSITIVE count among the aliases: a blank placeholder (`visits:
+// ''`) never hides a valid fallback (codex #6113 r38).
 const packageVisits = (...values) => {
-  const v = Number(values.find((x) => x !== null && x !== undefined));
-  return v > 0 ? Math.round(v) : null;
+  const v = values.map((x) => (x === null || x === undefined || x === '' ? NaN : Number(x))).find((n) => Number.isFinite(n) && n > 0);
+  return v === undefined ? null : Math.round(v);
 };
 const scopeIncludes = (...rows) => {
   const detail = rows.map((r) => r?.detail || r?.det).find(Boolean);
@@ -996,8 +1002,11 @@ function twinScopeConflicts(item, twin) {
   return (visits[0] != null && visits[1] != null && visits[0] !== visits[1])
     || (detail[0] != null && detail[1] != null && detail[0] !== detail[1]);
 }
+// Explicit taxable booleans on both sides must agree (codex #6113 r38): a
+// persisted sale that disagrees with itself is never silently exempted.
+const twinTaxabilityConflicts = (item, twin) => typeof item.taxable === 'boolean' && typeof twin.taxable === 'boolean' && item.taxable !== twin.taxable;
 function mergeMappedTwin(item, mappedAmount, twin) {
-  if (twinScopeConflicts(item, twin)) return { verdict: 'conflicted' };
+  if (twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) return { verdict: 'conflicted' };
   const twinManual = num(twin.manualFinalOneTime);
   const itemManual = num(item.manualFinalOneTime);
   if (twinManual != null && itemManual != null && roundCents(twinManual) !== roundCents(itemManual)) return { verdict: 'conflicted' };
@@ -1064,31 +1073,42 @@ function rawWorkLine(line, amount, taxabilityMap) {
 }
 // Mapped items → work lines, consuming raw twins; gated / comped / conflicted
 // labels accumulate on `out`.
+// A review gate on either twin gates both (codex #6113 r38): a gated mapped
+// item consumes its raw twin so the twin is not listed as work, and a mapped
+// item whose claimed twin is gated is gated too.
+const twinIsGated = (rawPool, twin) => !!twin && rawPool.some((e) => e.line === twin && e.gated);
+const pushGated = (out, label) => { if (!out.gated.includes(label)) out.gated.push(label); };
 function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap, out) {
   for (const item of fromOneTime) {
     const label = String(item.label || item.name || item.service || 'item');
-    if (rowIsReviewGated(item) || gatedIdentities.has(oneTimeIdentity(item))) { out.gated.push(label); continue; }
+    if (rowIsReviewGated(item) || gatedIdentities.has(oneTimeIdentity(item))) {
+      claimRawTwin(rawPool, item, mappedResolvedAmount(item));
+      pushGated(out, label);
+      continue;
+    }
     // An EXPLICIT accepted zero is comped scope (codex 1A-ii r2c), unless
     // its raw twin carries the operator-accepted net, which outranks the
     // mapped row's lower alias (codex #6113 r37): that net is the line.
     if (explicitZeroNet(item)) {
       const twin = claimManualNetTwin(rawPool, item);
       if (!twin) { out.comped.push(label); continue; }
-      if (twinScopeConflicts(item, twin)) { out.conflicted.push(label); continue; }
+      if (twinIsGated(rawPool, twin)) { pushGated(out, label); continue; }
+      if (twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) { out.conflicted.push(label); continue; }
       out.work.push(mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
       continue;
     }
     const mappedAmount = mappedResolvedAmount(item);
     if (!(mappedAmount > 0)) continue;
     const twin = claimRawTwin(rawPool, item, mappedAmount);
+    if (twinIsGated(rawPool, twin)) { pushGated(out, label); continue; }
     const merged = twin ? mergeMappedTwin(item, mappedAmount, twin) : { amount: mappedAmount, explicitTaxable: (item.taxable === true || item.taxable === false) ? item.taxable : undefined };
     if (merged.verdict) { out[merged.verdict].push(label); continue; }
     if (merged.amount > 0) out.work.push(mappedWorkLine(item, label, merged, twin, taxabilityMap));
   }
 }
 function rawRowsToWork(rawPool, taxabilityMap, out) {
-  for (const { line, used } of rawPool) {
-    if (used) continue;
+  for (const { line, used, gated } of rawPool) {
+    if (used || gated) continue;
     if (explicitZeroNetRaw(line)) { out.comped.push(rawLineLabel(line, 'item')); continue; }
     const amount = rawResolvedAmount(line);
     if (amount > 0) out.work.push(rawWorkLine(line, amount, taxabilityMap));
@@ -1142,13 +1162,13 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   const out = { work: [], gated: [], comped: [], conflicted: [...mappedCollapse.conflicted, ...rawCollapse.conflicted] };
   const rawGated = (line) => rowIsReviewGated(line) || raw.gatedIdentities.has(rawIdentity(line));
   for (const line of rawCollapse.rows.filter(rawGated)) out.gated.push(rawLineLabel(line, 'item'));
-  const rawPool = rawCollapse.rows.filter((line) => !rawGated(line) && rawRowIsOneTimeWork(line)).map((line) => ({ line, used: false }));
+  const rawPool = rawCollapse.rows.filter(rawRowIsOneTimeWork).map((line) => ({ line, used: false, gated: rawGated(line) }));
   mappedItemsToWork(mappedCollapse.rows, mapped.gatedIdentities, rawPool, taxabilityMap, out);
   rawRowsToWork(rawPool, taxabilityMap, out);
   if (out.conflicted.length) {
     return {
       correctiveWork: null,
-      warning: `One-time work was not generated: ${out.conflicted.join(', ')} has mirrored rows with disagreeing amounts or scope and no accepted price — verify the price and author the corrective work manually.`,
+      warning: `One-time work was not generated: ${out.conflicted.join(', ')} has mirrored rows with disagreeing amounts, scope or taxability and no accepted price — verify the price and author the corrective work manually.`,
     };
   }
   installationRowsToWork(rawCollapse.rows.filter(carriesInstallationCharge), mappedCollapse.rows, taxabilityMap, out);

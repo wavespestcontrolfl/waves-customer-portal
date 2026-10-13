@@ -230,13 +230,14 @@ function isSetupFeeRow(line = {}) {
   const text = String(line.name || line.label || '').toLowerCase();
   return service === 'waveguard_setup' || text.includes('waveguard setup') || text.includes('membership');
 }
-function cachedMembershipFee(data) {
-  for (const container of oneTimeContainers(data)) {
-    const n = Number(container.oneTime?.membershipFee);
-    if (Number.isFinite(n) && n > 0) return round2(n);
-  }
-  return null;
+// Every positive cached fee the containers carry, distinct and ascending:
+// two that disagree are two persisted accepted amounts, and the card refuses
+// rather than invoice the first (codex #6113 r38).
+function cachedMembershipFees(data) {
+  const fees = oneTimeContainers(data).map((c) => Number(c.oneTime?.membershipFee)).filter((n) => Number.isFinite(n) && n > 0).map(round2);
+  return [...new Set(fees.map(cents))].sort((a, b) => a - b).map((c) => c / 100);
 }
+const cachedMembershipFee = (data) => cachedMembershipFees(data)[0] ?? null;
 // One fee line at most, only while the fee applies. An explicit setup row
 // is the sold amount (its own net, as the estimate page's normalizer treats
 // it); the cached aggregate fee is read only when no such row exists
@@ -336,13 +337,18 @@ function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard' } = 
   if (canonical.refusal) return canonical;
   const setupRows = canonical.lines.filter(isSetupFeeRow);
   canonical.lines = canonical.lines.filter((line) => !isSetupFeeRow(line));
+  const applies = setupFeeApplies(data, billingTerm);
+  const cachedFees = applies && !setupRows.length ? cachedMembershipFees(data) : [];
+  if (cachedFees.length > 1) {
+    return { lines: [], refusal: { statusCode: 409, code: 'membership_fee_conflict', fees: cachedFees, message: `This estimate carries more than one accepted setup fee (${cachedFees.map(money).join(' and ')}), so the bar cannot say what to invoice. Accept it from the estimate page.` } };
+  }
   const disagreeing = oneTimeAggregateConflict(estimate);
   if (disagreeing) {
     return { lines: [], refusal: { statusCode: 409, code: 'one_time_total_conflict', totals: disagreeing, message: `This estimate carries more than one accepted one-time total (${disagreeing.map(money).join(' and ')}), so the bar cannot say what to invoice. Accept it from the estimate page.` } };
   }
   const dropped = unrepresentableRow(data, converter, { hasTotal: oneTimeAggregateTotal(estimate) != null });
   if (dropped) return { lines: [], refusal: unrepresentableRefusal(dropped) };
-  const fee = membershipFeeLine(data, { applies: setupFeeApplies(data, billingTerm), setupRows });
+  const fee = membershipFeeLine(data, { applies, setupRows });
   const listed = fee ? [...canonical.lines, fee] : canonical.lines;
   const discount = pooledDiscountLine(estimate, listed);
   return { lines: discount ? [...listed, discount] : listed, refusal: null };

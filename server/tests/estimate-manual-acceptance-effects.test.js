@@ -549,7 +549,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
       },
     });
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
-      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts or scope/) });
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts/) });
   });
   test('round 32: a mapped item and its raw twin that sell a different scope (one Kitchen visit vs three Whole-home visits, same price) refuse', async () => {
     const world = makeWorld({
@@ -565,7 +565,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
       },
     });
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
-      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts or scope/) });
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts/) });
   });
   test('round 32: a mapped sold net (amountAfterDiscount 80) is honored when its raw twin keeps only the same gross price', async () => {
     const world = makeWorld({
@@ -723,7 +723,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
       },
     });
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
-      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts or scope/) });
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts/) });
   });
   test('round 37: a raw operator net (manualFinalOneTime 80) outranks a mapped row that keeps a lower-priority zero (priceAfterDiscount 0): $80, not comped', async () => {
     const world = makeWorld({
@@ -740,6 +740,43 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Wasp Nest Removal', 80]]);
+  });
+  const rawOnly = (lineItems, extra = {}) => makeWorld({
+    estimateOverrides: {
+      onetime_total: null,
+      estimate_data: JSON.stringify({ recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, result: { lineItems }, ...extra }),
+    },
+  });
+  test('round 38: two cached setup fees that disagree ($99 in result, $49 in engineResult) refuse, never first-wins', async () => {
+    const world = feeWorld(solo, { membershipFee: 99, items: [roach] }, { engineResult: { oneTime: { membershipFee: 49 } } });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'membership_fee_conflict', statusCode: 409, message: expect.stringMatching(/\$49\.00 and \$99\.00/) });
+  });
+  test('round 38: a comped net serialized as "0.00" is still comped, not silently dropped', async () => {
+    const world = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, priceAfterDiscount: '0.00', billingCadence: 'one_time' }]);
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*comped/) });
+  });
+  test('round 38: a review gate on either twin gates both (raw LOW confidence beside a mapped item, and the reverse)', async () => {
+    const mapped = { service: 'wasp', name: 'Wasp Nest Removal', price: 100 };
+    const raw = { service: 'wasp', label: 'Wasp Nest Removal', price: 100, billingCadence: 'one_time' };
+    for (const [items, lineItems] of [[[mapped], [{ ...raw, pricingConfidence: 'LOW' }]], [[{ ...mapped, pricingConfidence: 'LOW' }], [raw]]]) {
+      const world = rawOnly(lineItems, { result: { oneTime: { items }, lineItems } });
+      await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+        .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*manual review/) });
+    }
+  });
+  test('round 38: a mapped item and its raw twin that disagree on taxable refuse, never a silent exemption', async () => {
+    const world = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, taxable: true, billingCadence: 'one_time' }], {
+      result: { oneTime: { items: [{ service: 'wasp', name: 'Wasp Nest Removal', price: 100, taxable: false }] }, lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, taxable: true, billingCadence: 'one_time' }] },
+    });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*taxability/) });
+  });
+  test('round 38: a blank visits placeholder does not hide the visitsPerYear package count', async () => {
+    const world = feeWorld(solo, { items: [{ service: 'flea', name: 'Flea Package', price: 300, visits: '', visitsPerYear: 3, detail: '3 visits' }] });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.visits])).toEqual([['Flea Package', 3]]);
   });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
