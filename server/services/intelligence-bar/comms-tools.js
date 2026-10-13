@@ -1520,10 +1520,26 @@ async function bearerSeamCheck({ body, toLast10, customerId, usDestination }) {
   const composerRecorded = bearer.cards || bearer.contracts || bearer.statements || bearer.preps || bearer.projectReports || bearer.consultationLeadId;
   return composerRecorded ? { error: COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
 }
+// A portal link wrapped inside another site's URL ("https://other.example/?next=
+// https://portal…/pay/<tok>", raw or percent-encoded) reads to every check
+// above as ONE foreign link, so the bearer inside would skip the owner and
+// seam checks and reach the outer site too. A text never carries one: the
+// link goes in the text as itself. (The email phase surfaces nested links in
+// renderedTextForLinkCheck and refuses every owned link.)
+const WRAPPED_LINK_REFUSAL = 'This text has a Waves customer link wrapped inside another web address — put the customer link in the text as itself. Nothing was sent.';
+function wrappedOwnedLinkCheck({ body }) {
+  const wrapped = body.split(/\s+/).some((token) => {
+    const runs = links().nestedOwnedLinkRuns(token);
+    if (!runs.length) return false;
+    const bare = token.replace(/^[^A-Za-z0-9]+/, '').replace(/^https?:\/\//i, '').toLowerCase();
+    return !runs.some((run) => bare.startsWith(run.toLowerCase()));
+  });
+  return wrapped ? { error: WRAPPED_LINK_REFUSAL, code: 'customer_link_refused' } : null;
+}
 const LINK_CHECKS_BY_PHASE = {
-  proposal: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  proposal: [wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
   email: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
-  commit: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
+  commit: [wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
 };
 async function customerLinkSendRefusal(message, phone, customerId, { phase = 'commit' } = {}) {
   const body = String(message || '');

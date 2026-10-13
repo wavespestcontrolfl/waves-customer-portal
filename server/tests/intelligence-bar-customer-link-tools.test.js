@@ -219,6 +219,21 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
       expect(abroad).toMatchObject({ blocked: true, code: 'customer_link_recipient', sent_to: '***0123' });
       expect(abroad.error).toMatch(/US numbers only/);
     }
+    // A portal link wrapped inside another site's URL (raw or percent-encoded) never rides a text: the checks above
+    // would read it as one foreign link.
+    for (const phase of ['proposal', 'commit']) {
+      for (const wrappedBody of [
+        'See https://other.example/?next=https://portal.wavespestcontrol.com/pay/tok',
+        'See https://other.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Fpay%2Ftok',
+        'See other.example/go#portal.wavespestcontrol.com/pay/tok',
+      ]) {
+        expect(await customerLinkSendRefusal(wrappedBody, '+19415550123', CUSTOMER_ID, { phase })).toMatchObject({ blocked: true, code: 'customer_link_refused' });
+      }
+    }
+    // The link as itself (bare, with a scheme, in brackets, at a sentence end) and a foreign link are not wrapped.
+    for (const plainBody of ['Pay: portal.wavespestcontrol.com/pay/tok', 'Pay: https://portal.wavespestcontrol.com/pay/tok.', 'Pay (https://portal.wavespestcontrol.com/pay/tok)', 'Map: https://other.example/?q=1']) {
+      expect(await customerLinkSendRefusal(plainBody, '+19415550123', CUSTOMER_ID, { phase: 'proposal' })).toBeNull();
+    }
     // A plain text to that number, and an email reply (no phone), are not judged by it.
     links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [] });
     expect(await customerLinkSendRefusal('Running late, sorry!', '+449415550123', CUSTOMER_ID, { phase: 'proposal' })).toBeNull();
