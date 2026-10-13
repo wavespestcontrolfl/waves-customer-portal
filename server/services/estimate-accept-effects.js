@@ -287,11 +287,14 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   // rule, codex #6113 r36), so it is not a comped row.
   const serviceKey = (row) => String(row.service || row.name || '').toLowerCase();
   const manualNetKeys = new Set();
+  const rawLines = oneTimeContainers(data).flatMap((c) => (Array.isArray(c.lineItems) ? c.lineItems : []));
+  for (const row of [...docs.flatMap((doc) => converter.estimateOneTimeItemsFromData(doc)), ...rawLines]) {
+    if (Number(row.manualFinalOneTime) > 0) manualNetKeys.add(serviceKey(row));
+  }
   for (const doc of docs) {
     for (const item of converter.estimateOneTimeItemsFromData(doc)) {
-      if (Number(item.manualFinalOneTime) > 0) manualNetKeys.add(serviceKey(item));
       const amount = lineAmount(item);
-      if (amount === 0) return `${rowName(item)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+      if (amount === 0 && !manualNetKeys.has(serviceKey(item))) return `${rowName(item)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
       if (amount != null && amount < 0 && !hasTotal) return `${rowName(item)} is a discount row with no one-time total to apply it to`;
     }
   }
@@ -299,11 +302,9 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   // mapped items): an explicit $0 in any sold-net alias is comped scope, and
   // a negative row (a bundle discount) is dropped by the extractor, so with
   // no aggregate to pool against the gross line would over-invoice.
-  for (const container of oneTimeContainers(data)) {
-    for (const line of Array.isArray(container.lineItems) ? container.lineItems : []) {
-      const why = rawLineRefusal(line, { hasTotal, manualNetKeys, serviceKey, rowName });
-      if (why) return why;
-    }
+  for (const line of rawLines) {
+    const why = rawLineRefusal(line, { hasTotal, manualNetKeys, serviceKey, rowName });
+    if (why) return why;
   }
   return null;
 }
@@ -313,8 +314,7 @@ function unrepresentableRow(data, converter, { hasTotal }) {
 function rawLineRefusal(line, { hasTotal, manualNetKeys, serviceKey, rowName }) {
   const { explicitZeroNetRaw, rawRowHasRecurringEvidence } = require('./estimate-proposal-generate');
   if (line.onProg === true || line.includedOnProgram === true || rawRowHasRecurringEvidence(line)) return null;
-  const manualOutranks = Number(line.manualFinalOneTime) > 0 || manualNetKeys.has(serviceKey(line));
-  if (explicitZeroNetRaw(line) && !manualOutranks) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
+  if (explicitZeroNetRaw(line) && !manualNetKeys.has(serviceKey(line))) return `${rowName(line)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
   const amount = rawLineAmount(line);
   if (amount != null && amount < 0 && !hasTotal) return `${rowName(line)} is a discount row with no one-time total to apply it to`;
   return null;

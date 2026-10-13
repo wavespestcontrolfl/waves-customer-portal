@@ -1032,6 +1032,14 @@ function claimRawTwin(rawPool, item, mappedAmount) {
   if (entry) entry.used = true;
   return entry ? entry.line : null;
 }
+// The unused same-service raw twin that carries a positive operator-accepted
+// net, consumed; null when there is none.
+function claimManualNetTwin(rawPool, item) {
+  const service = String(item.service || item.name || '').toLowerCase();
+  const entry = rawPool.find((e) => !e.used && String(e.line.service || e.line.name || '').toLowerCase() === service && num(e.line.manualFinalOneTime) > 0);
+  if (entry) entry.used = true;
+  return entry ? entry.line : null;
+}
 function mappedWorkLine(item, label, { amount, explicitTaxable }, twin, taxabilityMap) {
   return {
     label: label.slice(0, 160),
@@ -1060,8 +1068,16 @@ function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap,
   for (const item of fromOneTime) {
     const label = String(item.label || item.name || item.service || 'item');
     if (rowIsReviewGated(item) || gatedIdentities.has(oneTimeIdentity(item))) { out.gated.push(label); continue; }
-    // An EXPLICIT accepted zero is comped scope (codex 1A-ii r2c).
-    if (explicitZeroNet(item)) { out.comped.push(label); continue; }
+    // An EXPLICIT accepted zero is comped scope (codex 1A-ii r2c), unless
+    // its raw twin carries the operator-accepted net, which outranks the
+    // mapped row's lower alias (codex #6113 r37): that net is the line.
+    if (explicitZeroNet(item)) {
+      const twin = claimManualNetTwin(rawPool, item);
+      if (!twin) { out.comped.push(label); continue; }
+      if (twinScopeConflicts(item, twin)) { out.conflicted.push(label); continue; }
+      out.work.push(mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
+      continue;
+    }
     const mappedAmount = mappedResolvedAmount(item);
     if (!(mappedAmount > 0)) continue;
     const twin = claimRawTwin(rawPool, item, mappedAmount);
