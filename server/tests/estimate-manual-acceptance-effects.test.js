@@ -804,6 +804,25 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const plain = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, taxable: false, billingCadence: 'one_time' }]);
     expect((await markEstimateManuallyAccepted(base(plain, fakeConverter(plain), { dryRun: true }))).effects.find((e) => e.kind === 'one_time_line')).not.toHaveProperty('taxable');
   });
+  test('round 40: one row mirrored in three containers (oneTime.items, oneTime.specItems, root specItems) is one line, not a conflict', async () => {
+    const copy = () => ({ service: 'german_roach', name: 'German Roach Cleanout', price: 350 });
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { oneTime: { items: [copy()], specItems: [copy()] }, specItems: [copy()] },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['German Roach Cleanout', 350]]);
+  });
+  test('round 40: same-shape mirrors that disagree on taxable (items true, specItems false) refuse, never the first container', async () => {
+    const world = feeWorld(solo, { items: [{ ...roach, taxable: true }], specItems: [{ ...roach, taxable: false }] });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/German Roach Cleanout.*taxability/) });
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

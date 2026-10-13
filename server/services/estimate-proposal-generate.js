@@ -834,11 +834,17 @@ function collapseMirroredRows(sources, { identity, amount, label, scope, net }) 
   // Mirrors meet kept clones one-to-one (a multiset match): a clone a mirror
   // matched is consumed, so two dropped copies cannot both vouch for one
   // kept copy while another kept copy goes unmatched (codex #6113 r36).
+  // Each mirror SOURCE is matched against a fresh copy of the kept multiset
+  // (a row mirrored in three containers is one row, codex #6113 r40), and a
+  // clone whose explicit taxable boolean contradicts the mirror's is no
+  // match: such a pair conflicts rather than keeping the first container.
   const conflicted = [];
-  const consumed = new Set();
+  const consumedBySource = new Map();
   for (const t of tagged) {
     if (t.sourceIndex === fullestSource.get(t.key)) continue;
-    const clones = (kept.get(t.key) || []).filter((k) => !consumed.has(k));
+    if (!consumedBySource.has(t.sourceIndex)) consumedBySource.set(t.sourceIndex, new Set());
+    const consumed = consumedBySource.get(t.sourceIndex);
+    const clones = (kept.get(t.key) || []).filter((k) => !consumed.has(k) && !twinTaxabilityConflicts(k.row, t.row));
     const match = clones.find((k) => signature(k.row) === signature(t.row))
       || clones.find((k) => (!scope || scope(k.row) === scope(t.row)) && mirrorNetWinner(k.row, t.row, net) !== null);
     if (!match) { conflicted.push(label(t.row)); continue; }
