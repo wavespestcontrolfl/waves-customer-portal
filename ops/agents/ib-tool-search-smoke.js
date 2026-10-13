@@ -41,7 +41,8 @@
  * tools that are deferred in the list; the JSON string when the result also
  * holds an owner-workflow action), with the same tools and no tool_choice.
  * It prints whether the model then called or named that tool.
- * On a model that thinks by default tool search is off (toolSearchWanted), so
+ * On a model that does not support tool search, or that thinks by default, tool
+ * search is off (modelTakesToolSearch, the route's own predicate), so
  * every --execute mode prints that and exits 0 without calling the API.
  * Without --execute it prints the tools shape (counts, no API call).
  */
@@ -50,7 +51,7 @@ const MODELS = require('../../server/config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../../server/services/llm/anthropic-wire');
 const ActionRegistry = require('../../server/services/intelligence-bar/action-registry');
 const apiToolDefinition = require('../../server/services/intelligence-bar/tool-definition');
-const { stripServerSearchBlocks, toolResultContent } = require('../../server/services/intelligence-bar/tool-search');
+const { stripServerSearchBlocks, toolResultContent, modelTakesToolSearch } = require('../../server/services/intelligence-bar/tool-search');
 
 // The model is resolved exactly as the route does (the `MODEL` constant in
 // server/routes/admin-intelligence-bar.js, not exported):
@@ -162,9 +163,11 @@ async function main() {
     return 2;
   }
   const { model, source } = resolveModel();
-  // Tool search is off for a model that thinks by default (toolSearchWanted).
-  if (MODELS.anthropicThinksByDefault(model)) {
-    console.log(`tool search is off for this model (${model}, from ${source}) because it thinks by default; nothing to check. No API call made.`);
+  // Tool search is off for a model that does not support it or that thinks by
+  // default: the same predicate the route uses (tool-search.js).
+  if (!modelTakesToolSearch(model)) {
+    const why = MODELS.anthropicSupportsToolSearch(model) ? 'it thinks by default' : 'it does not support the tool search tool';
+    console.log(`tool search is off for this model (${model}, from ${source}) because ${why}; the bar uses its ordinary tool list. Nothing to check. No API call made.`);
     return 0;
   }
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });

@@ -265,5 +265,6 @@ function searchReferencedNames(messages) {
 }
 
 module.exports = {
+  modelTakesToolSearch,
   searchReferencedNames,
   hasSearchAndThinking, withTurnEndingText, hasPendingServerSearch, toolResultContent, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };

@@ -37,10 +37,15 @@ once. With the gate off, the owner follows the mapping too.
 
 The search path is one login and one kind of request: a full-access login
 (`ibFullAccess`, the owner) on an ordinary admin page, on the platform path
-(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a model that does NOT
-think by default (`MODELS.anthropicThinksByDefault`; with a thinking model the
-bar keeps the ordinary list, as with the gate off, because a history with search
-blocks and thinking blocks cannot be rewritten), on a FRESH request. A
+(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a model that accepts
+Anthropic's tool search (`MODELS.anthropicSupportsToolSearch`: Opus, Sonnet and
+Haiku 4.5 and later, Fable, Mythos; Opus 4.1 and earlier and any unknown id do
+not) AND does NOT think by default (`MODELS.anthropicThinksByDefault`), on a
+FRESH request. Both model conditions sit in `modelTakesToolSearch`
+(`tool-search.js`). With an unsupported model, or a thinking model, the bar
+keeps the ordinary list, as with the gate off: an unsupported model would
+reject the request, and a history with search blocks and thinking blocks
+cannot be rewritten. A
 resumed task (`/tasks/:id/resume`, `/tasks/:id/select-target`) always runs on
 the ordinary list. On the search path `initialTools` (with `scope.toolSearch`,
 set by `toolSearchWanted` in `tool-search.js`) keeps the page list as the eager

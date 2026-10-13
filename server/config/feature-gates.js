@@ -4889,8 +4889,9 @@ function ibRepriceVisitsLive() {
 // tools up front plus every other allowed tool deferred behind the Anthropic
 // API's tool search (action-registry.js initialTools, scope.toolSearch). Off =
 // the page list plus discover_capabilities for everyone. Has effect only on a
-// model that does not think by default (models.anthropicThinksByDefault); a
-// thinking model keeps the ordinary list. Kill: unset.
+// model that accepts tool search (models.anthropicSupportsToolSearch) and does
+// not think by default (models.anthropicThinksByDefault); any other model
+// keeps the ordinary list. Kill: unset.
 function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
 }
