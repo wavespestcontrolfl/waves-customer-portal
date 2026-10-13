@@ -302,3 +302,12 @@ describe('a no_action_needed disposition does not hide an open request', () => {
     }
   });
 });
+
+describe('the requested part of the day', () => {
+  it('rides on the row; "any" or a missing value is no preference', () => {
+    const row = (sched) => run([call({ ai_extraction_enriched: dayOnly({}, sched) })])[0];
+    expect(row({ preferred_time_of_day: 'morning' }).daypart).toBe('morning');
+    expect(row({ preferred_time_of_day: 'any' }).daypart).toBeNull();
+    expect(row({}).daypart).toBeNull();
+  });
+});

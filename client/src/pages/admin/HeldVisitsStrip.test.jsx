@@ -34,6 +34,12 @@ describe('HeldVisitsStrip', () => {
     expect(screen.getByText('Time not set')).toBeInTheDocument();
   });
 
+  it('shows the part of the day the caller asked for and the scheduling note from the call', () => {
+    render(<HeldVisitsStrip heldVisits={[{ ...dayOnly, daypart: 'morning', notes: 'Caller can meet after 10:30.' }]} onBook={() => {}} />);
+    expect(screen.getByText('Time not set · asked for the morning')).toBeInTheDocument();
+    expect(screen.getByText('From the call: Caller can meet after 10:30.')).toBeInTheDocument();
+  });
+
   it('never calls a day-only row a promise', () => {
     render(<HeldVisitsStrip heldVisits={[dayOnly]} onBook={() => {}} />);
     expect(screen.getByText('NOT CONFIRMED · not booked')).toBeInTheDocument();

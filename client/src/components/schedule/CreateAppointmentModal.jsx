@@ -573,6 +573,20 @@ export function customerPropertyCountLabel(propertyCount) {
   return `${n} properties`;
 }
 
+// The saved property a stated street line names: same house number and same first street
+// word, ignoring case and punctuation. Exactly one match, else '' (the caller keeps the
+// default). Dispatch "Book it" passes the address stated on the call (defaultAddressLine1).
+export function propertyIdForStatedAddress(properties = [], statedLine1 = '') {
+  const key = (line) => {
+    const m = String(line || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').match(/\b(\d+[a-z]?)\s+([a-z0-9]+)/);
+    return m ? `${m[1]} ${m[2]}` : '';
+  };
+  const wanted = key(statedLine1);
+  if (!wanted) return '';
+  const hits = properties.filter((p) => p && key(p.address_line1) === wanted);
+  return hits.length === 1 ? String(hits[0].id) : '';
+}
+
 export function defaultBookingPropertyId(properties = []) {
   const primary = properties.find((p) => p && p.is_primary) || properties[0];
   return primary ? String(primary.id) : '';
@@ -1493,7 +1507,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, defaultAddressLine1 = '', onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1856,7 +1870,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // started before this list arrived was scored at the primary, and
           // the default here may be a complete SECONDARY.
           resetAddressDerivedState();
-          setSelectedPropertyId(defaultBookingPropertyId(complete));
+          // A booking opened from a call lands on the property the caller named, when exactly
+          // one saved property carries that address; otherwise the usual default.
+          setSelectedPropertyId(propertyIdForStatedAddress(complete, defaultAddressLine1) || defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
         } else {
           setBookingPropertyState('hidden');

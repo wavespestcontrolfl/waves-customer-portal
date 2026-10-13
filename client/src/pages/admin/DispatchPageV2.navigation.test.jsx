@@ -341,7 +341,8 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   await screen.findByRole('dialog');
   expect(appointmentModalState.props).toMatchObject({
     defaultDate: '2026-10-14', requireTimeChoice: true,
-    defaultInternalNotes: 'Booked from a phone call. Call ID: call-off-hour. Time agreed on the call: 2:30 PM. Visits start on the hour: agree a whole-hour time with the caller.',
+    defaultInternalNotes: 'Booked from a phone call. Call ID: call-off-hour. Time agreed on the call: 2:30 PM. Visits start on the hour: agree a whole-hour time with the caller. Address stated on the call: 12 Test Lane, Bradenton, 34205.',
+    defaultAddressLine1: '12 Test Lane',
   });
   expect(appointmentModalState.props.defaultWindowStart).toBeUndefined();
   act(() => appointmentModalState.props.onClose());
@@ -350,7 +351,7 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   expect(appointmentModalState.props).toMatchObject({
     defaultDate: '2026-10-14', defaultWindowStart: '11:00', defaultCustomer: expect.objectContaining({ id: 'cust-1', firstName: 'Pat', lastName: 'Sample' }),
     // The call marker rides into the visit's internal notes, so the booked visit carries the call.
-    defaultInternalNotes: 'Booked from a phone call. Call ID: call-held.', requireTimeChoice: false,
+    defaultInternalNotes: 'Booked from a phone call. Call ID: call-held. Address stated on the call: 12 Test Lane, Bradenton, 34205.', requireTimeChoice: false,
   });
 });
 

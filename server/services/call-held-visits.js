@@ -58,6 +58,7 @@ const DAY_ONLY_STATUSES = new Set(['requested', 'offered', 'ambiguous']);
 // is still open, whatever the disposition field says.
 const CLOSED_DISPOSITIONS = new Set(['spam_discarded', 'wrong_number_closed', 'vendor_logged']);
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAYPARTS = new Set(['morning', 'afternoon', 'evening']);
 
 function parseExtraction(raw) {
   if (!raw) return null;
@@ -162,6 +163,8 @@ function heldRow({ call, extraction, kind, minutes }, { dateET, customerNames })
     service: request.specific_service_name || request.primary_service_category || null,
     call_at: new Date(call.created_at).toISOString(),
     customer_id: call.customer_id || null,
+    // The part of the day the caller asked for, when there is no agreed time.
+    daypart: DAYPARTS.has(extraction.scheduling?.preferred_time_of_day) ? extraction.scheduling.preferred_time_of_day : null,
     notes: notes ? notes.slice(0, NOTES_MAX_CHARS) : null,
   };
 }

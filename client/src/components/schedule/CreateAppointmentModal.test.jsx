@@ -27,6 +27,7 @@ import {
   mosquitoSubmitGate,
   MANUAL_SERVICE_ENTRY_LABEL,
   pickAutoScheduleEstimate,
+  propertyIdForStatedAddress,
   plannedRecurringCount,
   quickAddConfirmFlags,
   quickAddConflictFromError,
@@ -1025,5 +1026,23 @@ describe('lineIsRetiredSale (codex r35 on #4786)', () => {
     // camelCase still wins when both are present and only one names the retired key.
     expect(lineIsRetiredSale({ serviceKey: 'tree_shrub_quarterly', service_key: 'tree_shrub_program', name: 'Anything', cadence: 'one_time' })).toBe(true);
     expect(lineIsRetiredSale({ service_key: 'tree_shrub_program', name: 'Bi-Monthly Tree & Shrub Care', cadence: 'bimonthly' })).toBe(false);
+  });
+});
+
+// Dispatch "Book it" on a held visit: land on the property the caller named.
+describe('propertyIdForStatedAddress', () => {
+  const properties = [
+    { id: 'p-primary', is_primary: true, address_line1: '100 Example Loop' },
+    { id: 'p-second', address_line1: '12 Test Ln, Unit 4' },
+  ];
+  it('finds the one saved property with the stated house number and street, ignoring case and suffix style', () => {
+    expect(propertyIdForStatedAddress(properties, '12 TEST Lane')).toBe('p-second');
+    expect(propertyIdForStatedAddress(properties, '100 example loop')).toBe('p-primary');
+  });
+  it('returns nothing for no match, two matches or no stated address, so the usual default stands', () => {
+    expect(propertyIdForStatedAddress(properties, '77 Other Road')).toBe('');
+    expect(propertyIdForStatedAddress([...properties, { id: 'p-third', address_line1: '12 Test Lane' }], '12 Test Lane')).toBe('');
+    expect(propertyIdForStatedAddress(properties, '')).toBe('');
+    expect(propertyIdForStatedAddress(properties, 'Test Lane')).toBe('');
   });
 });

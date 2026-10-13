@@ -45,7 +45,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
             <li key={row.call_log_id} className="px-4 py-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div className="min-w-0 text-14 text-ink-primary">
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span className="u-nums font-medium">{row.time_label || 'Time not set'}</span>
+                  <span className="u-nums font-medium">{row.time_label || (row.daypart ? `Time not set · asked for the ${row.daypart}` : 'Time not set')}</span>
                   <span className="font-medium">{row.caller_name}</span>
                   <span className="inline-flex items-center border border-dashed border-zinc-400 rounded-xs px-2 text-14 text-ink-secondary">
                     {kindText(row).tag}
@@ -58,6 +58,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                   {fromCall(row)}
                   {row.phone ? <> · <span className="u-nums">{row.phone}</span></> : null}
                 </div>
+                {row.notes && <div className="text-ink-secondary">From the call: {row.notes}</div>}
                 {offHour(row) && (
                   <div className="text-ink-secondary">
                     Visits start on the hour. Agree a whole-hour time with the caller; the form does not take {row.time_label} and opens with no time selected.
