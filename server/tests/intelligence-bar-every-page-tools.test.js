@@ -44,8 +44,17 @@ test('the shared list names exactly the core tools and the general read pair, ea
 describe('the general admin read on every page', () => {
   const owner = context => ({ role: 'admin', context, fullAccess: true });
   let gateBefore;
-  beforeEach(() => { gateBefore = process.env.GATE_IB_GENERAL_READ; process.env.GATE_IB_GENERAL_READ = 'true'; });
-  afterEach(() => { if (gateBefore === undefined) delete process.env.GATE_IB_GENERAL_READ; else process.env.GATE_IB_GENERAL_READ = gateBefore; });
+  let platformBefore;
+  beforeEach(() => {
+    gateBefore = process.env.GATE_IB_GENERAL_READ;
+    platformBefore = process.env.GATE_IB_PLATFORM;
+    process.env.GATE_IB_GENERAL_READ = 'true';
+    process.env.GATE_IB_PLATFORM = 'true'; // the general read needs the platform gate
+  });
+  afterEach(() => {
+    if (gateBefore === undefined) delete process.env.GATE_IB_GENERAL_READ; else process.env.GATE_IB_GENERAL_READ = gateBefore;
+    if (platformBefore === undefined) delete process.env.GATE_IB_PLATFORM; else process.env.GATE_IB_PLATFORM = platformBefore;
+  });
 
   test.each(['customers', 'dashboard', 'revenue', 'comms', 'email', 'ops'])('the owner login on %s is offered the finder and the read, once each', (context) => {
     const offered = names(registry.initialTools(context, owner(context)));

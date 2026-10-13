@@ -20,7 +20,8 @@
  * is never read from model input, logged, returned, or stored in a task,
  * checkpoint, pending action or telemetry row.
  *
- * Dark behind GATE_IB_GENERAL_READ (ibGeneralReadLive, read at call time) and
+ * Dark behind GATE_IB_GENERAL_READ (ibGeneralReadLive, read at call time; needs
+ * GATE_IB_PLATFORM, which has the owner-only access model) and
  * owner-login only (ibFullAccess, carried as actionContext.fullAccess).
  */
 const config = require('../../config');
@@ -380,7 +381,7 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
     return refusal('Capability is not implemented', 'capability_unimplemented');
   }
   if (!adminReadLive()) {
-    return refusal('Reading admin screen data from the bar is turned off (GATE_IB_GENERAL_READ). Nothing was read.', 'gate_off');
+    return refusal('Reading admin screen data from the bar is turned off (GATE_IB_GENERAL_READ, which needs GATE_IB_PLATFORM). Nothing was read.', 'gate_off');
   }
   if (actionContext?.fullAccess !== true || actionContext?.isAdmin === false) {
     return refusal('This read is limited to the owner account.', 'permission_denied');

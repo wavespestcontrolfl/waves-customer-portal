@@ -3606,6 +3606,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
     const requestTaint = await OwnerDirect.loadRequestTaint({
       history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
+      fullAccess: actionScope.fullAccess, conversationHistory,
     });
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the

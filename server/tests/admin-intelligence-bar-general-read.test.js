@@ -412,15 +412,39 @@ describe('the taint follows the conversation (thread record)', () => {
     await run(editSteps(), { thread_id: THREAD, thread_seq: 2 });
     expect(editRound().untrusted).toBe(true);
   });
-  test('no thread id is a fresh conversation: no lookup, not tainted', async () => {
+  test('no thread id and no history is a first message: no lookup, not tainted', async () => {
     const lookup = jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(true);
     spies.push(lookup);
-    await run(editSteps());
+    await run(editSteps(), { conversationHistory: [] });
     expect(lookup).not.toHaveBeenCalled();
     expect(editRound().untrusted).toBe(false);
   });
+  test('no thread id but history is a follow-up with no server record: tainted, cards required', async () => {
+    const lookup = jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(false);
+    spies.push(lookup);
+    await run(editSteps());
+    expect(lookup).not.toHaveBeenCalled();
+    expect(editRound().untrusted).toBe(true);
+  });
+  test('with the threads gate off a follow-up is tainted, and a first message is not', async () => {
+    process.env.GATE_IB_THREADS = 'false';
+    await run(editSteps());
+    expect(editRound().untrusted).toBe(true);
+    seen.length = 0;
+    await run(editSteps(), { conversationHistory: [] });
+    expect(editRound().untrusted).toBe(false);
+  });
+  test('with the general read gate off the same follow-up is not tainted: owner-direct is unchanged', async () => {
+    process.env.GATE_IB_GENERAL_READ = 'false';
+    try {
+      await run(editSteps());
+      expect(editRound().untrusted).toBe(false);
+    } finally {
+      process.env.GATE_IB_GENERAL_READ = 'true';
+    }
+  });
 
-  test('the exchange that read data is saved with the marker; one that did not read is not', async () => {
+  test('the exchange that read data is saved with the marker; a first message that did not read is not', async () => {
     const append = jest.spyOn(IbThreads, 'appendExchange').mockResolvedValue({ threadId: THREAD, lastSeq: 2 });
     spies.push(append);
     await run([
@@ -431,7 +455,7 @@ describe('the taint follows the conversation (thread record)', () => {
     expect(append.mock.calls[0][0].assistantText).toContain(IbThreads.UNTRUSTED_READ_MARKER);
     expect(append.mock.calls[0][0].userText).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
     append.mockClear();
-    await run([{ content: [{ type: 'text', text: 'Hello.' }] }]);
+    await run([{ content: [{ type: 'text', text: 'Hello.' }] }], { conversationHistory: [] });
     expect(append.mock.calls[0][0].assistantText).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
   });
 });

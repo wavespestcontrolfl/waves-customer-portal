@@ -45,15 +45,20 @@ function jsonResponse(status, body, headers = { 'content-type': 'application/jso
 }
 
 let gateBefore;
+let platformBefore;
 beforeEach(() => {
   gateBefore = process.env.GATE_IB_GENERAL_READ;
+  platformBefore = process.env.GATE_IB_PLATFORM;
   process.env.GATE_IB_GENERAL_READ = 'true';
+  process.env.GATE_IB_PLATFORM = 'true'; // the general read needs the platform gate
   global.fetch = jest.fn(async () => jsonResponse(200, { ok: true }));
   jest.clearAllMocks();
 });
 afterEach(() => {
   if (gateBefore === undefined) delete process.env.GATE_IB_GENERAL_READ;
   else process.env.GATE_IB_GENERAL_READ = gateBefore;
+  if (platformBefore === undefined) delete process.env.GATE_IB_PLATFORM;
+  else process.env.GATE_IB_PLATFORM = platformBefore;
 });
 
 const read = (input, context = ownerContext()) => executeAdminReadTool(READ, input, context);
@@ -940,5 +945,40 @@ describe('the log marker secret stays inside the process', () => {
   test('it is not an environment variable', () => {
     const secret = adminReadMarkerValue();
     expect(Object.values(process.env).some(value => String(value).includes(secret))).toBe(false);
+  });
+});
+
+// Codex round 7: the general read needs GATE_IB_PLATFORM, in the reader itself.
+describe('the general read needs the platform gate', () => {
+  const { ibGeneralReadLive } = require('../config/feature-gates');
+  const withGates = async (general, platform, fn) => {
+    const before = [process.env.GATE_IB_GENERAL_READ, process.env.GATE_IB_PLATFORM];
+    const set = (name, value) => { if (value === undefined) delete process.env[name]; else process.env[name] = value; };
+    set('GATE_IB_GENERAL_READ', general); set('GATE_IB_PLATFORM', platform);
+    try { return await fn(); } finally { set('GATE_IB_GENERAL_READ', before[0]); set('GATE_IB_PLATFORM', before[1]); }
+  };
+
+  test.each([
+    ['true', 'true', true], ['true', 'false', false], ['true', undefined, false], ['false', 'true', false],
+    [undefined, 'true', false], ['1', 'true', false], ['TRUE', 'true', false], ['true', 'on', true],
+  ])('GATE_IB_GENERAL_READ=%s with GATE_IB_PLATFORM=%s is live: %s', async (general, platform, expected) => {
+    expect(await withGates(general, platform, () => ibGeneralReadLive())).toBe(expected);
+  });
+
+  test('with the platform gate off the tools are not offered and the executor refuses with the gate-off result', async () => {
+    await withGates('true', 'false', async () => {
+      const offered = registry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true }).map(t => t.name);
+      expect(offered).not.toContain(FIND);
+      expect(offered).not.toContain(READ);
+      expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ code: 'gate_off', error: expect.stringContaining('needs GATE_IB_PLATFORM') });
+      expect(await executeAdminReadTool(FIND, { query: 'customer' }, ownerContext())).toMatchObject({ code: 'gate_off' });
+    });
+    expect(callsOf()).toHaveLength(0);
+  });
+
+  test('with both on the tools are offered and read', async () => {
+    const offered = registry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true }).map(t => t.name);
+    expect(offered).toEqual(expect.arrayContaining([FIND, READ]));
+    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ status: 200 });
   });
 });

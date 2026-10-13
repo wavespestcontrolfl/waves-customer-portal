@@ -35,7 +35,7 @@
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
  */
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, ibGeneralReadLive } = require('../../config/feature-gates');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
 const IbThreads = require('./threads');
@@ -197,22 +197,42 @@ function newRequestTaint(history) {
   return { untrustedRead: untrustedReadInHistory(history) };
 }
 
+// What the server's own thread record says: true (an earlier exchange read
+// admin data, or the thread cannot be read: fail closed), false (a verified
+// thread with no such exchange), or null when there is no record to consult
+// (no thread id, or the threads gate is off so nothing was ever recorded).
+async function threadTaintVerdict(actorId, threadId) {
+  if (!threadId || !IbThreads.threadsEnabled()) return null;
+  try {
+    return (await IbThreads.hasUntrustedRead(actorId, threadId)) === true;
+  } catch {
+    return true;
+  }
+}
+
 // The flag for a new request, called once per request. It starts from the
 // message history this request carries (a resumed task's saved blocks), then
-// from the SERVER's own record of the conversation: a thread whose earlier
-// exchange read admin data stays tainted for its whole life, whatever history
-// the client resubmits (plain strings carry no tool blocks). No thread id = a
-// fresh conversation = not tainted. A thread id the server cannot read
-// (unknown to this actor, or a database error) fails closed: tainted.
-// `needed` is false when owner-direct is off, where the flag decides nothing.
-async function loadRequestTaint({ history, threadId, actorId, needed = true }) {
+// from the SERVER's own record of the conversation:
+//   - a verified thread record decides: a thread whose earlier exchange read
+//     admin data stays tainted for its whole life, whatever history the client
+//     resubmits (plain strings carry no tool blocks); an unreadable thread is
+//     tainted (fail closed);
+//   - with no record to consult (no thread id, threads gate off, or the thread
+//     append failed so the client detached), a FOLLOW-UP turn (history, or a
+//     thread id) is tainted, because an earlier turn may have used the general
+//     read and nothing trusted says it did not: cards are required;
+//   - the first message of a conversation (no history, no thread id) is not.
+// The whole rule applies only where the general read is live for this login
+// (its gate, which needs the platform gate, AND full access: the only case in
+// which a prior turn could have used it) and owner-direct is on (`needed`);
+// with the feature off, owner-direct behaves exactly as before.
+async function loadRequestTaint({ history, threadId, actorId, needed = true, fullAccess = false, conversationHistory = [] }) {
   const taint = newRequestTaint(history);
-  if (taint.untrustedRead || !needed || !threadId) return taint;
-  try {
-    taint.untrustedRead = (await IbThreads.hasUntrustedRead(actorId, threadId)) === true;
-  } catch {
-    taint.untrustedRead = true;
-  }
+  const readLive = fullAccess === true && ibGeneralReadLive();
+  if (taint.untrustedRead || !needed || !readLive) return taint;
+  const verdict = await threadTaintVerdict(actorId, threadId);
+  const followUp = Boolean(threadId) || (Array.isArray(conversationHistory) && conversationHistory.length > 0);
+  taint.untrustedRead = verdict === null ? followUp : verdict;
   return taint;
 }
 
