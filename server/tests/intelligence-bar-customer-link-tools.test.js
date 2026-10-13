@@ -20,7 +20,15 @@ jest.mock('../routes/admin-communications', () => ({
   rescheduleLinkInsert: jest.fn(),
   reserviceLinkInsert: jest.fn(),
 }));
+jest.mock('../services/autopay-setup-link', () => ({
+  setupLinkIneligibility: jest.fn(),
+  findSavedMethodForAutoSecure: jest.fn(),
+  setupLinkReuse: jest.fn(),
+  autopayDeliveryPreflight: jest.fn(),
+  requestAutopaySetupLink: jest.fn(),
+}));
 jest.mock('../services/composer-customer-links', () => ({
+  AUTOPAY_SKIP_REASONS: jest.requireActual('../services/composer-customer-links').AUTOPAY_SKIP_REASONS,
   autopayLinkSendCheck: jest.fn(),
   bearerLinkSendCheck: jest.fn(),
   composerOnlyLinkPresence: jest.fn(async () => ({ present: false, kinds: [] })),
@@ -33,6 +41,7 @@ jest.mock('../services/composer-customer-links', () => ({
 
 const db = require('../models/db');
 const routeExports = require('../routes/admin-communications');
+const autopay = require('../services/autopay-setup-link');
 const links = require('../services/composer-customer-links');
 const { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool } = require('../services/intelligence-bar/customer-link-tools');
 
@@ -58,8 +67,13 @@ beforeEach(() => {
 describe('tool definitions', () => {
   test('the tool is side-effect flagged, admin-only in the executor, and offers every Insert Link kind the bar builds', () => {
     const byName = Object.fromEntries(CUSTOMER_LINK_TOOLS.map((t) => [t.name, t]));
-    expect(Object.keys(byName)).toEqual(['create_customer_link']);
+    expect(Object.keys(byName)).toEqual(['create_customer_link', 'send_autopay_setup_link']);
     expect(byName.create_customer_link._sideEffects).toBe(true);
+    expect(byName.send_autopay_setup_link._sideEffects).toBe(true);
+    // No link-only mode from the bar: sms or email, and the description says where a link-only link lives.
+    expect(byName.send_autopay_setup_link.input_schema.properties.delivery.enum).toEqual(['sms', 'email']);
+    expect(byName.send_autopay_setup_link.description).toMatch(/link-only Auto Pay link .* stays on the Customers page/);
+    expect(byName.send_autopay_setup_link.description).toMatch(/saved card .* billing change/);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).toEqual([
       'reschedule', 'reservice', 'pay_balance', 'estimate', 'referral', 'consultation', 'appointment',
       'prep_guide', 'service_report', 'receipt', 'project_report',
@@ -136,7 +150,7 @@ describe('create_customer_link', () => {
       expect(result.error).not.toMatch(/card_request/);
     }
     expect(routeExports.customerLinkInsert).not.toHaveBeenCalled();
-    const tool = CUSTOMER_LINK_TOOLS[0];
+    const tool = CUSTOMER_LINK_TOOLS.find((t) => t.name === 'create_customer_link');
     expect(tool.input_schema.properties.kind.enum).not.toContain('card_request');
     expect(tool.description).toMatch(/card request links \(the Communications composer \/ visit card only/);
     // The preview carries no enrollment keys for any kind.
@@ -208,6 +222,226 @@ describe('create_customer_link', () => {
   });
 });
 
+describe('send_autopay_setup_link', () => {
+  const AP_CUSTOMER = { id: CUSTOMER_ID, first_name: 'Customer', last_name: 'Fixture', phone: '+19415550123', email: 'Fixture@Example.com ', billing_mode: 'per_application' };
+  const SMS_PIN = { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123', link_expires_at: null };
+  const EMAIL_PIN = { customer_id: CUSTOMER_ID, delivery: 'email', email: 'fixture@example.com', link_expires_at: null };
+  const BEARER = 'https://portal.wavespestcontrol.com/secure/AbCdEfGhIjKlMnOpQrSt';
+  const run = (input, ctx = { isAdmin: true }) => executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID, ...input }, ctx);
+
+  beforeEach(() => {
+    autopay.setupLinkIneligibility.mockResolvedValue({ reason: null, customer: AP_CUSTOMER });
+    autopay.findSavedMethodForAutoSecure.mockResolvedValue(null);
+    autopay.autopayDeliveryPreflight.mockResolvedValue({ ok: true });
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'new', expiresAt: null });
+    autopay.requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'sent', reason: 'sent', channel: 'sms', secureUrl: BEARER, expiresAt: '2026-11-12T00:00:00Z' });
+  });
+
+  test('a technician token is refused before any read', async () => {
+    expect(await run({}, { isAdmin: false })).toMatchObject({ code: 'permission_denied' });
+    expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
+  });
+
+  test('preview: a bad delivery (inline included) or customer id is refused before the service is read', async () => {
+    for (const delivery of ['inline', 'carrier pigeon']) {
+      expect(await run({ delivery })).toMatchObject({ code: 'invalid_target' });
+    }
+    expect(await run({ customer_id: 'not-a-uuid' })).toMatchObject({ code: 'invalid_target' });
+    expect(autopay.setupLinkIneligibility).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['autopay_already_active', 'This customer is already on Auto Pay'],
+    ['autopay_paused', /already set up but paused/],
+    ['payer_billed', /third-party payer/],
+    ['unsupported_billing_lane', /per-visit and per-application/],
+    ['gate_off', /switched off/],
+    ['customer_not_found', 'Customer not found'],
+  ])('preview: the service\'s eligibility reason %s is refused in the operator\'s words, before the card or the channel is read', async (reason, words) => {
+    autopay.setupLinkIneligibility.mockResolvedValue({ reason });
+    const refused = await run({});
+    expect(refused).toMatchObject({ blocked: true, code: reason });
+    expect(refused.error).toMatch(words);
+    expect(autopay.findSavedMethodForAutoSecure).not.toHaveBeenCalled();
+    expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test('preview: a customer with a consented saved card is refused — the bar never enrolls one — and the channel is never read', async () => {
+    autopay.findSavedMethodForAutoSecure.mockResolvedValue({ id: 'pm-1', stripe_payment_method_id: 'pm_synthetic' });
+    for (const delivery of ['sms', 'email']) {
+      const refused = await run({ delivery });
+      expect(refused).toMatchObject({ blocked: true, code: 'saved_method_available' });
+      expect(refused.error).toBe('This customer has a saved card on file. Enrolling it turns Auto Pay on for the account, which is a billing change the bar does not make — do it from the Customers page.');
+    }
+    expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+    expect(JSON.stringify(autopay.findSavedMethodForAutoSecure.mock.calls)).toBe(JSON.stringify([[CUSTOMER_ID], [CUSTOMER_ID]]));
+  });
+
+  test.each([
+    ['sms', 'no_customer_phone', 'This customer has no phone number on file — nothing to text.'],
+    ['sms', 'autopay_sms_gate_off', 'Auto Pay customer texts are switched off (GATE_AUTOPAY_CUSTOMER_SMS)'],
+    ['sms', 'template_inactive', 'The Auto Pay setup text is inactive in Templates — activate it before texting a setup link'],
+    ['sms', 'sms_policy_check_uncertain', "Could not read this customer's texting consent or suppression state — try again in a moment"],
+    ['sms', 'sms_line_type_check_uncertain', 'Could not check whether this number can receive texts — try again in a moment'],
+    ['sms', 'Recipient is suppressed (reason: opt_out_keyword)', 'The Auto Pay setup link was not sent: Recipient is suppressed (reason: opt_out_keyword)'],
+    ['email', 'no_customer_email', 'This customer has no valid email address on file — nothing to email.'],
+    ['email', 'email_opted_out', 'This customer has opted out of email — nothing to email.'],
+    ['email', 'email_prefs_check_uncertain', "Could not read this customer's email preference — try again in a moment"],
+    ['email', 'email_template_inactive', 'The Auto Pay setup email is inactive in Email Templates — activate it before emailing a setup link.'],
+    ['email', 'email_template_check_uncertain', 'Could not check the Auto Pay setup email template — try again in a moment'],
+    ['email', 'Suppressed: bounce', 'The Auto Pay setup link was not sent: Suppressed: bounce'],
+  ])('preview (%s): the service\'s delivery preflight reason "%s" is refused in the operator\'s words', async (delivery, reason, words) => {
+    autopay.autopayDeliveryPreflight.mockResolvedValue({ ok: false, reason });
+    expect(await run({ delivery })).toMatchObject({ blocked: true, error: words });
+    expect(autopay.autopayDeliveryPreflight).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, customer: AP_CUSTOMER, delivery, trigger: 'admin' });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test('preview: a text needs a full 10-digit US number (the pin is the last ten digits)', async () => {
+    autopay.setupLinkIneligibility.mockResolvedValue({ reason: null, customer: { ...AP_CUSTOMER, phone: '555-0123' } });
+    expect(await run({ delivery: 'sms' })).toMatchObject({ blocked: true, code: 'no_customer_phone' });
+    expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
+  });
+
+  test('preview: an unexpired existing setup link is RE-SENT as it is — the card says so, with its expiry in ET, and pins it', async () => {
+    const expires = new Date(Date.now() + 9 * 24 * 3600 * 1000);
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: expires });
+    const sms = await run({});
+    expect(sms).toMatchObject({ preview: true, link: 'existing', _version: { ...SMS_PIN, link_expires_at: expires.toISOString() } });
+    expect(sms.does).toMatch(/^re-sends the customer's existing Auto Pay setup link, which expires [A-Z][a-z]+ \d{1,2} at \d{1,2}:\d{2} [AP]M ET, by text to \*\*\*0123/);
+    const email = await run({ delivery: 'email' });
+    expect(email.does).toMatch(/by email to f•••@example\.com/);
+    expect(email._version.link_expires_at).toBe(expires.toISOString());
+  });
+
+  test('preview: an existing link that expires within 24 hours is refused — it would reach the customer nearly dead — and a link mid-completion is held', async () => {
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: new Date(Date.now() + 3 * 3600 * 1000) });
+    const soon = await run({});
+    expect(soon).toMatchObject({ blocked: true, code: 'existing_link_expiring' });
+    expect(soon.error).toMatch(/^The customer's existing Auto Pay setup link expires .* ET, too soon to re-send\. Once it expires, send again and a fresh 30-day link is created\.$/);
+    // Just over 24 hours is fine.
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: new Date(Date.now() + 25 * 3600 * 1000) });
+    expect((await run({})).preview).toBe(true);
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'completing', expiresAt: null });
+    expect(await run({})).toMatchObject({ blocked: true, code: 'completion_in_progress' });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test('confirmed: the link the card described is pinned — an expiry that changed (new link now, a different one, a lapsed one) refuses before the service', async () => {
+    const expires = new Date(Date.now() + 9 * 24 * 3600 * 1000);
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: expires });
+    const card = await run({});
+    expect(await run({ confirmed: true, _verified_autopay_version: card._version })).toMatchObject({ success: true });
+    autopay.requestAutopaySetupLink.mockClear();
+    // The existing link lapsed after the card: a new one would be minted — not what the card said.
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'new', expiresAt: null });
+    expect(await run({ confirmed: true, _verified_autopay_version: card._version })).toMatchObject({ preview_changed: true });
+    // ...and the other way round: a card for a new link, an existing one appeared.
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: expires });
+    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ preview_changed: true });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test('preview: the clean card for a text (the default) and for an email — masked recipient, pin, notifies the customer, no link', async () => {
+    const sms = await run({});
+    expect(sms).toMatchObject({
+      preview: true, delivery: 'sms', customer_name: 'Customer Fixture', recipient: '***0123', reaches: 'text to ***0123', notifies_customer: true,
+      _version: SMS_PIN,
+    });
+    expect(sms).toMatchObject({ link: 'new' });
+    expect(sms.does).toMatch(/creates a new Auto Pay setup link, valid 30 days, and texts it to \*\*\*0123/);
+    const email = await run({ delivery: 'email' });
+    expect(email).toMatchObject({
+      preview: true, delivery: 'email', recipient: 'f•••@example.com', reaches: 'email to f•••@example.com', notifies_customer: true,
+      _version: EMAIL_PIN,
+    });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+    // The card text never carries the link or the unmasked contact (only the pin, which the route keeps off the card).
+    const { _version: _a, ...smsCard } = sms;
+    const { _version: _b, ...emailCard } = email;
+    expect(JSON.stringify([smsCard, emailCard])).not.toMatch(/secure|9415550123|fixture@example/i);
+  });
+
+  test('confirmed: a missing pin or a contact changed since the card never reaches the service', async () => {
+    expect(await run({ confirmed: true })).toEqual({ error: 'Use the confirmation card to approve this change.' });
+    expect(await run({ confirmed: true, _verified_autopay_version: { ...SMS_PIN, phone_last10: '9415559999' } })).toMatchObject({ preview_changed: true });
+    expect(await run({ confirmed: true, delivery: 'email', _verified_autopay_version: { ...EMAIL_PIN, email: 'old@example.com' } })).toMatchObject({ preview_changed: true });
+    expect(await run({ confirmed: true, delivery: 'email', _verified_autopay_version: SMS_PIN })).toMatchObject({ preview_changed: true });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test('confirmed: re-reads the service checks, then makes ONE call with exactly the guarded options and the recipient the card showed', async () => {
+    const sent = await run({ confirmed: true, _verified_autopay_version: SMS_PIN });
+    expect(autopay.requestAutopaySetupLink).toHaveBeenCalledTimes(1);
+    expect(autopay.requestAutopaySetupLink).toHaveBeenCalledWith({
+      customerId: CUSTOMER_ID, delivery: 'sms', trigger: 'admin', requireDeliverable: true, allowAutoSecure: false, expectedRecipient: { phoneLast10: '9415550123' },
+    });
+    expect(sent).toMatchObject({ success: true, sent: true, channel: 'sms', recipient: '***0123', expires_at: '2026-11-12T00:00:00Z' });
+
+    autopay.requestAutopaySetupLink.mockClear();
+    autopay.requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'sent', channel: 'email', secureUrl: BEARER });
+    const mailed = await run({ delivery: 'email', confirmed: true, _verified_autopay_version: EMAIL_PIN });
+    expect(autopay.requestAutopaySetupLink).toHaveBeenCalledWith({
+      customerId: CUSTOMER_ID, delivery: 'email', trigger: 'admin', requireDeliverable: true, allowAutoSecure: false, expectedRecipient: { email: 'fixture@example.com' },
+    });
+    expect(mailed).toMatchObject({ success: true, channel: 'email', recipient: 'f•••@example.com' });
+    expect(mailed.summary).toMatch(/sent by email to f•••@example.com/);
+  });
+
+  test('confirmed: a state that turned ineligible, got a saved card, or cannot deliver now is refused before the service', async () => {
+    autopay.findSavedMethodForAutoSecure.mockResolvedValue({ id: 'pm-1' });
+    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ blocked: true, code: 'saved_method_available' });
+    autopay.findSavedMethodForAutoSecure.mockResolvedValue(null);
+    autopay.autopayDeliveryPreflight.mockResolvedValue({ ok: false, reason: 'email_opted_out' });
+    expect(await run({ delivery: 'email', confirmed: true, _verified_autopay_version: EMAIL_PIN })).toMatchObject({ blocked: true, code: 'email_opted_out' });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['recipient_changed', /phone number or email changed after the card was shown/],
+    ['saved_method_available', /saved card on file/],
+    ['template_inactive', /inactive in Templates/],
+    ['autopay_sms_gate_off', /switched off/],
+    ['completion_in_progress', /finishing an Auto Pay setup right now/],
+    ['Recipient is suppressed (reason: opt_out_keyword)', /was not sent: Recipient is suppressed/],
+  ])('confirmed: a service skip "%s" is a definite refusal — nothing was sent', async (reason, words) => {
+    autopay.requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'skipped', reason, secureUrl: BEARER, expiresAt: 'x' });
+    const refused = await run({ confirmed: true, _verified_autopay_version: SMS_PIN });
+    expect(refused).toMatchObject({ blocked: true, sent: false });
+    expect(refused.error).toMatch(words);
+    expect(refused.outcome_unknown).toBeUndefined();
+    expect(JSON.stringify(refused)).not.toMatch(/secure\/|AbCdEf/);
+  });
+
+  test.each(['send_outcome_uncertain', 'request_failed'])('confirmed: "%s" is an unknown outcome — check the customer\'s messages before trying again', async (reason) => {
+    autopay.requestAutopaySetupLink.mockResolvedValue({ requested: false, action: 'skipped', reason, secureUrl: BEARER });
+    const result = await run({ confirmed: true, _verified_autopay_version: SMS_PIN });
+    expect(result).toMatchObject({ outcome_unknown: true, code: reason });
+    expect(result.error).toMatch(/Check the customer's messages before trying again/);
+    expect(JSON.stringify(result)).not.toMatch(/secure\/|AbCdEf/);
+  });
+
+  test('confirmed: a throw after approval is an unknown outcome, never a retry invitation; an unexpected link_created / auto_secured is a refusal', async () => {
+    autopay.requestAutopaySetupLink.mockRejectedValue(new Error('provider down'));
+    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
+    for (const action of ['link_created', 'auto_secured']) {
+      autopay.requestAutopaySetupLink.mockResolvedValue({ requested: true, action, secureUrl: BEARER });
+      const odd = await run({ confirmed: true, _verified_autopay_version: SMS_PIN });
+      expect(odd).toMatchObject({ blocked: true, sent: false });
+      expect(odd.success).toBeUndefined();
+      expect(JSON.stringify(odd)).not.toMatch(/secure\/|AbCdEf/);
+    }
+  });
+
+  test('an unreadable service check on the preview is not a card (fail closed)', async () => {
+    autopay.findSavedMethodForAutoSecure.mockRejectedValue(new Error('db down'));
+    expect(await run({})).toEqual({ error: 'Could not prepare the Auto Pay setup link' });
+    expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
+  });
+});
+
 describe('customerLinkSendRefusal (comms-tools)', () => {
   const { customerLinkSendRefusal } = require('../services/intelligence-bar/comms-tools');
 
@@ -270,6 +504,31 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
 
     links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [{ kind: 'estimate', token: 'gone' }] });
     expect(await customerLinkSendRefusal('See: portal.wavespestcontrol.com/estimate/gone', '+19415550123', CUSTOMER_ID)).toMatchObject({ code: 'customer_link_unverified' });
+  });
+
+  describe('a portal host broken by a URL-dropped character (TAB, CR, LF)', () => {
+    const TOKEN = 'AbCdEfGhIjKlMnOpQrSt';
+    test.each([['%09'], ['%0A'], ['%0D'], ['%2509']])('inside a foreign URL (%s): refused in both SMS phases and the email phase', async (esc) => {
+      links.autopayLinkSendCheck.mockResolvedValue({ present: false });
+      links.bearerLinkSendCheck.mockResolvedValue({ ok: true });
+      const body = `See https://other.example/?next=https://port${esc}al.wavespestcontrol.com/pay/${TOKEN}`;
+      for (const phase of ['proposal', 'commit']) {
+        expect(await customerLinkSendRefusal(body, '+19415550123', CUSTOMER_ID, { phase })).toMatchObject({ blocked: true, code: 'customer_link_refused' });
+      }
+      // The email path: the rendered text surfaces the nested portal link as its own run, and the owned-link refusal sees it.
+      const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
+      expect(renderedTextForLinkCheck(body).split(/\s+/)).toContain(`portal.wavespestcontrol.com/pay/${TOKEN}`);
+      links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['portal_link'] });
+      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    });
+
+    test('a raw tab or newline left in an HTML reply body is dropped like the URL parser does, so the email path still surfaces the link', () => {
+      const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
+      for (const gap of ['\t', '\n', '\r']) {
+        const run = renderedTextForLinkCheck(`<a href="https://other.example/?next=https://port${gap}al.wavespestcontrol.com/pay/${TOKEN}">x</a>`).split(/\s+/);
+        expect(run.some((r) => r.startsWith(`portal.wavespestcontrol.com/pay/${TOKEN}`))).toBe(true);
+      }
+    });
   });
 
   describe('a link encoded past the scan cap', () => {

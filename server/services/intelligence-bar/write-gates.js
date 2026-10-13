@@ -87,6 +87,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'repair_closeout',
   'resend_receipt',
   'create_customer_link',
+  'send_autopay_setup_link',
   'remove_saved_payment_method',
   'correct_invoice_address',
   // send_invoice (owner ruling 2026-10-07): an existing invoice only,

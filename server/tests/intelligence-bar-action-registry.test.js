@@ -349,7 +349,7 @@ const SCOPE_SNAPSHOT = {
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
     'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address',
     // create_customer_link carries customer_id: the link is that customer's own.
-    'create_customer_link',
+    'create_customer_link', 'send_autopay_setup_link',
     // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).
     'send_invoice',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
