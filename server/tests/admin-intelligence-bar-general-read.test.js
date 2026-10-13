@@ -281,3 +281,78 @@ describe('find_admin_reads carries PII in its query', () => {
     expect(everythingKept()).not.toContain(NAME);
   });
 });
+
+// Codex round 3 (security): after the general read returned data, the rest of
+// the request cannot run an owner-direct edit without a card. The per-request
+// flag is read where owner-direct plans each model message (the direct commit
+// itself needs a database and is covered by the platform suite's gate).
+describe('untrusted read data and owner-direct edits', () => {
+  const OwnerDirect = require('../services/intelligence-bar/owner-direct');
+  let seen;
+  let spy;
+  let gateBefore;
+  beforeEach(() => {
+    gateBefore = process.env.GATE_IB_OWNER_DIRECT;
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
+    seen = [];
+    const real = OwnerDirect.messageDirectPlan;
+    spy = jest.spyOn(OwnerDirect, 'messageDirectPlan').mockImplementation((toolUses, isValid, taint) => {
+      seen.push({ tools: toolUses.map(t => t.name), untrusted: taint?.untrustedRead === true });
+      return real(toolUses, isValid, taint);
+    });
+  });
+  afterEach(() => {
+    spy.mockRestore();
+    if (gateBefore === undefined) delete process.env.GATE_IB_OWNER_DIRECT; else process.env.GATE_IB_OWNER_DIRECT = gateBefore;
+  });
+
+  const edit = { customer_id: '10000000-0000-4000-8000-00000000000a', updates: { city: 'Bradenton' } };
+  const run = async (steps) => {
+    scriptModel(steps);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, OWNER, { prompt: 'check the admin screen then fix the city', context: 'dashboard', session_id: 'session-1' });
+      expect(status).toBe(200);
+    });
+  };
+  const readCall = id => toolUse(id, 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: 'abc-1' } });
+
+  test('a read that returned data taints the rest of the request, and a later edit is planned with the flag', async () => {
+    await run([
+      toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
+      readCall('t2'),
+      toolUse('t3', 'update_customer', edit),
+      { content: [{ type: 'text', text: 'Done.' }] },
+    ]);
+    expect(loopbackCalls).toHaveLength(1);
+    const editRound = seen.find(entry => entry.tools.includes('update_customer'));
+    expect(editRound.untrusted).toBe(true);
+    expect(seen.find(entry => entry.tools.includes('read_admin_data')).untrusted).toBe(false);
+  });
+
+  test('without the read, the same edit is planned as before', async () => {
+    await run([
+      toolUse('t1', 'update_customer', edit),
+      { content: [{ type: 'text', text: 'Done.' }] },
+    ]);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every(entry => entry.untrusted === false)).toBe(true);
+  });
+
+  test('a read that failed does not taint', async () => {
+    global.fetch.mockImplementation(async (url, options) => {
+      if (String(url).startsWith(LOOPBACK)) {
+        loopbackCalls.push({ url: String(url), headers: { ...options.headers } });
+        return { status: 404, headers: { get: key => ({ 'content-type': 'application/json' }[String(key).toLowerCase()] ?? null) }, text: async () => JSON.stringify({ error: 'Not found' }) };
+      }
+      return realFetch(url, options);
+    });
+    await run([
+      toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
+      readCall('t2'),
+      toolUse('t3', 'update_customer', edit),
+      { content: [{ type: 'text', text: 'Done.' }] },
+    ]);
+    expect(loopbackCalls).toHaveLength(1);
+    expect(seen.find(entry => entry.tools.includes('update_customer')).untrusted).toBe(false);
+  });
+});

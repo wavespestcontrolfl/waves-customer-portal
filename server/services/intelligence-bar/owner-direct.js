@@ -28,6 +28,9 @@
  * parse cohorts" (2026-09-08). Every other admin login and every technician
  * keeps both, gate on or off. IB_WRITES_DISABLED still stops every write.
  *
+ * After a general admin read (`read_admin_data`) returned data, nothing in the
+ * rest of the request runs direct: see UNTRUSTED READS below.
+ *
  * No customer communication: nothing on the list sends a customer text or
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
@@ -103,7 +106,7 @@ const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().rep
 // `preview` is the mutation-free preview the proposal just ran (two-step
 // tools); the decision reads it where the input alone cannot tell a single
 // record from a group.
-function executesWithoutCard(toolName, input = {}, preview = null) {
+function directEditAllowed(toolName, input = {}, preview = null) {
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName)) return false;
   // assign_technician takes a list of stops; one stop is an internal edit,
   // several is a bulk change and keeps its card (pre-push P1). A lone stop
@@ -150,6 +153,49 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
   return true;
 }
 
+// UNTRUSTED READS. Text inside a read result can be typed by anyone (a
+// customer name a public quote visitor entered) and can read like an
+// instruction to the next model round. Once the general admin read
+// (`read_admin_data`) has returned data in a request, no write in the REST of
+// that request executes without a card: the owner-direct decisions above all
+// return false when this per-request flag is set, so the write is carded
+// exactly like a non-owner admin's. The flag lives in one `requestTaint`
+// object the route creates once per request (seeded from the saved history, so
+// a resumed task keeps it) and passes to the three decision functions. Scope:
+// this covers the general read only, because its catalog is broad and grows by
+// review; other read tools are unchanged by this rule.
+const GENERAL_READ_TOOL = 'read_admin_data';
+
+// A general-read result that carries data: a 2xx answer with a `data` field.
+// An error, a refusal or a bare note does not taint.
+function isDataAnswer(result) {
+  return Boolean(result) && typeof result === 'object' && !result.error && !result.code
+    && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
+}
+
+function noteUntrustedRead(taint, toolName, result) {
+  if (taint && toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+}
+
+// Pure: does a saved message history hold a general read that returned data?
+// A read with no saved result (the runner stopped between the call and its
+// result) counts as returned, so a resume fails closed.
+function untrustedReadInHistory(messages) {
+  const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
+  const readIds = blocks.filter(block => block?.type === 'tool_use' && block.name === GENERAL_READ_TOOL).map(block => block.id);
+  if (!readIds.length) return false;
+  const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
+  return readIds.some((id) => {
+    const answer = answers.get(id);
+    if (!answer) return true;
+    try { return isDataAnswer(JSON.parse(answer.content)); } catch { return true; }
+  });
+}
+
+function newRequestTaint(history) {
+  return { untrustedRead: untrustedReadInHistory(history) };
+}
+
 // Bulk cap (owner ruling 2026-10-02): one request may make at most two
 // direct edits with the same tool; three or more get one bulk card instead,
 // so "mark these leads lost" cannot fan a bulk change out into card-free
@@ -167,8 +213,8 @@ const DIRECT_CAP = 3;
 const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
-// The preview-free half of executesWithoutCard: could this call run direct?
-function mayExecuteWithoutCard(toolName, input = {}) {
+// The preview-free half of directEditAllowed: could this call run direct?
+function directEditPossible(toolName, input = {}) {
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName)) return false;
   if (toolName === 'assign_technician') return Array.isArray(input?.service_ids) && input.service_ids.length === 1;
   if (toolName === 'update_lead_contact' || toolName === 'update_lead_status') return Boolean(input?.lead_id) && !input.lead_name;
@@ -180,6 +226,16 @@ function mayExecuteWithoutCard(toolName, input = {}) {
     return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
   }
   return true;
+}
+
+// The two decisions the route asks, each checking the per-request flag first
+// (UNTRUSTED READS above): after a general read returned data, never direct.
+function executesWithoutCard(toolName, input = {}, preview = null, taint = null) {
+  return taint?.untrustedRead ? false : directEditAllowed(toolName, input, preview);
+}
+
+function mayExecuteWithoutCard(toolName, input = {}, taint = null) {
+  return taint?.untrustedRead ? false : directEditPossible(toolName, input);
 }
 
 // Direct commits already made for this task, by tool (proposePendingWrite
@@ -209,10 +265,10 @@ async function seedDirectCounts(task, dbh = null) {
   return counts;
 }
 
-function messageDirectPlan(toolUses, isValid = () => true) {
+function messageDirectPlan(toolUses, isValid = () => true, taint = null) {
   const plan = new Map();
   for (const toolUse of toolUses || []) {
-    if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
+    if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
   return plan;
 }
@@ -319,4 +375,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
