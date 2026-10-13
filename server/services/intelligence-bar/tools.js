@@ -3086,15 +3086,19 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
   }
   const catalogRow = match.row;
+  // Every classification below reads the RESOLVED catalog name (a close phrase
+  // like "trap follow" is the free "Rodent Trapping Follow-Up Visit"), so the
+  // proposal, the executor and the locked recheck all see the same service.
+  const bookedType = bookedServiceTypeFor({ catalogRow }, serviceType);
   // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
   // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
   if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
     return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
   }
   const stated = statedPrice !== undefined && statedPrice !== null;
-  if (isAlwaysFreeServiceType(serviceType)) {
+  if (isAlwaysFreeServiceType(bookedType)) {
     if (stated) {
-      return { error: `"${serviceType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
+      return { error: `"${bookedType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
     }
     return { price: null, source: null, catalogRow, pricing: null };
   }
@@ -3182,7 +3186,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     : false;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
-    serviceType,
+    serviceType: bookedType,
     serviceId: catalogRow.id,
     primaryLinePrice: stated ? statedPrice : catalogDefault,
     ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.row.id } } : {}),
@@ -3326,7 +3330,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
   if (booking.error) return { error: booking.error };
-  const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
+  const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
   if (request?.error) return { error: request.error };

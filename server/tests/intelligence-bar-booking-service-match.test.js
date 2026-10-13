@@ -118,8 +118,44 @@ describe('resolveCloseCatalogService', () => {
     test('the services.frequency column counts as identity when the name says nothing', () => {
       const hidden = { id: 'svc-h', name: 'Rodent Bait Station Service', short_name: null, frequency: 'monthly' };
       expect(resolveCloseCatalogService([hidden], 'rodent bait station')).toEqual({ row: null });
+      expect(resolveCloseCatalogService([hidden], 'monthly rodent bait station')).toEqual({ row: hidden });
       const everySix = { id: 'svc-e', name: 'Rodent Bait Station Service', short_name: null, frequency: 'every_6_weeks' };
       expect(resolveCloseCatalogService([everySix], 'rodent bait station')).toEqual({ row: null });
+    });
+  });
+  describe('spoken counts and the frequency column', () => {
+    const EVERY_SIX = { id: 'svc-e6', name: 'Every 6 Weeks Tree & Shrub Care Service', short_name: null };
+    const BAIT = { id: 'svc-bait', name: 'Termite Bait Station System', short_name: null, frequency: 'quarterly' };
+
+    test.each([
+      'every six weeks tree and shrub care',
+      'every 6 weeks tree & shrub',
+      'Every Six Week tree and shrub',
+    ])('"%s" resolves to the every-6-weeks row', (said) => {
+      expect(resolveCloseCatalogService([EVERY_SIX, ONE_TIME_PEST], said)).toEqual({ row: EVERY_SIX });
+    });
+
+    test('a different count, and a bare tree and shrub request, resolve nothing', () => {
+      expect(resolveCloseCatalogService([EVERY_SIX], 'every eight weeks tree and shrub')).toEqual({ row: null });
+      expect(resolveCloseCatalogService([EVERY_SIX], 'tree and shrub care')).toEqual({ row: null });
+    });
+
+    test('number words are turned into digits only when they count days, weeks or months', () => {
+      expect(phraseTokens('every six weeks')).toEqual(['cad:every6week']);
+      expect(phraseTokens('one time')).toEqual(['cad:onetime']);
+      expect(phraseTokens('a week')).toEqual(['a', 'week']);
+    });
+
+    test('a cadence stored only in the frequency column is matched when stated, and blocks a pick when not', () => {
+      expect(resolveCloseCatalogService([BAIT], 'quarterly termite bait station system')).toEqual({ row: BAIT });
+      expect(resolveCloseCatalogService([BAIT], 'monthly termite bait station system')).toEqual({ row: null });
+      expect(resolveCloseCatalogService([BAIT], 'termite bait station system')).toEqual({ row: null });
+    });
+
+    test('a stated cadence matches the column only for the row that carries it', () => {
+      const monthlyBait = { ...BAIT, id: 'svc-bait-m', frequency: 'monthly' };
+      expect(resolveCloseCatalogService([BAIT, monthlyBait], 'quarterly termite bait station system')).toEqual({ row: BAIT });
+      expect(names(resolveCloseCatalogService([BAIT, monthlyBait], 'termite bait station system').candidates)).toEqual([BAIT.name, monthlyBait.name]);
     });
   });
 });

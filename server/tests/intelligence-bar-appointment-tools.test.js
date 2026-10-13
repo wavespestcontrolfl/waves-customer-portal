@@ -1579,6 +1579,46 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(proposal).toMatchObject({ serviceId: 'svc-otp', bookedServiceType: 'One-Time Pest Control Service' });
     });
 
+    describe('a close phrase for an always-free visit type books that free visit, in the proposal and at commit', () => {
+      const TRAP_FOLLOW_UP = {
+        id: 'svc-tfu', name: 'Rodent Trapping Follow-Up Visit', short_name: 'Trap Follow-Up', service_key: 'rodent_trapping_followup',
+        base_price: '95.00', category: 'rodent',
+      };
+
+      test('the proposal pins no price and names the catalog service', async () => {
+        wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([TRAP_FOLLOW_UP, ...rows])] });
+        const proposal = await ibBookingProposal('cust-1', 'trap follow', undefined);
+        expect(proposal).toMatchObject({
+          price: null, source: null, serviceId: 'svc-tfu', serviceName: 'Rodent Trapping Follow-Up Visit', bookedServiceType: 'Rodent Trapping Follow-Up Visit',
+        });
+      });
+
+      test('Confirm commits it unpriced under the catalog name (preflight and locked pass agree)', async () => {
+        const insertChain = wirePriced({ rows: [TRAP_FOLLOW_UP, ...rows] });
+        const result = await book({ service_type: 'trap follow', _booking_price: null, _booking_service_id: 'svc-tfu' });
+        expect(result.success).toBe(true);
+        const inserted = insertChain.insert.mock.calls[0][0];
+        expect(inserted).toMatchObject({ service_type: 'Rodent Trapping Follow-Up Visit', service_id: 'svc-tfu' });
+        expect(inserted.estimated_price).toBeUndefined();
+      });
+
+      test('a stated price is refused exactly as it is for the exact name', async () => {
+        wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([TRAP_FOLLOW_UP, ...rows]), catalog([TRAP_FOLLOW_UP, ...rows])] });
+        const close = await ibBookingProposal('cust-1', 'trap follow', 125);
+        wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([TRAP_FOLLOW_UP, ...rows])] });
+        const exact = await ibBookingProposal('cust-1', 'Rodent Trapping Follow-Up Visit', 125);
+        expect(exact.error).toMatch(/free visit type/);
+        expect(close.error).toBe(exact.error);
+      });
+    });
+
+    test('an exact name that carries a frequency column is matched by the exact resolver, before the close-name one', async () => {
+      const BAIT = { id: 'svc-bait', name: 'Termite Bait Station System', short_name: null, service_key: 'termite_bait', base_price: '300.00', category: 'termite', frequency: 'quarterly' };
+      wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([BAIT, ...rows])] });
+      const proposal = await ibBookingProposal('cust-1', 'Termite Bait Station System', undefined);
+      expect(proposal).toMatchObject({ serviceId: 'svc-bait', bookedServiceType: 'Termite Bait Station System', price: 300 });
+    });
+
     test('several close services are listed for the user to choose from, and nothing is booked', async () => {
       wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog(rows)] });
       const result = await book({ service_type: 'pest control service', price: 90 });

@@ -15,6 +15,10 @@
 //      (a misspelling). A cadence word (one-time, quarterly, monthly,
 //      bi-monthly, annual, ...) is first turned into one canonical token and
 //      must be EQUAL: "bi-monthly" never matches "monthly".
+//      A counted cadence is read as digits ("every six weeks" = "every 6
+//      weeks"), and the services.frequency column counts as part of a row's
+//      identity: a stated "quarterly" matches a row sold quarterly even
+//      when its name never says it.
 //   3. Two spoken words may join to one name word and the reverse
 //      ("pre treat" / "pretreat"; name "Pre-Treat" / said "pretreat").
 //   4. Generic words (a, the, service, treatment, visit, job, appointment,
@@ -71,8 +75,18 @@ function repairCadenceSpelling(text) {
   return text.replace(/[a-z]{8,}/g, (word) => MISSPELLABLE_CADENCE.find((c) => levenshtein(word, c) === 1) || word);
 }
 
+// "every six weeks" -> "every 6 weeks". Only a number word that counts days,
+// weeks or months is turned into a digit, so the "one" of "one time" and the
+// "a" of "a week" stay as they are.
+const NUMBER_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+const NUMBER_WORD_RE = new RegExp(`\\b(${NUMBER_WORDS.join('|')})(?=[\\s-]+(?:day|week|month)s?\\b)`, 'g');
+
+function digitsForCountWords(text) {
+  return text.replace(NUMBER_WORD_RE, (word) => String(NUMBER_WORDS.indexOf(word) + 1));
+}
+
 function canonicalCadence(text) {
-  return CADENCE_PATTERNS.reduce((acc, [pattern, token]) => acc.replace(pattern, ` ${token} `), repairCadenceSpelling(text));
+  return CADENCE_PATTERNS.reduce((acc, [pattern, token]) => acc.replace(pattern, ` ${token} `), digitsForCountWords(repairCadenceSpelling(text)));
 }
 
 // "treatment" -> "treat", "pretreatment" -> "pretreat", "shrubs" -> "shrub".
@@ -124,20 +138,32 @@ function unsaidWords(searchTokens, nameTokens) {
   return nameTokens.filter((_, i) => !done[i]);
 }
 
+// The cadences the services.frequency column adds to a row's identity
+// ("quarterly", "every_6_weeks"). "one_time" adds nothing (a slab pre-treat has
+// no cadence to omit); a One-Time in the NAME is a cadence the operator must say.
+function frequencyCadences(row) {
+  if (!row.frequency) return [];
+  return phraseTokens(String(row.frequency).replace(/_/g, ' ')).filter((t) => isCadence(t) && t !== ONE_TIME_CADENCE);
+}
+
+// The words one alias of a row answers to: the alias plus the frequency
+// cadence, so a stated "quarterly" matches a row whose name never says it.
+function aliasTokens(row, alias) {
+  const tokens = phraseTokens(alias);
+  return tokens.concat(frequencyCadences(row).filter((t) => !tokens.includes(t)));
+}
+
 // A row answers to its name and its short name; the closer one counts.
 function rowUnsaid(searchTokens, row) {
   const fits = [row.name, row.short_name].filter(Boolean)
-    .map((name) => unsaidWords(searchTokens, phraseTokens(name))).filter((words) => words !== null);
+    .map((alias) => unsaidWords(searchTokens, aliasTokens(row, alias))).filter((words) => words !== null);
   return fits.length ? fits.reduce((best, words) => (words.length < best.length ? words : best)) : null;
 }
 
 // The cadences a service is sold at: the cadence words of its name and short
-// name, plus the services.frequency column ("quarterly", "every_6_weeks").
-// "one_time" in the column adds nothing (a slab pre-treat has no cadence to
-// omit); a One-Time in the NAME is a cadence the operator must have said.
+// name plus its frequency column, whichever alias the operator's words matched.
 function identityCadences(row) {
-  const fromColumn = row.frequency ? phraseTokens(String(row.frequency).replace(/_/g, ' ')).filter((t) => t !== ONE_TIME_CADENCE) : [];
-  return new Set([row.name, row.short_name].flatMap(phraseTokens).concat(fromColumn).filter(isCadence));
+  return new Set([row.name, row.short_name].flatMap(phraseTokens).concat(frequencyCadences(row)).filter(isCadence));
 }
 
 // True when the service is sold at a cadence the operator did not say.
