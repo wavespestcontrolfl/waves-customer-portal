@@ -218,7 +218,7 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     // Voice-agent sandbox test calls are ordinary inbound rows; they are never a promised visit.
-    .modify(whereNotSandboxCall)
+    .modify((qb) => whereNotSandboxCall(qb))
     .whereRaw('ai_extraction_enriched::text LIKE ANY(?)', [dateTexts])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'answered_by',
       'processing_status', 'v2_extraction_status', 'ai_extraction_enriched');
