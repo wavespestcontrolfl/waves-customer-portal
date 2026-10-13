@@ -1196,17 +1196,16 @@ const pushMapped = (out, item, line) => { out.work.push(line); out.lineByItem.se
 // twin carries the operator-accepted net, which outranks the mapped row's
 // lower alias (codex #6113 r37): that net is the line.
 function compedItemToWork(item, label, rawPool, taxabilityMap, out) {
-    if (claimExactZeroTwin(rawPool, item)) { out.comped.push(label); return; }
-    const twin = claimManualNetTwin(rawPool, item);
-    if (!twin) { out.comped.push(label); return; }
-    if (twinIsGated(rawPool, twin)) { pushGated(out, label); return; }
-    // Only a LOWER alias's zero is outranked: a mapped manualFinalOneTime
-    // of 0 is itself an operator decision, and a twin's different manual
-    // net is a conflict, never an override (codex #6113 r50).
-    const manualZero = zeroInFirstAlias(item, ['manualFinalOneTime']);
-    if (manualZero || twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) { out.conflicted.push(label); return; }
-    pushMapped(out, item, mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
-    
+  if (claimExactZeroTwin(rawPool, item)) { out.comped.push(label); return; }
+  const twin = claimManualNetTwin(rawPool, item);
+  if (!twin) { out.comped.push(label); return; }
+  if (twinIsGated(rawPool, twin)) { pushGated(out, label); return; }
+  // Only a LOWER alias's zero is outranked: a mapped manualFinalOneTime
+  // of 0 is itself an operator decision, and a twin's different manual
+  // net is a conflict, never an override (codex #6113 r50).
+  const manualZero = zeroInFirstAlias(item, ['manualFinalOneTime']);
+  if (manualZero || twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) { out.conflicted.push(label); return; }
+  pushMapped(out, item, mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
 }
 function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap, out) {
   for (const item of fromOneTime) {
