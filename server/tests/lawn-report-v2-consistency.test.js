@@ -1009,6 +1009,11 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(buildWateringBanner({ ...twoWindows, later: { at: 'not a date', state: 'water_in', lines: ['x'] } })).not.toHaveProperty('later');
     expect(buildWateringBanner({ ...twoWindows, later: { at: twoWindows.waterInBy, state: 'water_in', lines: [] } })).not.toHaveProperty('later');
     expect(buildWateringBanner(hold)).not.toHaveProperty('later');
+    // Rain covered the water-in (GATE_LAWN_WATER_IN_RAIN, read time): no later phase is left to announce.
+    const { coveredByRain } = require('../services/service-report/lawn-water-in-rain');
+    expect(coveredByRain(twoWindows)).not.toHaveProperty('later');
+    expect(buildWateringBanner(coveredByRain(twoWindows))).not.toHaveProperty('later');
+    expect(buildWateringBanner({ ...twoWindows, state: 'water_in_by_rain' })).not.toHaveProperty('later');
     const mixed = buildWateringInstruction({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
     expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-03T18:00:00.000Z' });
     // A hold that reaches the water-in deadline is followed by the water-in from the hold end (owner 2026-10-09).

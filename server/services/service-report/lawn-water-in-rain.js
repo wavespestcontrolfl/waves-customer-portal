@@ -155,13 +155,16 @@ async function resolveRainCoverage({
 /**
  * The instruction once rain has covered the water-in: state "water_in_by_rain", the two fixed sentences (a hold line
  * stays first). Every other field is the frozen one, so the hold times, the deadline and the expiry read as before.
- * The caller has checked appliesTo.
+ * The caller has checked appliesTo. A visit with a short water-in beside a 14-day one loses its later phase
+ * (instruction.later): the rain reached the largest amount any of its products asks (thresholdInches), so no water-in
+ * is left to announce once the short deadline passes.
  */
 function coveredByRain(instruction) {
   const holdLine = instruction.state === 'hold_then_water_in' && typeof instruction.lines[0] === 'string' && HOLD_LINE.test(instruction.lines[0])
     ? [instruction.lines[0]] : [];
+  const { later: _later, ...frozen } = instruction;
   return {
-    ...instruction,
+    ...frozen,
     state: COVERED_STATE,
     lines: [...holdLine, COPY.waterInByRainLine1, COPY.waterInByRainLine2],
     rainCovered: true,
