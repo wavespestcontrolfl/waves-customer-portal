@@ -38,7 +38,7 @@ jest.mock('../middleware/admin-auth', () => ({
   // from this same mock at its own require time. Without it here the whole
   // chain throws at require() (undefined route middleware), not inside this
   // test's own code.
-  requireAdmin: (_req, _res, next) => next(),
+  requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 
 const express = require('express');
@@ -137,7 +137,27 @@ function makeFakeDb(seed = {}) {
   }
   const conn = (table) => builder(String(table).split(' ')[0]);
   conn.transaction = async (fn) => fn(conn);
-  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  // boundCardsForActiveHolds (the real SQL is pinned by no-text-held-lines-postgres.test.js): a text card binds a
+  // hold when its hold_bindings list names (line, held_at); a card with no list and no ani_phone (the shape most
+  // fixtures here use) stands for every hold of its call.
+  const sameInstant = (a, b) => new Date(a).getTime() === new Date(b).getTime();
+  const bindsHold = (card, hold) => {
+    const list = card.payload?.hold_bindings;
+    if (list) return list.some((b) => b.line_e164 === hold.phone_e164 && sameInstant(b.held_at, hold.held_at));
+    return card.payload?.ani_phone ? String(card.payload.ani_phone).replace(/\D/g, '').slice(-10) === hold.phone_e164.replace(/\D/g, '').slice(-10) : true;
+  };
+  conn.raw = (sql, bindings) => {
+    if (/FROM disclaimed_number_holds h\s+JOIN triage_items t ON/.test(sql)) {
+      const pairs = [];
+      for (const hold of ensure('disclaimed_number_holds').filter((h) => h.source_call_log_id === bindings[0] && h.cleared_at == null)) {
+        const cards = ensure('triage_items').filter((t) => t.call_log_id === hold.source_call_log_id && t.reason_code === 'text_number_differs' && bindsHold(t, hold))
+          .sort((x, y) => (String(x.created_at) < String(y.created_at) ? 1 : -1));
+        for (const card of cards) pairs.push({ phone_e164: hold.phone_e164, card_id: card.id });
+      }
+      return { rows: pairs.sort((x, y) => (x.phone_e164 < y.phone_e164 ? -1 : x.phone_e164 > y.phone_e164 ? 1 : 0)) };
+    }
+    return { __raw: sql, bindings };
+  };
   conn.schema = { hasTable: async () => false };
   return { conn, tables };
 }
@@ -701,11 +721,394 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
-  test('technicians can use it exactly as they can the callback_number_needed card (no admin-only gate on either)', async () => {
+  test('releasing a NAMED line (the held-lines panel) is admin only: a technician gets 403 and nothing changes', async () => {
+    mockRole = 'technician';
+    const fx = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true, line_e164: '+19415551234' });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Admin access required' });
+    });
+    expect(fx.tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('open');
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
+  });
+
+  test('technicians can still use the inbox-card release (no line named) exactly as the callback_number_needed card', async () => {
     mockRole = 'technician';
     const cb = await run([cbCard()], 'resolve', 'card-cb');
     expect(cb.tables.triage_items[0].status).toBe('resolved');
     const tx = await run([textCard()], 'resolve', CARD_ID, { line_can_get_texts: true });
     expect(numberHold(tx.tables).cleared_at).toBeInstanceOf(Date);
+  });
+
+  // Lock order for a "Line can get texts" release (#6112 r15 follow-up): per-call triage lock, then the
+  // phone-wide advisory lock, then the first hold row write. Two staff releasing one shared line from
+  // cards on different calls then queue on the phone lock instead of crossing row locks.
+  describe('phone-wide lock before any hold row is touched', () => {
+    const LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtext(?))';
+    const { lockTriageCall } = require('../utils/triage-locks');
+
+    // Same fake db, with every lock and every hold-row write appended to one event list.
+    function loggedDb(triage_items) {
+      const fx = fixture({ triage_items });
+      const events = [];
+      lockTriageCall.mockImplementation(async (_trx, callId) => { events.push(`triage-lock:${callId}`); });
+      const inner = fx.conn;
+      const conn = (table) => {
+        const b = inner(table);
+        if (table === 'disclaimed_number_holds') {
+          const update = b.update;
+          b.update = async (...a) => { events.push('hold-update'); return update(...a); };
+        }
+        return b;
+      };
+      conn.transaction = async (fn) => fn(conn);
+      conn.schema = inner.schema;
+      conn.raw = (sql, bindings) => {
+        if (sql === LOCK_SQL) events.push(`phone-lock:${bindings[0]}`);
+        else if (/UPDATE disclaimed_number_holds/.test(sql)) events.push('hold-update');
+        return inner.raw(sql, bindings);
+      };
+      wireDb(db, { conn });
+      return { ...fx, events };
+    }
+    const base2 = { call_log_id: CALL_ID, status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory' };
+    const textCard2 = (over = {}) => ({ id: CARD_ID, reason_code: 'text_number_differs', payload: { no_text_hold: true }, ...base2, ...over });
+    afterEach(() => lockTriageCall.mockImplementation(async () => {}));
+
+    test.each([['open card', 'open'], ['closed card', 'resolved']])('release from an %s: triage lock, then the phone lock, then the first hold write', async (_n, status) => {
+      const fx = loggedDb([textCard2({ status })]);
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base2.updated_at, line_can_get_texts: true });
+        expect(res.status).toBe(200);
+      });
+      const firstHoldWrite = fx.events.findIndex((e) => e === 'hold-update');
+      const phoneLock = fx.events.findIndex((e) => e.startsWith('phone-lock:'));
+      expect(phoneLock).toBeGreaterThan(-1);
+      expect(firstHoldWrite).toBeGreaterThan(phoneLock);
+      expect(fx.events.indexOf(`triage-lock:${CALL_ID}`)).toBeLessThan(phoneLock);
+      expect(fx.events[phoneLock]).toBe('phone-lock:no_text_line:+19415551234');
+      expect(numberHold(fx.tables).cleared_at).toBeInstanceOf(Date);
+    });
+
+    test('a release that is deferred (open "not my number" card) takes no phone lock and touches no hold row', async () => {
+      const fx = loggedDb([textCard2(), { id: 'card-cb', reason_code: 'callback_number_needed', payload: {}, ...base2 }]);
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base2.updated_at, line_can_get_texts: true })).status).toBe(200);
+      });
+      expect(fx.events.filter((e) => e.startsWith('phone-lock:') || e === 'hold-update')).toEqual([]);
+      expect(numberHold(fx.tables).cleared_at).toBeNull();
+    });
+
+    test('Resolve without line_can_get_texts never takes the phone lock', async () => {
+      const fx = loggedDb([textCard2()]);
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base2.updated_at })).status).toBe(200);
+      });
+      expect(fx.events.filter((e) => e.startsWith('phone-lock:'))).toEqual([]);
+    });
+  });
+});
+
+// A call can hold several lines (#6292 codex r1 P1). The held-lines panel names the line it releases; the
+// inbox card names none and releases every line the call holds.
+describe('line_e164: release the selected line, across calls', () => {
+  const X = '+19415551234';
+  const Y = '+19415557777';
+  const base = { status: 'resolved', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory' };
+  const text = (id, callId, over = {}) => ({ id, call_log_id: callId, reason_code: 'text_number_differs', payload: { no_text_hold: true }, ...base, ...over });
+  const hold = (id, phone, callId, heldAt) => ({ id, phone_e164: phone, source_call_log_id: callId, customer_id: null, held_at: heldAt, cleared_at: null });
+
+  // call-1 holds X (older) and Y (newer); call-2 holds X; call-3 holds Y. Each call has its release card.
+  function multiLine(over = {}) {
+    const fx = fixture({
+      triage_items: [text(CARD_ID, CALL_ID), text('card-2', 'call-2'), text('card-3', 'call-3')],
+      disclaimed_number_holds: [
+        hold('c1x', X, CALL_ID, '2030-01-01T10:00:00Z'), hold('c1y', Y, CALL_ID, '2030-01-02T10:00:00Z'),
+        hold('c2x', X, 'call-2', '2030-01-03T10:00:00Z'), hold('c3y', Y, 'call-3', '2030-01-04T10:00:00Z'),
+      ],
+      ...over,
+    });
+    const inner = fx.conn;
+    const events = [];
+    const conn = (table) => inner(table);
+    conn.transaction = async (fn) => fn(conn);
+    conn.schema = inner.schema;
+    // clearNoTextHoldsForPhone is one raw UPDATE; the fake db needs to apply it to the in-memory rows.
+    conn.raw = (sql, bindings) => {
+      if (sql === 'SELECT pg_advisory_xact_lock(hashtext(?))') { events.push(`lock:${bindings[0]}`); return {}; }
+      if (/SELECT DISTINCT h\.phone_e164/.test(sql)) {
+        // linesBlockedByOwnershipCard: ANY active hold on the line whose call has an unresolved ownership card
+        const cards = fx.tables.triage_items;
+        const rows = fx.tables.disclaimed_number_holds.filter((h) => bindings.includes(h.phone_e164) && h.cleared_at == null
+          && cards.some((d) => d.call_log_id === h.source_call_log_id && d.reason_code === 'callback_number_needed' && d.status !== 'resolved'
+            && (d.payload?.no_text_hold !== true || d.payload?.ownership_disclaimed === true)));
+        return { rows: [...new Set(rows.map((h) => h.phone_e164))].map((phone_e164) => ({ phone_e164 })) };
+      }
+      if (/UPDATE disclaimed_number_holds/.test(sql)) {
+        const [, , key, except] = bindings;
+        const hit = fx.tables.disclaimed_number_holds.filter((h) => h.phone_e164 === key && h.cleared_at == null && h.source_call_log_id !== except
+          && fx.tables.triage_items.some((t) => t.call_log_id === h.source_call_log_id && t.reason_code === 'text_number_differs'));
+        hit.forEach((h) => { h.cleared_at = new Date(); events.push(`clear:${h.id}`); });
+        return { rows: hit.map((h) => ({ source_call_log_id: h.source_call_log_id })) };
+      }
+      return inner.raw(sql, bindings);
+    };
+    wireDb(db, { conn });
+    return { ...fx, events };
+  }
+  const active = (tables) => tables.disclaimed_number_holds.filter((h) => h.cleared_at == null).map((h) => h.id).sort();
+  const release = async (body, id = CARD_ID) => {
+    let out;
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${id}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true, ...body });
+      out = { status: res.status, json: await res.json() };
+    });
+    return out;
+  };
+
+  test('selecting the OLDER line X clears X on this call and on the other call, and leaves Y alone everywhere', async () => {
+    const fx = multiLine();
+    const out = await release({ line_e164: X });
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [X] });
+    expect(active(fx.tables)).toEqual(['c1y', 'c3y']); // Y on call-1 and call-3 untouched
+    expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${X}`]);
+  });
+
+  test('a differently formatted line number selects the same line', async () => {
+    const fx = multiLine();
+    expect((await release({ line_e164: '(941) 555-7777' })).status).toBe(200);
+    expect(active(fx.tables)).toEqual(['c1x', 'c2x']);
+  });
+
+  test('a line this call does not actively hold is a 409 NO_TEXT_LINE_NOT_HELD and clears nothing (closed card)', async () => {
+    const fx = multiLine();
+    const out = await release({ line_e164: '+19415550000' });
+    expect(out.status).toBe(409);
+    expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+    expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+    expect(fx.events).toEqual([]);
+    expect((await release({ line_e164: 'not a number' })).status).toBe(409);
+  });
+
+  test('a line this call held and that was released meanwhile is already released: 200, no lock, no propagation, the card resolves (r10)', async () => {
+    const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status: 'open' }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    fx.tables.disclaimed_number_holds.find((h) => h.id === 'c1x').cleared_at = new Date(); // another call's release cleared it
+    const before = active(fx.tables);
+    const out = await release({ line_e164: X });
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ release: 'ok', lines_released: [], already_released: [X] });
+    expect(fx.events.filter((e) => e.startsWith('lock:') || e.startsWith('clear:'))).toEqual([]);
+    expect(active(fx.tables)).toEqual(before); // nothing else cleared
+    expect(fx.tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('resolved');
+  });
+
+  test('an open card with a line this call does not hold is refused the same way', async () => {
+    const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status: 'open' }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    const out = await release({ line_e164: '+19415550000' });
+    expect(out.status).toBe(409);
+    expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+    expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+  });
+
+  test('the inbox card skips a line this call already released: a fresh hold another call placed on it stays (codex r2 P1)', async () => {
+    const fx = multiLine();
+    // X was released from the panel on call-1 (its row is cleared); call-2 re-held X since; call-1 still holds Y.
+    fx.tables.disclaimed_number_holds.find((h) => h.id === 'c1x').cleared_at = new Date();
+    const out = await release({});
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [Y] });
+    expect(active(fx.tables)).toEqual(['c2x']); // Y cleared on call-1 and call-3; the fresh X hold stays
+    expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${Y}`]);
+  });
+
+  test('when the call holds no active line the card still resolves, nothing is locked or propagated', async () => {
+    const fx = multiLine();
+    for (const id of ['c1x', 'c1y']) fx.tables.disclaimed_number_holds.find((h) => h.id === id).cleared_at = new Date();
+    const out = await release({});
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number.lines_released).toEqual([]);
+    expect(fx.events).toEqual([]);
+    expect(active(fx.tables)).toEqual(['c2x', 'c3y']);
+  });
+
+  test('releasing X keeps the clearance off a visit whose customer phone is the still-held line Y (codex r3 P1)', async () => {
+    const stamp = new Date('2030-01-07T10:00:00Z');
+    const visit = (id, customer_id) => ({ id, source_call_log_id: CALL_ID, customer_id, status: 'confirmed', callback_number_hold_at: stamp, call_sms_cleared_at: null });
+    const fx = multiLine({
+      customers: [{ id: 'cust-x', phone: '9415551234' }, { id: 'cust-y', phone: '(941) 555-7777' }, { id: 'cust-none', phone: null }],
+      scheduled_services: [visit('svc-x', 'cust-x'), visit('svc-y', 'cust-y'), visit('svc-none', 'cust-none')],
+    });
+    const cleared = (id) => fx.tables.scheduled_services.find((v) => v.id === id).call_sms_cleared_at;
+    expect((await release({ line_e164: X })).status).toBe(200);
+    expect(cleared('svc-x')).not.toBeNull();
+    expect(cleared('svc-none')).not.toBeNull();
+    expect(cleared('svc-y')).toBeNull(); // Y is still held on this call
+    // releasing Y afterwards (nothing else held on the call) clears the last visit too
+    expect((await release({ line_e164: Y })).status).toBe(200);
+    expect(cleared('svc-y')).not.toBeNull();
+  });
+
+  test('the inbox card (every active line) clears every visit, as before', async () => {
+    const stamp = new Date('2030-01-07T10:00:00Z');
+    const fx = multiLine({
+      customers: [{ id: 'cust-y', phone: Y }],
+      scheduled_services: [{ id: 'svc-y', source_call_log_id: CALL_ID, customer_id: 'cust-y', status: 'confirmed', callback_number_hold_at: stamp, call_sms_cleared_at: null }],
+    });
+    expect((await release({})).status).toBe(200);
+    expect(fx.tables.scheduled_services[0].call_sms_cleared_at).not.toBeNull();
+  });
+
+  describe('another call on the same line with an open "not my number" card (codex r3 P1)', () => {
+    const ownershipCard = { id: 'card-own', call_log_id: 'call-2', reason_code: 'callback_number_needed', payload: {}, ...base, status: 'open' };
+    const withBlock = () => multiLine({ triage_items: [text(CARD_ID, CALL_ID), text('card-2', 'call-2'), text('card-3', 'call-3'), ownershipCard] });
+
+    test.each([['closed', 'resolved'], ['open', 'open']])('releasing the line defers: nothing on it is cleared on any call, and the reply says so (%s card)', async (_n, status) => {
+      const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status }), text('card-2', 'call-2'), text('card-3', 'call-3'), ownershipCard] });
+      const out = await release({ line_e164: X });
+      expect(out.status).toBe(200);
+      expect(out.json.callback_number).toMatchObject({ release: 'deferred', disclaimed_number_hold: 'kept', lines_released: [], lines_blocked: [X] });
+      expect(out.json.callback_number.message).toMatch(/another call on this line has an open "not my number" card/);
+      expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+    });
+
+    test('the inbox card releases the unblocked line and defers the blocked one', async () => {
+      const fx = withBlock();
+      const out = await release({});
+      expect(out.json.callback_number).toMatchObject({ release: 'deferred', lines_released: [Y], lines_blocked: [X] });
+      expect(active(fx.tables)).toEqual(['c1x', 'c2x']); // Y cleared on call-1 and call-3; X kept everywhere
+    });
+
+    test('a call that only disclaimed the same number (ownership hold, no text card) still blocks the line', async () => {
+      const fx = multiLine({
+        triage_items: [text(CARD_ID, CALL_ID), { id: 'card-b', call_log_id: 'call-b', reason_code: 'callback_number_needed', payload: {}, ...base, status: 'open' }],
+        disclaimed_number_holds: [hold('c1x', X, CALL_ID, '2030-01-01T10:00:00Z'), hold('cbx', X, 'call-b', '2030-01-03T10:00:00Z')],
+      });
+      const out = await release({ line_e164: X });
+      expect(out.json.callback_number).toMatchObject({ release: 'deferred', lines_blocked: [X], lines_released: [] });
+      expect(active(fx.tables)).toEqual(['c1x', 'cbx']); // nothing cleared, B's hold untouched
+    });
+
+    test('once that ownership card is resolved the line releases normally', async () => {
+      const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID), text('card-2', 'call-2'), text('card-3', 'call-3'), { ...ownershipCard, status: 'resolved' }] });
+      const out = await release({ line_e164: X });
+      expect(out.json.callback_number.release).toBeUndefined();
+      expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
+    });
+  });
+
+  describe('the supersession check is per line and per binding (codex r4/r5)', () => {
+    const bound = (id, lines, createdAt, over = {}) => text(id, CALL_ID, {
+      payload: { no_text_hold: true, hold_bindings: lines.map((l) => ({ line_e164: l, held_at: l === X ? '2030-01-01T10:00:00Z' : '2030-01-02T10:00:00Z' })) },
+      created_at: createdAt, ...over,
+    });
+    const others = [text('card-2', 'call-2'), text('card-3', 'call-3')];
+
+    test('an older closed card bound to X still releases X when a newer card is bound only to Y', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x', [X], '2030-01-01T10:00:00Z'), bound('card-y', [Y], '2030-01-05T10:00:00Z'), ...others] });
+      const out = await release({ line_e164: X }, 'card-x');
+      expect(out.status).toBe(200);
+      expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
+    });
+
+    test('the inbox path from the older X card releases the call\'s bound lines when nothing newer is bound to X', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x', [X], '2030-01-01T10:00:00Z'), bound('card-y', [Y], '2030-01-05T10:00:00Z'), ...others] });
+      expect((await release({}, 'card-x')).status).toBe(200);
+      expect(active(fx.tables)).toEqual([]);
+    });
+
+    test('a newer card bound to the SAME line supersedes the older one (409 stale); a card cannot release a line it is not the newest for', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x1', [X], '2030-01-01T10:00:00Z'), bound('card-x2', [X, Y], '2030-01-05T10:00:00Z'), ...others] });
+      expect((await release({ line_e164: X }, 'card-x1')).status).toBe(409); // card-x2 is bound to X and newer
+      expect((await release({}, 'card-x1')).status).toBe(409);
+      expect((await release({ line_e164: Y }, 'card-x2')).status).toBe(200); // card-x2 is the newest bound to Y
+      expect(active(fx.tables)).toEqual(['c1x', 'c2x']);
+    });
+
+    test('a card bound to no active hold of the call (an old arming) releases nothing: 409 while another card is bound', async () => {
+      const staleBinding = [{ line_e164: X, held_at: '2029-12-01T10:00:00Z' }];
+      const fx = multiLine({ triage_items: [text('card-old', CALL_ID, { payload: { no_text_hold: true, hold_bindings: staleBinding }, created_at: '2029-12-01T10:00:00Z' }), bound('card-new', [X, Y], '2030-01-05T10:00:00Z'), ...others] });
+      expect((await release({}, 'card-old')).status).toBe(409);
+      expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
+    });
+
+    test('an ownership-only hold of the call (no card bound to it) is not this card\'s to release', async () => {
+      const fx = multiLine({ triage_items: [bound('card-x', [X], '2030-01-01T10:00:00Z'), ...others] });
+      const out = await release({ line_e164: Y }, 'card-x'); // Y is held but no text card is bound to it
+      expect(out.status).toBe(409);
+      expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
+      expect((await release({}, 'card-x')).status).toBe(200); // the inbox path releases only X
+      expect(active(fx.tables)).toEqual(['c1y', 'c3y']);
+    });
+  });
+
+  test.each([['closed', 'resolved'], ['open', 'open']])('the inbox card (no line_e164) on a two-line call releases BOTH lines on every call, each under its own lock, sorted (%s card)', async (_n, status) => {
+    const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    const out = await release({});
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', lines_released: [X, Y] });
+    expect(active(fx.tables)).toEqual([]);
+    expect(fx.events.filter((e) => e.startsWith('lock:'))).toEqual([`lock:no_text_line:${X}`, `lock:no_text_line:${Y}`]);
+    // both locks are taken before the first propagation write
+    expect(fx.events.findIndex((e) => e.startsWith('clear:'))).toBeGreaterThan(fx.events.lastIndexOf(`lock:no_text_line:${Y}`));
+  });
+});
+
+describe('GET /admin/triage/held-lines', () => {
+  const row = { hold_id: 'h1', phone_e164: '+19415551234', held_at: '2030-01-01T10:00:00.000Z', source_call_log_id: CALL_ID, card_id: CARD_ID, card_status: 'resolved', card_updated_at: '2030-01-02T10:00:00.000Z', blocked_by_ownership_card: false };
+
+  test('lists one row per LINE (newest hold) with its bound card, the line\'s blocked flag and the cap after grouping; admin only', async () => {
+    mockRole = 'admin';
+    const fx = fixture();
+    wireDb(db, { conn: fx.conn });
+    db.raw = jest.fn(async () => ({ rows: [row] }));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/held-lines`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ lines: [row] });
+    });
+    const sql = db.raw.mock.calls[0][0];
+    const Holds = require('../services/disclaimed-number-holds');
+    expect(sql).toContain('h.cleared_at IS NULL');
+    expect(sql).toContain('ORDER BY t.created_at DESC LIMIT 1'); // the newest card bound to the hold
+    expect(sql).toContain(Holds.NO_TEXT_CARD_FOR_HOLD_SQL); // bound to this line and this arming
+    // one representative per line, THEN the cap: a busy line cannot hide the others
+    expect(sql).toContain('SELECT DISTINCT ON (h.phone_e164)');
+    expect(sql).toContain('ORDER BY h.phone_e164, h.held_at DESC) lines');
+    expect(sql.indexOf('DISTINCT ON')).toBeLessThan(sql.lastIndexOf('LIMIT 500'));
+    expect(sql.match(/LIMIT 500/g)).toHaveLength(1);
+    expect(sql).toContain('COUNT(*) OVER (PARTITION BY h.phone_e164)');
+    expect(sql).toContain('MIN(h.held_at) OVER (PARTITION BY h.phone_e164) AS line_since');
+    expect(sql).toContain('ORDER BY held_at DESC');
+    // the blocked flag is the LINE's: every active hold on the line, the same predicate as the release check
+    expect(sql).toContain(Holds.lineOwnershipBlockSql('h.phone_e164'));
+    expect(sql).not.toContain('__BLOCK__');
+    expect(sql).not.toContain('__CARD__');
+  });
+
+  test('a technician gets 403 and the query never runs (it lists up to 500 held numbers with names)', async () => {
+    mockRole = 'technician';
+    const fx = fixture();
+    wireDb(db, { conn: fx.conn });
+    db.raw = jest.fn(async () => ({ rows: [row] }));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/held-lines`);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Admin access required' });
+    });
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+
+  test('a read error is a 500 with a fixed message (no query text)', async () => {
+    const fx = fixture();
+    wireDb(db, { conn: fx.conn });
+    db.raw = jest.fn(async () => { throw new Error('select secret from x'); });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/held-lines`);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: 'Failed to load held lines' });
+    });
   });
 });
