@@ -962,6 +962,47 @@ describe('the server decides every rollover; the palette obeys', () => {
       expect(queryBodies()[1].thread_reopened).toBeUndefined();
     });
 
+    async function restoreIdleTask() {
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return reply({ threadId: TASK_THREAD, threadSeq: 6 });
+        if (url.includes('/threads/latest')) return ok({ thread: null });
+        if (url.endsWith('/resume')) return ok(taskBody(TASK_THREAD, { threadSeq: 4, response: 'Continued answer', canContinue: false }));
+        if (url.includes('/tasks/saved-task')) return ok(taskBody(TASK_THREAD, { canContinue: true }));
+        if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'saved-task', target: { target: { label: 'Synthetic saved target' } }, state: 'responded' }] });
+        return ok({ actions: [], threads: [] });
+      });
+      useIsMobile.mockReturnValue(true);
+      await mount();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+      fireEvent.click(screen.getByLabelText('Conversation options'));
+      fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+      fireEvent.click(await screen.findByRole('button', { name: /Synthetic saved target/ }));
+      await screen.findByText('Saved answer');
+    }
+
+    it('Continue is an exchange the server appended: it consumes the reopened flag, so the next ordinary question does not carry it', async () => {
+      await restoreIdleTask();
+      fireEvent.click(await screen.findByRole('button', { name: 'Continue request' }));
+      await screen.findByText('Continued answer');
+      submit('Synthetic ordinary question');
+      await waitFor(() => expect(queryBodies()).toHaveLength(1));
+      expect(queryBodies()[0].thread_id).toBe(TASK_THREAD);
+      expect(queryBodies()[0].thread_reopened).toBeUndefined();
+    });
+
+    it('a status-only refresh (GET) does not advance the thread: the next question still carries the flag, once', async () => {
+      await restoreIdleTask();
+      fireEvent.click(await screen.findByRole('button', { name: /Refresh status/ }));
+      await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url.includes('/tasks/saved-task')).length).toBeGreaterThan(1));
+      submit('Synthetic question after a refresh');
+      await waitFor(() => expect(queryBodies()).toHaveLength(1));
+      expect(queryBodies()[0].thread_reopened).toBe(true);
+      await screen.findByText('Done.');
+      submit('Synthetic next question');
+      await waitFor(() => expect(queryBodies()).toHaveLength(2));
+      expect(queryBodies()[1].thread_reopened).toBeUndefined();
+    });
+
     it('refreshing the task already on screen does not make a normal thread "reopened"', async () => {
       fetchMock.mockImplementation(async url => {
         if (url.endsWith('/query')) return reply({ taskId: 'saved-task', taskState: 'responded', threadId: TASK_THREAD, threadSeq: 2 });

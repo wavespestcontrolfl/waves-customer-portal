@@ -47,12 +47,14 @@ const DISMISSED_THREAD_KEY = "admin_ib_dismissed_thread";
 // A task the palette loads and shows is a conversation the operator chose,
 // like a History open: its first follow-up keeps its thread (thread_reopened).
 // Rule: the flag is set when the load attaches a thread, changes the held one,
-// or loads a task other than the one on screen. A refresh of the task already
-// on screen (the Refresh button, the reload after a card is decided, Continue,
-// a target choice) leaves the flag as it was, so a normal thread never becomes
-// permanently "reopened". Whether a thread is idle is the server's call alone.
-function taskLoadReopens(loaded, held) {
-  if (!loaded.threadId) return false;
+// or loads a task other than the one on screen. A status-only refresh of the
+// task already on screen (the Refresh button, the reload after a card is
+// decided) leaves the flag as it was, so a normal thread never becomes
+// permanently "reopened". A task operation (Continue, a target choice) is an
+// exchange the server appended, so it consumes the flag exactly as a query
+// does. Whether a thread is idle is the server's call alone.
+function taskLoadReopens(loaded, held, operation) {
+  if (!loaded.threadId || operation) return false;
   return loaded.threadId !== held.threadId || loaded.taskId !== held.activeTask?.taskId || held.reopened;
 }
 
@@ -811,7 +813,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       // A loaded task replaces what is on screen, so its cards replace too.
       setPendingActions([]);
       applyServerReply(data, { fallbackTaskId: id });
-      holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data, held));
+      holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data, held, operation));
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);

@@ -3345,6 +3345,14 @@ Use the request-time Eastern date provided on the current turn.`;
 
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
 
+// The shape /query accepts for conversationHistory: an array of user and
+// assistant text turns. runQuery answers 400 otherwise, and the idle rollover
+// never touches a body that fails it, so the request reaches runQuery unchanged.
+function isValidConversationHistory(history) {
+  return Array.isArray(history)
+    && history.every(turn => turn && ['user', 'assistant'].includes(turn.role) && typeof turn.content === 'string');
+}
+
 async function runQuery(req, res, next) {
   // A resumed task keeps its original start, so a late card is not ordered as the newest.
   const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
@@ -3368,8 +3376,7 @@ async function runQuery(req, res, next) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-    if (!Array.isArray(conversationHistory) || conversationHistory.some(turn =>
-      !turn || !['user', 'assistant'].includes(turn.role) || typeof turn.content !== 'string')) {
+    if (!isValidConversationHistory(conversationHistory)) {
       return res.status(400).json({ error: 'Conversation history must contain user and assistant text turns' });
     }
     // Role guards run on the REQUESTED context so a technician asking for a
@@ -4184,9 +4191,11 @@ function flagRolledOverReplies(res) {
 async function startFreshWhenThreadIdle(req, res, next) {
   try {
     const body = req.body || {};
-    if (IbThreads.threadsEnabled() && req.techRole === 'admin' && body.thread_reopened !== true
-      && UUID_RE.test(String(body.thread_id || ''))
-      && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
+    const eligible = [IbThreads.threadsEnabled(), req.techRole === 'admin', body.thread_reopened !== true,
+      UUID_RE.test(String(body.thread_id || '')),
+      // A malformed history is left for runQuery to refuse with its 400.
+      body.conversationHistory === undefined || isValidConversationHistory(body.conversationHistory)].every(Boolean);
+    if (eligible && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
       req.ibThreadRollover = {
         thread_id: body.thread_id,
         thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,

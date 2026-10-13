@@ -405,6 +405,31 @@ describe('threads gate ON', () => {
       expect(body).not.toHaveProperty('threadRolledOver');
     });
 
+    test.each([['a string', 'x'], ['an object', { role: 'user', content: 'x' }], ['null', null], ['a bad turn', [{ role: 'system', content: 'x' }]]])(
+      'an idle thread with a malformed history (%s) is left to runQuery: its 400, no rollover, no model call, no flag', async (_label, bad) => {
+        mockIsThreadIdle.mockResolvedValue(true);
+        mockMessagesCreate.mockClear();
+        mockAppendExchange.mockClear();
+        const { status, body } = await postRollover({ conversationHistory: bad });
+        expect(status).toBe(400);
+        expect(body.error).toBe('Conversation history must contain user and assistant text turns');
+        expect(body).not.toHaveProperty('threadRolledOver');
+        expect(mockMessagesCreate).not.toHaveBeenCalled();
+        expect(mockAppendExchange).not.toHaveBeenCalled();
+      });
+
+    test('an idle thread with no history field still rolls over', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue({ threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', lastSeq: 2 });
+      scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+      let result;
+      await withServer(async (baseUrl) => {
+        result = await postQuery(baseUrl, { prompt: 'a later ask', context: 'customers', thread_id: THREAD_ID, thread_seq: 4 });
+      });
+      expect(result.status).toBe(200);
+      expect(result.body.threadRolledOver).toBe(true);
+    });
+
     test('a reopened thread is never rolled over and its reply never carries it', async () => {
       mockIsThreadIdle.mockResolvedValue(true);
       mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 6 });
