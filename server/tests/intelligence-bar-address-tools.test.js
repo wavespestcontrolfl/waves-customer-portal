@@ -354,6 +354,20 @@ describe('check_address round 2 cases', () => {
     const text = ADDRESS_TOOLS[0].description;
     expect(text).not.toMatch(/update_customer_property|create_appointment/);
   });
+  test('a comma-free compound unit that is only partly read is reported as incomplete', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way Bldg 2 Apt 4 Sarasota FL 34236' });
+    if (out.unit !== 'Bldg 2 Apt 4') {
+      expect(out.unit_incomplete).toBe(true);
+      expect(out.note).toMatch(/more unit parts/);
+      expect(out.note).not.toMatch(/keep "/);
+    }
+  });
+  test.each(['100 Example Way, Bldg 2 Apt 4, Sarasota, FL 34236', '100 Example Way Apt 4, Sarasota, FL 34236', '100 Example Way #12, Sarasota, FL 34236', '100 Example Way, Sarasota, FL 34236'])('%s has a complete unit reading', async (address) => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address });
+    expect(out.unit_incomplete).toBe(false);
+  });
   test('a comma-free address with no readable state says FL was assumed', async () => {
     validateAddress.mockResolvedValue(google());
     const out = await run({ address: '100 Example Way Sarasota Flordia 34236' });

@@ -100,6 +100,13 @@ function localityParts(input, parsed, text, directionAsCity) {
   };
 }
 
+// How many unit parts a text names ("Bldg 2 Apt 4" = 2; "#12" = 1). No
+// parsing rule reads every comma-free compound unit, so the count of the
+// input is compared with the count of the unit that was read: fewer read than
+// named means the unit is incomplete, and the result says so.
+const UNIT_PART_RE = /\b(?:apartment|apt|unit|ste|suite|building|bldg|floor|space|spc|lot)\b\.?\s*#?\s*[A-Za-z0-9-]+|#\s*[A-Za-z0-9-]+/gi;
+const unitPartCount = text => (cleanText(text).match(UNIT_PART_RE) || []).length;
+
 function givenParts(input) {
   const text = cleanText(input.address);
   // The whole unit is read from the ORIGINAL text first (trailing, its own
@@ -112,6 +119,7 @@ function givenParts(input) {
   return {
     street: normalizeStreetLine(street),
     unit: normalizeUnitLine(unit),
+    unitIncomplete: unitPartCount(text) > unitPartCount(unit),
     ...localityParts(input, parsed, text, directionAsCity),
   };
 }
@@ -154,12 +162,33 @@ const VERDICTS = {
 // component, so a unit the operator gave cannot be called safe after a correction.
 const unitUnverifiedAfterCorrection = (status, given) => status === STATUSES.CORRECTED && Boolean(given.unit);
 
+// Advice added beside the verdict line: each entry is [applies, text].
+const ADVICE = [
+  [({ status, changed, given, result }) => changed.length,
+    ({ given }) => 'Google differs from the input: show the operator both versions and ask before saving (the operator\'s own words, or a call transcript, may be the one that is wrong). If the operator insists their spelling is right, run this check again with their exact words.'],
+  [({ status, changed, given, result }) => changed.some(c => c.component === 'zip' && !c.input),
+    ({ given }) => 'The ZIP comes from Google, not from the operator: tell them which ZIP you are using.'],
+  [({ status, changed, given, result }) => !given.city && result.normalized?.city,
+    ({ given }) => 'No city was given: confirm Google\'s city with the operator.'],
+  // No rule can tell a misspelled state from a city word in free text
+  // ("Sarasota Flordia"), so the assumption is always stated instead.
+  [({ status, changed, given, result }) => !given.state,
+    ({ given }) => `No state was read from the input, so ${DEFAULT_STATE} was assumed: tell the operator, and ask if any word of the input could be another state.`],
+  [({ status, changed, given, result }) => given.zipPlus4,
+    ({ given }) => `The ZIP+4 suffix "-${given.zipPlus4}" was not checked and is not in the normalized ZIP: save the five-digit ZIP and tell the operator the suffix was left out.`],
+  [({ status, changed, given, result }) => given.unitIncomplete,
+    ({ given }) => `The input names more unit parts than this check could read${given.unit ? ` (it read "${given.unit}")` : ''}. Do not save yet: read the full unit back to the operator from their own words and ask.`],
+  [({ status, changed, given, result }) => given.unit && !unitUnverifiedAfterCorrection(status, given) && !given.unitIncomplete,
+    ({ given }) => `Google does not check the unit or apartment number: keep "${given.unit}". Put it in the second address line when the tool has one; otherwise add it at the end of the street line.`],
+];
+
 function noteFor(status, changed, given, result) {
   if (status === STATUSES.NOT_ATTEMPTED || status === STATUSES.API_UNAVAILABLE) {
     return 'The address could NOT be verified. Say so, and ask the operator for the ZIP and the exact spelling. Do not guess a ZIP or fix the spelling yourself.';
   }
   const usable = status === STATUSES.VALIDATED_ACCEPT || status === STATUSES.CORRECTED;
   const unitUnverified = unitUnverifiedAfterCorrection(status, given);
+  const context = { status, changed, given, result };
   const parts = [];
   // A visible difference (a ZIP) says nothing about whether Google also
   // replaced a part the normalized shape does not show (the unit), so a
@@ -169,14 +198,7 @@ function noteFor(status, changed, given, result) {
   else if (usable) parts.push('Save Google\'s normalized spelling, city and ZIP, not the input.');
   else if (status === STATUSES.OUT_OF_SERVICE_AREA) parts.push('Tell the operator it is outside the service area, and save nothing until they decide.');
   else parts.push('Do not save this address yet. Show the operator what Google returned and what is missing or unconfirmed, and ask.');
-  if (changed.length) parts.push('Google differs from the input: show the operator both versions and ask before saving (the operator\'s own words, or a call transcript, may be the one that is wrong). If the operator insists their spelling is right, run this check again with their exact words.');
-  if (changed.some(c => c.component === 'zip' && !c.input)) parts.push('The ZIP comes from Google, not from the operator: tell them which ZIP you are using.');
-  if (!given.city && result.normalized?.city) parts.push('No city was given: confirm Google\'s city with the operator.');
-  // No rule can tell a misspelled state from a city word in free text
-  // ("Sarasota Flordia"), so the assumption is always stated instead.
-  if (!given.state) parts.push(`No state was read from the input, so ${DEFAULT_STATE} was assumed: tell the operator, and ask if any word of the input could be another state.`);
-  if (given.zipPlus4) parts.push(`The ZIP+4 suffix "-${given.zipPlus4}" was not checked and is not in the normalized ZIP: save the five-digit ZIP and tell the operator the suffix was left out.`);
-  if (given.unit && !unitUnverified) parts.push(`Google does not check the unit or apartment number: keep "${given.unit}". Put it in the second address line when the tool has one; otherwise add it at the end of the street line.`);
+  for (const [applies, text] of ADVICE) if (applies(context)) parts.push(text(context));
   return parts.join(' ');
 }
 
@@ -208,6 +230,7 @@ function shape(providerResult, given) {
     verdict: VERDICTS[status] || 'Google returned a result this tool does not recognize.',
     normalized: n ? { address_line1: n.street_line_1, city: n.city, state: n.state, zip: n.postal_code } : null,
     unit: given.unit || null,
+    unit_incomplete: given.unitIncomplete,
     unit_unverified_after_correction: unitUnverifiedAfterCorrection(status, given),
     state_assumed: given.state ? null : DEFAULT_STATE,
     zip_plus4_unchecked: given.zipPlus4 || null,
