@@ -54,9 +54,9 @@ describe('known secret formats', () => {
 
 describe('labelled secrets in prose', () => {
   test.each([
-    ['Portal password: hunter22 (changed)', 'Portal password: [removed] (changed)'],
+    ['Portal password: hunter22 (changed)', 'Portal password: [removed]'],
     ['password=Sunshine1#', 'password=[removed]'],
-    ['His PIN is 4821 for the app', 'His PIN is [removed] for the app'],
+    ['His PIN is 4821 for the app', 'His PIN is [removed]'],
     ['pin: 0042.', 'pin: [removed].'],
     ['api key = abc-123-def', 'api key = [removed]'],
     ['API_KEY: zz9', 'API_KEY: [removed]'],
@@ -65,7 +65,7 @@ describe('labelled secrets in prose', () => {
     ['verification code is 654321', 'verification code is [removed]'],
     ['login code: 778899', 'login code: [removed]'],
     ['the passcode is "blue-fox"', 'the passcode is "[removed]"'],
-    ['secret: s3cr3t,next', 'secret: [removed],next'],
+    ['secret: s3cr3t,next', 'secret: [removed]'],
     ['token = abcdef12', 'token = [removed]'],
     ['pwd: Tr0ub4dor', 'pwd: [removed]'],
   ])('%s', (input, expected) => {
@@ -205,5 +205,21 @@ describe('labelled secrets after " is " with a plain word', () => {
     'password is unknown', 'password is none', 'password is n/a', 'the token is needed', 'pin is blue', 'password is reset',
   ])('"%s" is kept', phrase => {
     expect(secretWord(phrase)).toBe(phrase);
+  });
+});
+
+// Codex: a passphrase is several words; the whole labelled clause is the value.
+describe('multi-word labelled values', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  test.each([
+    ['API token: alpha beta gamma', 'API token: [removed]'],
+    ['password is correct horse battery staple', 'password is [removed]'],
+    ['Wifi passphrase: blue river nine. Ask at the desk.', 'Wifi passphrase: [removed]. Ask at the desk.'],
+    ['token = "my long pass phrase" ok', 'token = "[removed]" ok'],
+  ])('%s', (text, expected) => {
+    expect(scrubSecretText(text).text).toBe(expected);
+  });
+  test.each(['password is correct', 'The pin is required before booking', 'password is on file', 'Password is not set', 'gate PIN: 1234', 'pin is blue'])('prose stays: %s', (text) => {
+    expect(scrubSecretText(text).text).toBe(text);
   });
 });

@@ -105,9 +105,12 @@ const SECRET_PATTERNS = Object.freeze([
 // Words that name a credential. "access key" is a credential; "access code" is
 // a gate/door code and is not in this list.
 const LABEL_WORDS = '(?:password|passcode|passphrase|passwd|pwd|pin|secret|token|api[ _-]?key|access[ _-]?key|login[ _-]?code|verification[ _-]?code|otp)';
-// label, separator (":" / "=" / " is "), optional quote, value up to the next
-// whitespace or punctuation boundary.
-const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]+is[ \\t]+)(["'\`]?)([^\\s"'\`,;)\\]<>]+)`, 'gi');
+// label, separator (":" / "=" / " is "), then the WHOLE value clause: to the
+// closing quote when quoted, otherwise to the end of the sentence or line (a
+// passphrase is several words: "token: alpha beta gamma"), at most 120
+// characters. A "." inside a value ("abc.def") does not end it; a "." followed
+// by a space or the end does.
+const LABELLED_RE = new RegExp(`\\b(${LABEL_WORDS})\\b([ \\t]*[:=][ \\t]*|[ \\t]+is[ \\t]+)(?:(["'\`])([^"'\`\\n]{1,120})\\3|()([^\\n]{1,120}?)(?=[.;!?,]?[ \\t]*(?:\\n|$)|[.;!?][ \\t]))`, 'gi');
 // "gate PIN: 1234", "lockbox pin 1234": a PIN or passcode that opens a gate,
 // door or lockbox is the same kept data as a gate code.
 const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|passcode)\s*$/i;
@@ -119,20 +122,29 @@ const NOT_A_VALUE = new Set(['none', 'n/a', 'na', 'unknown', 'required', 'needed
   'verified', 'enabled', 'disabled', 'rejected', 'accepted', 'locked', 'unlocked', 'current', 'default', 'unset', 'shared', 'rotated',
   'changing', 'unknown', 'unavailable', 'optional', 'mandatory', 'sensitive', 'private', 'secure', 'secret']);
 
-function labelledReplacement(match, label, separator, quote, rawValue, offset, text) {
-  // Sentence punctuation after the value is not part of it.
-  const tail = (rawValue.match(/[.!?:]+$/) || [''])[0];
-  const value = tail ? rawValue.slice(0, -tail.length) : rawValue;
-  if (!value) return match;
-  const lowered = value.toLowerCase();
-  if (value.startsWith('[removed') || NOT_A_VALUE.has(lowered)) return match;
+// Is the clause prose about the credential, not its value? It is when its
+// first word is a status word ("required before booking", "on file", "not
+// set"). A few status words can also open a passphrase ("correct horse battery
+// staple"): for those every word of the clause must be a status word.
+const AMBIGUOUS_FIRST = new Set(['correct', 'valid', 'private', 'secure', 'secret', 'same', 'old', 'new', 'current', 'default', 'shared', 'a', 'an', 'the']);
+const statusWord = word => NOT_A_VALUE.has(word.replace(/[^a-z/]/g, ''));
+function proseOnly(clause) {
+  const words = clause.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!statusWord(words[0])) return false;
+  return AMBIGUOUS_FIRST.has(words[0].replace(/[^a-z/]/g, '')) ? words.every(statusWord) : true;
+}
+
+function labelledReplacement(match, label, separator, quote, quoted, _empty, bare, offset, text) {
+  const value = (quote ? quoted : bare || '').trim();
+  // An earlier pattern may already have removed the first word; a value that
+  // is ONLY the removed marker is done, anything after it is still the value.
+  if (!value || /^\[removed[^\]]*\]$/.test(value) || proseOnly(value)) return match;
   if (/^pin|passcode/i.test(label) && KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length))) return match;
   const viaIs = /\bis[ \t]*$/i.test(separator);
-  // After " is " a plain word is a value only when it is one token of 6+ characters
-  // ("portal password is swordfish"); a short word ("pin is blue") or a status
-  // word (NOT_A_VALUE) reads as prose. A digit or symbol always counts.
-  if (viaIs && !quote && !/[\d!@#$%^&*_+=~/\\|-]/.test(value) && value.length < 6) return match;
-  return `${label}${separator}${quote}${REMOVED}${tail}`;
+  // After " is " one short plain word ("pin is blue") reads as prose; anything
+  // longer, several words, or a digit or symbol is taken as the value.
+  if (viaIs && !quote && !/\s/.test(value) && !/[\d!@#$%^&*_+=~/\\|-]/.test(value) && value.length < 6) return match;
+  return `${label}${separator}${quote || ''}${REMOVED}${quote || ''}`;
 }
 
 // Returns { text, removed } where removed counts the secrets taken out.
@@ -151,7 +163,8 @@ function scrubSecretText(input) {
   }
   text = text.replace(LABELLED_RE, (...args) => {
     const replaced = labelledReplacement(...args);
-    if (replaced !== args[0]) removed += 1;
+    // A clause whose first word an earlier pattern already removed was counted there.
+    if (replaced !== args[0] && !args[0].includes(REMOVED)) removed += 1;
     return replaced;
   });
   return { text, removed };
