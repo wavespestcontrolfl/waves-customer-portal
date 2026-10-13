@@ -666,10 +666,14 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // canonical duplicate-series guard, findActiveRecurringSeries — see
     // isDuplicateActiveSeries's own comment. Back to the 6 pre-existing
     // consumers below.)
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(6);
+    // 7th: seriesNextOccurrencesUnbillable (the Intelligence Bar / customer-page
+    // lane edit asks the top-up's own billable verdict for the next
+    // occurrences) anchors its cadence walk on the same helper, read-only.
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(7);
     // The occupied-dates preload is shared the same way — same 4th
-    // consumer.
-    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
+    // consumer; the 5th is seriesWalkWithRide (the verdict asks the top-up's own
+    // rideLawnCandidate, which excludes dates the series already holds).
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(5);
   });
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {

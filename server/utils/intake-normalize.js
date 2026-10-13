@@ -105,6 +105,26 @@ function normalizeZip(value) {
  * @param {Object} updates - pending update object (phone already normalized)
  * @param {Object} before  - existing customer row (needs phone + line_type)
  */
+// The shared-phone texting mark (customers.sms_primary_for_shared_phone,
+// GATE_SMS_SHARED_PHONE_LINK) was chosen for ONE number. Any writer that
+// changes the number's last-10-digit identity drops the mark unless the same
+// write sets it for the new number (updates carries the column). A stale mark
+// on a number that is, or later becomes, shared would route the other
+// account's texts and reschedule replies here (codex #6268 r2/r3). Same
+// last-10 comparison as clearLineTypeOnPhoneChange. Every supported phone
+// writer calls this from its pre-write row: admin PUT, Intelligence Bar
+// update_customer; bulk_update_customers has no per-row before-state and
+// clears unconditionally.
+function clearSharedPhoneMarkOnPhoneChange(updates, before) {
+  if (!updates || updates.phone === undefined || !before) return;
+  if (updates.sms_primary_for_shared_phone !== undefined) return;
+  if (before.sms_primary_for_shared_phone !== true) return;
+  const last10 = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+  if (last10(updates.phone) !== last10(before.phone)) {
+    updates.sms_primary_for_shared_phone = false;
+  }
+}
+
 function clearLineTypeOnPhoneChange(updates, before) {
   if (!updates || updates.phone === undefined || !before || !before.line_type) return;
   // Compare last-10 digits (matches isLandline's own slice(-10)), so a 10-digit
@@ -528,6 +548,7 @@ module.exports = {
   applyContactNormalization,
   normalizeAdminAddressInput,
   clearLineTypeOnPhoneChange,
+  clearSharedPhoneMarkOnPhoneChange,
   CONTACT_FIELD_NORMALIZERS,
   normalizeContactName,
   normalizeContactEmail,

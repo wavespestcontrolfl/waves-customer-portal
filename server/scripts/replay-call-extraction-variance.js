@@ -123,6 +123,11 @@ const FIELD_GROUPS = {
     // hallucinating one) must show up here, not just in a triage-flag count.
     'caller_id_disclaimed',
     'phone_note',
+    // ani_cannot_text / text_phone (schema 1.25.0) — decide which number a
+    // call's texts go to (new customer phone, the swap card, the booking-link
+    // text); a model that drifts on them must show up here.
+    'ani_cannot_text',
+    'text_phone',
     // sms_declined (schema 1.19.0, codex P1 on #5292) — the dedicated
     // explicit-SMS-refusal field the booking-link staging check reads
     // (call-booking-link-text.js). A model that stops catching (or starts
@@ -480,7 +485,7 @@ const FIELD_NORMALIZERS = {
 //     explicit false, which the booking-link staging check treats very
 //     differently (null fails closed; false does not block).
 const BOOL_FIELDS = new Set([
-  'appointment_confirmed', 'is_spam', 'is_voicemail', 'price_accepted', 'caller_id_disclaimed',
+  'appointment_confirmed', 'is_spam', 'is_voicemail', 'price_accepted', 'caller_id_disclaimed', 'ani_cannot_text',
   'sms_declined', 'definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used',
   'price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'price_discussed', 'staff_accepted_proposed_slot',
 ]);

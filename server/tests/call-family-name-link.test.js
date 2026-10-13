@@ -18,6 +18,7 @@ const { randomUUID } = require('crypto');
 const {
   pickNamedAccountHolder, normName, fullNameKey, statedAddressCorroborates,
   findLiveCustomersByFullName, suggestFamilyAccounts, fileFamilyAccountCard, CARD_REASON, RETIRE_RULE,
+  matchCallerOwnAccounts, OWN_ACCOUNT_REASONS, MAX_OWN_CANDIDATES, RECENT_DAYS,
 } = require('../services/call-family-name-link');
 const { buildTriageItem } = require('../services/call-routing-gates');
 
@@ -140,30 +141,30 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(triage.slice(at, at + 700)).toContain("'family_account_candidates'");
   });
   test('techs: the card is hidden from the list and counts and refused on every transition (admin-only reasons)', () => {
-    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];");
+    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];");
     expect(triage).toContain("q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain("q.whereNotIn('reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain('if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {');
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);');
+    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);');
     const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
     expect(branch.slice(0, 600)).toContain('isAdmin ? (');
   });
   test('Resolve / Dismiss bind to the version the operator saw (expected_updated_at), via the version-bound reason set', () => {
-    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',\s*\];/);
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',(?:\s*'name_spelling_differs',)?\s*\];/);
     expect(triage).toContain('if (VERSION_BOUND_REASONS.includes(item.reason_code)');
     expect(triage).toContain('|| emailReviewCard');
     expect(triage).toContain("return { outcome: 'stale_version' };");
   });
   test('a merged candidate opens its survivor: the list resolves customer_ids for this card too', () => {
-    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];");
+    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates', 'name_spelling_differs'];");
     expect(triage).toContain('items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code))');
   });
   test('the inbox: no verdict badge or Accept / Deny, own evidence component, looked up by reason', () => {
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\([\s\S]*?"family_account_candidates"[\s\S]*?\]\);/);
     expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
-    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence,');
+    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence };');
     expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
   });
 });
@@ -260,6 +261,115 @@ const SKIP = !process.env.DATABASE_URL;
     expect(card.payload.customer_ids).toHaveLength(5);
     await trx('customers').where({ city: 'City5' }).update({ deleted_at: new Date() });
     expect((await suggestFamilyAccounts(input(await call()))).more_accounts).toBe(false);
+  });
+
+  // 2026-10-10 call audit (owner 2026-10-12): three callers on a number no account carried.
+  describe('the caller\'s OWN account (suggest only)', () => {
+    const CALL_AT = '2026-10-09T19:54:00Z';
+    const day = (offset) => new Date(Date.parse(CALL_AT) + offset * 86400000).toISOString().slice(0, 10);
+    const own = (callLogId, over = {}) => input(callLogId, {
+      call: { id: callLogId, from_phone: '+19415550101', customer_id: null, created_at: CALL_AT },
+      extracted: { first_name: 'Robin', last_name: 'Example', is_voicemail: false },
+      v2CanonicalExtraction: { caller: { relationship_to_property: 'property_manager' }, call_nature: 'existing_customer_scheduling', meta: { call_summary: 'x' } },
+      statedAddress: {},
+      ...over,
+    });
+    const visit = (customerId, over = {}) => trx('scheduled_services').insert({ customer_id: customerId, scheduled_date: day(2), service_type: 'pest', status: 'pending', ...over });
+
+    test('basis 1: the caller\'s exact full name on a live account under another number files the card', async () => {
+      const account = await customer({ first_name: 'Robin', last_name: 'Example', city: 'Sampleton' });
+      const callLogId = await call();
+      const out = await fileFamilyAccountCard(own(callLogId));
+      expect(out).toMatchObject({ basis: 'caller_full_name', candidates: [{ id: String(account), name: 'Robin Example', city: 'Sampleton' }] });
+      const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(card).toMatchObject({ reason_code: 'family_account_candidates', severity: 'advisory', status: 'open' });
+      expect(card.payload).toMatchObject({
+        account_holder_name: null, match_basis: 'caller_full_name', caller_name: 'Robin Example',
+        customer_ids: [String(account)], reason: OWN_ACCOUNT_REASONS.caller_full_name,
+      });
+      const row = await trx('call_log').where({ id: callLogId }).first();
+      expect(row.customer_id).toBeNull(); // nothing is linked
+    });
+
+    test('basis 1 needs a live customer and never matches a number an account already knows or a linked call', async () => {
+      await customer({ first_name: 'Robin', last_name: 'Example', pipeline_stage: 'new_lead' });
+      expect(await fileFamilyAccountCard(own(await call()))).toBeNull();
+      const account = await customer({ first_name: 'Robin', last_name: 'Example', phone: '+19415550101' });
+      expect(await fileFamilyAccountCard(own(await call()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ phone: '+19415559999' });
+      const elsewhere = await customer({ first_name: 'Pat', last_name: 'Other' });
+      const linked = await call({ customer_id: elsewhere });
+      expect(await fileFamilyAccountCard(own(linked, { call: { id: linked, from_phone: '+19415550101', customer_id: elsewhere, created_at: CALL_AT } }))).toBeNull();
+    });
+
+    test('basis 2: an existing-customer call, the caller\'s first name, and a visit within the window, under another last name', async () => {
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      await visit(account);
+      const out = await matchCallerOwnAccounts(own(await call()));
+      expect(out).toMatchObject({ basis: 'caller_first_name_recent_visit', candidates: [{ id: String(account), name: 'Robin Otherwise' }] });
+    });
+
+    // Codex r1: the window is counted in Eastern calendar days from the call's ET day.
+    test('basis 2 counts the window in Eastern days: a 9 PM ET call is still that ET day', async () => {
+      const lateEt = '2026-10-10T01:00:00Z'; // Oct 9, 9 PM ET
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      const at = (callLogId) => own(callLogId, { call: { id: callLogId, from_phone: '+19415550101', customer_id: null, created_at: lateEt } });
+      await visit(account, { scheduled_date: '2026-10-24' }); // 15 ET days after Oct 9
+      expect(await matchCallerOwnAccounts(at(await call()))).toBeNull();
+      await visit(account, { scheduled_date: '2026-09-25' }); // exactly 14 ET days before
+      expect((await matchCallerOwnAccounts(at(await call()))).basis).toBe('caller_first_name_recent_visit');
+    });
+
+    test('basis 2 does not fire: a new-lead call, a visit outside the window, a cancelled visit, or too many first-name matches', async () => {
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      await visit(account, { scheduled_date: day(RECENT_DAYS + 3) });
+      await visit(account, { scheduled_date: day(1), status: 'cancelled' });
+      expect(await matchCallerOwnAccounts(own(await call()))).toBeNull();
+      await visit(account, { scheduled_date: day(-3), status: 'completed' });
+      const newLead = { caller: {}, call_nature: 'new_lead', meta: {} };
+      expect(await matchCallerOwnAccounts(own(await call(), { v2CanonicalExtraction: newLead }))).toBeNull();
+      expect((await matchCallerOwnAccounts(own(await call()))).basis).toBe('caller_first_name_recent_visit');
+      for (let i = 0; i < MAX_OWN_CANDIDATES; i += 1) await visit(await customer({ first_name: 'Robin', last_name: `Many${i}` }));
+      expect(await matchCallerOwnAccounts(own(await call()))).toBeNull();
+    });
+
+    test('basis 3: a first name only, the stated city, and a record created in the last two weeks', async () => {
+      const recent = new Date(Date.parse(CALL_AT) - 86400000);
+      const account = await customer({ first_name: 'Robin', last_name: 'E', city: 'Sampleton', created_at: recent });
+      const firstOnly = ({ city = ' sampleton ' } = {}) => ({ extracted: { first_name: 'Robin', city: 'Sampleton', is_voicemail: false }, statedAddress: { city }, v2CanonicalExtraction: { caller: {}, call_nature: 'new_lead', meta: {} } });
+      const out = await matchCallerOwnAccounts(own(await call(), firstOnly()));
+      expect(out).toMatchObject({ basis: 'caller_first_name_city_recent', candidates: [{ id: String(account), name: 'Robin E', city: 'Sampleton' }] });
+      // Another city, no city, an older record, a record created after the call, or a record with no last name: nothing.
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly({ city: 'Elsewhere' })))).toBeNull();
+      // No city was SAID: the merged record's city (address validation may have filled it) is not used.
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly({ city: null })))).toBeNull();
+      await trx('customers').where({ id: account }).update({ created_at: new Date(Date.parse(CALL_AT) - (RECENT_DAYS + 2) * 86400000) });
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ created_at: new Date(Date.parse(CALL_AT) + 3600000) });
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ created_at: recent, last_name: null });
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
+    });
+
+    test('the customer this call created for the caller is never its own match; a voicemail, an outbound call or no first name suggests nothing', async () => {
+      const mine = await customer({ first_name: 'Robin', last_name: 'Example', phone: '+19415550101' });
+      const callLogId = await call({ customer_id: mine, metadata: { created_customer_id: mine } });
+      const reprocess = own(callLogId, { call: { id: callLogId, from_phone: '+19415550101', customer_id: mine, created_at: CALL_AT, metadata: { created_customer_id: mine } } });
+      expect(await matchCallerOwnAccounts(reprocess)).toBeNull();
+      await customer({ first_name: 'Robin', last_name: 'Example' });
+      expect((await matchCallerOwnAccounts(reprocess)).basis).toBe('caller_full_name');
+      expect(await matchCallerOwnAccounts(own(await call(), { isOutbound: true }))).toBeNull();
+      expect(await matchCallerOwnAccounts(own(await call(), { extracted: { first_name: 'Robin', last_name: 'Example', is_voicemail: true } }))).toBeNull();
+      expect(await matchCallerOwnAccounts(own(await call(), { extracted: { last_name: 'Example', is_voicemail: false } }))).toBeNull();
+    });
+
+    test('the family rule still wins when both could suggest', async () => {
+      await customer({ first_name: 'Dana', last_name: 'Lee', phone: '+19415558888' });
+      const mom = await customer();
+      const out = await fileFamilyAccountCard(input(await call()));
+      expect(out.holder).toMatchObject({ first_name: 'Angelina' });
+      expect(out.candidates.map((c) => c.id)).toEqual([String(mom)]);
+    });
   });
 
   describe('reprocess: refresh the open card, retire it when the suggestion is gone', () => {

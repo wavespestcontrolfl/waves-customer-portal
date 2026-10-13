@@ -1402,7 +1402,7 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
 
 });
 
-describe('lawn report lead status card (GATE_LAWN_REPORT_LEAD)', () => {
+describe('lawn report lead status card', () => {
   const lawn = (reportV2) => ({ serviceType: 'Lawn Care', serviceLine: 'lawn', applications: [], reportV2 });
   const snapshot = { status: 'watch', statusHeadline: 'Stable — watching thin edges' };
   const GENERIC = 'Service completed — we noted items to keep an eye on; details are below.';

@@ -289,90 +289,77 @@ describe('FastCompleteSheet tip for the customer', () => {
     expect(await screen.findByText('Tip for the customer')).toBeTruthy();
   });
 
-  test('offers several options and keeps only the last one picked', async () => {
+  const searchTips = (value) => fireEvent.change(screen.getByLabelText('Search tips'), { target: { value } });
+  const tipButton = (name) => screen.getByRole('button', { name });
+
+  test('no tip is listed until the tech searches; a pick shows alone and one tip goes on the wire (owner 2026-10-12)', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
     await screen.findByText('Tip for the customer');
 
     expect(screen.getByText('Pick 1 (optional)')).toBeTruthy();
-    // The short list first; the rest sits behind Show all.
-    expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Lights on a motion sensor/ })).toBeTruthy();
-    // A tip this customer already received goes last, behind Show all, and says when.
-    expect(screen.getByRole('button', { name: /Aim landscape lights away/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Warm porch bulbs/ })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
-    expect(screen.getByRole('button', { name: /Warm porch bulbs/ }).textContent).toContain('sent Aug 3');
+    // Nothing from the library before a search, and no "Show all".
+    for (const name of [/Fix drips at hose bibs/, /Check under the kitchen sink/, /Warm porch bulbs/, /Lights on a motion sensor/, /Aim landscape lights away/]) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(screen.queryByRole('button', { name: 'Show all' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Check under the kitchen sink/ }));
-    expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ }).getAttribute('aria-pressed')).toBe('false');
-    expect(screen.getByRole('button', { name: /Check under the kitchen sink/ }).getAttribute('aria-pressed')).toBe('true');
+    searchTips('light');
+    expect(tipButton(/Lights on a motion sensor/)).toBeTruthy();
+    expect(tipButton(/Aim landscape lights away/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Fix drips at hose bibs/ })).toBeNull();
+    // A tip this customer already received says when.
+    searchTips('porch');
+    expect(tipButton(/Warm porch bulbs/).textContent).toContain('sent Aug 3');
+
+    searchTips('sink');
+    fireEvent.click(tipButton(/Check under the kitchen sink/));
+    // The pick shows alone, pressed, with Remove tip; the search is gone until it is removed.
+    expect(tipButton(/Check under the kitchen sink/).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.queryByLabelText('Search tips')).toBeNull();
     expect(screen.getByText('1 picked')).toBeTruthy();
 
     const body = await completeAndReadBody(request);
     expect(body.techTips).toEqual({ ids: ['under_sink'], custom: null });
   });
 
-  test('tapping the picked tip again clears it', async () => {
+  test('Remove tip, or a tap on the picked tip, clears it and brings the search back', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
     await screen.findByText('Tip for the customer');
-    const option = screen.getByRole('button', { name: /Fix drips at hose bibs/ });
-    fireEvent.click(option);
-    fireEvent.click(option);
-    expect(option.getAttribute('aria-pressed')).toBe('false');
+    searchTips('hose');
+    fireEvent.click(tipButton(/Fix drips at hose bibs/));
+    fireEvent.click(tipButton('Remove tip'));
+    expect(screen.getByLabelText('Search tips')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Remove tip' })).toBeNull();
+
+    searchTips('hose');
+    fireEvent.click(tipButton(/Fix drips at hose bibs/));
+    fireEvent.click(tipButton(/Fix drips at hose bibs/));
+    expect(screen.getByLabelText('Search tips')).toBeTruthy();
     const body = await completeAndReadBody(request);
     expect(body.techTips).toEqual({ ids: [], custom: null });
   });
 
-  test('Show all and search reach the whole list, and the pick stays in view', async () => {
-    const request = makeRequest({ tips: TIP_LIBRARY });
-    await openSheet(request);
-    await screen.findByText('Tip for the customer');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
-    fireEvent.click(screen.getByRole('button', { name: /Aim landscape lights away/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Show fewer' }));
-    // Outside the short list, still shown because it is the pick.
-    expect(screen.getByRole('button', { name: /Aim landscape lights away/ }).getAttribute('aria-pressed')).toBe('true');
-
-    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'ghost ants' } });
-    expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Warm porch bulbs/ })).toBeNull();
-
-    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'zzz' } });
-    expect(screen.getByText('No tips match.')).toBeTruthy();
-  });
-
-  test('a tapped pest lifts the advice for it, and a search reaches a tip off the list (owner 2026-10-09)', async () => {
-    const library = {
-      ...TIP_LIBRARY,
-      groups: [
-        { id: 'moisture', label: 'Moisture', tips: [tip('hose_bib', 'Fix drips at hose bibs', { pests: ['Ants'] }), tip('under_sink', 'Check under the kitchen sink', { pests: ['Roaches'] })] },
-        TIP_LIBRARY.groups[1],
-      ],
-      more: [tip('flea_yard', 'Open up where pets rest outside', { pests: ['Fleas'], keywords: ['dog run'] })],
-    };
+  test('a search reads keywords and the whole library, and says when nothing matches', async () => {
+    const library = { ...TIP_LIBRARY, more: [tip('flea_yard', 'Open up where pets rest outside', { pests: ['Fleas'], keywords: ['dog run'] })] };
     const request = makeRequest({ tips: library });
     await openSheet(request);
     await screen.findByText('Tip for the customer');
-    // Nothing tapped: no lift, and the off-list tip is not offered.
-    expect(screen.queryByText('For what you saw today')).toBeNull();
-    expect(screen.queryByRole('button', { name: /Open up where pets rest outside/ })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
-    expect(screen.getByText('For what you saw today')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /Check under the kitchen sink/ })).toHaveLength(1);
-    // Lifted, never picked.
-    expect(screen.getByRole('button', { name: /Check under the kitchen sink/ }).getAttribute('aria-pressed')).toBe('false');
+    searchTips('ghost ants');
+    expect(tipButton(/Fix drips at hose bibs/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Warm porch bulbs/ })).toBeNull();
 
-    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: 'dog run' } });
-    fireEvent.click(screen.getByRole('button', { name: /Open up where pets rest outside/ }));
-    fireEvent.change(screen.getByLabelText('Search tips'), { target: { value: '' } });
-    // The off-list pick stays in view once, and goes on the wire.
-    expect(screen.getAllByRole('button', { name: /Open up where pets rest outside/ })).toHaveLength(1);
-    expect(screen.getByRole('button', { name: /Open up where pets rest outside/ }).getAttribute('aria-pressed')).toBe('true');
+    searchTips('zzz');
+    expect(screen.getByText('No tips match.')).toBeTruthy();
+
+    // A tip off this visit's list (`more`) is found, picked, and goes on the wire.
+    searchTips('dog run');
+    fireEvent.click(tipButton(/Open up where pets rest outside/));
+    expect(tipButton(/Open up where pets rest outside/).getAttribute('aria-pressed')).toBe('true');
+    const body = await completeAndReadBody(request);
+    expect(body.techTips).toEqual({ ids: ['flea_yard'], custom: null });
   });
 
   test('the tech\'s own line has the note\'s microphone, and a spoken line joins what is there (owner 2026-10-09)', async () => {
@@ -380,6 +367,7 @@ describe('FastCompleteSheet tip for the customer', () => {
     await openSheet(request);
     await screen.findByText('Tip for the customer');
     expect(screen.queryByRole('button', { name: 'Say your own tip' })).toBeNull();
+    searchTips('hose');
     fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Write your own' }));
     expect(screen.getByRole('button', { name: 'Say your own tip' })).toBeTruthy();
@@ -389,6 +377,7 @@ describe('FastCompleteSheet tip for the customer', () => {
     expect(screen.getByLabelText('Your own tip (one sentence)').value).toBe('I brushed the mud dauber nests off the lanai and it is ready for paint.');
     expect(screen.getByLabelText('Tell me about the visit').value).toBe('');
     // The spoken line replaces the library pick, as a typed one does.
+    expect(screen.queryByRole('button', { name: 'Remove tip' })).toBeNull();
     expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ }).getAttribute('aria-pressed')).toBe('false');
   });
 
@@ -397,13 +386,17 @@ describe('FastCompleteSheet tip for the customer', () => {
     await openSheet(request);
     await screen.findByText('Tip for the customer');
 
+    searchTips('hose');
     fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Write your own' }));
     const own = screen.getByLabelText('Your own tip (one sentence)');
     expect(own.getAttribute('maxlength')).toBe('240');
     fireEvent.change(own, { target: { value: 'Keep the pet bowls off the lanai overnight.' } });
+    // The typed line replaces the pick: the search is back, with the tip unpicked in its results.
+    expect(screen.queryByRole('button', { name: 'Remove tip' })).toBeNull();
     expect(screen.getByRole('button', { name: /Fix drips at hose bibs/ }).getAttribute('aria-pressed')).toBe('false');
 
+    searchTips('motion');
     fireEvent.click(screen.getByRole('button', { name: /Lights on a motion sensor/ }));
     expect(screen.queryByLabelText('Your own tip (one sentence)')?.value || '').toBe('');
 

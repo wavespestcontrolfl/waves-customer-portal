@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const Joi = require('joi');
 const db = require('../models/db');
 const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepoint-read');
+const { storeNextVisitNote } = require('./next-visit-note');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
 const logger = require('../services/logger');
@@ -69,7 +70,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -2904,6 +2905,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Voice fill's office note (GATE_FAST_COMPLETE_VOICE_FILL): staff-only,
       // appended to scheduled_services.internal_notes below; never the report.
       officeNote,
+      // The "Needs adjustment?" box under the next scheduled visit, with the id of
+      // the visit the card showed: stored on THAT visit's staff note (see
+      // services/next-visit-note.js), inside the completion transaction.
+      nextVisitAdjustmentNote,
+      nextVisitId,
       customerConcernText,
       customerRecap,
       visitOutcome = 'completed',
@@ -2923,6 +2929,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // completion profile and both dark gates are known.
       customerRecapMode,
       requestReview,
+      // Set by the Fast Complete Wrap-up beside requestReview:true on the re-service sheets (owner 2026-10-10):
+      // refused below once GATE_FAST_COMPLETE_WRAP_UP is off. Absent on the full form.
+      wrapUpReviewAsk,
       reviewTiming,
       reviewScheduledFor,
       oneTimeRecapOnly = false,
@@ -3548,6 +3557,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
       ? false
       : sendCompletionSmsRequested;
+    // Whether a re-service completion may ask for a review: one decision, read live (so a gate turned off
+    // while a sheet is open stops the new asks too). See ReserviceFixedRecap.reviewAskAllowed.
+    const reviewAskAllowed = ReserviceFixedRecap.reviewAskAllowed({
+      marker: wrapUpReviewAsk === true,
+      wrapUpGate: require('../config/feature-gates').fastCompleteWrapUpLive(),
+      fixedRequested: reserviceFixedRecapRequested,
+      fixedHonored: reserviceFixedRecap,
+    });
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
@@ -4948,7 +4965,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // the auto-charge block: an existing open invoice (pre-minted /
     // recovery) must not be auto-charged either when nothing was performed
     // (Codex round-9 P1).
-    const visitPerformed = visitOutcome !== 'inspection_only' && visitOutcome !== 'customer_declined';
+    const visitPerformed = require('./visit-outcomes').visitWasPerformed(visitOutcome);
     // Billing-lane classification + the completion invoice amount — hoisted
     // from the invoice block below for the same one-derivation reason (fix
     // round 9): the commit-time posture must read the EXACT inputs the mint
@@ -6255,6 +6272,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
             });
           }
+          // Billing-lane drift (Codex round 7 on #6118), judged on the LOCKED rows of the
+          // transaction that commits the visit as completed: the customer row is held FOR
+          // SHARE and the visit FOR UPDATE from here to the commit, the locks the Intelligence
+          // Bar billing-type card's commit needs (customer row FOR UPDATE, then its live
+          // visits FOR UPDATE by id). Edit first: it committed before the customer lock above
+          // was granted, the lane read here is the new one, and the completion refuses with the
+          // retryable 409 BILLING_LANE_CHANGED (nothing written; the retry bills on the new
+          // lane). Completion first: the visit is completed when the card re-reads, no longer
+          // live, so the card's visit pin refuses (preview_changed). Either way no completion
+          // decides "no invoice" on a lane the customer has already left. Nothing but this
+          // read happens here: no text, email or bell.
+          await refuseBillingLaneDriftInTrx(trx, svc);
           // The add-on each application row belongs to was resolved BEFORE this lock. An Update Details save that removed or
           // replaced an add-on (or moved the visit's own service) in between would leave rows tagged to work the visit no
           // longer carries: resolved again on the LOCKED visit, and any difference rolls the record back as a changed visit
@@ -6785,7 +6814,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Backfill completions freeze it off for the same reason: a
             // review ask days after the visit (or from the later payment)
             // must never fire from a quiet backlog closeout.
-            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false,
+            requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
             reviewTiming: reviewTiming || null,
@@ -8442,6 +8471,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             internal_notes: trx.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`[Office note ${etDateString(completionEndedAt ? new Date(completionEndedAt) : new Date())}] ${officeNoteText}`]),
           });
         }
+        // The tech's note about the NEXT visit (the full form's and the sheets' "Needs
+        // adjustment?" box): one dated line on that visit's staff note. In this commit
+        // phase only, so it lands once per completion (a replay returns before this
+        // block, a resume skips it, the packet effects phase never reaches it) and
+        // never fails the visit: it runs in a savepoint and logs on error.
+        await storeNextVisitNote(trx, {
+          completed: { id: svc.id, customerId: svc.customer_id, date: svc.scheduled_date },
+          note: nextVisitAdjustmentNote,
+          nextVisitId,
+          actor: completionInput.actor,
+        });
 
         // The "this visit mints no dues because the month is covered" verdict is
         // CONFIRMED here, right before the status flip, under the dues-month
@@ -8634,6 +8674,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             error: 'This visit was reassigned to another technician while it was being completed. Reload and try again.',
             code: 'service_reassigned',
           } });
+        }
+        if (err && err.code === 'BILLING_LANE_CHANGED') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: { error: err.message, code: 'BILLING_LANE_CHANGED' } });
         }
         if (err && (err.code === 'lawn_bermuda_limit_reached' || err.code === 'lawn_bermuda_pair_required')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
@@ -11891,6 +11935,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         })
           ? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)
           : null;
+        // The mint's in-lock check: the covered-member guard, then the
+        // customer's billing lane re-read under the lock against the lane
+        // this completion decided the amount from (a lane edit committed
+        // since entry 409s retryably, never settles on the old lane).
+        const mintRecheckInTrx = async (trx) => {
+          if (coveredMemberMintGuard) await coveredMemberMintGuard(trx);
+          await refuseBillingLaneDriftInTrx(trx, svc);
+        };
         // An unpriced membership plan visit billed at monthly_rate IS that
         // month's dues: stamp the month on the invoice so the month's other
         // plan visits see it covered (monthlyDuesCollected). The month is the
@@ -11961,7 +12013,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // by-then-mutable row and drift from the frozen cents.
           useScheduledReplay: !isBackfillCompletion
             && !(backfillReviewMintRequired && resumingCommittedCompletion),
-          recheckInTrx: coveredMemberMintGuard,
+          recheckInTrx: mintRecheckInTrx,
           // Live replay mints prove the row price hasn't moved since this
           // completion derived its amount (codex #3344 r2) — a WaveGuard
           // reprice landing mid-completion 409s and the retry bills fresh
@@ -12080,7 +12132,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? svc
               : { ...svc, estimated_price: mintInvoiceAmount, primary_line_price: null },
             allowPriceMovement: false,
-            recheckInTrx: coveredMemberMintGuard,
+            recheckInTrx: mintRecheckInTrx,
             buildCreateParams: () => ({
               customerId: svc.customer_id,
               serviceRecordId: record.id,
@@ -12474,6 +12526,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? 'This visit\'s setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
               : `This visit's setup fee is still being billed by another closeout — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'setup_fee_claim_in_flight',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The customer's billing type moved while the mint waited on its locks
+        // (refuseBillingLaneDriftInTrx): nothing was minted. Retryable on EVERY
+        // lane, never the non-blocking "bill by hand" finalize below — the retry
+        // decides and bills on the new lane.
+        if (invErr?.code === 'BILLING_LANE_CHANGED' && !invoice?.id) {
+          logger.warn(`[dispatch] visit ${svc.id}: billing type changed during the mint — releasing for resume so the retry bills on the new lane`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          return ({ status: 409, body: {
+            error: invErr.message,
+            code: 'BILLING_LANE_CHANGED',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
@@ -13232,8 +13298,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
       && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
-      // follows it (scope: "leave it off on re-services").
-      && !reserviceFixedRecap;
+      // follows it (scope: "leave it off on re-services"). With
+      // GATE_FAST_COMPLETE_WRAP_UP on, a re-service asks for a review by default
+      // (owner 2026-10-10, "show on"): the sheet's Wrap-up sends requestReview and
+      // wrapUpReviewAsk, and a fixed-text ask goes as its OWN message through
+      // enrollPostService below (shouldBundleReview refuses fixed mode). Gate off,
+      // the marker is refused and every re-service path is as it was. Decided once,
+      // above, by ReserviceFixedRecap.reviewAskAllowed.
+      && reviewAskAllowed;
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -13347,6 +13419,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
+      // The fixed re-service text is final as built: a review ask never rides
+      // inside it (it follows as its own message, below).
+      !reserviceFixedRecap &&
       // Only an operator-chosen immediate ask rides inside the completion
       // text. No timing ("Automatic", or a client that sent none) is the
       // legacy 120-minute separate ask that enrollPostService schedules
@@ -14879,6 +14954,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
+                  // The replay rebuilds appointmentId from this, as the
+                  // immediate send passes it: the App push opens the visit's
+                  // report, not the Documents tab.
+                  scheduled_service_id: svc.id,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,
                   // from_phone above is a NOT-NULL placeholder — the

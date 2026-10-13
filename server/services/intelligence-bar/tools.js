@@ -18,6 +18,7 @@ const { applyAssignable, assertAssignableTechnician } = require('../technician-e
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
+const { MAX_RESULTS: MAX_NAME_MATCHES, isNameLikeSearch, rankNameMatches } = require('./name-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -48,6 +49,7 @@ const {
   normalizeContactZip,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
+  clearSharedPhoneMarkOnPhoneChange,
 } = require('../../utils/intake-normalize');
 
 // ─── TOOL DEFINITIONS (Anthropic format) ────────────────────────
@@ -70,7 +72,8 @@ Use for: "what do we know about large patch on zoysia", "how has K-Flow performe
     name: 'query_customers',
     description: `Search/filter the customer database. Returns matching customers with key fields.
 Use for: finding customers by attribute, missing data, filtering by city/tier/stage/tags/service type.
-Supports SQL-like conditions via the filters parameter.`,
+Supports SQL-like conditions via the filters parameter.
+When a name search (no digits) finds nothing exact on the first page, it falls back to at most 5 sound-alike / close-spelling matches, honoring limit and never offset (result has approximate: true, rows show company_name); offer those with offer_choices and confirm with the operator before acting on one.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -220,6 +223,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
+Billing type and per-application fee (only when the office has turned this on; otherwise refused): updates.billing_mode (per_application, per_visit, one_time or monthly_membership) and updates.per_application_fee (dollars per visit, e.g. 147). Send them alone, with no other field; the card shows what the next visits are charged. Annual prepay and clearing the billing type are done elsewhere.
 monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. ${PRICE_NOTICE_DISCLOSURE}
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
@@ -418,7 +422,8 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
         Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
         input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
-        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null);
+        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null,
+        input._ib_billing_pin);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -446,7 +451,7 @@ async function queryCustomers(input, readCustomerIds = []) {
 
   let query = db('customers')
     .select(
-      'customers.id', 'customers.first_name', 'customers.last_name',
+      'customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name',
       'customers.email', 'customers.phone', 'customers.city', 'customers.state', 'customers.zip',
       'customers.address_line1', 'customers.waveguard_tier', 'customers.pipeline_stage',
       'customers.monthly_rate', 'customers.lifetime_revenue', 'customers.lead_score',
@@ -465,6 +470,41 @@ async function queryCustomers(input, readCustomerIds = []) {
   const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));
   if (unsupported.length) return { error: `Unsupported customer filters: ${unsupported.join(', ')}` };
 
+  query = applyCustomerFilters(query, filters);
+
+  // Inside a customer-scoped task every customer list — searched, filtered or
+  // bare — may only return that customer; a genuinely unscoped request
+  // arrives with an empty scope and stays broad.
+  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
+  const unsearched = query.clone(); // filters + scope, no text search
+  if (search) query = applyCustomerSearch(query, search);
+
+  // Sort
+  const sortMap = {
+    name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
+    lead_score: 'lead_score', health_score: 'health_score',
+    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
+  };
+  const sortCol = sortMap[sort_by] || 'last_name';
+  query = query.orderBy(sortCol, sort_dir);
+
+  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
+  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
+  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
+
+  const result = {
+    customers: customers.map(customerListRow),
+    total_matching: Number(matched.count),
+    returned_count: customers.length,
+    has_more: offset + customers.length < Number(matched.count),
+    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
+    total_customers: parseInt(total.count),
+  };
+  return Number(matched.count) === 0 ? await withApproximateCustomers(result, unsearched, { search, limit, offset }) : result;
+}
+
+// Every non-search filter of query_customers, in one place.
+function applyCustomerFilters(query, filters) {
   // Table-driven exact filters keep the public names and DB columns aligned.
   for (const [key, column] of Object.entries({ state: 'state', zip: 'zip', stage: 'pipeline_stage', lead_source: 'lead_source', active: 'active' })) {
     if (filters[key] != null) query = query.where(column, filters[key]);
@@ -501,66 +541,78 @@ async function queryCustomers(input, readCustomerIds = []) {
         .whereILike('service_type', `%${filters.service_type}%`);
     });
   }
+  return query;
+}
 
-  // Free text search
-  // Inside a customer-scoped task every customer list — searched, filtered or
-  // bare — may only return that customer; a genuinely unscoped request
-  // arrives with an empty scope and stays broad.
-  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
-  if (search) {
-    const s = `%${search}%`;
-    query = query.where(function () {
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
-        .orWhereILike('phone', s).orWhereILike('email', s)
-        .orWhereILike('address_line1', s).orWhereILike('city', s)
-        .orWhereILike('company_name', s);
-    });
-  }
+function applyCustomerSearch(query, search) {
+  const s = `%${search}%`;
+  return query.where(function () {
+    this.whereILike('first_name', s).orWhereILike('last_name', s)
+      .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
+      .orWhereILike('phone', s).orWhereILike('email', s)
+      .orWhereILike('address_line1', s).orWhereILike('city', s)
+      .orWhereILike('company_name', s);
+  });
+}
 
-  // Sort
-  const sortMap = {
-    name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
-    lead_score: 'lead_score', health_score: 'health_score',
-    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
-  };
-  const sortCol = sortMap[sort_by] || 'last_name';
-  query = query.orderBy(sortCol, sort_dir);
-
-  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
-  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
-  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
-
+function customerListRow(c) {
   return {
-    customers: customers.map(c => ({
-      id: c.id,
-      name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
-      first_name: c.first_name,
-      last_name: c.last_name,
-      email: c.email || null,
-      phone: c.phone || null,
-      city: c.city || null,
-      state: c.state || null,
-      zip: c.zip || null,
-      address: c.address_line1 || null,
-      tier: c.waveguard_tier || null,
-      stage: c.pipeline_stage,
-      monthly_rate: parseFloat(c.monthly_rate || 0),
-      lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
-      lead_score: c.lead_score,
-      health_score: c.health_score ? parseInt(c.health_score) : null,
-      active: c.active,
-      member_since: c.member_since,
-      last_service_date: c.last_service_date,
-      next_service_date: c.next_service_date,
-      last_contact_date: c.last_contact_date,
-      lead_source: c.lead_source,
-    })),
-    total_matching: Number(matched.count),
+    id: c.id,
+    name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+    first_name: c.first_name,
+    last_name: c.last_name,
+    company_name: c.company_name || null,
+    email: c.email || null,
+    phone: c.phone || null,
+    city: c.city || null,
+    state: c.state || null,
+    zip: c.zip || null,
+    address: c.address_line1 || null,
+    tier: c.waveguard_tier || null,
+    stage: c.pipeline_stage,
+    monthly_rate: parseFloat(c.monthly_rate || 0),
+    lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
+    lead_score: c.lead_score,
+    health_score: c.health_score ? parseInt(c.health_score) : null,
+    active: c.active,
+    member_since: c.member_since,
+    last_service_date: c.last_service_date,
+    next_service_date: c.next_service_date,
+    last_contact_date: c.last_contact_date,
+    lead_source: c.lead_source,
+  };
+}
+
+const APPROXIMATE_CUSTOMER_NOTE = 'No customer matched that search exactly. These are sound-alike / close-spelling matches, best first, and may be the wrong people. Show them to the operator with offer_choices and get a confirmed pick before any write or send.';
+// Name columns only, so 20,000 rows stay a light read; a larger book is
+// scanned in id order and the fallback is best-effort past the cap.
+const APPROXIMATE_CANDIDATE_CAP = 20000;
+
+// Rescue path for a dictated, misspelled name. `unsearched` is the main query
+// with its filters and customer scope but no text search. Contract: only the
+// first page (offset 0) gets a fallback, capped at min(limit, 5) rows, so
+// has_more is false and there is no page 2 of guesses. Ranks the candidates by
+// sound and spelling in Node, then reads the best few with the main query's
+// columns. Returns `result` unchanged when nothing is close.
+async function withApproximateCustomers(result, unsearched, { search, limit, offset }) {
+  if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
+  const candidates = await unsearched.clone().clearSelect().clearOrder()
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
+    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+  const ranked = rankNameMatches(search, candidates, { limit: Math.min(limit, MAX_NAME_MATCHES) });
+  if (!ranked.length) return result;
+  const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
+  const rank = new Map(ranked.map((r, i) => [r.id, i]));
+  const customers = rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
+  return {
+    ...result,
+    approximate: true,
+    note: APPROXIMATE_CUSTOMER_NOTE,
+    customers,
+    total_matching: customers.length,
     returned_count: customers.length,
-    has_more: offset + customers.length < Number(matched.count),
-    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
-    total_customers: parseInt(total.count),
+    has_more: false,
+    next_offset: null,
   };
 }
 
@@ -1189,6 +1241,13 @@ const UPDATABLE_FIELDS = {
   monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
 
+// The columns update_customer reports in `changes`: the shared fields plus the
+// billing pair, which reach the write only through billing-mode-change.js
+// (gated and pinned; never through sanitizeUpdates or the bulk tool).
+const CHANGE_REPORT_COLUMNS = {
+  ...UPDATABLE_FIELDS, billing_mode: 'billing_mode', per_application_fee: 'per_application_fee',
+};
+
 function sanitizeUpdates(updates) {
   const clean = {};
   for (const [key, val] of Object.entries(updates)) {
@@ -1331,10 +1390,17 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null) {
-  const clean = sanitizeUpdates(updates);
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null, billingPin) {
+  // Billing type + per-application fee (GATE_IB_BILLING_MODE_EDIT, owner D5
+  // 2026-10-06): only from a card that pinned them (billing-mode-change.js).
+  const BillingModeChange = require('./billing-mode-change');
+  const billingEdit = BillingModeChange.executorBillingEdit(updates, billingPin);
+  if (billingEdit.error) return billingEdit;
+  const clean = { ...sanitizeUpdates(updates), ...billingEdit.fields };
   Object.assign(clean, normalizeContactRecord(clean));
-  if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
+  // updated_at alone (sanitizeUpdates always stamps it) is no edit; a card
+  // with one recognized field (e.g. billing_mode alone) is one.
+  if (!Object.keys(clean).some((k) => k !== 'updated_at')) return { error: 'No valid fields to update' };
 
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
@@ -1354,6 +1420,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
+  // Phone change → drop the shared-phone texting mark (codex #6268 r3); the IB
+  // never sets the mark, so there is no same-write exception here.
+  clearSharedPhoneMarkOnPhoneChange(clean, before);
 
   // Stage change → the FULL canonical lifecycle stamps, identical to the
   // admin route (codex #3282 audit P1 — the old member_since-only handling
@@ -1429,9 +1498,18 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customerId)],
       );
-      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+      // A billing type / fee edit joins it too (billing-mode-change.js): a
+      // Schedule booking INSERTs visits under this same lock, so taking it
+      // here, before the customer row lock (the order the booking and
+      // customer-comms-lock.js document), fences new visits out until this
+      // transaction ends.
+      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined
+        || Object.keys(billingEdit.fields).length > 0) {
         await lockCustomerComms(trx, customerId);
       }
+      // …then the per-customer annual-prepay lock every term writer takes
+      // (billing-mode-change.js; billing edits only), still before the row.
+      await BillingModeChange.lockAnnualPrepayBeforeRow(trx, customerId, billingEdit.fields);
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
@@ -1445,6 +1523,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.customerNoLongerLive = true;
         throw err;
       }
+      // REBUILD the shared-phone mark clear from the LOCKED row (codex #6268
+      // r4/r8): the pre-lock pass may have derived `false` from a stale phone;
+      // a save that moved the number and marked it since must keep its mark
+      // when this write no longer changes the identity. The IB never sets
+      // the mark itself, so the derived value is dropped and decided again.
+      delete clean.sms_primary_for_shared_phone;
+      clearSharedPhoneMarkOnPhoneChange(clean, lockedBefore);
       if (expectedVersion) {
         // Compare Postgres' full-precision version while holding the same row
         // lock as the domain write; JS Date equality loses microseconds.
@@ -1464,6 +1549,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         err.previewChanged = true;
         throw err;
       }
+      // The billing fields still read as the card showed, and the customer
+      // page's billing-type rules still hold (no-op without billing fields).
+      await BillingModeChange.assertBillingEditUnderLock(trx, customerId, lockedBefore, billingEdit.fields, billingPin);
       // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage=
       // 'churned' — including a re-save on an already-churned row — so a
       // pre-fix residue row self-heals. Refuses (naming what's still live)
@@ -1637,11 +1725,15 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
   const changes = {};
   for (const key of Object.keys(updates)) {
-    const dbCol = UPDATABLE_FIELDS[key];
+    const dbCol = CHANGE_REPORT_COLUMNS[key];
     if (dbCol && String(before[dbCol]) !== String(after[dbCol])) {
       changes[key] = { from: before[dbCol], to: after[dbCol] };
     }
   }
+  // Server-derived effect the card disclosed (codex #6268 r8): the phone
+  // change cleared this customer's shared-phone texting mark.
+  const sharedPhoneMarkCleared = clean.sms_primary_for_shared_phone === false && committedRows?.before?.sms_primary_for_shared_phone === true;
+  if (sharedPhoneMarkCleared) changes.sms_primary_for_shared_phone = { from: true, to: false };
 
   // notes maps to free-text crm_notes (gate codes, access details) — redact
   // it from logs while still persisting the value.
@@ -1677,6 +1769,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
     customer_id: customerId,
     customer_name: `${after.first_name} ${after.last_name}`,
     changes,
+    ...(sharedPhoneMarkCleared ? { shared_phone_mark_cleared: true, shared_phone_mark_note: 'The phone change cleared this customer\'s shared-phone texting mark; texts from the shared phone go unlinked until staff mark an account again.' } : {}),
     // Disclosed commit effect (#3140): this write made the customer an
     // implied monthly member, so the lane inference was stamped explicitly.
     ...(impliedLaneStamp ? {
@@ -1750,7 +1843,18 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
   // when phone is part of the update).
-  if (clean.phone !== undefined) clean.line_type = null;
+  if (clean.phone !== undefined) {
+    clean.line_type = null;
+    // ...and the shared-phone texting mark, chosen for the old number — but
+    // only on rows whose number IDENTITY changes (codex #6268 r3/r8): a row
+    // already holding this number keeps its mark. Decided per row inside the
+    // UPDATE against the row's current phone, since there is no per-row
+    // before-state here.
+    const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+    clean.sms_primary_for_shared_phone = db.raw(
+      "CASE WHEN RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN sms_primary_for_shared_phone ELSE false END",
+      [newKey]);
+  }
 
   // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
   // per row, since there's no per-row before-state) — codex #3282 audit P1:
@@ -1818,7 +1922,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared = 0 } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
       if (laneStampRelevant) {
@@ -1931,6 +2035,20 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
+      // Receipt for the shared-phone mark clear the card disclosed (codex
+      // #6268 r9): rows marked primary whose number identity this write
+      // changes. Counted under the same statement's lock set, before the CASE
+      // in `clean` clears them.
+      let sharedPhoneMarksCleared = 0;
+      if (clean.phone !== undefined) {
+        const newKey = String(clean.phone == null ? '' : clean.phone).replace(/\D/g, '').slice(-10);
+        const marked = await trx('customers')
+          .whereIn('id', targetIds)
+          .where({ sms_primary_for_shared_phone: true })
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) <> ?", [newKey])
+          .count({ n: '*' });
+        sharedPhoneMarksCleared = Number(marked?.[0]?.n || 0);
+      }
       const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
@@ -1941,7 +2059,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped, churnWoundDownCount, railsRepairedCount, sharedPhoneMarksCleared };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
@@ -1972,6 +2090,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
+      ...(sharedPhoneMarksCleared ? { shared_phone_marks_cleared: sharedPhoneMarksCleared, shared_phone_mark_note: `${sharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
       ...bulkLaneStampResult(laneStampIds),
       // Skipped rows surface on the card, never a silent Done (same
       // contract as the per-row address/email path; GH r9 P1). Each skipped
@@ -2021,6 +2140,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
+  // Receipt for the shared-phone mark clear the card disclosed (codex #6268
+  // r13): rows marked primary whose number identity this write changes.
+  let perRowSharedPhoneMarksCleared = 0;
   const perRowLaneStampIds = [];
   let churnWoundDownCount = 0;
   // Codex #4715 r4 P2: rows where churnGuardOrRepair only repaired the
@@ -2044,6 +2166,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     }
     let emailSync = null;
     let rowLaneStamp = null;
+    let rowMarkCleared = false;
     let rowRailsRepairedOnly = false;
     try {
       await db.transaction(async (trx) => {
@@ -2110,6 +2233,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
         await trx('customers').where('id', customerId).update(
           rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
         );
+        // Flag only; counted after the transaction commits (codex #6268 r14).
+        rowMarkCleared = clean.phone !== undefined && lockedBefore.sms_primary_for_shared_phone === true
+          && String(lockedBefore.phone || '').replace(/\D/g, '').slice(-10) !== String(clean.phone || '').replace(/\D/g, '').slice(-10);
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
             !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -2183,6 +2309,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       }).catch(() => null);
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
+    if (rowMarkCleared) perRowSharedPhoneMarksCleared += 1;
     // Reaching here means the per-row transaction committed — a blocked
     // churnGuardForRow throws churnBlocked above and lands in `errors`
     // instead. Codex #4715 r4 P2: a railsRepairedOnly row (already churned,
@@ -2211,6 +2338,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
     updated_count: count,
     fields_updated: Object.keys(updates),
     ...bulkLaneStampResult(perRowLaneStampIds),
+    ...(perRowSharedPhoneMarksCleared ? { shared_phone_marks_cleared: perRowSharedPhoneMarksCleared, shared_phone_mark_note: `${perRowSharedPhoneMarksCleared} customer(s) lost their shared-phone texting mark with this phone change; texts from those shared phones go unlinked until staff mark an account again.` } : {}),
     ...(errors.length ? {
       errors,
       // The confirm card renders `warning` — a partial bulk update must never

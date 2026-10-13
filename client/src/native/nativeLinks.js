@@ -1,7 +1,7 @@
 /**
  * Universal / App Link handling for the native (Capacitor) shell.
  *
- * When iOS or Android hands the app a verified https://portal.wavespestcontrol.com
+ * When iOS or Android hands the app a verified portal.wavespestcontrol.com
  * URL (universal link / app link), Capacitor emits 'appUrlOpen' on @capacitor/app
  * instead of navigating anywhere. The shell's webview already runs the remote
  * portal (capacitor.config server.url), so honoring the link is a same-origin
@@ -15,7 +15,11 @@
  * Safety rules (the OS should never hand us a violating URL, but the webview
  * must not be steerable if it does):
  *  - foreign origins are ignored, and navigation uses the origin-checked
- *    ABSOLUTE href — never a derived path. A crafted same-origin URL like
+ *    ABSOLUTE href — never a derived path. Plain http on our own host is the
+ *    one exception: texted links carry no scheme (the SMS link policy strips
+ *    https://), iOS turns them into http://portal... and routes http universal
+ *    links into the app too, so that form is upgraded to https before the
+ *    origin check instead of being refused. A crafted same-origin URL like
  *    https://portal.wavespestcontrol.com//evil.example/x has pathname
  *    //evil.example/x, which location.assign would treat as protocol-relative
  *    and leave the origin; such pathnames are rejected outright.
@@ -28,6 +32,22 @@ import { reportNativeLink } from '../lib/reportError';
 
 const STAFF_OR_API_PATH = /^\/(admin|tech|api)(\/|$)/;
 const LINK_ROUTES = new Map([['', 'home'], ['l', 'shortlink'], ['estimate', 'estimate']]);
+
+// http://portal.wavespestcontrol.com/... is our own page reached without TLS;
+// hand it over as its https form. Any other host, scheme, or port is left for
+// the origin check to refuse.
+function upgradeOwnHostHttp(target, loc) {
+  if (target.protocol !== 'http:') return target;
+  let own;
+  try {
+    own = new URL(loc.origin);
+  } catch {
+    return target;
+  }
+  if (own.protocol !== 'https:' || target.host !== own.host) return target;
+  target.protocol = 'https:';
+  return target;
+}
 
 function traceLink(source, outcome, target) {
   reportNativeLink({
@@ -43,7 +63,7 @@ export function sameOriginUrl(rawUrl, loc = window.location) {
   if (!rawUrl) return null;
   let target;
   try {
-    target = new URL(rawUrl);
+    target = upgradeOwnHostHttp(new URL(rawUrl), loc);
   } catch {
     return null;
   }
@@ -68,7 +88,7 @@ export function customerAppUrl(rawUrl, loc = window.location) {
 
   let target;
   try {
-    target = new URL(value, loc.origin);
+    target = upgradeOwnHostHttp(new URL(value, loc.origin), loc);
   } catch {
     return null;
   }

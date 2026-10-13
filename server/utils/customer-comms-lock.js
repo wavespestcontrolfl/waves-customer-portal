@@ -91,6 +91,16 @@ async function lockSmsPhone(trx, phone) {
   await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [normalized]);
 }
 
+// Non-blocking form of lockSmsPhone (the same key): true when acquired. A final provider boundary that already holds other
+// locks uses it so a writer holding the number is a refusal, never a wait.
+async function tryLockSmsPhone(trx, phone) {
+  const normalized = require('./phone').toE164(phone);
+  if (!normalized) return false;
+  const res = await trx.raw("SELECT pg_try_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text)) AS locked", [normalized]);
+  const row = res && res.rows ? res.rows[0] : (Array.isArray(res) ? res[0] : null);
+  return !!(row && (row.locked === true || row.locked === 't'));
+}
+
 // The callback covers final authority reads and the SDK call only. Provider
 // preparation and error recorders use separate connections and run outside it.
 async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
@@ -211,5 +221,5 @@ async function lockAssignedCustomerEmails(trx, updates = {}) {
   return addresses;
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail, lockEmailOwnershipForSend,
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, tryLockSmsPhone, withSmsConsentLock, lockCustomerEmail, lockEmailOwnershipForSend,
   lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS, googleMailboxIdentity, GOOGLE_MAILBOX_SQL };

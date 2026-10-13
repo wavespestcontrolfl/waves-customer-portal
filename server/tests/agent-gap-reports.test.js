@@ -523,12 +523,16 @@ describe('agent-gap-reports', () => {
       expect(insertedRows.map((row) => row.summary)).toEqual(['add a second service address', 'refund a card payment']);
     });
 
-    test('tool failures are never recorded here, coded or not', async () => {
+    test('plain tool failures and by-design refusals are never recorded', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       for (let i = 0; i < 3; i += 1) {
-        collector.toolResult('adjust_stock', { error: 'x', code: 'target_clarification_required' }, true);
-        collector.toolResult('send_sms', { error: 'IB writes are turned off' }, true);
+        collector.toolResult('send_sms', { error: 'IB writes are turned off' }, true, { round: 0 });
+        collector.toolResult('adjust_stock', { error: 'x', code: 'permission_denied' }, true, { round: 0 });
+        collector.toolResult('adjust_stock', { error: 'x', code: 'approval_required' }, true, { round: 0 });
+        collector.toolResult('adjust_stock', { error: 'x', code: 'invalid_input' }, true, { round: 0 });
+        collector.toolResult('adjust_stock', { error: 'x', code: 'owner_direct_bulk_limit' }, true, { round: 0 });
+        collector.toolResult('get_invoice', { error: 'x', code: 'invoice_not_found' }, true, { round: 0 });
       }
       await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(0);
@@ -622,6 +626,259 @@ describe('agent-gap-reports', () => {
         "I can't switch it without the rental's street address", 'Done — the visit moved to Thursday at 9 AM.']) {
         expect(DECLINE_RE.test(reply)).toBe(false);
       }
+    });
+  });
+
+  describe('blocked rows: refusals and loop exhaustion', () => {
+    const REFUSED = { error: 'Pick the customer first for Pat Placeholder at 100 Example Lane', code: 'target_clarification_required' };
+    const collectorFor = (opts = {}) => load().createGapCollector({ source: 'intelligence-bar', ...opts });
+
+    test('a request that ends on a recordable refusal writes one row from tool + code, with no refusal text', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await collector.flush({ reply: 'Which customer do you mean?' });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ source: 'intelligence-bar', kind: 'blocked', closest_tool: 'update_customer', status: 'new' });
+      expect(insertedRows[0].summary).toContain('target_clarification_required');
+      expect(JSON.stringify(insertedRows[0])).not.toMatch(/Placeholder|Example Lane/);
+    });
+
+    test.each([
+      'capability_unimplemented', 'capability_not_loaded', 'dependency_unresolved', 'target_clarification_required',
+      'customer_scope_required', 'requires_existing_owner_workflow',
+    ].filter((code) => code !== 'capability_unimplemented'))('code %s is recorded as a blocked row', async (code) => {
+      const collector = collectorFor({ isRegisteredTool: () => true });
+      collector.toolResult('update_customer', { error: 'x', code }, true, { round: 0 });
+      await collector.flush({ reply: 'Which one?' });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].kind).toBe('blocked');
+      expect(insertedRows[0].summary).toContain(code);
+    });
+
+    test('a coded refusal that names another screen is recorded under its own code; a refused marker under other_screen', async () => {
+      const collector = collectorFor();
+      collector.toolResult('reprice_visits', { error: 'Change visit prices on the Schedule screen.', code: 'annual_prepay_customer' }, true, { round: 0 });
+      collector.toolResult('book_visit', { refused: 'Move it from the Schedule screen.', error: 'Not done' }, true, { round: 0 });
+      await collector.flush({ reply: 'Use the Schedule screen.' });
+      expect(insertedRows.map((row) => row.summary.match(/\((\w+)\)/)[1]).sort()).toEqual(['annual_prepay_customer', 'other_screen']);
+    });
+
+    test('an UNCODED failure whose text names a screen is a fault, never a gap', async () => {
+      const collector = collectorFor();
+      collector.toolResult('book_visit', { error: 'Could not verify the slot; book from the Schedule screen instead.' }, true, { round: 0 });
+      await collector.flush({ reply: 'Use the Schedule screen.' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('a by-design refusal whose text names a screen records nothing', async () => {
+      const collector = collectorFor();
+      collector.toolResult('book_visit', { error: 'Approve it on the confirmation page.', code: 'approval_required' }, true, { round: 0 });
+      await collector.flush({ reply: 'Approve the card.' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('the same tool and code give one fingerprint however the ask or reply was worded; a different code or tool differs', async () => {
+      const first = collectorFor();
+      first.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await first.flush({ reply: 'Which customer do you mean?' });
+      const second = collectorFor();
+      second.toolResult('update_customer', { error: 'other words entirely', code: 'target_clarification_required' }, true, { round: 3 });
+      await second.flush({ reply: 'Tell me the name.' });
+      const third = collectorFor();
+      third.toolResult('update_customer', { error: 'x', code: 'customer_scope_required' }, true, { round: 0 });
+      third.toolResult('other_tool', REFUSED, true, { round: 0 });
+      await third.flush({ reply: 'x' });
+      const [a, b, c, d] = insertedRows.map((row) => row.fingerprint);
+      expect(a).toBe(b);
+      expect(new Set([a, c, d]).size).toBe(3);
+    });
+
+    test('five refusals of one ask in a request are one signal', async () => {
+      const collector = collectorFor();
+      for (let i = 0; i < 5; i += 1) collector.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await collector.flush({ reply: 'Which customer do you mean?' });
+      expect(insertedRows).toHaveLength(1);
+    });
+
+    test('a refusal in an earlier round, or in a round that proposed a write, is not where the request ended', async () => {
+      const recovered = collectorFor();
+      recovered.toolResult('update_customer', REFUSED, true, { round: 0 });
+      recovered.toolResult('update_customer', { customer: 'ok' }, false, { round: 1 });
+      await recovered.flush({ reply: 'Done.' });
+      const wrote = collectorFor();
+      wrote.toolResult('update_customer', REFUSED, true, { round: 0 });
+      wrote.toolResult('update_customer', { pending_confirmation: true }, false, { round: 0, wrote: true });
+      await wrote.flush({ reply: 'Confirm the card.' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('a capability search after the refusal moves the request on', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 0 });
+      collector.toolResult('discover_capabilities', { status: 'capabilities_found' }, false, { round: 1 });
+      await collector.flush({ reply: 'Here is what I found.' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('running out of steps writes one row, keyed on source + code only, and replaces the refusal row', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 10 });
+      await collector.flush({ reply: 'too many steps', stepLimitReached: true, noReply: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ kind: 'blocked', closest_tool: 'update_customer' });
+      expect(insertedRows[0].summary).toMatch(/used all its steps/);
+      const other = collectorFor();
+      other.toolResult('get_invoice', { error: 'Database unavailable' }, true, { round: 10 });
+      await other.flush({ reply: 'x', stepLimitReached: true, noReply: true });
+      expect(insertedRows[1].fingerprint).toBe(insertedRows[0].fingerprint);
+    });
+
+    test('running out of steps with a prose decline still writes one row', async () => {
+      const collector = collectorFor();
+      collector.toolResult('no_such_tool', { error: 'Capability is not implemented', code: 'capability_unimplemented' }, true, { round: 11 });
+      await collector.flush({ reply: "I can't do that from here.", ask: 'do the thing', stepLimitReached: true, noReply: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].kind).toBe('blocked');
+      expect(insertedRows[0].summary).toMatch(/used all its steps/);
+    });
+
+    test('the tech bar keeps its prose record at the step limit (it writes no exhaustion row)', async () => {
+      const collector = collectorFor({ source: 'tech-bar' });
+      await collector.flush({ reply: "I can't do that from here.", ask: 'log the bait station count', stepLimitReached: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', source: 'tech-bar' });
+    });
+
+    test('with no tool at all, running out of steps still records', async () => {
+      const collector = collectorFor();
+      await collector.flush({ reply: 'x', stepLimitReached: true, noReply: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].closest_tool).toBeNull();
+    });
+
+    test('a long request whose last tool round only succeeded is finished, not exhausted', async () => {
+      const collector = collectorFor();
+      collector.toolResult('get_invoice', { rows: [] }, false, { round: 10 });
+      await collector.flush({ reply: 'All done: the visit moved to Friday.', stepLimitReached: true, noReply: false });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('a long request whose last tool round committed or proposed a write is finished, not exhausted', async () => {
+      const collector = collectorFor();
+      collector.toolResult('get_invoice', { error: 'Database unavailable' }, true, { round: 10 });
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 10, wrote: true });
+      await collector.flush({ reply: 'Confirm the card.', stepLimitReached: true, noReply: false });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('step limit + a by-design refusal + a report is a finished request: no row', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', { error: 'Only the owner can do that', code: 'permission_denied' }, true, { round: 10 });
+      await collector.flush({ reply: 'That is limited to the owner account.', stepLimitReached: true, noReply: false });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('step limit + a recordable refusal + a report writes the refusal row, not an exhaustion row', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 10 });
+      await collector.flush({ reply: 'I could not pick the customer.', stepLimitReached: true, noReply: false });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].summary).toContain('target_clarification_required');
+      expect(insertedRows[0].summary).not.toMatch(/used all its steps/);
+    });
+
+    test('with no final answer at all, exhaustion records even when the last round wrote', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 10, wrote: true });
+      await collector.flush({ reply: 'too many steps', stepLimitReached: true, noReply: true });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].summary).toMatch(/used all its steps/);
+    });
+
+    test('a write by one tool does not hide an unrelated refusal in the same parallel round', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 4, wrote: true });
+      collector.toolResult('reschedule_appointment', { error: 'x', code: 'dependency_unresolved' }, true, { round: 4 });
+      await collector.flush({ reply: 'Confirm the card; the move needs a step first.' });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ closest_tool: 'reschedule_appointment' });
+      expect(insertedRows[0].summary).toContain('dependency_unresolved');
+    });
+
+    test('a refusal and a write by the SAME tool in one round is not a gap', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 4 });
+      collector.toolResult('update_customer', { pending_confirmation: true }, false, { round: 4, wrote: true });
+      await collector.flush({ reply: 'Confirm the card.' });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('an unknown tool is the same missing_capability row whatever the reply says', async () => {
+      const refusal = { error: 'no such tool', code: 'capability_unimplemented' };
+      const first = collectorFor({ isRegisteredTool: () => false });
+      first.toolResult('create_property', refusal, true, { round: 0 });
+      await first.flush({ reply: "There is no tool in this bar that adds a property." });
+      const second = collectorFor({ isRegisteredTool: () => false });
+      second.toolResult('create_property', refusal, true, { round: 3 });
+      await second.flush({ reply: 'Which property did you mean?' });
+      expect(insertedRows).toHaveLength(2);
+      expect(insertedRows.map((row) => row.kind)).toEqual(['missing_capability', 'missing_capability']);
+      expect(insertedRows[0].fingerprint).toBe(insertedRows[1].fingerprint);
+      expect(insertedRows[1].summary).toBe('Asked for a tool the bar does not have: create_property');
+    });
+
+    test('a registered tool refusing a case is the same missing_capability row whatever the reply says, and never also blocked', async () => {
+      const refusal = { error: 'Commercial estimates are not supported by this tool', code: 'capability_unimplemented' };
+      for (const reply of ["I can't do that from the bar.", 'Anything else?']) {
+        const collector = collectorFor({ isRegisteredTool: () => true });
+        collector.toolResult('save_customer_estimate', refusal, true, { round: 0 });
+        await collector.flush({ reply });
+      }
+      expect(insertedRows).toHaveLength(2);
+      expect(insertedRows.every((row) => row.kind === 'missing_capability')).toBe(true);
+      expect(insertedRows[0].fingerprint).toBe(insertedRows[1].fingerprint);
+    });
+
+    test('a refusal the prose path already records as an unknown tool is not written twice', async () => {
+      const collector = collectorFor({ isRegisteredTool: () => false });
+      collector.toolResult('create_property', { error: 'no such tool', code: 'capability_unimplemented' }, true, { round: 0 });
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].kind).toBe('missing_capability');
+    });
+
+    test('the tech bar keeps its own rule: no refusal or step-limit rows', async () => {
+      const collector = load().createGapCollector({ source: 'tech-bar' });
+      collector.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await collector.flush({ reply: 'Which one?', stepLimitReached: true });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('AGENT_GAP_REPORTS=off records nothing', async () => {
+      process.env.AGENT_GAP_REPORTS = 'off';
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await collector.flush({ reply: 'x', stepLimitReached: true });
+      expect(insertedRows).toHaveLength(0);
+    });
+
+    test('a blocked row rings the bell once, on first sighting, like any other row', async () => {
+      const collector = collectorFor();
+      collector.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await collector.flush({ reply: 'x' });
+      expect(digestMock).toHaveBeenCalledTimes(1);
+      returningRows = [{ id: '7', occurrences: 2, status: 'new', domain: null, xmax: '999' }];
+      priorRow = { status: 'new', belled_at: new Date() };
+      const again = collectorFor();
+      again.toolResult('update_customer', REFUSED, true, { round: 0 });
+      await again.flush({ reply: 'x' });
+      expect(digestMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('prepareGapRow rejects a blocked signal with no usable code', () => {
+      const { _private: { prepareGapRow } } = load();
+      expect(prepareGapRow({ source: 'intelligence-bar', kind: 'blocked', summary: 'x' })).toBeNull();
+      expect(prepareGapRow({ source: 'intelligence-bar', kind: 'blocked', code: 'Not A Code', summary: 'x' })).toBeNull();
     });
   });
 

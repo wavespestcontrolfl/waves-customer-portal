@@ -1,0 +1,136 @@
+// client/src/lib/fast-complete-wrap-up.js
+//
+// The pure rules of the Fast Complete Wrap-up section (components/tech/FastCompleteWrapUp.jsx):
+// the body fragment it posts, the submit-time guards, the re-entry seeds, and the billing facts
+// that decide which rows show. Each rule is the full Complete Service form's, from the same lib
+// functions (lib/completion-review-timing.js, lib/completion-invoice-prediction.js).
+import {
+  REVIEW_TIMING_DEFAULT,
+  completionTimeOnSiteBody,
+  customReviewTimeProblem,
+  reviewDelayMinutesOf,
+  reviewScheduledForOf,
+} from './completion-review-timing';
+import { completionInvoicePrediction } from './completion-invoice-prediction';
+import { nextVisitNoteFields } from './completion-next-visit-note';
+
+export const REENTRY_MAX = 1440;
+export const ADJUSTED_RANGE_MESSAGE = 'Adjusted time on site must be 1–720 minutes.';
+export const REVIEW_TIME_MISSING_MESSAGE = 'Choose a review request time.';
+
+// Will the completion invoice, and who pays: the schedule row's own facts. A confirmed third-party
+// payer gets the banner and no pay-link row.
+export function wrapUpBilling(service) {
+  const { willInvoice, reviewAwaitsPayment } = completionInvoicePrediction({ service: service || {}, visitPrice: service?.estimatedPrice });
+  const payer = service?.billedToPayer;
+  const payerBanner = payer
+    ? `Billed to ${payer.name || 'a third-party payer'} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
+    : null;
+  return { willInvoice, reviewAwaitsPayment, payerBanner };
+}
+
+// The re-entry seeds the server names: a side with no countdown is 0.
+const seedSide = (value) => {
+  const minutes = Number(value);
+  return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : 0;
+};
+export const reentrySeedsFrom = (data) => ({ exteriorMinutes: seedSide(data?.exteriorMinutes), interiorMinutes: seedSide(data?.interiorMinutes) });
+
+// A side whose seed drops to 0 hides its stepper, so its value follows to 0; a side the tech never
+// moved adopts the new seed; a moved side is never clobbered.
+export const adoptSeed = (current, previousSeed, seed) => (seed === 0 || current == null || current === previousSeed ? seed : current);
+
+// A stepper value is posted only once it is off its seed.
+export const reentryMoved = (value, seed) => value != null && value !== (seed ?? null);
+
+export const stepReentry = (delta) => (current) => Math.min(REENTRY_MAX, Math.max(0, (current ?? 0) + delta));
+
+// The review timing keys. `reviewTiming` always posts, unless `omitAutoTiming` (a sheet that posted
+// no `reviewTiming` before keeps the key absent while the timing is Automatic). The explicit delay
+// and time post only off Automatic, as the full form's reviewDelayMinutes / reviewScheduledFor do.
+function timingFields(timing, omitAutoTiming) {
+  if (timing.reviewTiming === REVIEW_TIMING_DEFAULT) return omitAutoTiming ? {} : { reviewTiming: timing.reviewTiming };
+  return { reviewTiming: timing.reviewTiming, reviewDelayMinutes: reviewDelayMinutesOf(timing), reviewScheduledFor: reviewScheduledForOf(timing) };
+}
+
+function reentryFields({ ext, int, seeds }) {
+  return {
+    ...(reentryMoved(ext, seeds?.exteriorMinutes) ? { reentryExteriorMinutes: ext } : {}),
+    ...(reentryMoved(int, seeds?.interiorMinutes) ? { reentryInteriorMinutes: int } : {}),
+  };
+}
+
+// The pay link a sheet posts. A sheet whose text carries no pay link (`noPayLink`: the pest re-service's
+// fixed text and its report-flow text) posts false whatever the tech does; any other posts the tech's
+// choice only while the visit invoices and the text is on, else true.
+const payLinkPosted = ({ noPayLink, willInvoice, sendSms, includePayLink }) => (noPayLink ? false : (willInvoice && sendSms ? includePayLink : true));
+
+// The mark a re-service sheet's Wrap-up puts on a review ask (owner 2026-10-10, "show on"): the server
+// refuses a marked ask once GATE_FAST_COMPLETE_WRAP_UP is off, so a gate turned off under an open sheet
+// stops the new re-service asks. Only beside requestReview:true, and only where the sheet asks `reviewMarker`.
+const reviewMarkerFields = ({ reviewMarker, willReview }) => (reviewMarker && willReview ? { wrapUpReviewAsk: true } : {});
+
+// The body fragment. Untouched it is the four customer-text flags the sheets always posted; every
+// other key appears only when the tech changed it (the next-visit note: lib/completion-next-visit-note.js). `adjusted` is the admin's typed minutes ('' for
+// anyone else): blank sends nothing (the server measures check-in to Complete), a number overrides.
+export function wrapUpFields({ sendSms, includePayLink, willInvoice, willReview, reviewTiming, reviewCustomAt, adjusted, ext, int, seeds, omitAutoTiming, noPayLink, reviewMarker, nextVisitNote, nextVisit }) {
+  const timing = { willReview, reviewTiming, reviewCustomAt };
+  return {
+    sendCompletionSms: sendSms,
+    includePayLink: payLinkPosted({ noPayLink, willInvoice, sendSms, includePayLink }),
+    requestReview: willReview,
+    ...reviewMarkerFields({ reviewMarker, willReview }),
+    ...timingFields(timing, omitAutoTiming),
+    ...completionTimeOnSiteBody({ backfill: false, adjustedMinutes: adjusted, elapsed: '', preparing: true }),
+    ...reentryFields({ ext, int, seeds }),
+    ...nextVisitNoteFields({ nextVisitNote, nextVisit }),
+  };
+}
+
+// The member the packet enrolls the review from: the first by window_start (a member with no start last), then by id
+// (visit-completion-packets.js enrollVisitCompletionReviewOnce). `rows` are the stop's schedule rows.
+export function firstMemberId(rows) {
+  const keyOf = (row) => `${row.windowStart ? 0 : 1}|${row.windowStart || ''}|${row.id}`;
+  return [...rows].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : 1))[0]?.id ?? null;
+}
+
+// The grouped stop's Wrap-up (owner 2026-10-12): the three things the packet reads for the whole stop. One text
+// goes if ANY item asks for it, one review ask goes only if EVERY item allows it, and its delay comes from the
+// FIRST member, so each of these must be the same on every item. The stop keeps no pay-link row, no time
+// correction and no re-entry steppers (the packet records those per service: they stay on the full form).
+const STOP_TIMING_KEYS = ['reviewTiming', 'reviewDelayMinutes', 'reviewScheduledFor'];
+export function stopWrapUpFields(fields) {
+  const { sendCompletionSms, requestReview, ...rest } = fields;
+  return { sendCompletionSms, requestReview, ...Object.fromEntries(STOP_TIMING_KEYS.filter((key) => key in rest).map((key) => [key, rest[key]])) };
+}
+
+// The stop's saved draft with those fields laid onto EVERY item body, identically. The timing keys the stop owns
+// are cleared first, so a choice changed back to Automatic leaves none behind. Pure: the draft in is not changed.
+export function overlayStopFields(draft, fields) {
+  const forms = Object.fromEntries(Object.entries(draft.forms || {}).map(([id, form]) => {
+    const kept = Object.fromEntries(Object.entries(form.body || {}).filter(([key]) => !STOP_TIMING_KEYS.includes(key)));
+    return [id, { ...form, body: { ...kept, ...fields } }];
+  }));
+  return { ...draft, forms };
+}
+
+// Submit-time guards, in the full form's order. Each returns the problem in words, or null.
+// A typo in the override must never silently fall back to the inflated timer.
+export function adjustedTimeProblem({ isAdmin, adjusted }) {
+  if (!isAdmin || String(adjusted || '').trim() === '') return null;
+  const minutes = Math.round(Number(adjusted));
+  return Number.isFinite(minutes) && minutes >= 1 && minutes <= 720 ? null : ADJUSTED_RANGE_MESSAGE;
+}
+
+export function reviewTimeMissingProblem(timing) {
+  return timing.willReview && reviewDelayMinutesOf(timing) === null ? REVIEW_TIME_MISSING_MESSAGE : null;
+}
+
+export function customTimeProblem({ willReview, reviewTiming, reviewCustomAt }) {
+  return willReview && reviewTiming === 'custom' ? customReviewTimeProblem(reviewCustomAt) : null;
+}
+
+// "Automatic" is a server decision bucketed by time of day, so it is read again at submit. Every
+// other timing is read again only while the scheduler's state is unknown, so a submit never
+// silently accepts an ask that may never send.
+export const previewRecheckWanted = ({ willReview, reviewTiming, schedulerStateKnown }) => willReview && (reviewTiming === REVIEW_TIMING_DEFAULT || !schedulerStateKnown);

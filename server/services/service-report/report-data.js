@@ -28,7 +28,7 @@ const { stage1PayloadFlag, stage1KeyStamp, stage1TechTips } = require('./lawn-re
 const { lawnNewSodPayload } = require('../lawn-sod-report-card');
 const { attachLongerCycles } = require('./lawn-longer-cycles');
 const { buildMowingHeightContext } = require('./turf-height');
-const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
+const { buildLawnReportV2 } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
@@ -39,7 +39,6 @@ const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const {
   techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
 } = require('./tree-shrub-tech-findings');
-const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
@@ -2881,17 +2880,14 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
   // GATE_LAWN_WATER_IN_RAIN: rain since the visit can change a frozen water-in banner, so the key follows what it will say. Empty while dark.
   irrigationStamp += await lawnWaterInRainStamp(service, knex);
-  // The report lead (GATE_LAWN_REPORT_LEAD) changes what the lawn web report
-  // and its PDF render (lead-mode findings, stock sentences left out), so a PDF
-  // cached before a flip must never be served after it, nor the reverse. The
-  // stamp rides only while the gate is live: gate off leaves every signature,
-  // and so every cached PDF key, byte-identical to before.
-  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
-  // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
-  // its PDF key moves with it; the stamp rides only while the gate is live.
-  // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
-  // so a PDF never depends on the customer's bookings and needs no key for them.
-  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // The report lead changes what the lawn web report and its PDF render
+  // (lead-mode findings, stock sentences left out) and the v6 copy writer changes
+  // the lead's words. The gates that used to add this stamp are gone, but it stays
+  // a CONSTANT: every PDF cached while they were live keeps its key, and a PDF
+  // cached before they went live must never be served again. The by-next-visit
+  // sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields), so a PDF never
+  // depends on the customer's bookings and needs no key for them.
+  irrigationStamp += ':lead=1:copyv6=1';
   // The copy fixes (GATE_LAWN_REPORT_COPY_FIXES) change the lawn report's words, labels and charts,
   // so its PDF key moves with it; the part is empty while the gate is off.
   irrigationStamp += copyFixesPdfStamp();
@@ -4076,10 +4072,10 @@ function buildWateringBanner(instruction, weekPlan = null) {
   };
 }
 
-// The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
+// The v6 copy carrier for a render with no copy.
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null });
 
-// The next lawn visit AT THIS REPORT'S PROPERTY (GATE_LAWN_REPORT_COPY_V6):
+// The next lawn visit AT THIS REPORT'S PROPERTY (live with the report lead):
 // what the report's "Next visit" line shows and what the v6 copy's "by your
 // next visit" sentence is timed from, so the two can never disagree. On a
 // multi-property account a booking at another home is skipped, not taken
@@ -6062,47 +6058,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // same way svcIso does above before slicing, or String(Date) yields
           // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
           const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
-          // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
-          // (lawnNextVisitAtProperty); the same visit times the v6 copy's
-          // by-next-visit sentence. Gate off: the customer-wide query, as before.
-          const copyV6Next = featureGates.lawnReportCopyV6Live();
-          // The Visit Summary's write gate (programVisitOut) needs the PROPERTY-scoped answer with
-          // copy v6 off too: the legacy query below is customer-wide. A failed read leaves it unset.
+          // The next lawn visit at THIS property (lawnNextVisitAtProperty); the same
+          // visit times the v6 copy's by-next-visit sentence.
+          const propertyNext = await lawnNextVisitAtProperty(service, afterIso, knex, readFailures);
+          // The Visit Summary's write gate (programVisitOut) needs the PROPERTY-scoped answer.
           const visitSummaryOut = opts.programVisitOut && typeof opts.programVisitOut === 'object' ? opts.programVisitOut : null;
-          const propertyNext = copyV6Next || visitSummaryOut
-            ? await lawnNextVisitAtProperty(service, afterIso, knex, readFailures)
-            : null;
-          if (visitSummaryOut && propertyNext) visitSummaryOut.nextVisitBooked = propertyNext.state === 'scheduled';
-          const scopedNext = copyV6Next ? propertyNext : null;
-          const legacyNextRow = async () => {
-            return knex('scheduled_services')
-              .where('customer_id', service.customer_id)
-              .andWhere('scheduled_date', '>', afterIso)
-              // NO 'rescheduled': phantom placeholders hold the OLD date until the
-              // office rebooks — publishing one shows a stale time as still real
-              // (same rule as the tree-shrub and nextAppointment queries below).
-              .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-              // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
-              // Grouped OR so it stays ANDed with the customer/date/status predicates.
-              .andWhere((qb) => qb
-                .whereRaw('LOWER(service_type) LIKE ?', ['%lawn%'])
-                .orWhereRaw('LOWER(service_type) LIKE ?', ['%turf%']))
-              .orderBy('scheduled_date', 'asc')
-              .first('scheduled_date')
-              .catch(() => null);
-          };
-          const nextRow = scopedNext
-            ? (scopedNext.state === 'scheduled' ? scopedNext.row : null)
-            : await legacyNextRow();
+          if (visitSummaryOut) visitSummaryOut.nextVisitBooked = propertyNext.state === 'scheduled';
+          const nextRow = propertyNext.state === 'scheduled' ? propertyNext.row : null;
           let nextVisit = null;
           if (nextRow && nextRow.scheduled_date) {
             nextVisit = { label: fmtDate(nextRow.scheduled_date), source: 'scheduled' };
-            if (scopedNext) {
-              const raw = nextRow.scheduled_date;
-              lawnCopyNextVisitIso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
-              lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
-            }
-          } else if (svcIso && !(scopedNext && scopedNext.state === 'unknown')) {
+            const raw = nextRow.scheduled_date;
+            lawnCopyNextVisitIso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
+            lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
+          } else if (svcIso && propertyNext.state !== 'unknown') {
             // An unknown property match shows nothing: a cadence estimate beside
             // a real booking we could not place would be a second, wrong date.
             const weeks = lawnCadenceWeeks(service.service_type);
@@ -6116,25 +6085,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 nextVisit = { label: fmtDate(est.toISOString()), source: 'estimated', cadenceWeeks: weeks };
                 // No booking at this property: the SHOWN estimate times the
                 // copy, counted from the selected assessment's date.
-                if (scopedNext) {
-                  lawnCopyNextVisitIso = est.toISOString().slice(0, 10);
-                  lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
-                }
+                lawnCopyNextVisitIso = est.toISOString().slice(0, 10);
+                lawnCopyGapDays = daysFromVisit(lawnCopyNextVisitIso);
               }
             }
           }
           if (nextVisit && reportV2.snapshot) reportV2.snapshot.nextVisit = nextVisit;
         } catch {
-          // Best-effort for the label; under the v6 gate it is also an input
-          // the copy must not freeze without.
-          if (featureGates.lawnReportCopyV6Live()) readFailures.add('next_visit');
+          // Best-effort for the label; it is also an input the v6 copy must not
+          // freeze without.
+          readFailures.add('next_visit');
         }
       }
 
-      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
-        // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
-        // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
-        // read while this is live). Fixed sentences from this visit's facts, no
+      if (reportV2) {
+        // The v6 copy (P14): the structural writer replaced the old narrative
+        // overlay (env LAWN_REPORT_V2_NARRATIVE is not read). Fixed sentences from this visit's facts, no
         // model (owner 2026-10-02); frozen copy replays; a degraded read or an
         // unverifiable treatment ships the lead's own copy. The fields ride the
         // in-process report as `copyV6` for the lead derivation (a non-enumerable
@@ -6183,51 +6149,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           Object.defineProperty(reportV2, 'copyV6', { value: LAWN_COPY_V6_EMPTY, enumerable: false, writable: true, configurable: true });
           lawnAssessment.weekWeatherUncacheable = true;
           lawnAssessment.lawnCopyV6Unfrozen = true;
-        }
-      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
-        // The overlay rewrites customer-facing prose and validates only
-        // banned-copy + rain-window rules — it can reintroduce advice that
-        // contradicts today's applications (codex P1 r28). Skip it entirely
-        // when treatment data is unverifiable, and reconcile its output
-        // against the guard otherwise, restoring the deterministic string
-        // for any field it contradicted.
-        if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
-          console.warn('[report-data] lawn narrative overlay skipped — treatment data unverifiable');
-        } else {
-          const preOverlay = JSON.parse(JSON.stringify(reportV2));
-          reportV2 = await applyLawnReportNarrative(reportV2, {
-            grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
-            observations: lawnAssessment?.observations || '',
-            customerConcern: structuredCustomerConcern(structured),
-          }).catch(() => reportV2);
-          if (lawnTreatmentGuard?.guardProducts?.length) {
-            const { treatmentGuard: tg, guardProducts: gp } = lawnTreatmentGuard;
-            const bad = (text) => tg.contradictsAppliedProducts(text, gp);
-            const restore = (host, prev, key) => {
-              if (host && prev && typeof host[key] === 'string' && bad(host[key])) host[key] = prev[key];
-            };
-            restore(reportV2.snapshot, preOverlay.snapshot, 'statusHeadline');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'mainWatch');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'customerAction');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'rootCause');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'wavesNext');
-            restore(reportV2.snapshot, preOverlay.snapshot, 'treatmentSummary');
-            restore(reportV2.water, preOverlay.water, 'explanation');
-            restore(reportV2.mowing, preOverlay.mowing, 'recommendation');
-            restore(reportV2.treatment, preOverlay.treatment, 'summary');
-            restore(reportV2, preOverlay, 'todaysResult');
-            restore(reportV2, preOverlay, 'smsSummary');
-            (reportV2.diagnosis || []).forEach((d, i) => {
-              const prev = preOverlay.diagnosis?.[i];
-              restore(d, prev, 'explanation');
-              restore(d, prev, 'customerExplanation');
-            });
-            (reportV2.insights || []).forEach((ins, i) => {
-              const prev = preOverlay.insights?.[i];
-              ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'].forEach((k) => restore(ins, prev, k));
-            });
-            if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
-          }
         }
       }
       // GATE_LAWN_TECH_PARAGRAPH: the "From your technician" paragraph written
@@ -7212,7 +7133,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   if (
     serviceLine !== 'rodent'
     // Lawn and tree & shrub have their own specialized narrative layers
-    // (applyLawnReportNarrative / the T&S V2 composition) — a second
+    // (the lawn v6 copy / the T&S V2 composition) — a second
     // generic summary would duplicate or conflict with them, and this
     // engine's guards don't ground agronomic claims (codex P2 #3007 r6).
     && serviceLine !== 'lawn'

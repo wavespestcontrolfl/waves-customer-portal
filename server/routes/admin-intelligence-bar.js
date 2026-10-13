@@ -69,8 +69,9 @@ const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/
 const { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool } = require('../services/intelligence-bar/customer-link-tools');
 const { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, repriceVisitsLive } = require('../services/intelligence-bar/reprice-visits-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
+const { INVOICE_ACTION_TOOLS, executeInvoiceActionTool, invoiceActionsLive } = require('../services/intelligence-bar/invoice-action-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
-const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
@@ -79,7 +80,7 @@ const { outsideWritePins } = require('../services/intelligence-bar/outside-write
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
-const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
+const { isToolFailure, recordToolOutcome, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
@@ -109,7 +110,22 @@ const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-met
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
-const MAX_TOOL_ROUNDS = 8;
+// 12, not 8: a "check the last call, then fix the address" ask needed nine
+// tool rounds and got the "too many steps" line (owner IB history 10-12).
+const MAX_TOOL_ROUNDS = 12;
+// The last round may not call a tool: the model answers with what it has
+// found and names what is left, in place of the generic "too many steps" line.
+const FINAL_ROUND_NOTE = '[Step limit reached. Do not call a tool. Answer now: say what you found, what you changed or proposed, and what is still left to do.]';
+function finalRoundMessages(messages) {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'user' || !Array.isArray(last.content)) return messages;
+  return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text: FINAL_ROUND_NOTE }] }];
+}
+// What the gap collector needs beside a tool result: the round, and whether
+// this call proposed a card or committed an owner-direct write.
+function gapToolMeta(round, proposedCard, result) {
+  return { round, wrote: proposedCard === true || result?.executed === true };
+}
 // Model arguments that only pick WHICH task customer an operation targets.
 // They are excluded from an operation's clarification identity so a retry
 // with the corrected target answers the original clarification.
@@ -160,6 +176,7 @@ const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name))
 const CUSTOMER_LINK_TOOL_NAMES = new Set(CUSTOMER_LINK_TOOLS.map(t => t.name));
 const REPRICE_VISITS_TOOL_NAMES = new Set(REPRICE_VISITS_TOOLS.map(t => t.name));
 const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
+const INVOICE_ACTION_TOOL_NAMES = new Set(INVOICE_ACTION_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -228,12 +245,15 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  'delete_duplicate_customer', // mirrors requireAdmin DELETE /api/admin/customers/:id
   // Billing readers show invoices, balances and payment evidence: admin only,
   // like the requireAdmin invoice routes they mirror.
   ...BILLING_READER_TOOLS.map(t => t.name),
   // Mirror requireAdmin /api/admin/customers/:id/payment-methods/:methodId and
   // /api/admin/invoices/:id/receipt-address.
   ...BILLING_WRITE_TOOL_NAMES,
+  // send_invoice runs the requireAdmin invoice send handler.
+  ...INVOICE_ACTION_TOOL_NAMES,
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
   ...CLOSEOUT_REPAIR_TOOL_NAMES,
@@ -639,6 +659,10 @@ function summarizeProposal(toolName, params, displayParams = params) {
       ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
       : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
   }
+  // A phone edit (single or bulk) may clear the shared-phone texting mark (codex #6268 r8/r9).
+  if ((toolName === 'update_customer' || toolName === 'bulk_update_customers') && params?.updates?.phone !== undefined) {
+    rippleParts.push(require('../services/shared-phone-link').SHARED_PHONE_MARK_CLEAR_DISCLOSURE);
+  }
   const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
   // The ripple is long by design (it names every synced surface) and sits
   // OUTSIDE the cap — the base summary (who + what changes) keeps its full
@@ -799,7 +823,21 @@ function pinnedRecipientDisplay(params, preview) {
   return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
 }
 
+// delete_duplicate_customer: the fingerprint-verified preview's content pins
+// (route-owned, `_`-prefixed): the archived record's pin, and the other record
+// on the card as { id, version } - both asserted under the row locks inside
+// the archive transaction. A preview without a pin yields none.
+function deleteDuplicatePins(livePreview) {
+  const pins = {};
+  if (!livePreview?._version) return pins;
+  pins._approved_version = String(livePreview._version);
+  const keeper = livePreview.duplicate_of;
+  if (keeper?.customer_id && keeper?.version) pins._approved_keeper = { id: String(keeper.customer_id), version: String(keeper.version) };
+  return pins;
+}
+
 const PINNED_DISPLAY_BUILDERS = {
+  delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
   reply_via_sms: pinnedRecipientDisplay,
   send_sms: pinnedRecipientDisplay,
@@ -871,6 +909,11 @@ const PINNED_DISPLAY_BUILDERS = {
       corrected_to: preview.after_correction_text,
     }
     : null),
+  // send_invoice: the card names the invoice, the customer, the
+  // money and who is contacted; the full lines are curated in authorization-contract.js.
+  send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -907,6 +950,9 @@ const VERIFIED_VERSION_PARAMS = {
   adjust_stock: '_verified_inventory_version',
   create_restock_request: '_verified_inventory_version',
   update_restock_request: '_verified_inventory_version',
+  // send_invoice binds the invoice state, the recipients and the total the card
+  // showed (invoice-action-tools.js _version).
+  send_invoice: '_verified_invoice_send_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -1328,7 +1374,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // then silently dropped at commit. Unknown keys refuse the proposal
       // instead, naming them so the model can correct the call.
       const { UPDATABLE_FIELDS } = require('../services/intelligence-bar/tools');
-      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS));
+      // Billing type + per-application fee: update_customer only, and only
+      // while GATE_IB_BILLING_MODE_EDIT is on (billing-mode-change.js).
+      const BillingModeChange = require('../services/intelligence-bar/billing-mode-change');
+      const billingFields = toolUse.name === 'update_customer' && BillingModeChange.billingEditLive()
+        ? BillingModeChange.BILLING_EDIT_FIELDS : [];
+      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS) && !billingFields.includes(k));
       if (unsupported.length) {
         return { failed: true, modelResult: { error: `These fields cannot be updated by this tool: ${unsupported.join(', ')} — nothing was proposed. Supported fields: ${Object.keys(UPDATABLE_FIELDS).join(', ')}.` } };
       }
@@ -1406,6 +1457,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           params._rate_ledger_pin = rate.pin;
         }
         if (rate?.display) preview = { ...preview, rate_change: rate.display };
+      }
+      // Billing type + per-application fee (owner D5 2026-10-06): the same
+      // rules as the customer page, a card in plain words, and the billing
+      // fields + customer version pinned (billing-mode-change.js).
+      const BillingModeChange = require('../services/intelligence-bar/billing-mode-change');
+      if (params.customer_id && BillingModeChange.hasBillingEdit(params.updates)) {
+        let billing;
+        try {
+          billing = await BillingModeChange.billingEditProposal(String(params.customer_id), params.updates);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s billing — nothing was proposed. Try again in a moment.' } };
+        }
+        if (billing.error) return { failed: true, modelResult: { error: billing.error, code: billing.code } };
+        params._ib_billing_pin = billing.pin;
+        params._ib_customer_version = billing.version;
+        // A billing edit carries no notes; the task path below reuses this
+        // read's version instead of reading a newer one.
+        notesReadVersion = billing.version;
+        preview = { ...preview, billing_change: billing.display };
       }
       // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): a
       // card that raises the WaveGuard tier and changes the billed monthly
@@ -1989,6 +2059,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     params._ib_property_plan_hash = String(preview.plan_hash);
   }
   if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
+    params.invoice_id = String(preview.invoice_id);
+    delete params.invoice_number;
+  }
+  // send_invoice: the stored approval names the invoice the preview resolved,
+  // never the number the model sent.
+  if (toolUse.name === 'send_invoice' && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -2911,7 +2987,7 @@ const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
 function withEveryPageTools(tools, context, isAdmin) {
   if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
   const present = new Set(tools.map(t => t.name));
-  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS]
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
     .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
 }
 
@@ -2932,7 +3008,18 @@ function getToolsForContext(context, isAdmin = false, fullAccess = false) {
     // below) — never offered without full access, whatever module it rides.
     .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
     .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
-  return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
+  const offered = withInvoiceActionTools(tools, context, isAdmin);
+  return (mergeCustomersEnabled() ? offered : offered.filter(t => t.name !== 'merge_customers')).filter(t => deleteDuplicateCustomerEnabled() || t.name !== 'delete_duplicate_customer');
+}
+
+// send_invoice (owner ruling 2026-10-07): offered to admins on the
+// Customers, Invoices / Revenue and dashboard pages while GATE_IB_INVOICE_ACTIONS is
+// on; off, they are in no list (and refuse every call).
+const INVOICE_ACTION_CONTEXTS = new Set(['customers', 'revenue', 'dashboard']);
+function withInvoiceActionTools(tools, context, isAdmin) {
+  if (!isAdmin || !INVOICE_ACTION_CONTEXTS.has(context) || !invoiceActionsLive()) return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...INVOICE_ACTION_TOOLS.filter(t => !present.has(t.name))];
 }
 
 function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
@@ -3149,6 +3236,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (BILLING_WRITE_TOOL_NAMES.has(toolName)) {
     return executeBillingWriteTool(toolName, input, actionContext);
   }
+  if (INVOICE_ACTION_TOOL_NAMES.has(toolName)) {
+    return executeInvoiceActionTool(toolName, input, actionContext);
+  }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
   }
@@ -3228,6 +3318,7 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). Never create an invoice, change an amount, charge a card, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
@@ -3243,6 +3334,7 @@ IMAGE ATTACHMENTS:
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
+- Duplicate customer records (when these tools are available): merge_customers folds a duplicate with ANY history into the real record; delete_duplicate_customer only soft-deletes a record that holds nothing at all. Prefer merge_customers when unsure.
 - You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
@@ -3540,7 +3632,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
     // Tool-use loop
     let lastToolResponse = null;
+    let stepLimitReached = false; // the final, tool-less round ran: the request used every step
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const finalRound = round === MAX_TOOL_ROUNDS - 1;
+      stepLimitReached = finalRound;
       const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
@@ -3553,7 +3648,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // shorter-TTL ones — system renders before messages, so this is safe.
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
-        messages: withCacheBreakpoint(currentMessages),
+        ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
+        messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
@@ -3761,12 +3857,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
+            // Breaker: faults only. A coded refusal is a decision, not an outage;
+            // `failed` below is unchanged (activity line, ledger, model view).
+            recordToolOutcome(adminToolBreaker, result);
             if (isToolFailure(result)) {
               failed = true;
               errorMessage = result.error || result.message || 'tool returned error';
-              adminToolBreaker.recordFailure();
-            } else {
-              adminToolBreaker.recordSuccess();
             }
           } catch (err) {
             logger.error(`[intelligence-bar] Tool ${toolUse.name} threw:`, err);
@@ -3801,7 +3897,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             : errorMessage,
           ...(failed && toolHealthFailureCode(result) ? { metadata: { code: toolHealthFailureCode(result) } } : {}),
         });
-        gapCollector?.toolResult(toolUse.name, result, failed);
+        gapCollector?.toolResult(toolUse.name, result, failed, gapToolMeta(round, proposedCard, result));
 
         results.push({
           type: 'tool_result',
@@ -3839,6 +3935,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     }
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
+    const noReply = !finalResponse; // no terminal answer: the loop ended on a tool call
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
@@ -3850,7 +3947,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // discover_capabilities loop there to gather signals from); the admin
     // platform collector already searches first, so passing it there too is
     // inert on every request that already gathered a signal.
-    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined });
+    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -4358,6 +4455,8 @@ async function commitPendingAction(req, { id, contractHash }) {
     // winner_version/loser_version are inside that fingerprint).
     delete execParams._approved_versions;
     delete execParams._approved_effects;
+    delete execParams._approved_version;
+    delete execParams._approved_keeper;
     if (execParams._ib_task_context) {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
@@ -4508,7 +4607,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           return reply(409, result);
         }
         if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
-        if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
+        if (['add_customer_property', 'update_customer_property', 'set_primary_property', 'remove_customer_property'].includes(action.tool_name)) {
           execParams._verified_property_version = livePreview._version;
         }
         if (action.tool_name === 'save_customer_estimate') execParams._verified_estimate_version = livePreview._version;
@@ -4523,6 +4622,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
           execParams._verified_stops = livePreview.stops;
         }
+        if (action.tool_name === 'delete_duplicate_customer') Object.assign(execParams, deleteDuplicatePins(livePreview));
         // merge_customers: the fingerprint-verified preview's pins (both
         // customer versions + the disclosed effects fingerprint) ride to
         // the executor so it validates the APPROVED snapshot under its own

@@ -66,6 +66,7 @@ import useDispatchReadiness from "../../components/schedule/useDispatchReadiness
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import { onSiteTimeOf } from "../../lib/on-site-time";
+import { completionBillingFacts, wrapUpSheetFields } from "../../lib/completion-billing-facts";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
@@ -392,6 +393,8 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
 // TechHomePage routes the sheet with).
 function lawnReserviceSheetService(row) {
   return {
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    ...wrapUpSheetFields(row),
     id: row.id,
     customerName: row.customer_name || row.customerName,
     serviceType: row.service_type || row.serviceType,
@@ -961,6 +964,8 @@ export default function DispatchPageV2({
   // `a || b` over a row's snake_case and camelCase spellings, as the sheets were always given them.
   const pickOf = (row, ...keys) => keys.reduce((found, key) => found || row[key], undefined);
   const lawnSheetService = (row) => ({
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads to know whether the visit invoices and who pays.
+    ...completionBillingFacts(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
     serviceType: pickOf(row, 'service_type', 'serviceType'),
@@ -989,6 +994,8 @@ export default function DispatchPageV2({
     completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
   });
   const pestSheetService = (row) => ({
+    // What the Wrap-up (GATE_FAST_COMPLETE_WRAP_UP) reads: billing facts, the customer, the check-in time.
+    ...wrapUpSheetFields(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
     serviceType: pickOf(row, 'service_type', 'serviceType'),
@@ -2102,6 +2109,10 @@ export default function DispatchPageV2({
             serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
             address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || "",
             timeLabel: serviceWindowLabel(treeShrubFastService) || "",
+            // The Wrap-up (GATE_FAST_COMPLETE_WRAP_UP): the customer for the next visit, the Time on-site clock, and the billing keys.
+            customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
+            ...completionBillingFacts(treeShrubFastService),
             // The visit the user opened, checked against the live context
             // (same fields TechHomePage routes the sheet with).
             routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,

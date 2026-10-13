@@ -420,6 +420,29 @@ describe('buildLawnFastContext', () => {
     });
   });
 
+  describe('Wrap-up (GATE_FAST_COMPLETE_WRAP_UP)', () => {
+    afterEach(() => { delete process.env.GATE_FAST_COMPLETE_WRAP_UP; });
+    const read = () => buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
+
+    test('gate off: the context carries no wrapUp key', async () => {
+      delete process.env.GATE_FAST_COMPLETE_WRAP_UP;
+      expect('wrapUp' in await read()).toBe(false);
+    });
+
+    test('gate on (exactly true): wrapUp is true; any other value stays off', async () => {
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+      expect((await read()).wrapUp).toBe(true);
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = '1';
+      expect('wrapUp' in await read()).toBe(false);
+    });
+
+    test('an ineligible visit carries no wrapUp even with the gate on', async () => {
+      process.env.GATE_FAST_COMPLETE_WRAP_UP = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
+      expect('wrapUp' in await read()).toBe(false);
+    });
+  });
+
   describe('weed spot rules (GATE_LAWN_SPOT_RULES)', () => {
     const P_LEAD = uuid(21);
     const P_SURF = uuid(22);
@@ -772,13 +795,11 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     });
 
     test('lawnReportTies (the sheet records the standing chinch tap as a find) exists only while the report ties are live', async () => {
-      const TIE_GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2', 'GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+      const TIE_GATES = ['GATE_LAWN_REPORT_FACTS', 'GATE_LAWN_VISIT_SUMMARY_V2'];
       try {
         live();
         expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
-        for (const name of TIE_GATES.slice(0, 3)) process.env[name] = 'true';
-        expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
-        process.env.GATE_LAWN_REPORT_LEAD = 'true';
+        for (const name of TIE_GATES) process.env[name] = 'true';
         expect((await context(tablesFor())).lawnReportTies).toBe(true);
         delete process.env.GATE_LAWN_REPORT_FACTS;
         expect('lawnReportTies' in (await context(tablesFor()))).toBe(false);
