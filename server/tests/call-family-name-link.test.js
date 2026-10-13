@@ -19,6 +19,7 @@ const {
   pickNamedAccountHolder, normName, fullNameKey, statedAddressCorroborates,
   findLiveCustomersByFullName, suggestFamilyAccounts, fileFamilyAccountCard, CARD_REASON, RETIRE_RULE,
   matchCallerOwnAccounts, OWN_ACCOUNT_REASONS, MAX_OWN_CANDIDATES, RECENT_DAYS,
+  matchContactPhoneAccounts, contactPhoneKeys,
 } = require('../services/call-family-name-link');
 const { buildTriageItem } = require('../services/call-routing-gates');
 
@@ -166,6 +167,31 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
     expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence };');
     expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
+  });
+});
+
+// 2026-10-12 call audit: a caller on an unknown number gave the homeowner's number, which was
+// the phone on an existing account; the call became a new lead.
+describe('contactPhoneKeys (numbers the caller gave for other people)', () => {
+  const call = { from_phone: '+19415550101' };
+  test('second-person phones, de-duplicated, as 10-digit keys', () => {
+    expect(contactPhoneKeys({
+      call,
+      extracted: { phone: '+19415550101' },
+      v2CanonicalExtraction: {
+        secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: '+19415550177' },
+        secondary_contacts: [{ first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: '+19415550177' }],
+      },
+    })).toEqual(['9415550177']);
+  });
+  test('the caller\'s own line and callback number are never a contact phone', () => {
+    const v2 = (phone) => ({ secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: phone } });
+    expect(contactPhoneKeys({ call, extracted: {}, v2CanonicalExtraction: v2('+19415550101') })).toEqual([]);
+    expect(contactPhoneKeys({ call, extracted: { phone: '(941) 555-0188' }, v2CanonicalExtraction: v2('+19415550188') })).toEqual([]);
+  });
+  test('no second person, or one without a number: nothing', () => {
+    expect(contactPhoneKeys({ call, extracted: {}, v2CanonicalExtraction: null })).toEqual([]);
+    expect(contactPhoneKeys({ call, extracted: {}, v2CanonicalExtraction: { secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'unknown' } } })).toEqual([]);
   });
 });
 
@@ -369,6 +395,69 @@ const SKIP = !process.env.DATABASE_URL;
       const out = await fileFamilyAccountCard(input(await call()));
       expect(out.holder).toMatchObject({ first_name: 'Angelina' });
       expect(out.candidates.map((c) => c.id)).toEqual([String(mom)]);
+    });
+  });
+
+  describe('a number the caller gave for another person (suggest only)', () => {
+    const HOLDER_PHONE = '+19415550177';
+    const byPhone = (callLogId, over = {}) => input(callLogId, {
+      extracted: { first_name: null, last_name: null, phone: '+19415550101', is_voicemail: false },
+      v2CanonicalExtraction: {
+        caller: { relationship_to_property: 'other' },
+        secondary_contact: { first_name: 'Angela', last_name: 'Testersen', role: 'unknown', phone_e164: HOLDER_PHONE },
+        meta: { call_summary: 'x' },
+      },
+      phone: '+19415550101',
+      phones: ['+19415550101'],
+      ...over,
+    });
+
+    test('the number is an account\'s own phone: ONE advisory card on that basis; nothing is linked', async () => {
+      const account = await customer({ phone: HOLDER_PHONE });
+      const callLogId = await call();
+      const out = await fileFamilyAccountCard(byPhone(callLogId));
+      expect(out).toMatchObject({ basis: 'contact_phone_on_account', candidates: [{ id: String(account), name: 'Angelina Testerson', address_matches: true }] });
+      const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(card).toMatchObject({ reason_code: 'family_account_candidates', severity: 'advisory', status: 'open' });
+      expect(card.payload).toMatchObject({ match_basis: 'contact_phone_on_account', customer_ids: [String(account)], reason: OWN_ACCOUNT_REASONS.contact_phone_on_account });
+      expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+    });
+
+    test('the secondary phone counts; a service-contact slot, an inactive or a deleted account does not', async () => {
+      const account = await customer({ secondary_phone: '(941) 555-0177' });
+      expect((await matchContactPhoneAccounts(byPhone(await call()))).candidates.map((c) => c.id)).toEqual([String(account)]);
+      await trx('customers').where({ id: account }).update({ secondary_phone: null, service_contact_phone: HOLDER_PHONE });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ phone: HOLDER_PHONE, active: false });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ active: true, deleted_at: new Date() });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+    });
+
+    test('more accounts than the cap, a voicemail or an outbound call suggests nothing', async () => {
+      for (let i = 0; i <= MAX_OWN_CANDIDATES; i += 1) await customer({ phone: HOLDER_PHONE, city: `City${i}` });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+      await trx('customers').where({ city: 'City0' }).update({ deleted_at: new Date() });
+      expect((await matchContactPhoneAccounts(byPhone(await call()))).candidates).toHaveLength(MAX_OWN_CANDIDATES);
+      expect(await matchContactPhoneAccounts(byPhone(await call(), { isOutbound: true }))).toBeNull();
+      expect(await matchContactPhoneAccounts(byPhone(await call(), { extracted: { is_voicemail: true } }))).toBeNull();
+    });
+
+    test('the family rule still wins; the number wins over the caller\'s own name', async () => {
+      const byNumber = await customer({ first_name: 'Pat', last_name: 'Other', phone: HOLDER_PHONE });
+      const mom = await customer();
+      const family = await fileFamilyAccountCard(input(await call(), {
+        v2CanonicalExtraction: {
+          caller: { relationship_to_property: 'family_member' },
+          secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'family_member', phone_e164: HOLDER_PHONE },
+          meta: { call_summary: 'x' },
+        },
+      }));
+      expect(family.holder).toMatchObject({ first_name: 'Angelina' });
+      expect(family.candidates.map((c) => c.id)).toEqual([String(mom)]);
+      await customer({ first_name: 'Robin', last_name: 'Example', phone: '+19415558888' });
+      const out = await fileFamilyAccountCard(byPhone(await call(), { extracted: { first_name: 'Robin', last_name: 'Example', phone: '+19415550101', is_voicemail: false } }));
+      expect(out).toMatchObject({ basis: 'contact_phone_on_account', candidates: [{ id: String(byNumber) }] });
     });
   });
 

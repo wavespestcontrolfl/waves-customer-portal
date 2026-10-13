@@ -36,6 +36,15 @@
  * fired (about five cards in all). A basis that finds more than MAX_OWN_CANDIDATES accounts
  * suggests nothing: a common first name is not evidence.
  *
+ * A phone number the caller gave for another person (2026-10-12 call audit; same suggest-only
+ * card, basis contact_phone_on_account). A caller on an unknown number asked for service for
+ * the homeowner and gave the homeowner's number; that number was the phone on an existing
+ * account, and the call became a new lead. When the family rule suggests nothing, the card
+ * lists the active accounts whose OWN phone (phone or secondary_phone, never a service-contact
+ * slot: an agent's number sits in many accounts' slots) is a number the caller gave for someone
+ * else. More than MAX_OWN_CANDIDATES accounts suggests nothing. This basis is tried before the
+ * caller's-own-account bases: a spoken number is stronger evidence than a first name.
+ *
  * No card: the caller is not a family member, no full name was named, a voicemail
  * (a one-sided transcription never names an account), an outbound call, a call that
  * is already linked or was unlinked on purpose, a number some live account already
@@ -47,7 +56,7 @@ const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
-const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+const { findKnownCallerCustomer, customerPhoneLookupKey } = require('../utils/known-caller-phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -136,6 +145,7 @@ const OWN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', 'comp
 const OWN_ACCOUNT_REASONS = {
   caller_full_name: 'An account carries this caller\'s exact name under another phone number. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
   caller_first_name_recent_visit: 'An account with this caller\'s first name has a visit on the calendar close to this call. Confirm it is the same household, then link the call.',
+  contact_phone_on_account: 'The caller gave a phone number for another person, and an account carries that number. Confirm the caller is calling for this account, then link the call. A lead or customer record may exist under the caller: merge it on the Duplicates page.',
   caller_first_name_city_recent: 'The caller gave a first name only. An account created in the last two weeks has that first name in the same city. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
 };
 
@@ -254,9 +264,51 @@ async function matchCallerOwnAccounts({ call, extracted, v2CanonicalExtraction, 
   return null;
 }
 
-// What the card suggests for this call: the family rule first, else the caller's own account.
+// The 10-digit keys of the numbers the caller gave for OTHER people (the V2 second-person slots),
+// without the caller's own line or callback number. Pure.
+function contactPhoneKeys({ call, extracted, v2CanonicalExtraction }) {
+  const own = new Set([call && call.from_phone, extracted && extracted.phone].map(customerPhoneLookupKey).filter(Boolean));
+  const contacts = [canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)].filter(Boolean);
+  const keys = contacts.map((c) => customerPhoneLookupKey(c.phone)).filter((k) => k.length === 10 && !own.has(k));
+  return [...new Set(keys)];
+}
+
+// Active, not soft-deleted customers whose own phone or secondary phone is one of the keys.
+function findCustomersByOwnPhone(conn, keys, limit) {
+  const forms = keys.flatMap((k) => [k, `1${k}`]);
+  const digits = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
+  const marks = forms.map(() => '?').join(', ');
+  return conn('customers')
+    .where('active', true)
+    .whereNull('deleted_at')
+    .whereRaw(`(${digits('phone')} IN (${marks}) OR ${digits('secondary_phone')} IN (${marks}))`, [...forms, ...forms])
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').limit(limit)
+    .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip');
+}
+
+/**
+ * The account a number the caller gave for another person belongs to (see the module comment):
+ * { basis, candidates, more_accounts } or null. Read-only.
+ */
+async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtraction, statedAddress, isOutbound = false, conn = db }) {
+  if (isOutbound || extracted.is_voicemail) return null;
+  const keys = contactPhoneKeys({ call, extracted, v2CanonicalExtraction });
+  if (!keys.length) return null;
+  const own = createdCustomerId(call);
+  const found = (await findCustomersByOwnPhone(conn, keys, MAX_OWN_CANDIDATES + 2))
+    .filter((r) => String(r.id) !== own && String(r.id) !== String(call.customer_id || ''));
+  if (!found.length || found.length > MAX_OWN_CANDIDATES) return null;
+  return {
+    basis: 'contact_phone_on_account',
+    more_accounts: false,
+    candidates: found.map((m) => ({ ...ownCandidate(m), address_matches: statedAddressCorroborates(statedAddress, m) })),
+  };
+}
+
+// What the card suggests for this call: the family rule first, then a number the caller gave for
+// another person, else the caller's own account.
 async function matchSuggestedAccounts(args) {
-  return (await matchFamilyAccounts(args)) || matchCallerOwnAccounts(args);
+  return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args)) || matchCallerOwnAccounts(args);
 }
 
 /**
@@ -385,6 +437,8 @@ module.exports = {
   RETIRE_RULE,
   matchFamilyAccounts,
   matchCallerOwnAccounts,
+  matchContactPhoneAccounts,
+  contactPhoneKeys,
   RECENT_DAYS,
   MAX_OWN_CANDIDATES,
   OWN_ACCOUNT_REASONS,
