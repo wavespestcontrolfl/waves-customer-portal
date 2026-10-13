@@ -335,7 +335,12 @@ describe('the write of a checked move', () => {
         };
         return chain;
       };
-      trx.raw = async (sql, bindings) => { calls.push(['raw', sql, bindings]); return { rows: [{ locked }] }; };
+      trx.raw = async (sql, bindings) => {
+        calls.push(['raw', sql, bindings]);
+        if (locked instanceof Error) throw locked;
+        if (!locked) throw Object.assign(new Error('could not obtain lock on row'), { code: '55P03' });
+        return { rows: [{ id: 'c1' }] };
+      };
       trx.calls = calls;
       return trx;
     };
@@ -345,16 +350,17 @@ describe('the write of a checked move', () => {
     const superseded = (err) => nightly.approvedSlotTaken({ allowed: true }, err);
     afterEach(() => jest.restoreAllMocks());
 
-    test('nothing changed: the move goes on; the preference writers\' lock was tried and both rows read FOR SHARE', async () => {
+    test('nothing changed: the move goes on; the customer row was locked first, then both rows read FOR SHARE', async () => {
       const trx = trxOf();
       await expect(guard(trx)).resolves.toBeUndefined();
-      expect(trx.calls[0]).toEqual(['raw', expect.stringContaining('pg_try_advisory_xact_lock'), ['property-preferences', 'c1']]);
+      expect(trx.calls[0]).toEqual(['raw', 'SELECT id FROM customers WHERE id = ? FOR UPDATE NOWAIT', ['c1']]);
       expect(trx.calls.slice(1)).toEqual(['forShare:property_preferences', 'forShare:notifications']);
     });
 
-    test('a preference writer holds the lock: superseded, nothing is waited on', async () => {
+    test('another write holds the customer row: superseded, nothing is waited on; any other lock error is a failure', async () => {
       const err = await guard(trxOf({ locked: false })).catch((e) => e);
-      expect(superseded(err)).toMatchObject({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: expect.stringContaining('were being changed') });
+      expect(superseded(err)).toMatchObject({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: expect.stringContaining('was being changed') });
+      expect(superseded(await guard(trxOf({ locked: new Error('connection lost') })).catch((e) => e))).toBeNull();
     });
 
     test('a new preferred day since the check: superseded, not a failure', async () => {

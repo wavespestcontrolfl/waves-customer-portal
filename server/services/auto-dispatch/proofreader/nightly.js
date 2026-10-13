@@ -346,11 +346,18 @@ function changedDuringCheck(err, description) {
 // the approval stood on still stands. A model call takes up to two minutes
 // and the reads after it are not atomic with the write, so each is made once
 // more here (Codex #6313 r15 to r18). Only a proofread move is asked.
+//   0. THE FENCE: the customer's own row is locked FOR UPDATE. Every table the
+//      checks below read references that row by foreign key
+//      (property_preferences, sms_log, emails, call_log,
+//      customer_interactions, service_requests, reschedule_log), and an
+//      insert or a re-link of a referencing row takes a key lock on it: such
+//      a write waits until the move commits. This is the one fence every
+//      writer observes; the preference writers' advisory lock is not (some
+//      first-row writers never take it: r19). NOWAIT: the move already holds
+//      the visit's row, so it never waits; a busy customer row means a
+//      change is under way.
 //   1. The customer's stored day, time and blackout preferences (hard rules)
-//      are the ones the move was scored on. The preference writers' own
-//      advisory lock is tried first, so a first row cannot be inserted
-//      meanwhile; a writer holding it means a change is under way. Tried,
-//      never waited on: the move already holds the visit's row.
+//      are the ones the move was scored on.
 //   2. No person marked the visit's notice done.
 //   3. The customer record is the one the model was shown.
 // A difference refuses the move as superseded. A read that fails throws an
@@ -358,9 +365,11 @@ function changedDuringCheck(err, description) {
 async function assertStillApproved(trx, service, config, refuse) {
   if (config.proofread !== true) return;
   const superseded = (why, description) => changedDuringCheck(refuse(service.id, why), description);
-  const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['property-preferences', String(service.customer_id)]);
-  if (!(lock && lock.rows && lock.rows[0] && lock.rows[0].locked === true)) {
-    throw superseded('has its customer preferences open for a change', 'The customer\'s scheduling preferences were being changed while the move was checked');
+  try {
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR UPDATE NOWAIT', [service.customer_id]);
+  } catch (err) {
+    if (err && err.code === LOCK_NOT_AVAILABLE) throw superseded('has a customer row another write holds', 'The customer\'s record was being changed while the move was checked');
+    throw err;
   }
   if (config.prefs) {
     const { getCustomerSchedulingPreferences } = require('../preferences');
@@ -379,6 +388,9 @@ async function assertStillApproved(trx, service, config, refuse) {
     throw superseded('has a customer record that changed since the move was checked', 'The customer record changed while the move was checked');
   }
 }
+
+// Postgres: NOWAIT could not take the lock.
+const LOCK_NOT_AVAILABLE = '55P03';
 
 const preferencesPrint = (prefs) => JSON.stringify(prefs);
 
