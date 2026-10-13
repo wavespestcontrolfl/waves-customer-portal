@@ -95,14 +95,19 @@ describe('voicemailCallbackAlertPlan', () => {
     })).toBeNull();
   });
 
-  test('callback-asked needs a valid V2 verdict that is not spam', () => {
+  test('callback-asked needs V2 as the primary extractor and a valid verdict that is not spam', () => {
     const v2 = (extraction, status = 'valid') => ({ status, extraction });
     const asked = { recommended_disposition: 'callback_task_created', spam_verdict: { spam_kind: 'not_spam' } };
-    expect(voicemailCallbackAsked(v2(asked))).toBe(true);
-    expect(voicemailCallbackAsked(v2(asked, 'invalid'))).toBe(false);
-    expect(voicemailCallbackAsked(v2({ ...asked, spam_verdict: { spam_kind: 'solicitation' } }))).toBe(false);
-    expect(voicemailCallbackAsked(v2({ ...asked, recommended_disposition: 'voicemail_processed' }))).toBe(false);
-    expect(voicemailCallbackAsked(null)).toBe(false);
+    const primary = { v2Primary: true };
+    expect(voicemailCallbackAsked(v2(asked), primary)).toBe(true);
+    expect(voicemailCallbackAsked(v2(asked, 'invalid'), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...asked, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...asked, recommended_disposition: 'voicemail_processed' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(null, primary)).toBe(false);
+    // Shadow mode (V2 on, routing off): the verdict is evaluation data and rings nothing.
+    expect(voicemailCallbackAsked(v2(asked), { v2Primary: false })).toBe(false);
+    // The default reads the live mode; this test process runs with V2 off.
+    expect(voicemailCallbackAsked(v2(asked))).toBe(false);
   });
 
   test('KNOWN customer without service intent rings the bell (owner ruling 2026-07-30)', () => {

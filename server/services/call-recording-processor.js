@@ -3863,7 +3863,10 @@ const shutdownStampSql = (conn) => conn.raw(
 );
 // The V2 verdict that an unknown caller's voicemail asks for a call back: a
 // valid extraction that is not spam and whose disposition is the callback task.
-function voicemailCallbackAsked(v2Result) {
+// Only while V2 is the primary extractor: in shadow mode (V2 on, routing off)
+// its verdict is recorded for evaluation and rings nothing.
+function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled() } = {}) {
+  if (!v2Primary) return false;
   const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
   return v2?.recommended_disposition === 'callback_task_created' && v2?.spam_verdict?.spam_kind === 'not_spam';
 }
