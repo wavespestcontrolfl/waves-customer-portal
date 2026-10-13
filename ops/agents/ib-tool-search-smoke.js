@@ -1,0 +1,186 @@
+#!/usr/bin/env node
+/**
+ * ib-tool-search-smoke.js — READ-ONLY
+ *
+ * One live check of the Intelligence Bar's tool-search request shape
+ * (GATE_IB_TOOL_SEARCH, server/services/intelligence-bar/action-registry.js
+ * initialTools with toolSearch). It writes nothing: no database, no customer
+ * data, no gate flips. It calls the Anthropic API ONCE (twice with --resume-shape), so it needs --execute.
+ *
+ * It builds the real full-access tools array for the dashboard page (page tools
+ * eager, the API's tool search tool, every other allowed tool with
+ * defer_loading), sends one non-streaming messages.create with the model the
+ * Intelligence Bar uses (INTELLIGENCE_BAR_MODEL, else MODELS.FLAGSHIP) and a
+ * fixed synthetic prompt, and prints:
+ *   - success, or the API error message (a 400 means the request shape is wrong);
+ *   - stop_reason and the block types in the response;
+ *   - the search queries and the tool_references the search returned;
+ *   - usage: input, cache write, cache read.
+ * The prompt asks the model to search and name a tool, not to call it, so no
+ * tool ever runs.
+ *
+ * max_tokens goes through anthropicMaxTokens() (1024 asked; the helper only
+ * raises it for thinking-floor models, which an Opus tier needs). This is an
+ * ops script, not a server call site: the ledgerCall wrapper that
+ * llm-call-ledger-coverage.test.js enforces on server code is deliberately not
+ * used, so this one call is not recorded in the LLM ledger.
+ *
+ * Usage (from the repo root; the key comes from the environment only):
+ *   railway run node ops/agents/ib-tool-search-smoke.js --execute
+ *   railway run node ops/agents/ib-tool-search-smoke.js --execute --resume-shape
+ * --resume-shape adds a second request built the way a resume builds it: the
+ * assistant content of call 1 with the search blocks stripped
+ * (stripServerSearchBlocks), a plain user text turn, and the ordinary tools
+ * list (no search tool, no defer_loading). Both requests are synthetic text.
+ *   railway run node ops/agents/ib-tool-search-smoke.js --execute --discover-shape
+ * --discover-shape is a different two-request run: call 1 asks the model to call
+ * discover_capabilities (tool_choice stays auto, as in the live bar; a run where
+ * it does not is reported INCONCLUSIVE and exits 3); call 2 answers it with the
+ * tool_result the ROUTE would
+ * build (toolResultContent: tool_reference blocks ONLY, up to 5, for the found
+ * tools that are deferred in the list; the JSON string when the result also
+ * holds an owner-workflow action), with the same tools and no tool_choice.
+ * It prints whether the model then called or named that tool.
+ * On a model that does not support tool search, or that thinks by default, tool
+ * search is off (modelTakesToolSearch, the route's own predicate), so
+ * every --execute mode prints that and exits 0 without calling the API.
+ * Without --execute it prints the tools shape (counts, no API call).
+ */
+const Anthropic = require('@anthropic-ai/sdk');
+const MODELS = require('../../server/config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../../server/services/llm/anthropic-wire');
+const ActionRegistry = require('../../server/services/intelligence-bar/action-registry');
+const apiToolDefinition = require('../../server/services/intelligence-bar/tool-definition');
+const { stripServerSearchBlocks, toolResultContent, modelTakesToolSearch } = require('../../server/services/intelligence-bar/tool-search');
+
+// The model is resolved exactly as the route does (the `MODEL` constant in
+// server/routes/admin-intelligence-bar.js, not exported):
+//   const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
+function resolveModel() {
+  return process.env.INTELLIGENCE_BAR_MODEL
+    ? { model: process.env.INTELLIGENCE_BAR_MODEL, source: 'INTELLIGENCE_BAR_MODEL' }
+    : { model: MODELS.FLAGSHIP, source: 'MODELS.FLAGSHIP' };
+}
+
+const PROMPT = "Which tool would list the technicians' timesheets? Search for it and name it; do not call it.";
+
+function buildTools() {
+  return ActionRegistry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true, toolSearch: true })
+    .map(apiToolDefinition);
+}
+
+function describeContent(content) {
+  const searches = content.filter((block) => block.type === 'server_tool_use').map((block) => block.input?.query);
+  const references = content.filter((block) => block.type === 'tool_search_tool_result')
+    .map((block) => block.content?.tool_references?.map((ref) => ref.tool_name) ?? `error: ${block.content?.error_code}`);
+  return { types: content.map((block) => block.type), searches, references };
+}
+
+// One request, printed. Returns the response, or null after printing the API error.
+async function send(client, label, model, source, body) {
+  try {
+    const response = await client.messages.create({
+      model,
+      ...anthropicEffortConfig(model),
+      max_tokens: anthropicMaxTokens(model, 1024),
+      ...body,
+    });
+    const { types, searches, references } = describeContent(response.content);
+    const usage = response.usage || {};
+    console.log(`${label} result: success (model ${model}, from ${source})`);
+    console.log(`${label} stop_reason: ${response.stop_reason}`);
+    console.log(`${label} block types: ${types.join(', ')}`);
+    console.log(`${label} search queries: ${JSON.stringify(searches)}`);
+    console.log(`${label} tool_references: ${JSON.stringify(references)}`);
+    console.log(`${label} usage: input ${usage.input_tokens ?? 0}, cache write ${usage.cache_creation_input_tokens ?? 0}, cache read ${usage.cache_read_input_tokens ?? 0}, output ${usage.output_tokens ?? 0}`);
+    return response;
+  } catch (error) {
+    console.log(`${label} result: API error (status ${error.status ?? 'none'}): ${error.message}`);
+    return null;
+  }
+}
+
+// What a resumed task sends (a resumed task never uses tool search): the saved
+// assistant content with the search blocks stripped, a plain user turn, and the
+// ORDINARY dashboard tool list (page list + discover_capabilities).
+function resumeRequest(first) {
+  const messages = stripServerSearchBlocks([
+    { role: 'user', content: PROMPT },
+    { role: 'assistant', content: first.content },
+    { role: 'user', content: 'Thanks. Reply with the single word OK.' },
+  ]);
+  const tools = ActionRegistry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true }).map(apiToolDefinition);
+  return { tools, messages };
+}
+
+const DISCOVER_PROMPT = "Call discover_capabilities with the query 'review stats' now. Do not use any other tool.";
+const DISCOVER_QUERY = 'review stats';
+const DISCOVER_TARGET = 'get_review_stats';
+
+// Call 2 of --discover-shape: the tool_result the route builds for the real
+// discover() result on the search path (content array with tool_reference blocks).
+function discoverRequest(first, tools) {
+  const call = first.content.find((block) => block.type === 'tool_use' && block.name === 'discover_capabilities');
+  const result = ActionRegistry.discover({ query: DISCOVER_QUERY }, { role: 'admin', context: 'dashboard', fullAccess: true }).result;
+  const content = toolResultContent('discover_capabilities', result, tools, true);
+  console.log(`discover answer content: ${Array.isArray(content) ? content.map((part) => `reference:${part.tool_name}`).join(', ') : 'JSON string (no references)'}`);
+  return {
+    tools,
+    messages: [
+      { role: 'user', content: DISCOVER_PROMPT },
+      { role: 'assistant', content: first.content },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: call.id, content }] },
+    ],
+  };
+}
+
+async function discoverShape(client, model, source, tools) {
+  // tool_choice is left on auto, as in the live bar (some models reject forced tool use).
+  const first = await send(client, 'call 1 (discover prompt)', model, source, { tools, messages: [{ role: 'user', content: DISCOVER_PROMPT }] });
+  if (!first) return 1;
+  if (!first.content.some((block) => block.type === 'tool_use' && block.name === 'discover_capabilities')) {
+    console.log('INCONCLUSIVE: the model answered without calling discover_capabilities, so the answer shape was not exercised. Run it again.');
+    return 3;
+  }
+  const second = await send(client, 'call 2 (discover answer)', model, source, discoverRequest(first, tools));
+  if (!second) return 1;
+  const called = second.content.some((block) => block.type === 'tool_use' && block.name === DISCOVER_TARGET);
+  const named = second.content.some((block) => block.type === 'text' && block.text.includes(DISCOVER_TARGET));
+  console.log(`call 2 ${called ? 'CALLED' : named ? 'NAMED' : 'did not call or name'} ${DISCOVER_TARGET}`);
+  return 0;
+}
+
+async function main() {
+  const tools = buildTools();
+  const deferred = tools.filter((tool) => tool.defer_loading === true).length;
+  console.log(`tools: ${tools.length} (eager ${tools.length - deferred}, deferred ${deferred}), ${JSON.stringify(tools).length} bytes`);
+  if (!process.argv.includes('--execute')) {
+    console.log('dry run: no API call. Re-run with --execute to send one request (add --resume-shape for a second, resume-shaped one).');
+    return 0;
+  }
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('ANTHROPIC_API_KEY is not set (run under `railway run`).');
+    return 2;
+  }
+  const { model, source } = resolveModel();
+  // Tool search is off for a model that does not support it or that thinks by
+  // default: the same predicate the route uses (tool-search.js).
+  if (!modelTakesToolSearch(model)) {
+    const why = MODELS.anthropicSupportsToolSearch(model) ? 'it thinks by default' : 'it does not support the tool search tool';
+    console.log(`tool search is off for this model (${model}, from ${source}) because ${why}; the bar uses its ordinary tool list. Nothing to check. No API call made.`);
+    return 0;
+  }
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (process.argv.includes('--discover-shape')) return discoverShape(client, model, source, tools);
+  const first = await send(client, 'call 1', model, source, { tools, messages: [{ role: 'user', content: PROMPT }] });
+  if (!first) return 1;
+  if (!process.argv.includes('--resume-shape')) return 0;
+  if (first.content.some((block) => block.type === 'tool_use')) {
+    console.log('call 2 skipped: call 1 ended with a client tool call, so no resume shape can be built from it.');
+    return 1;
+  }
+  const second = await send(client, 'call 2 (resume shape)', model, source, resumeRequest(first));
+  return second ? 0 : 1;
+}
+
+main().then((code) => process.exit(code), (error) => { console.error(error.message); process.exit(1); });

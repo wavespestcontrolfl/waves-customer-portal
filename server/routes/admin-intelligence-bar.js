@@ -87,6 +87,7 @@ const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
+const ToolSearch = require('../services/intelligence-bar/tool-search');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -117,9 +118,7 @@ const MAX_TOOL_ROUNDS = 12;
 // found and names what is left, in place of the generic "too many steps" line.
 const FINAL_ROUND_NOTE = '[Step limit reached. Do not call a tool. Answer now: say what you found, what you changed or proposed, and what is still left to do.]';
 function finalRoundMessages(messages) {
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== 'user' || !Array.isArray(last.content)) return messages;
-  return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text: FINAL_ROUND_NOTE }] }];
+  return ToolSearch.withTurnEndingText(messages, FINAL_ROUND_NOTE);
 }
 // What the gap collector needs beside a tool result: the round, and whether
 // this call proposed a card or committed an owner-direct write.
@@ -478,6 +477,9 @@ const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
 function withCacheBreakpoint(messages) {
   if (!messages.length) return messages;
   const last = messages[messages.length - 1];
+  // A paused turn (pause_turn) continues from the assistant message: its blocks
+  // (server tool search results) take no breakpoint.
+  if (last.role === 'assistant') return messages;
   let content = last.content;
   if (typeof content === 'string') {
     content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
@@ -3439,6 +3441,9 @@ async function runQuery(req, res, next) {
     // sees or can invoke one through initialTools/discover/validateInput
     // either, whatever GATE_IB_PLATFORM is set to.
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
+    // GATE_IB_TOOL_SEARCH: a full-access login reaches its non-page tools through
+    // the API's tool search instead of discover_capabilities (tool-search.js).
+    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope, MODEL);
     // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
     // login gets no target refusals, no card on internal edits and short
     // replies. Read from the live request on every run; the isolated tech
@@ -3541,10 +3546,10 @@ async function runQuery(req, res, next) {
     }
     if (platformEnabled) {
       systemPrompt += `\n\nPLATFORM CAPABILITIES:
-The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
+The page ranks useful tools; it does not restrict what you can do. ${ToolSearch.capabilitySearchLine(toolSearch)} Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine({ toolSearch })}`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -3576,7 +3581,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Select tools based on context and role (email tools are admin-only).
     // Red-tier tools additionally require full access (owner ruling
     // 2026-09-28) — never a card either way; see getToolsForContext.
-    let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
+    let tools = (platformEnabled ? ActionRegistry.initialTools(context, { ...actionScope, toolSearch })
       : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
@@ -3590,7 +3595,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
     ];
 
-    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...req.ibResumedTask.checkpoint] : messages;
+    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...ToolSearch.stripServerSearchBlocks(req.ibResumedTask.checkpoint)] : messages;
+    // A resumed task never uses tool search: the saved search blocks are
+    // stripped on load and the request runs on the ordinary list (tool-search.js).
+    const searchQueries = new Map();
     if (req.ibResumedTask) {
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
@@ -3605,8 +3613,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
         .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
       const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
-      const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
-        .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
+      const searchedNames = ToolSearch.searchReferencedNames(req.ibResumedTask.checkpoint);
+      const previouslyLoaded = [...invokedNames, ...discoveredNames, ...searchedNames].map(name => ActionRegistry.actions.get(name))
+        .filter(Boolean).filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
     let finalResponse = null;
@@ -3696,6 +3705,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
+      ToolSearch.observeServerToolSearches(response.content, gapCollector, searchQueries);
       // This message's calls that could run direct, judged before any of them
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
@@ -3705,7 +3715,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
-      if (toolUses.length === 0) {
+      if (ToolSearch.finishesTurn(response, toolUses)) {
         finalResponse = textBlocks.map(t => t.text).join('\n');
         // A terminal turn with neither a tool call nor usable text (a
         // thinking-only or refused reply) answers nothing — the `!finalResponse`
@@ -3762,9 +3772,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         } else if (platformEnabled && toolUse.name === ActionRegistry.DISCOVERY_TOOL.name) {
           const discovered = ActionRegistry.discover(toolUse.input, actionScope);
           result = discovered.result;
-          const byName = new Map(tools.map(t => [t.name, t]));
-          for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
-          tools = [...byName.values()];
+          tools = ToolSearch.mergeDiscoveredTools(tools, discovered.definitions.map(apiToolDefinition), toolSearch);
           gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
@@ -3935,7 +3943,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
-          content: JSON.stringify(result),
+          content: ToolSearch.toolResultContent(toolUse.name, result, tools, toolSearch),
           ...(failed ? { is_error: true } : {}),
         });
 
@@ -3959,11 +3967,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
-      currentMessages = [
-        ...currentMessages,
-        { role: 'assistant', content: response.content },
-        { role: 'user', content: results },
-      ];
+      currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results);
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
     // finalResponse is still null only when every round was tool_use and the

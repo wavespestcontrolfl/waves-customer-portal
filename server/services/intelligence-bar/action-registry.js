@@ -215,17 +215,58 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'update_customer', 'get_call_log',
 ]);
 
-function initialTools(context, scope) {
+// An ordinary admin page: not the technician rail and not the dedicated
+// estimate-drafting rail, both of which keep their own narrow tool lists.
+function isOrdinaryAdminPage(context, scope) {
+  return scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context);
+}
+
+// The tool list a page opens with (common + every-page + the page's domain),
+// without the discovery tool.
+function pageTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
   // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
   if (context === 'revenue' || context === 'dashboard') common.add('send_invoice');
-  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
   if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
-  return [...discovery, ...[...actions.values()]
+  return [...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
-    .map(a => a.definition)];
+    .map(a => a.definition);
+}
+
+// The API's own tool search (GA, no beta header; supported on MODELS.FLAGSHIP
+// and newer). Never deferred, never given cache_control.
+const TOOL_SEARCH_TOOL = Object.freeze({ type: 'tool_search_tool_bm25_20251119', name: 'tool_search_tool_bm25' });
+
+// Owner ruling 2026-10-12 (the bar must reach everything on the owner login),
+// shaped for tool selection: Anthropic documents accuracy degrading past 30 to
+// 50 active tools, so the owner keeps exactly the page list a plain admin gets
+// (eager, INCLUDING discover_capabilities: it is the route to actions that are
+// not callable tools, such as owner-workflow ones), plus the API's tool search,
+// plus every other allowed tool with defer_loading true, sorted by name.
+// Deferred tools sit outside the cached prefix and a discovered one is appended
+// inline, so the cache is untouched. The deferred copies are NEW objects: the
+// registry's own definitions stay non-deferred for every other request.
+// allowed() still decides every entry (gated tools, FULL_ACCESS_TWO_STEP tools)
+// and confirmed_endpoint tools are never loaded.
+function toolSearchTools(context, scope) {
+  const eager = [DISCOVERY_TOOL, ...pageTools(context, { ...scope, fullAccess: false })];
+  const eagerNames = new Set(eager.map(tool => tool.name));
+  const deferred = [...actions.values()]
+    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && !eagerNames.has(a.id))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(a => ({ ...a.definition, defer_loading: true }));
+  return [...eager, TOOL_SEARCH_TOOL, ...deferred];
+}
+
+// scope.toolSearch is set by the route from GATE_IB_TOOL_SEARCH (or a resumed
+// history that already holds tool-search blocks) and the authenticated login
+// (scope.fullAccess), never from model input.
+function initialTools(context, scope) {
+  const ordinary = isOrdinaryAdminPage(context, scope);
+  if (ordinary && scope.fullAccess === true && scope.toolSearch === true) return toolSearchTools(context, scope);
+  return [...(ordinary ? [DISCOVERY_TOOL] : []), ...pageTools(context, scope)];
 }
 
 function execute(name, input, { role, context, techContext, actionContext = {} } = {}) {
@@ -256,4 +297,4 @@ function execute(name, input, { role, context, techContext, actionContext = {} }
   return action.executor(name, executionInput, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
 }
 
-module.exports = { actions, policyErrors, DISCOVERY_TOOL, EVERY_PAGE_TOOL_NAMES, initialTools, discover, validateInput, allowed, execute };
+module.exports = { actions, policyErrors, DISCOVERY_TOOL, TOOL_SEARCH_TOOL, EVERY_PAGE_TOOL_NAMES, initialTools, discover, validateInput, allowed, execute };
