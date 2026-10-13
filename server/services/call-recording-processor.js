@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, staffNameSavedAsCaller } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -3861,6 +3861,33 @@ const shutdownStampSql = (conn) => conn.raw(
   `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
   [new Date().toISOString()],
 );
+// The Waves staff member who answered an INBOUND call (the webhook's forward_acceptance stamp),
+// or null. An outbound call does not record who placed it.
+function answeringStaffName(call = {}) {
+  if (isOutboundCall(call)) return null;
+  return parseJsonObjectSafe(call.metadata)?.forward_acceptance?.csr_name || null;
+}
+// Did the extraction save the answering staff member's first name as the caller's own name?
+// The words decide (staffNameSavedAsCaller); a linked customer who has that first name keeps it.
+// A failed customer read keeps the name (false).
+async function callerNameIsStaffName(conn, { call, extracted, transcript }) {
+  if (!staffNameSavedAsCaller({ firstName: extracted?.first_name, lastName: extracted?.last_name, staffName: answeringStaffName(call), transcript })) return false;
+  if (!call.customer_id) return true;
+  try {
+    const customer = await conn('customers').where({ id: call.customer_id }).first('first_name');
+    return String(customer?.first_name || '').trim().toLowerCase() !== String(extracted.first_name).trim().toLowerCase();
+  } catch (err) {
+    logger.warn(`[call-proc] staff-name check skipped: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+// Drops the caller first name from a V2 result in place (and a name_full that is only that name).
+function clearV2CallerFirstName(v2Result) {
+  const caller = v2Result?.extraction?.caller;
+  if (!caller) return;
+  if (String(caller.name_full || '').trim().toLowerCase() === String(caller.first_name || '').trim().toLowerCase()) caller.name_full = null;
+  caller.first_name = null;
+}
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -11250,6 +11277,19 @@ const CallRecordingProcessor = {
         } catch (guardErr) {
           logger.warn(`[call-proc] spoken-phone guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
         }
+        // A staff first name V2 saved as the caller's own name is dropped here, before
+        // ai_extraction_enriched is serialized below, so the stored V2 record and every reader
+        // of it agree with the canonical record (cleared after adoption). Fail-open.
+        try {
+          if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+            const v2Caller = v2Result.extraction.caller || {};
+            if (await callerNameIsStaffName(db, { call, extracted: { first_name: v2Caller.first_name, last_name: v2Caller.last_name }, transcript: transcription })) {
+              clearV2CallerFirstName(v2Result);
+            }
+          }
+        } catch (guardErr) {
+          logger.warn(`[call-proc] staff-name guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
+        }
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
         // recorded for the promotion-readiness gate and reused by the routing
@@ -11404,6 +11444,14 @@ const CallRecordingProcessor = {
       extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
       // Only while the no-price assessment lane is live (gate off: the persisted record is unchanged).
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
+    }
+
+    // A staff name the extraction saved as the caller's own name is dropped before any reader
+    // (customer match, cards, lead) sees it. The name is never guessed: it becomes null.
+    // The V2 record was cleared before it was stored (the V2 guard above).
+    if (await callerNameIsStaffName(db, { call, extracted, transcript: transcription })) {
+      extracted = { ...extracted, first_name: null };
+      logger.info(`[call-proc] staff name dropped from the caller name for ${maskSid(callSid)}`);
     }
 
     // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
@@ -24709,6 +24757,9 @@ CallRecordingProcessor._test = {
   leadContactCompleteness,
   hasWorkableLeadSignal,
   voicemailCallbackAlertPlan,
+  answeringStaffName,
+  callerNameIsStaffName,
+  clearV2CallerFirstName,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
   emailCardSignature,

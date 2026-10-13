@@ -975,6 +975,33 @@ function callEndedWithNothingToDo(extraction) {
   return extraction.service_request?.quote_promised !== true;
 }
 
+// A staff member's first name saved as the caller's name (2026-10-12 call audit: the label pass
+// swapped the greeting lines of "Hey Morgan, it's Riley" and the caller was saved as "Riley").
+// INBOUND calls only: `staffName` is the person who answered, the one staff identity the call
+// records. An outbound call does not record who placed it, so it is never judged here.
+// True only when the extracted first name is that staff name, no last name was captured, and the
+// transcript WORDS attribute the name to staff (speaker labels are what went wrong, so they are
+// not read):
+//   - the speaker greets another NAME and then gives this one ("Hey Morgan, it's Riley"; a filler
+//     word such as "there" is not a name), or
+//   - someone greets this name ("Hey Riley") and nobody on the call introduces themselves by it
+//     ("this is Riley", "my name is Riley"): a caller who says their own name keeps it.
+// The caller applies one more guard: a linked customer with this first name keeps it. Pure.
+const STAFF_ROLE_LABELS = new Set(['office manager', 'waves', 'unknown']);
+const GREETING_FILLER_WORDS = 'there|guys|everyone|everybody|all|you|folks|again|buddy|bud|man|sir|maam|yes|yeah|so|um|uh|good|well|and|this|it';
+function staffNameSavedAsCaller({ firstName, lastName, staffName, transcript = '' } = {}) {
+  const first = String(firstName || '').trim().toLowerCase();
+  if (!first || !/^[a-z]+$/.test(first) || String(lastName || '').trim()) return false;
+  const staff = String(staffName || '').trim().toLowerCase();
+  if (staff !== first || STAFF_ROLE_LABELS.has(staff)) return false;
+  const text = String(transcript || '');
+  const selfAfterGreeting = new RegExp(`\\b(?:hey|hi|hello)[,\\s]+(?!(?:${first}|${GREETING_FILLER_WORDS})\\b)[a-z]+[,.!\\s]+(?:it'?s|it is|this is)\\s+${first}\\b`, 'i');
+  if (selfAfterGreeting.test(text)) return true;
+  const greeted = new RegExp(`\\b(?:hey|hi|hello|thanks|thank you|bye)[,\\s]+${first}\\b`, 'i');
+  const selfNamed = new RegExp(`\\b(?:my name is|my name's|this is|it'?s|it is|i'?m|i am)\\s+${first}\\b`, 'i');
+  return greeted.test(text) && !selfNamed.test(text);
+}
+
 function noActionCallCards(extraction, { canonicalStreet } = {}) {
   if (!callEndedWithNothingToDo(extraction)) return [];
   const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
@@ -3464,6 +3491,7 @@ module.exports = {
   dropUnneededCallCards,
   callEndedWithNothingToDo,
   noActionCallCards,
+  staffNameSavedAsCaller,
   callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
