@@ -23,7 +23,7 @@ const CORE = [
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
-  'offer_choices',
+  'offer_choices', 'check_address',
   'create_appointment', 'reschedule_appointment', 'cancel_appointment',
   'update_customer', 'get_call_log',
 ];
