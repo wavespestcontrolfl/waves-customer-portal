@@ -331,14 +331,40 @@ function writeOptions(checked, fallback) {
   return checked ? { alternateCandidates: [], proofread: true } : fallback;
 }
 
+// A write refusal that says the visit or its customer changed while the
+// model read: marked so the run logs "superseded", not a failed write.
+function changedDuringCheck(err, description) {
+  return Object.assign(err, { supersededDuringCheck: description });
+}
+
+// apply.js makeMoveGuard, on the move transaction: the customer's stored day,
+// time and blackout preferences are hard rules, and a model call takes up to
+// two minutes. They are read again FOR SHARE and compared with the ones the
+// move was scored on (Codex #6313 r15, r17). Only a proofread move is asked.
+async function assertPreferencesUnchanged(trx, service, config, refuse) {
+  if (config.proofread !== true || !config.prefs) return;
+  const { getCustomerSchedulingPreferences } = require('../preferences');
+  const now = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, trx, { lock: true });
+  if (preferencesPrint(now) !== preferencesPrint(config.prefs)) {
+    throw changedDuringCheck(refuse(service.id, 'has new customer scheduling preferences since the move was checked'), 'The customer\'s scheduling preferences changed while the move was checked');
+  }
+}
+
+const preferencesPrint = (prefs) => JSON.stringify(prefs);
+
+// The run dropped this visit's move for a change during the check: a notice
+// collected for it describes a proposal nobody holds any more.
+function dropNotice(state, service) {
+  if (state) state.notices.delete(keyFor(service));
+}
+
 // apply.js makeMemberGuard, under the unit mover's stop lock and before any
 // write: a visit that was alone when it was checked and has since joined a
 // stop of two or more is not moved (see isGroupedStop). The next run sees
 // the stop and leaves it.
 function assertNotGrouped(members, proofread, refuse, primaryId) {
   if (proofread !== true || (members || []).length < 2) return;
-  // Marked so the run reads it as a change during the check, not a failed write.
-  throw Object.assign(refuse(primaryId, 'joined a grouped stop after the move was checked'), { joinedStopAfterCheck: true });
+  throw changedDuringCheck(refuse(primaryId, 'joined a grouped stop after the move was checked'), 'The visit joined a grouped stop while the move was checked');
 }
 
 // The approved slot was taken between the check and the write. Nothing
@@ -350,11 +376,11 @@ function assertNotGrouped(members, proofread, refuse, primaryId) {
 const NOT_A_FAILURE = {
   SLOT_TAKEN: ['APPROVED_SLOT_TAKEN', 'The slot the move proofreader approved was taken before the move; the next run tries again'],
   STALE_PLACEMENT: ['SUPERSEDED_DURING_RUN', 'Superseded by an operator while the move was checked'],
-  JOINED_STOP: ['SUPERSEDED_DURING_RUN', 'The visit joined a grouped stop while the move was checked'],
 };
 function approvedSlotTaken(checked, err) {
   const nothingMoved = !!(checked && err) && !err.movedCount && !(Array.isArray(err.failedMembers) && err.failedMembers.length);
-  const reason = nothingMoved ? NOT_A_FAILURE[err.joinedStopAfterCheck ? 'JOINED_STOP' : err.code] : null;
+  if (nothingMoved && err.supersededDuringCheck) return { reason_code: 'SUPERSEDED_DURING_RUN', reason_description: err.supersededDuringCheck };
+  const reason = nothingMoved ? NOT_A_FAILURE[err.code] : null;
   return reason ? { reason_code: reason[0], reason_description: reason[1] } : null;
 }
 
@@ -537,6 +563,6 @@ function tallyOf(state) {
 }
 
 module.exports = {
-  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, approvedSlotTaken, closeNotices, raiseNotices, statusAfterNotices, tallyOf,
+  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, assertPreferencesUnchanged, preferencesPrint, dropNotice, approvedSlotTaken, closeNotices, raiseNotices, statusAfterNotices, tallyOf,
   _internals: { whyFor, detailFor, plannedMove },
 };

@@ -1238,6 +1238,18 @@ async function applyPlannedMove(pm, run, attempt) {
   // before the write, so a move no rule or cap lets through is never paid
   // for. Anything but "allow" leaves the visit where it is.
   const checked = await moveCheck.checkMove({ service: pm.service, best: fresh.best, run });
+  // A model call takes up to two minutes: the customer's stored day, time and
+  // blackout preferences are hard rules, so they are read again after it,
+  // whatever the verdict. Changed: the visit stays, no person is told about a
+  // proposal scored on the old ones, and the next run scores it on the new
+  // ones. (The write reads them once more on its own transaction: apply.js.)
+  if (checked && await preferencesChanged(pm)) {
+    moveCheck.dropNotice(run.proofreader, pm.service);
+    noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
+    return audit.logDecision(runId, {
+      action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked', ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
+    });
+  }
   if (checked && !checked.allowed) {
     // The check itself did not work: never a green run (the visit stays).
     if (checked.broke) run.guardReadDegraded = true;
@@ -1247,15 +1259,6 @@ async function applyPlannedMove(pm, run, attempt) {
     });
   }
   attempt.checked = checked;
-  // A model call takes up to two minutes: the customer's stored day, time and
-  // blackout preferences are hard rules, so they are read again before the
-  // write. Changed: the visit stays, and the next run scores it on the new ones.
-  if (checked && await preferencesChanged(pm)) {
-    noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
-    return audit.logDecision(runId, {
-      action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked', ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
-    });
-  }
 
   // Next-best still-scored candidates (GATE_AUTO_DISPATCH_SHARED_MODEL) —
   // apply falls back to one of these on a SLOT_TAKEN refusal instead of
@@ -1314,7 +1317,7 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
 // ones this move was scored on. A read error throws: the move fails closed.
 async function preferencesChanged(pm) {
   const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type);
-  return JSON.stringify(now) !== JSON.stringify(pm.prefs);
+  return moveCheck.preferencesPrint(now) !== moveCheck.preferencesPrint(pm.prefs);
 }
 
 // A proofread move that the write refused for an ordinary reason: the one

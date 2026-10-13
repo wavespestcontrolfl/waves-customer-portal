@@ -319,6 +319,45 @@ describe('the write of a checked move', () => {
     expect(() => nightly.assertNotGrouped([{ id: 's1' }, { id: 's2' }], undefined, refuse, 's1')).not.toThrow();
   });
 
+  describe('the customer\'s stored preferences at the write', () => {
+    const refuse = (id, why) => new Error(`${id} ${why}`);
+    const prefs = { preferred_day_indexes: [], blackout: null };
+    const trxOf = (row) => {
+      const calls = [];
+      const chain = { where: () => chain, forShare: () => { calls.push('forShare'); return chain; }, first: async () => row };
+      return Object.assign(() => chain, { calls });
+    };
+    const scored = () => require('../services/auto-dispatch/preferences').normalizePreferences(undefined, SERVICE.service_type);
+
+    test('unchanged: the move goes on, and the row was read FOR SHARE on the move transaction', async () => {
+      const trx = trxOf(undefined);
+      await expect(nightly.assertPreferencesUnchanged(trx, SERVICE, { proofread: true, prefs: scored() }, refuse)).resolves.toBeUndefined();
+      expect(trx.calls).toEqual(['forShare']);
+    });
+
+    test('a new preferred day since the check refuses the move as superseded, not as a failure', async () => {
+      const trx = trxOf({ preferred_day: 'tuesday' });
+      const err = await nightly.assertPreferencesUnchanged(trx, SERVICE, { proofread: true, prefs: scored() }, refuse).catch((e) => e);
+      expect(err.message).toMatch(/new customer scheduling preferences/);
+      expect(nightly.approvedSlotTaken({ allowed: true }, err)).toEqual({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked' });
+    });
+
+    test('a move that was not proofread reads nothing', async () => {
+      const trx = jest.fn();
+      await nightly.assertPreferencesUnchanged(trx, SERVICE, { prefs }, refuse);
+      expect(trx).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a notice collected for a move the run then dropped is discarded', async () => {
+    const run = runOf();
+    await check(run, proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }));
+    expect(run.proofreader.notices.size).toBe(1);
+    nightly.dropNotice(run.proofreader, SERVICE);
+    expect(run.proofreader.notices.size).toBe(0);
+    expect(() => nightly.dropNotice(null, SERVICE)).not.toThrow();
+  });
+
   test('check off: the fallback is unchanged', () => {
     expect(nightly.writeOptions(null, fallback)).toBe(fallback);
   });

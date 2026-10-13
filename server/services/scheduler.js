@@ -879,6 +879,9 @@ function initScheduledJobs() {
           const failures = [];
           await flagUnplacedVisits(getAutoDispatchConfig()).catch((err) => failures.push(err));
           await maintainMissingGeoNotices().catch((err) => failures.push(err));
+          // No proofread move can run either: close every open move-check notice.
+          const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: false });
+          if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
           if (failures.length) throw failures[0];
           return;
         }

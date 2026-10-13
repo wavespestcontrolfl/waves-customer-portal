@@ -1752,6 +1752,23 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
+  test('preferences changed under an unsure answer: superseded, and the queued notice is discarded', async () => {
+    await applyMode(async () => {
+      const preferences = require('../services/auto-dispatch/preferences');
+      const before = await preferences.getCustomerSchedulingPreferences();
+      let state;
+      checkMove.mockImplementation(async ({ run, service }) => {
+        state = run.proofreader;
+        state.notices.set(moveCheck.noticeKey(service.id, '2026-08-04', '09:00:t1'), { id: service.id });
+        preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
+        return stop('PROOFREADER_UNSURE', 'unknown');
+      });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
+      expect(state.notices.size).toBe(0);
+    });
+  });
+
   test('a visit a person changed while the model read is superseded, not a failed run', async () => {
     await applyMode(async () => {
       checkMove.mockResolvedValue(ALLOW);
