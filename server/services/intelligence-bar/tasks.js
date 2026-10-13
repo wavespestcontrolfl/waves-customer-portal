@@ -115,7 +115,10 @@ async function snapshot(task, actorId) {
       expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     });
   }
-  return { ...(task.response || {}), taskId: task.id, taskState: exposedTaskState(task, receipts),
+  // A request rolled over to a new conversation (idle thread) replays that first
+  // decision; the key is always present so the /query reply flag does not add its own.
+  return { ...(task.response || {}), threadRolledOver: task.request?.thread_rolled_over ? true : undefined,
+    taskId: task.id, taskState: exposedTaskState(task, receipts),
     taskTarget: task.target?.target || null, pendingActions, receipts,
     canContinue: !continuationError(task, receipts),
     response: task.response?.response || (task.request?.had_images ? ATTACHMENTS_LOST

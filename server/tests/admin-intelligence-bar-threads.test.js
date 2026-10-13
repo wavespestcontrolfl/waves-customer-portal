@@ -76,7 +76,6 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
 }));
 jest.mock('../services/intelligence-bar/threads', () => ({
   threadsEnabled: () => process.env.GATE_IB_THREADS === 'true',
-  idleHours: () => 4,
   isThreadIdle: (...args) => mockIsThreadIdle(...args),
   appendExchange: (...args) => mockAppendExchange(...args),
   latestThread: (...args) => mockLatestThread(...args),
@@ -279,17 +278,13 @@ describe('threads gate ON', () => {
 
   test('/threads/latest returns the actor\'s thread; technician gets 403', async () => {
     mockLatestThread.mockResolvedValue({
-      id: THREAD_ID, title: 'Test reschedule', context: 'schedule', idleForMs: 12600000,
+      id: THREAD_ID, title: 'Test reschedule', context: 'schedule',
       conversationHistory: [{ role: 'user', content: 'move the test appointment' }],
     });
     await withServer(async (baseUrl) => {
       const { status, body } = await getPath(baseUrl, '/threads/latest');
       expect(status).toBe(200);
       expect(body.thread.id).toBe(THREAD_ID);
-      // The server-computed age (3.5 h) reaches the palette as is; the client
-      // never subtracts a server timestamp from its own clock.
-      expect(body.thread.idleForMs).toBe(12600000);
-      expect(body.idleHours).toBe(4);
       expect(mockLatestThread).toHaveBeenCalledWith('admin-1');
 
       const techRes = await getPath(baseUrl, '/threads/latest', 'tech');
@@ -297,12 +292,12 @@ describe('threads gate ON', () => {
     });
   });
 
-  test('/threads/latest with an idle newest thread answers no thread and states the limit', async () => {
+  test('/threads/latest with an idle newest thread answers no thread (the server decides the auto-resume)', async () => {
     mockLatestThread.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
       const { status, body } = await getPath(baseUrl, '/threads/latest');
       expect(status).toBe(200);
-      expect(body).toEqual({ thread: null, idleHours: 4 });
+      expect(body).toEqual({ thread: null });
     });
   });
 
@@ -373,63 +368,113 @@ describe('threads gate ON', () => {
     });
   });
 
-  describe('the idle rollover keeps the request identity', () => {
+  describe('threadRolledOver: the server is the only authority', () => {
     const history = [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Synthetic old answer' }];
-    const reqFor = (body) => ({ body: { ...body }, techRole: 'admin', technician: { id: 'admin-1' }, technicianId: 'admin-1' });
-    const runGuard = async (req) => {
-      const next = jest.fn();
-      await intelligenceRouter.startFreshWhenThreadIdle(req, {}, next);
-      expect(next).toHaveBeenCalledTimes(1);
+    const postRollover = async (extra = {}) => {
+      scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+      let result;
+      await withServer(async (baseUrl) => {
+        result = await postQuery(baseUrl, { prompt: 'a later ask', context: 'customers', thread_id: THREAD_ID, thread_seq: 4,
+          conversationHistory: history, ...extra });
+      });
+      return result;
     };
-    const taskRequest = (body) => ({
-      prompt: body.prompt, context: 'customers', pageData: {}, selectedTarget: null, images: [],
-      conversationHistory: (body.conversationHistory || []).slice(-10),
-      thread_id: body.thread_id || null, thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
-    });
     afterEach(() => mockIsThreadIdle.mockReset());
 
-    test('an idle rollover stashes the original thread fields and rewrites only the live body', async () => {
+    test('a rolled-over reply with a new thread id carries the flag', async () => {
       mockIsThreadIdle.mockResolvedValue(true);
-      const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
-      const req = reqFor(sent);
-      await runGuard(req);
-      expect(req.body.thread_id).toBeUndefined();
-      expect(req.body.conversationHistory).toEqual([]);
-      // The identity the task hash reads is exactly what the client sent.
-      expect(intelligenceRouter.identityWithOriginalThread(req, taskRequest(req.body))).toEqual(taskRequest(sent));
-      // ...while the stored request is the rolled-over one.
-      expect(taskRequest(req.body)).toMatchObject({ thread_id: null, thread_seq: null, conversationHistory: [] });
+      mockAppendExchange.mockResolvedValue({ threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', lastSeq: 2 });
+      const { status, body } = await postRollover();
+      expect(status).toBe(200);
+      expect(body.threadRolledOver).toBe(true);
+      expect(body.threadId).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
     });
 
-    test('no rollover: the identity is the request itself', async () => {
+    test('the flag is there even when the append fails and no thread id could be created', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue(null);
+      const { body } = await postRollover();
+      expect(body.threadRolledOver).toBe(true);
+      expect(body.threadId).toBeUndefined();
+    });
+
+    test('a normal reply never carries it', async () => {
       mockIsThreadIdle.mockResolvedValue(false);
-      const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
-      const req = reqFor(sent);
-      await runGuard(req);
-      expect(req.ibThreadRollover).toBeUndefined();
-      const request = taskRequest(req.body);
-      expect(intelligenceRouter.identityWithOriginalThread(req, request)).toBe(request);
+      mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 6 });
+      const { body } = await postRollover();
+      expect(body).not.toHaveProperty('threadRolledOver');
     });
 
-    test('a retry of the same request hashes the same whether or not the thread is still idle', async () => {
+    test('a reopened thread is never rolled over and its reply never carries it', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 6 });
+      const { body } = await postRollover({ thread_reopened: true });
+      expect(mockIsThreadIdle).not.toHaveBeenCalled();
+      expect(body).not.toHaveProperty('threadRolledOver');
+      expect(mockAppendExchange.mock.calls.at(-1)[0].threadId).toBe(THREAD_ID);
+    });
+
+    test('every JSON body of a rolled-over request is flagged, unless it already states the flag (a stored snapshot)', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = [];
+      const res = { json: (body) => { sent.push(body); return res; } };
+      await intelligenceRouter.startFreshWhenThreadIdle({ body: { thread_id: THREAD_ID, conversationHistory: history },
+        techRole: 'admin', technician: { id: 'admin-1' }, technicianId: 'admin-1' }, res, jest.fn());
+      res.json({ error: 'refused' });
+      res.json({ taskId: 't', threadRolledOver: undefined });
+      res.json({ taskId: 't', threadRolledOver: true });
+      res.json([1]);
+      expect(sent).toEqual([{ error: 'refused', threadRolledOver: true }, { taskId: 't', threadRolledOver: undefined },
+        { taskId: 't', threadRolledOver: true }, [1]]);
+    });
+
+    describe('request identity', () => {
+      const reqFor = (body) => ({ body: { ...body }, techRole: 'admin', technician: { id: 'admin-1' }, technicianId: 'admin-1' });
+      const runGuard = async (req) => {
+        const next = jest.fn();
+        await intelligenceRouter.startFreshWhenThreadIdle(req, { json: jest.fn() }, next);
+        expect(next).toHaveBeenCalledTimes(1);
+      };
+      const taskRequest = (body) => ({
+        prompt: body.prompt, context: 'customers', pageData: {}, selectedTarget: null, images: [],
+        conversationHistory: (body.conversationHistory || []).slice(-10),
+        thread_id: body.thread_id || null, thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+      });
+      const identityOf = (req) => {
+        const { request, identityRequest } = intelligenceRouter.taskRequestsFor(req, taskRequest(req.body));
+        return identityRequest || request;
+      };
       const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
-      const identities = [];
-      for (const idle of [false, true, true, false]) {
-        mockIsThreadIdle.mockResolvedValue(idle);
+
+      test('an idle rollover hashes what the client sent and stores the rolled-over request with the decision', async () => {
+        mockIsThreadIdle.mockResolvedValue(true);
         const req = reqFor(sent);
         await runGuard(req);
-        identities.push(JSON.stringify(intelligenceRouter.identityWithOriginalThread(req, taskRequest(req.body))));
-      }
-      expect(new Set(identities).size).toBe(1);
-    });
+        expect(req.body.thread_id).toBeUndefined();
+        expect(req.body.conversationHistory).toEqual([]);
+        const { request } = intelligenceRouter.taskRequestsFor(req, taskRequest(req.body));
+        expect(identityOf(req)).toEqual(taskRequest(sent));
+        expect(request).toMatchObject({ thread_id: null, thread_seq: null, conversationHistory: [], thread_rolled_over: true });
+      });
 
-    test('a reopened thread is never rolled over, so its identity is untouched', async () => {
-      mockIsThreadIdle.mockResolvedValue(true);
-      const req = reqFor({ prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, thread_reopened: true, conversationHistory: history });
-      await runGuard(req);
-      expect(mockIsThreadIdle).not.toHaveBeenCalled();
-      expect(req.ibThreadRollover).toBeUndefined();
-      expect(req.body.thread_id).toBe(THREAD_ID);
+      test('no rollover: the identity is the request itself and no decision is stored', async () => {
+        mockIsThreadIdle.mockResolvedValue(false);
+        const req = reqFor(sent);
+        await runGuard(req);
+        expect(req.ibThreadRollover).toBeUndefined();
+        expect(intelligenceRouter.taskRequestsFor(req, taskRequest(req.body))).toEqual({ request: taskRequest(sent) });
+      });
+
+      test('a retry of the same request hashes the same whether or not the thread is still idle', async () => {
+        const identities = [];
+        for (const idle of [false, true, true, false]) {
+          mockIsThreadIdle.mockResolvedValue(idle);
+          const req = reqFor(sent);
+          await runGuard(req);
+          identities.push(JSON.stringify(identityOf(req)));
+        }
+        expect(new Set(identities).size).toBe(1);
+      });
     });
   });
 

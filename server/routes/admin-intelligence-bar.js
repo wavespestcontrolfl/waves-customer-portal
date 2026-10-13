@@ -3416,7 +3416,7 @@ async function runQuery(req, res, next) {
         thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
-        request: taskRequest, identityRequest: identityWithOriginalThread(req, taskRequest),
+        ...taskRequestsFor(req, taskRequest),
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -4147,21 +4147,38 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
   }
 }
 
-// The idle limit must not rest on the client clock: an explicit thread_id whose
-// thread is idle past IB_THREAD_IDLE_HOURS starts a NEW conversation (no thread
-// id, no client history, so the model never sees the old customer) unless the
-// client says the operator reopened it on purpose from History
-// (thread_reopened: true). Direct /query only: a saved task resumed through
+// The server is the only authority on starting a new conversation. An explicit
+// thread_id whose thread is idle past IB_THREAD_IDLE_HOURS starts a NEW
+// conversation (no thread id, no client history, so the model never sees the old
+// customer) unless the client says the operator reopened it on purpose from
+// History or a restored saved task (thread_reopened: true). Every JSON reply to
+// that request then carries threadRolledOver: true (whether or not a new thread
+// id could be created), and never otherwise; the palette holds the thread it
+// has and obeys the flag. Direct /query only: a saved task resumed through
 // /tasks/:id/* keeps its own thread. Fails open (the request runs unchanged)
-// when the lookup throws. The rollover must not change the request's identity:
-// a retry of the same request key (lost response, failed run) is recognised by
-// the hash of what the client sent, so identityWithOriginalThread hands
-// IbTasks.begin the original thread fields to hash while the saved task keeps
-// the rolled-over ones (a later resume continues the new conversation).
-function identityWithOriginalThread(req, request) {
+// when the lookup throws.
+//
+// The rollover must not change the request's identity: a retry of the same
+// request key (lost response, failed run) is recognised by the hash of what the
+// client sent, so taskRequestsFor hands IbTasks.begin the original thread fields
+// to hash while the saved task keeps the rolled-over ones plus the decision
+// (thread_rolled_over), which the snapshot a retry gets back replays.
+function taskRequestsFor(req, taskRequest) {
   const original = req.ibThreadRollover;
-  return original ? { ...request, conversationHistory: original.conversationHistory.slice(-10),
-    thread_id: original.thread_id, thread_seq: original.thread_seq } : request;
+  if (!original) return { request: taskRequest };
+  return {
+    request: { ...taskRequest, thread_rolled_over: true },
+    identityRequest: { ...taskRequest, conversationHistory: original.conversationHistory.slice(-10),
+      thread_id: original.thread_id, thread_seq: original.thread_seq },
+  };
+}
+
+// Marks every JSON object body of this response, unless the body already states
+// the flag itself (a stored task snapshot replays its own first decision).
+function flagRolledOverReplies(res) {
+  const json = res.json.bind(res);
+  res.json = (body) => json(body && typeof body === 'object' && !Array.isArray(body) && !('threadRolledOver' in body)
+    ? { ...body, threadRolledOver: true } : body);
 }
 
 async function startFreshWhenThreadIdle(req, res, next) {
@@ -4170,8 +4187,6 @@ async function startFreshWhenThreadIdle(req, res, next) {
     if (IbThreads.threadsEnabled() && req.techRole === 'admin' && body.thread_reopened !== true
       && UUID_RE.test(String(body.thread_id || ''))
       && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
-      // The request's identity (IbTasks.begin's hash) stays what the client
-      // sent; only the stored request and the model input are rolled over.
       req.ibThreadRollover = {
         thread_id: body.thread_id,
         thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
@@ -4180,6 +4195,7 @@ async function startFreshWhenThreadIdle(req, res, next) {
       delete body.thread_id;
       delete body.thread_seq;
       body.conversationHistory = [];
+      flagRolledOverReplies(res);
     }
   } catch (err) {
     logger.warn(`[intelligence-bar] idle thread check failed (code=${err?.code || 'unknown'})`);
@@ -5105,10 +5121,9 @@ router.get('/threads/latest', async (req, res, next) => {
   try {
     if (!threadsGuard(req, res)) return;
     // null = nothing to resume: no thread, or the newest is idle past the
-    // limit (a new conversation starts). idleHours lets a palette that stays
-    // open for hours apply the same limit to the thread it holds.
+    // limit (the server decides: a new conversation starts).
     const thread = await IbThreads.latestThread(getAdminActorId(req));
-    res.json({ thread: thread || null, idleHours: IbThreads.idleHours() });
+    res.json({ thread: thread || null });
   } catch (err) {
     logger.error('[intelligence-bar] threads/latest failed:', err);
     next(err);
@@ -5145,7 +5160,7 @@ module.exports = router;
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
 // Exposed for the idle-thread rollover identity test.
-module.exports.identityWithOriginalThread = identityWithOriginalThread;
+module.exports.taskRequestsFor = taskRequestsFor;
 module.exports.startFreshWhenThreadIdle = startFreshWhenThreadIdle;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
 // Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —

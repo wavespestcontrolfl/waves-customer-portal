@@ -32,6 +32,7 @@ jest.mock('../models/db', () => {
 });
 
 const IbTasks = require('../services/intelligence-bar/tasks');
+const PendingActions = require('../services/intelligence-bar/pending-actions');
 
 const SESSION = '5a1c2f7a-aaaa-4bbb-8ccc-deadbeef0001';
 const THREAD = '5a1c2f7a-aaaa-4bbb-8ccc-deadbeef0002';
@@ -85,5 +86,28 @@ describe('IbTasks.begin identityRequest', () => {
     await IbTasks.begin(args({ request: original }));
     const changed = await IbTasks.begin(args({ request: rolled }));
     expect(changed.code).toBe('request_changed');
+  });
+});
+
+describe('the snapshot a retry gets back replays the first rollover decision', () => {
+  beforeEach(() => jest.spyOn(PendingActions, 'forTask').mockResolvedValue([]));
+  afterEach(() => jest.restoreAllMocks());
+
+  test('a rolled-over request: threadRolledOver true', async () => {
+    const started = await IbTasks.begin(args({ request: { ...rolled, thread_rolled_over: true }, identityRequest: original }));
+    const snapshot = await IbTasks.snapshot(started.task, 'admin-1');
+    expect(snapshot.threadRolledOver).toBe(true);
+    // A retry that rolls over again (or not) recovers this same task and its decision.
+    const retry = await IbTasks.begin(args({ request: { ...rolled, thread_rolled_over: true }, identityRequest: original }));
+    expect((await IbTasks.snapshot(retry.task, 'admin-1')).threadRolledOver).toBe(true);
+    const unrolledRetry = await IbTasks.begin(args({ request: original }));
+    expect((await IbTasks.snapshot(unrolledRetry.task, 'admin-1')).threadRolledOver).toBe(true);
+  });
+
+  test('a request that was not rolled over: the key is present but unset, so the wire body has no flag', async () => {
+    const started = await IbTasks.begin(args({ request: original }));
+    const snapshot = await IbTasks.snapshot(started.task, 'admin-1');
+    expect(snapshot).toHaveProperty('threadRolledOver', undefined);
+    expect(JSON.parse(JSON.stringify(snapshot))).not.toHaveProperty('threadRolledOver');
   });
 });

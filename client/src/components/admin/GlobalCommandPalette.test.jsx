@@ -701,12 +701,17 @@ describe('answer choice buttons', () => {
   });
 });
 
-describe('idle conversations start fresh', () => {
+describe('the server decides every rollover; the palette obeys', () => {
   const THREAD = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-  const reply = (extra = {}) => ok({ response: 'Done.', conversationHistory: [
-    { role: 'user', content: 'Synthetic first ask' }, { role: 'assistant', content: 'Done.' }],
-  threadId: THREAD, threadSeq: 2, threadsEnabled: true, ...extra });
+  const THREAD_B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const TASK_THREAD = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const history = (ask, answer) => [{ role: 'user', content: ask }, { role: 'assistant', content: answer }];
+  const cardX = { id: 'action-old', tool: 'update_customer', summary: 'Old synthetic card', expiresInMs: 100 * 3600000 };
+  const cardY = { id: 'action-new', tool: 'update_customer', summary: 'New synthetic card', expiresInMs: 100 * 3600000 };
+  const reply = (extra = {}) => ok({ response: 'Done.', conversationHistory: history('Synthetic first ask', 'Done.'),
+    threadId: THREAD, threadSeq: 2, threadsEnabled: true, ...extra });
   const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
+  const confirms = () => screen.queryAllByRole('button', { name: 'Confirm', exact: true });
   const realNow = Date.now;
   let skewMs;
   beforeEach(() => {
@@ -715,270 +720,32 @@ describe('idle conversations start fresh', () => {
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
-  async function firstExchange(latestBody = { thread: null, idleHours: 4 }) {
+  // First query: card X on a task, thread A. Second query: whatever `second` returns.
+  async function sendTwo(second) {
     fetchMock.mockImplementation(async url => {
-      if (url.endsWith('/query')) return reply();
-      if (url.includes('/threads/latest')) return ok(latestBody);
-      return ok({ actions: [], tasks: [], threads: [] });
-    });
-    const ref = await mount();
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
-    submit('Synthetic first ask');
-    await waitFor(() => expect(queryBodies()).toHaveLength(1));
-    await screen.findByText('Done.');
-    return ref;
-  }
-
-  it('a follow-up inside the idle limit keeps the thread and its history', async () => {
-    await firstExchange();
-    skewMs = 3 * 3600000;
-    submit('Synthetic follow-up');
-    await waitFor(() => expect(queryBodies()).toHaveLength(2));
-    const [, followUp] = queryBodies();
-    expect(followUp.thread_id).toBe(THREAD);
-    expect(followUp.conversationHistory).toHaveLength(2);
-  });
-
-  it('a question after the idle limit sends no thread id and no history', async () => {
-    await firstExchange();
-    skewMs = 5 * 3600000;
-    submit('Synthetic later ask');
-    await waitFor(() => expect(queryBodies()).toHaveLength(2));
-    const [, later] = queryBodies();
-    expect(later.thread_id).toBeUndefined();
-    expect(later.thread_seq).toBeUndefined();
-    expect(later.conversationHistory).toEqual([]);
-  });
-
-  it('reopening a palette that sat idle past the limit shows a new conversation', async () => {
-    const ref = await firstExchange();
-    act(() => ref.current.close());
-    skewMs = 5 * 3600000;
-    act(() => ref.current.open());
-    await screen.findByPlaceholderText(/Ask anything/);
-    await waitFor(() => expect(screen.queryByText('Done.')).not.toBeInTheDocument());
-  });
-
-  // The server reports the thread's age as idleForMs (database clock against its
-  // own row). last_active_at is deliberately absurd here: the palette must not
-  // subtract it from the browser clock, whatever that clock says.
-  async function mountAutoResumed(hoursAgo) {
-    fetchMock.mockImplementation(async url => {
-      if (url.endsWith('/query')) return reply({ threadSeq: 4 });
-      if (url.includes('/threads/latest')) return ok({ idleHours: 4, thread: { id: THREAD, title: 'Resumed', lastSeq: 2, last_active_at: '2001-01-01T00:00:00Z',
-        idleForMs: hoursAgo * 3600000,
-        conversationHistory: [{ role: 'user', content: 'Synthetic earlier ask' }, { role: 'assistant', content: 'Resumed answer' }] } });
+      if (url.endsWith('/query')) {
+        const n = queryBodies().length;
+        if (n === 1) return ok({ response: 'Prepared.', taskId: 'task-old', taskState: 'awaiting_approval', pendingActions: [cardX],
+          conversationHistory: history('Synthetic first ask', 'Prepared.'), threadId: THREAD, threadSeq: 2, threadsEnabled: true });
+        if (n === 2) return ok(second);
+        return reply({ response: 'Third.', threadId: THREAD_B, threadSeq: 4, conversationHistory: history('x', 'Third.') });
+      }
+      if (url.includes('/threads/latest')) return ok({ thread: null });
       return ok({ actions: [], tasks: [], threads: [] });
     });
     await mount();
-    await screen.findByText('Resumed answer');
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+    submit('Synthetic first ask');
+    await screen.findByRole('button', { name: 'Confirm', exact: true });
+    submit('Synthetic second ask');
+    await waitFor(() => expect(queryBodies()).toHaveLength(2));
   }
 
-  it('an auto-resumed thread keeps the idle clock of its own last exchange: 3.5 h old, dropped 1 h later', async () => {
-    await mountAutoResumed(3.5);
-    skewMs = 60 * 60000;
-    submit('Synthetic later ask');
-    await waitFor(() => expect(queryBodies()).toHaveLength(1));
-    const [body] = queryBodies();
-    expect(body.thread_id).toBeUndefined();
-    expect(body.thread_reopened).toBeUndefined();
-    expect(body.conversationHistory).toEqual([]);
-  });
-
-  it.each([['6 hours ahead', 6 * 3600000], ['6 hours behind', -6 * 3600000], ['correct', 0]])(
-    'a thread the server calls 3.5 h idle is kept 20 minutes later and dropped 40 minutes later, with the browser clock %s', async (_label, offset) => {
-      skewMs = offset;
-      await mountAutoResumed(3.5);
-      skewMs = offset + 20 * 60000;
-      submit('Synthetic ask after twenty minutes');
-      await waitFor(() => expect(queryBodies()).toHaveLength(1));
-      expect(queryBodies()[0].thread_id).toBe(THREAD);
-      await screen.findByText('Done.');
-      cleanup();
-      fetchMock.mockClear();
-      skewMs = offset;
-      await mountAutoResumed(3.5);
-      skewMs = offset + 40 * 60000;
-      submit('Synthetic ask after forty minutes');
-      await waitFor(() => expect(queryBodies()).toHaveLength(1));
-      expect(queryBodies()[0].thread_id).toBeUndefined();
-      expect(queryBodies()[0].conversationHistory).toEqual([]);
-    });
-
-  it('an auto-resumed thread 3.5 h old is still continued 10 minutes later, without the reopened flag', async () => {
-    await mountAutoResumed(3.5);
-    skewMs = 10 * 60000;
-    submit('Synthetic soon ask');
-    await waitFor(() => expect(queryBodies()).toHaveLength(1));
-    const [body] = queryBodies();
-    expect(body.thread_id).toBe(THREAD);
-    expect(body.thread_reopened).toBeUndefined();
-    expect(body.conversationHistory).toHaveLength(2);
-  });
-
-  it('a query in flight across the deadline survives a close and reopen: the answer lands in its own conversation and the next question rolls over', async () => {
-    const ref = await firstExchange();
-    const pending = [];
-    fetchMock.mockImplementation(async url => {
-      if (url.endsWith('/query')) return new Promise(resolve => pending.push(resolve));
-      return ok({ actions: [], tasks: [], threads: [] });
-    });
-    skewMs = 3.9 * 3600000;
-    submit('Synthetic ask sent just before the deadline');
-    await waitFor(() => expect(pending).toHaveLength(1));
-    skewMs = 4.2 * 3600000;
-    act(() => ref.current.close());
-    act(() => ref.current.open());
-    await screen.findByPlaceholderText(/Ask anything/);
-    await act(async () => pending[0](reply({ response: 'Answer two', threadSeq: 4 })));
-    expect(await screen.findByText('Answer two')).toBeInTheDocument();
-    // Settled: the submit guards were released, so the palette takes another question.
-    skewMs = 4.2 * 3600000 + 5 * 3600000;
-    submit('Synthetic next ask');
-    await waitFor(() => expect(pending).toHaveLength(2));
-    const sent = JSON.parse(fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).at(-1)[1].body);
-    expect(sent.thread_id).toBeUndefined();
-    expect(sent.conversationHistory).toEqual([]);
-    // The in-flight query was sent on the old thread, not rolled over.
-    const first = JSON.parse(fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).at(-2)[1].body);
-    expect(first.thread_id).toBe(THREAD);
-  });
-
-  describe('a request whose response was lost', () => {
-    const lostResponse = () => ({ ok: false, status: 503, json: async () => ({ error: 'Gateway timeout' }) });
-    const queryCalls = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => options.body);
-
-    async function loseSecondQuery() {
-      const ref = await firstExchange();
-      let mode = 'lost';
-      fetchMock.mockImplementation(async url => {
-        if (url.endsWith('/query')) return mode === 'lost' ? lostResponse() : reply({ response: 'Recovered answer', threadSeq: 4 });
-        return ok({ actions: [], tasks: [], threads: [] });
-      });
-      skewMs = 3.9 * 3600000;
-      submit('Synthetic ask whose answer is lost');
-      await screen.findByText(/Error: /);
-      expect(queryCalls()).toHaveLength(2);
-      return { ref, recover: () => { mode = 'ok'; } };
-    }
-
-    it('retrying across the deadline sends the identical body and the same request key, and shows the recovered answer', async () => {
-      const { ref, recover } = await loseSecondQuery();
-      // The deadline passes, the palette is closed and reopened (the open-time reset must not touch it).
-      skewMs = 4.6 * 3600000;
-      act(() => ref.current.close());
-      act(() => ref.current.open());
-      await screen.findByPlaceholderText(/Ask anything/);
-      recover();
-      fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
-      expect(await screen.findByText('Recovered answer')).toBeInTheDocument();
-      const [, lost, retry] = queryCalls();
-      expect(retry).toBe(lost);
-      const body = JSON.parse(retry);
-      expect(body.request_key).toBe(JSON.parse(lost).request_key);
-      expect(body.thread_id).toBe(THREAD);
-      expect(body.conversationHistory).toHaveLength(2);
-    });
-
-    it('once it resolves, the next new question starts a fresh conversation', async () => {
-      const { recover } = await loseSecondQuery();
-      skewMs = 4.6 * 3600000;
-      recover();
-      fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
-      await screen.findByText('Recovered answer');
-      skewMs = 4.6 * 3600000 + 5 * 3600000;
-      submit('Synthetic brand new question');
-      await waitFor(() => expect(queryCalls()).toHaveLength(4));
-      const fresh = JSON.parse(queryCalls()[3]);
-      expect(fresh.thread_id).toBeUndefined();
-      expect(fresh.conversationHistory).toEqual([]);
-    });
-
-    it('editing the prompt into a different request is a new request: the idle rule applies to it', async () => {
-      await loseSecondQuery();
-      skewMs = 4.6 * 3600000;
-      submit('Synthetic different question');
-      await waitFor(() => expect(queryCalls()).toHaveLength(3));
-      const edited = JSON.parse(queryCalls()[2]);
-      expect(edited.thread_id).toBeUndefined();
-      expect(edited.conversationHistory).toEqual([]);
-      expect(edited.request_key).not.toBe(JSON.parse(queryCalls()[1]).request_key);
-    });
-  });
-
-  describe('an idle rollover at submit starts a clean conversation', () => {
-    const card = { id: 'action-stale', tool: 'update_customer', summary: 'Save synthetic note', expiresInMs: 100 * 3600000 };
-    const staleReply = () => ok({ response: 'Prepared.', taskId: 'task-stale', taskState: 'awaiting_approval', pendingActions: [card],
-      conversationHistory: [{ role: 'user', content: 'Synthetic ask' }, { role: 'assistant', content: 'Prepared.' }],
-      threadId: THREAD, threadSeq: 2, threadsEnabled: true });
-    const confirm = () => screen.queryByRole('button', { name: 'Confirm', exact: true });
-    async function withStaleCardAndTask(next) {
-      fetchMock.mockImplementation(async url => {
-        if (url.endsWith('/query')) return fetchMock.mock.calls.filter(([u]) => u.endsWith('/query')).length === 1 ? staleReply() : next();
-        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
-        return ok({ actions: [], tasks: [], threads: [] });
-      });
-      await mount();
-      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
-      submit('Synthetic ask');
-      expect(await screen.findByRole('button', { name: 'Confirm', exact: true })).toBeInTheDocument();
-      skewMs = 5 * 3600000;
-    }
-
-    it('the stale card and task are gone, the typed prompt is not touched, and the new reply\'s choices show', async () => {
-      await withStaleCardAndTask(() => ok({ response: 'Which one?', choices: ['Option A', 'Option B'],
-        conversationHistory: [{ role: 'user', content: 'Synthetic new ask' }, { role: 'assistant', content: 'Which one?' }],
-        threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', threadSeq: 2, threadsEnabled: true }));
-      submit('Synthetic new ask');
-      expect(await screen.findByRole('group', { name: 'Answer choices' })).toBeInTheDocument();
-      expect(confirm()).not.toBeInTheDocument();
-      expect(screen.queryByText(/Save synthetic note/)).not.toBeInTheDocument();
-      const bodies = queryBodies();
-      expect(bodies[1].thread_id).toBeUndefined();
-      expect(bodies[1].conversationHistory).toEqual([]);
-    });
-
-    it('a failed new request shows only its own error, with no old card beside it', async () => {
-      await withStaleCardAndTask(() => ({ ok: false, status: 503, json: async () => ({ error: 'Gateway timeout' }) }));
-      submit('Synthetic new ask');
-      expect(await screen.findByText(/Error: /)).toBeInTheDocument();
-      expect(confirm()).not.toBeInTheDocument();
-      expect(screen.queryByText(/Save synthetic note/)).not.toBeInTheDocument();
-      // The typed prompt stays for a retry.
-      expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('Synthetic new ask');
-    });
-  });
-
-  describe('the server rolls the conversation over', () => {
-    const THREAD_B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
-    const cardX = { id: 'action-old', tool: 'update_customer', summary: 'Old synthetic card', expiresInMs: 100 * 3600000 };
-    const cardY = { id: 'action-new', tool: 'update_customer', summary: 'New synthetic card', expiresInMs: 100 * 3600000 };
-    const history = (ask, answer) => [{ role: 'user', content: ask }, { role: 'assistant', content: answer }];
-    const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
-    const confirms = () => screen.queryAllByRole('button', { name: 'Confirm', exact: true });
-    async function sendTwo(secondReply) {
-      fetchMock.mockImplementation(async url => {
-        if (url.endsWith('/query')) {
-          const n = queryBodies().length;
-          if (n === 1) return ok({ response: 'Prepared.', taskId: 'task-old', taskState: 'awaiting_approval', pendingActions: [cardX],
-            conversationHistory: history('Synthetic first ask', 'Prepared.'), threadId: THREAD, threadSeq: 2, threadsEnabled: true });
-          if (n === 2) return ok(secondReply);
-          return ok({ response: 'Third.', conversationHistory: history('x', 'Third.'), threadId: THREAD_B, threadSeq: 4, threadsEnabled: true });
-        }
-        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
-        return ok({ actions: [], tasks: [], threads: [] });
-      });
-      await mount();
-      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
-      submit('Synthetic first ask');
-      await screen.findByRole('button', { name: 'Confirm', exact: true });
-      submit('Synthetic second ask');
-      await waitFor(() => expect(queryBodies()).toHaveLength(2));
-    }
-
-    it('sent thread A, reply carries thread B: only the new card remains, and history is only the new exchange', async () => {
-      await sendTwo({ response: 'Fresh.', pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'Fresh.'),
+  describe('a reply flagged threadRolledOver', () => {
+    it('with a new thread id: only the new card remains, history is only the new exchange, the next request uses the new thread', async () => {
+      await sendTwo({ response: 'Fresh.', pendingActions: [cardY], threadRolledOver: true, conversationHistory: history('Synthetic second ask', 'Fresh.'),
         threadId: THREAD_B, threadSeq: 2, threadsEnabled: true });
+      // The palette sent the thread it held; it did not decide anything.
       expect(queryBodies()[1].thread_id).toBe(THREAD);
       await screen.findByText('Fresh.');
       expect(confirms()).toHaveLength(1);
@@ -988,32 +755,121 @@ describe('idle conversations start fresh', () => {
       expect(queryBodies()[2].conversationHistory).toEqual(history('Synthetic second ask', 'Fresh.'));
     });
 
-    it('a rolled-over reply shows its own choice buttons, with no old card beside them', async () => {
-      await sendTwo({ response: 'Which?', choices: ['Option A', 'Option B'], conversationHistory: history('Synthetic second ask', 'Which?'),
+    it('with no thread id (the best-effort append failed): old cards and task are gone, no thread is held, the next request sends none', async () => {
+      await sendTwo({ response: 'Fresh.', threadRolledOver: true, conversationHistory: history('Synthetic second ask', 'Fresh.'), threadsEnabled: true });
+      await screen.findByText('Fresh.');
+      expect(confirms()).toHaveLength(0);
+      submit('Synthetic third ask');
+      await waitFor(() => expect(queryBodies()).toHaveLength(3));
+      expect(queryBodies()[2].thread_id).toBeUndefined();
+      expect(queryBodies()[2].thread_seq).toBeUndefined();
+    });
+
+    it('shows its own choice buttons with no old card beside them', async () => {
+      await sendTwo({ response: 'Which?', choices: ['Option A', 'Option B'], threadRolledOver: true, conversationHistory: history('Synthetic second ask', 'Which?'),
         threadId: THREAD_B, threadSeq: 2, threadsEnabled: true });
       expect(await screen.findByRole('group', { name: 'Answer choices' })).toBeInTheDocument();
       expect(confirms()).toHaveLength(0);
     });
 
-    it('a reply on the same thread still adds to the cards on screen', async () => {
-      await sendTwo({ response: 'More.', pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'More.'),
-        threadId: THREAD, threadSeq: 4, threadsEnabled: true });
-      await screen.findByText('More.');
-      expect(confirms()).toHaveLength(2);
+    it('arriving for a request the operator has since left (New chat) resets nothing of what they did next', async () => {
+      const pending = [];
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return new Promise(resolve => pending.push(resolve));
+        if (url.includes('/threads/latest')) return ok({ thread: null });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      useIsMobile.mockReturnValue(true);
+      await mount();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+      submit('Synthetic ask that gets abandoned');
+      await waitFor(() => expect(pending).toHaveLength(1));
+      fireEvent.click(screen.getByLabelText('Conversation options'));
+      fireEvent.click(await screen.findByRole('button', { name: 'New chat' }));
+      submit('Synthetic ask after New chat');
+      await waitFor(() => expect(pending).toHaveLength(2));
+      await act(async () => pending[1](reply({ response: 'Second answer', threadId: THREAD_B, pendingActions: [cardY] })));
+      await screen.findByText('Second answer');
+      await act(async () => pending[0](reply({ response: 'Abandoned reply', threadRolledOver: true, threadId: THREAD })));
+      expect(screen.getByText('Second answer')).toBeInTheDocument();
+      expect(screen.queryByText('Abandoned reply')).not.toBeInTheDocument();
+      expect(confirms()).toHaveLength(1);
+      submit('Synthetic third ask');
+      await waitFor(() => expect(pending).toHaveLength(3));
+      expect(queryBodies()[2].thread_id).toBe(THREAD_B);
+    });
+  });
+
+  it('a reply without the flag adds to the cards on screen, as before', async () => {
+    await sendTwo({ response: 'More.', pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'More.'),
+      threadId: THREAD, threadSeq: 4, threadsEnabled: true });
+    await screen.findByText('More.');
+    expect(confirms()).toHaveLength(2);
+  });
+
+  it('a palette that sat open 6 hours sends the thread it holds, unchanged: the client decides nothing', async () => {
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return reply();
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      return ok({ actions: [], tasks: [], threads: [] });
+    });
+    const ref = await mount();
+    submit('Synthetic first ask');
+    await screen.findByText('Done.');
+    skewMs = 6 * 3600000;
+    act(() => ref.current.close());
+    act(() => ref.current.open());
+    await screen.findByPlaceholderText(/Ask anything/);
+    expect(screen.getByText('Done.')).toBeInTheDocument();
+    submit('Synthetic later ask');
+    await waitFor(() => expect(queryBodies()).toHaveLength(2));
+    expect(queryBodies()[1].thread_id).toBe(THREAD);
+    expect(queryBodies()[1].conversationHistory).toHaveLength(2);
+  });
+
+  describe('a request whose response was lost', () => {
+    const lostResponse = () => ({ ok: false, status: 503, json: async () => ({ error: 'Gateway timeout' }) });
+    const queryCalls = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => options.body);
+
+    it('retried after hours is byte-identical with the same request key, and shows the recovered answer', async () => {
+      let mode = 'first';
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) {
+          if (mode === 'first') return reply();
+          return mode === 'lost' ? lostResponse() : reply({ response: 'Recovered answer', threadRolledOver: true, threadId: THREAD_B, threadSeq: 2 });
+        }
+        if (url.includes('/threads/latest')) return ok({ thread: null });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      const ref = await mount();
+      submit('Synthetic first ask');
+      await screen.findByText('Done.');
+      mode = 'lost';
+      submit('Synthetic ask whose answer is lost');
+      await screen.findByText(/Error: /);
+      skewMs = 6 * 3600000;
+      act(() => ref.current.close());
+      act(() => ref.current.open());
+      await screen.findByPlaceholderText(/Ask anything/);
+      mode = 'ok';
+      fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
+      expect(await screen.findByText('Recovered answer')).toBeInTheDocument();
+      const [, lost, retry] = queryCalls();
+      expect(retry).toBe(lost);
+      expect(JSON.parse(retry).request_key).toBe(JSON.parse(lost).request_key);
+      expect(JSON.parse(retry).thread_id).toBe(THREAD);
     });
   });
 
   describe('a saved task restored into the palette', () => {
-    const TASK_THREAD = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
-    const taskHistory = [{ role: 'user', content: 'Synthetic saved ask' }, { role: 'assistant', content: 'Saved answer' }];
+    const taskHistory = history('Synthetic saved ask', 'Saved answer');
     const taskBody = (threadId, extra = {}) => ({ taskId: 'saved-task', taskState: 'responded', response: 'Saved answer', canContinue: false,
       conversationHistory: taskHistory, threadId, threadSeq: 2, pendingActions: [], receipts: [], ...extra });
-    const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
 
-    it('a task whose thread is 6 hours idle: the first follow-up carries the thread, thread_reopened and the history, the next does not', async () => {
+    it('the first follow-up carries the thread, thread_reopened and the history; the next does not', async () => {
       fetchMock.mockImplementation(async url => {
         if (url.endsWith('/query')) return reply({ threadId: TASK_THREAD, threadSeq: 4 });
-        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
+        if (url.includes('/threads/latest')) return ok({ thread: null });
         if (url.includes('/tasks/saved-task')) return ok(taskBody(TASK_THREAD));
         if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'saved-task', target: { target: { label: 'Synthetic saved target' } }, state: 'responded' }] });
         return ok({ actions: [], threads: [] });
@@ -1021,7 +877,6 @@ describe('idle conversations start fresh', () => {
       useIsMobile.mockReturnValue(true);
       await mount();
       await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
-      skewMs = 6 * 3600000;
       fireEvent.click(screen.getByLabelText('Conversation options'));
       fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
       fireEvent.click(await screen.findByRole('button', { name: /Synthetic saved target/ }));
@@ -1038,12 +893,11 @@ describe('idle conversations start fresh', () => {
       expect(queryBodies()[1].thread_reopened).toBeUndefined();
     });
 
-    it('refreshing the task whose thread is already attached does not make a normal thread "reopened"', async () => {
+    it('refreshing the task already on screen does not make a normal thread "reopened"', async () => {
       fetchMock.mockImplementation(async url => {
         if (url.endsWith('/query')) return reply({ taskId: 'saved-task', taskState: 'responded', threadId: TASK_THREAD, threadSeq: 2 });
-        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
-        if (url.includes('/tasks/saved-task')) return ok(taskBody(TASK_THREAD, { conversationHistory: [
-          { role: 'user', content: 'Synthetic first ask' }, { role: 'assistant', content: 'Done.' }] }));
+        if (url.includes('/threads/latest')) return ok({ thread: null });
+        if (url.includes('/tasks/saved-task')) return ok(taskBody(TASK_THREAD, { conversationHistory: history('Synthetic first ask', 'Done.') }));
         return ok({ actions: [], tasks: [], threads: [] });
       });
       await mount();
@@ -1058,13 +912,13 @@ describe('idle conversations start fresh', () => {
     });
   });
 
-  it('a thread opened by hand from History is not idle-limited, however old it is', async () => {
+  it('a thread opened by hand from History carries thread_reopened on its first question only', async () => {
     fetchMock.mockImplementation(async url => {
       if (url.endsWith('/query')) return reply({ threadSeq: 6 });
-      if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
-      if (url.includes(`/threads/${THREAD}`)) return ok({ thread: { id: THREAD, title: 'Old chat', lastSeq: 4, last_active_at: '2026-09-03T12:00:00Z',
-        conversationHistory: [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Old answer' }] } });
-      if (url.includes('/threads')) return ok({ threads: [{ id: THREAD, title: 'Old chat', last_active_at: '2026-09-03T12:00:00Z' }] });
+      if (url.includes('/threads/latest')) return ok({ thread: null });
+      if (url.includes(`/threads/${THREAD}`)) return ok({ thread: { id: THREAD, title: 'Old chat', lastSeq: 4,
+        conversationHistory: history('Synthetic old ask', 'Old answer') } });
+      if (url.includes('/threads')) return ok({ threads: [{ id: THREAD, title: 'Old chat' }] });
       return ok({ actions: [], tasks: [] });
     });
     useIsMobile.mockReturnValue(true);
@@ -1074,12 +928,10 @@ describe('idle conversations start fresh', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
     fireEvent.click(await screen.findByRole('button', { name: /Old chat/ }));
     await screen.findByText('Old answer');
-    skewMs = 60 * 60000;
     submit('Synthetic continue');
     await waitFor(() => expect(queryBodies()).toHaveLength(1));
     expect(queryBodies()[0].thread_id).toBe(THREAD);
     expect(queryBodies()[0].thread_seq).toBe(4);
-    // The server is told the operator reopened it on purpose, for the first question only.
     expect(queryBodies()[0].thread_reopened).toBe(true);
     await screen.findByText('Done.');
     submit('Synthetic second question');

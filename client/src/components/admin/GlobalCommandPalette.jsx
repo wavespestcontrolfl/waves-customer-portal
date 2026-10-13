@@ -47,13 +47,13 @@ const DISMISSED_THREAD_KEY = "admin_ib_dismissed_thread";
 // A task the palette loads and shows is a conversation the operator chose,
 // like a History open: its first follow-up keeps its thread (thread_reopened).
 // Rule: the flag is set when the load attaches a thread, changes the held one,
-// or finds the held one past the idle limit. A refresh of the thread already
-// attached and fresh (the Refresh button, the reload after a card is decided,
-// Continue, a target choice) leaves the flag as it was, so a normal thread
-// never becomes permanently "reopened".
-function taskLoadReopens(loadedThreadId, held) {
-  if (!loadedThreadId) return false;
-  return loadedThreadId !== held.threadId || held.idle || held.reopened;
+// or loads a task other than the one on screen. A refresh of the task already
+// on screen (the Refresh button, the reload after a card is decided, Continue,
+// a target choice) leaves the flag as it was, so a normal thread never becomes
+// permanently "reopened". Whether a thread is idle is the server's call alone.
+function taskLoadReopens(loaded, held) {
+  if (!loaded.threadId) return false;
+  return loaded.threadId !== held.threadId || loaded.taskId !== held.activeTask?.taskId || held.reopened;
 }
 
 function dismissedThreadKey() {
@@ -381,15 +381,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // server rejects an append that would interleave with another tab's.
   const threadSeqRef = useRef(null);
   const resumeAttemptedRef = useRef(false);
-  // Idle limit the server states on /threads/latest, and when this palette
-  // last touched the thread it holds. A palette left mounted for hours must
-  // not keep sending an hours-old thread id: the server starts a new
-  // conversation for a reload, and this does the same for a held thread.
-  const idleLimitMsRef = useRef(null);
-  const threadActivityRef = useRef(0);
-  // True from a deliberate History open until the first exchange lands: the
-  // first question tells the server the operator chose this old conversation,
-  // so the server's own idle rule does not start a new one.
+  // True from a deliberate History open (or a restored saved task) until the
+  // first exchange lands: the first question tells the server the operator
+  // chose this conversation, so the server's idle rule does not start a new one.
+  // The server is the only authority on starting a new conversation: this palette
+  // sends the thread it holds and obeys threadRolledOver on the reply.
   const threadReopenedRef = useRef(false);
   // Bumped by submit/"New chat" so a still-inflight resume or query response
   // can't clobber newer state (it only applies if the epoch is unchanged).
@@ -555,38 +551,22 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // looks like a new chat while silently sending the old history with the
   // next prompt. Server-side taint markers are presentation noise here;
   // they stay on the stored turns.
-  // The ONE place that sets the held thread's idle clock and its reopened flag
-  // (History open, saved-task restore, automatic resume). A thread the operator
-  // chose to open (deliberate) counts as active from now, so the idle limit
-  // never blocks reading or continuing it, and its first follow-up carries
-  // thread_reopened so the server's own idle rule keeps it. An automatic resume
-  // is anchored from the age the SERVER computed (idleForMs, database clock
-  // against database clock) on this browser's clock at the moment the reply
-  // arrives; only differences of this browser's own clock are used afterwards,
-  // so a skewed workstation clock changes nothing.
-  const anchorThreadClock = useCallback((deliberate, idleForMs) => {
-    const idleFor = Number(idleForMs);
-    threadActivityRef.current = Date.now() - (deliberate || !Number.isFinite(idleFor) || idleFor < 0 ? 0 : idleFor);
-    threadReopenedRef.current = deliberate;
-  }, []);
-
-  // Holds a thread (or none, id null): its id, tail seq and idle clock. History
-  // open, the automatic resume, a loaded saved task and every query reply set
-  // the held thread through here.
-  const holdThread = useCallback((id, seq, deliberate = false, idleForMs = 0) => {
+  // Holds a thread (or none, id null): its id, tail seq and reopened flag.
+  // History open, the automatic resume, a loaded saved task and every query
+  // reply set the held thread through here.
+  const holdThread = useCallback((id, seq, reopened = false) => {
     setThreadId(id);
     threadSeqRef.current = Number.isInteger(seq) ? seq : null;
-    anchorThreadClock(deliberate, idleForMs);
-  }, [anchorThreadClock]);
+    threadReopenedRef.current = reopened;
+  }, []);
 
-  // deliberate: the operator picked this conversation (History). Otherwise it
-  // is the automatic resume, and the idle clock starts at the thread's own last
-  // exchange, not at the moment the palette loaded it.
+  // deliberate: the operator picked this conversation (History); otherwise it
+  // is the automatic resume.
   const hydrateThread = useCallback((thread, { deliberate = false } = {}) => {
     const hist = thread?.conversationHistory;
     if (!hist?.length) return false;
     setConversationHistory(hist);
-    holdThread(thread.id, thread.lastSeq, deliberate, thread.idleForMs);
+    holdThread(thread.id, thread.lastSeq, deliberate);
     setPendingActions([]);
     setChoices(null);
     setToolActivity([]);
@@ -639,16 +619,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       .finally(() => setThreadsLoading(false));
   };
 
-  // True when the held thread has had no exchange for longer than the
-  // server's idle limit (stated by /threads/latest). Unknown limit = never.
-  const threadIsIdle = useCallback(() => (
-    !!threadId && idleLimitMsRef.current !== null && threadActivityRef.current > 0
-    && Date.now() - threadActivityRef.current > idleLimitMsRef.current
-  ), [threadId]);
-
-  // THE one place that starts a new conversation locally: New chat, the
-  // open-time idle rollover and the submit-time idle rollover all call it, so
-  // they cannot drift. It drops the held thread, its history, and everything
+  // THE one place that starts a new conversation locally: New chat and a reply
+  // the server flagged threadRolledOver both call it, so they cannot drift. It drops the held thread, its history, and everything
   // that belonged to the old conversation (cards, the open task, answer
   // buttons, tool activity, knowledge-gap prompts). It does not touch the
   // typed prompt or the answer on screen (callers decide), and it cancels
@@ -656,7 +628,6 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const startNewConversation = useCallback(() => {
     setThreadId(null);
     threadSeqRef.current = null;
-    threadActivityRef.current = 0;
     threadReopenedRef.current = false;
     setConversationHistory([]);
     setPendingActions([]);
@@ -676,7 +647,6 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     adminFetch("/admin/intelligence-bar/threads/latest")
       .then((data) => {
         markThreadsAvailable(true); // 200 = gate on (thread may be null)
-        idleLimitMsRef.current = Number(data?.idleHours) > 0 ? Number(data.idleHours) * 3600000 : null;
         if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
         let dismissedId = null;
         try { dismissedId = localStorage.getItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
@@ -694,48 +664,32 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       });
   }, [open, conversationHistory.length]);
 
-  // The thread id and history a query sends: none of either when the held
-  // thread is idle past the limit (it is detached here).
-  // Builds the query's request from the held thread. thread_reopened marks a
-  // deliberate History open, so the server's idle rule lets it through. The
-  // idle rule applies to a NEW request only: when the request built from the
-  // held thread is the unresolved one (a retry that reuses its request key),
-  // it goes out exactly as first sent, whatever the clock says. Otherwise a
-  // held thread idle past the limit is dropped and the request is rebuilt with
-  // no thread and no history (the old thread stays in History).
-  const resolveSendState = useCallback((build) => {
-    const threadFields = threadId ? {
+  // The query request for the thread this palette holds. thread_reopened marks a
+  // History open or a restored saved task, so the server's idle rule keeps it.
+  const queryPayloadFor = useCallback((q, selectedTarget) => ({
+    prompt: q,
+    conversationHistory,
+    context,
+    ...(selectedTarget ? { selected_target: selectedTarget } : {}),
+    ...(threadId ? {
       thread_id: threadId,
       ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
       ...(threadReopenedRef.current ? { thread_reopened: true } : {}),
-    } : {};
-    const request = build(conversationHistory, threadFields);
-    if (identityRef.current.isPending(JSON.stringify(request)) || !threadIsIdle()) return { request, sentThreadId: threadId };
-    startNewConversation();
-    return { request: build([], {}), sentThreadId: null };
-  }, [threadIsIdle, startNewConversation, threadId, conversationHistory]);
-
-  // A palette left mounted past the idle limit opens as a new conversation.
-  // Never while a request is unresolved (in flight, or sent with no answer
-  // recorded and kept for a retry): bumping the epoch would strand the query's
-  // cleanup, and changing the thread or history would change the retry's
-  // request, so the client would issue a new request key and the server would
-  // run a second task. It applies again once the request resolves.
-  useEffect(() => {
-    if (!open || loading || submittingRef.current || identityRef.current.isPending() || !threadIsIdle()) return;
-    threadEpochRef.current += 1; // invalidate any inflight thread resume
-    startNewConversation();
-    setResponse(null);
-  }, [open]);
+    } : {}),
+    pageData: { ...ibPageData, route: location.pathname, search: location.search },
+    ...(attachments.length
+      ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+      : {}),
+  }), [conversationHistory, context, threadId, ibPageData, location.pathname, location.search, attachments]);
 
   // Applies a server reply to the conversation: the answer, its cards (added to
   // any card already on screen, deduplicated), the open task, tool activity,
   // knowledge-gap prompts and history. Shared by a query reply and a loaded
-  // saved task. sentThreadId: the thread the request was sent on; a reply on a
-  // different thread means the server rolled the conversation over (a stale
-  // clock or limit on this side), so the old conversation's state goes first.
-  const applyServerReply = useCallback((data, { sentThreadId = null, fallbackTaskId = null } = {}) => {
-    if (sentThreadId && data.threadId && data.threadId !== sentThreadId) startNewConversation();
+  // saved task. A reply the server flagged threadRolledOver started a new
+  // conversation (its idle rule), with or without a new thread id, so the old
+  // conversation's state goes first.
+  const applyServerReply = useCallback((data, { fallbackTaskId = null } = {}) => {
+    if (data.threadRolledOver) startNewConversation();
     const taskId = data.taskId || fallbackTaskId;
     setResponse(data.response);
     setPendingActions(previous => [...previous, ...(data.pendingActions || [])
@@ -753,19 +707,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       const busy = [loading, submittingRef.current, attachmentsLoadingRef.current, dictationPendingRef.current].some(Boolean);
       if (!q || busy) return;
       submittingRef.current = true;
-      // A NEW question on a thread idle past the server's limit starts a new
-      // conversation; the unresolved request being retried never does.
-      const { request, sentThreadId } = resolveSendState((sentHistory, threadFields) => ({
-        prompt: q,
-        conversationHistory: sentHistory,
-        context,
-        ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-        ...threadFields,
-        pageData: { ...ibPageData, route: location.pathname, search: location.search },
-        ...(attachments.length
-          ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
-          : {}),
-      }));
+      // Always the thread this palette holds: the server alone decides whether
+      // an idle thread starts a new conversation (threadRolledOver on the reply),
+      // so a retry goes out byte for byte as first sent.
+      const request = queryPayloadFor(q, selectedTarget);
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
@@ -791,7 +736,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
-          applyServerReply(data, { sentThreadId });
+          applyServerReply(data);
           setChoices(Array.isArray(data.choices) ? data.choices.filter(choice => typeof choice === "string" && choice.trim()) : null);
           // The server states thread availability on every query, so a
           // RUNTIME gate change is reflected: off → detach and return to
@@ -825,7 +770,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, conversationHistory, context, threadId, resolveSendState, applyServerReply, holdThread, location.pathname, location.search, attachments, resetAttachments, ibPageData],
+    [prompt, loading, queryPayloadFor, applyServerReply, holdThread, resetAttachments],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -833,7 +778,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     const epoch = ++threadEpochRef.current;
     submittingRef.current = true;
     setLoading(true);
-    const held = { threadId, idle: threadIsIdle(), reopened: threadReopenedRef.current };
+    const held = { threadId, activeTask, reopened: threadReopenedRef.current };
     // Cleared when the refresh starts, like submit: a failed refresh must not
     // bring the old buttons back under its error.
     setChoices(null);
@@ -846,7 +791,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       // A loaded task replaces what is on screen, so its cards replace too.
       setPendingActions([]);
       applyServerReply(data, { fallbackTaskId: id });
-      holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data.threadId, held));
+      holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data, held));
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);
