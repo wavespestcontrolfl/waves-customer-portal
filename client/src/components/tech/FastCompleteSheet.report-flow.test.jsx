@@ -309,25 +309,25 @@ describe('generate and read', () => {
     expect(screen.getByTestId('fast-complete-heard').textContent).toBe('Heard from you: treated inside and outside · for ghost ants');
   });
 
-  test('after the note is read, one tip for what it heard is offered; a tap adds it and it is never picked for the tech (owner 2026-10-09)', async () => {
+  test('the report step offers no tip of its own; the tip the tech searched for on the visit step is the one sent (owner 2026-10-12)', async () => {
     const tip = (id, label, extra = {}) => ({ id, label, keywords: [], copy: `${label} copy.`, ...extra });
     const tips = {
       available: true,
       groups: [{ id: 'kitchen', label: 'Kitchen', tips: [tip('bulbs', 'Warm porch bulbs'), tip('bowls', 'Pet bowls up overnight', { pests: ['Ants'] })] }],
       more: [],
     };
-    // The note names no pest the client can read; the server's reader heard ants.
+    // The server's reader heard ants, and a tip is tagged for ants: nothing is suggested for it.
     const request = makeRequest({ tips, facts: { ...FACTS, pests: ['ghost ants'] } });
     await openSheet(request);
+    fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'porch' } });
+    fireEvent.click(screen.getByRole('button', { name: /Warm porch bulbs/ }));
     await generate({ note: 'Treated the kitchen and around the outside of the house.' });
-    await screen.findByText('Suggested from your note');
-    const offer = screen.getByRole('button', { name: /Pet bowls up overnight/ });
-    expect(offer.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(offer);
-    expect(screen.getByText('1 picked')).toBeTruthy();
+    expect(screen.queryByText('Suggested from your note')).toBeNull();
+    expect(screen.queryByText('Tip for the customer')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Pet bowls up overnight/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await waitFor(() => expect(request.bodies('/complete')).toHaveLength(1));
-    expect(request.bodies('/complete')[0].techTips).toEqual({ ids: ['bowls'], custom: null });
+    expect(request.bodies('/complete')[0].techTips).toEqual({ ids: ['bulbs'], custom: null });
   });
 
   test('photo captions ride the report request, as the full form sends them', async () => {
