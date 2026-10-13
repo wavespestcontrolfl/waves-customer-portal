@@ -1292,7 +1292,9 @@ async function resolveSmsRecipient(input) {
         .whereNull('deleted_at')
         .first()
       : null;
-    return { phone: directPhone, custId: customer ? customer.id : customer_id, customerName: customer ? fullName(customer) : null };
+    // inferred: the id is only what the number matched (first row), not a pick
+    // — the customer-link guard does not trust it (customerLinkSendRefusal).
+    return { phone: directPhone, custId: customer ? customer.id : customer_id, customerName: customer ? fullName(customer) : null, inferred: true };
   }
   // BOTH custId and phone given. Verify they belong to the same record;
   // if not, trust the typed phone and drop the id. Prevents cross-wired
@@ -1326,14 +1328,14 @@ async function sendSms(input) {
   const { message, message_type = 'manual' } = input;
   const recipient = await resolveSmsRecipient(input);
   if (recipient.error) return recipient;
-  const { phone, custId, customerName } = recipient;
+  const { phone, custId, customerName, inferred } = recipient;
 
   if (!phone) return { error: 'No phone number' };
 
   // A customer link the composer's send seam must carry stays with the
   // composer (claims, activation, sent marks live in its /sms route);
   // re-checked at commit, like consent, since a card can sit open.
-  const linkRefusal = await customerLinkSendRefusal(message, phone, custId || null);
+  const linkRefusal = await customerLinkSendRefusal(message, phone, custId || null, { recipientSelected: !inferred });
   if (linkRefusal) return linkRefusal;
 
   // Routed through the customer-message middleware. This is Virginia's
@@ -1499,12 +1501,28 @@ async function autopayLinkCheck({ body, toLast10, customerId, email }) {
 // account check; the seam's own non-US refusal covers only the bearers it
 // counts, so a text carrying any of these links goes to a US number only.
 const NON_US_LINK_REFUSAL = 'This text carries a customer link, and customer links go to US numbers only — send it to the customer\'s own US number. Nothing was sent.';
-async function linkOwnerCheck({ body, customerId, email, usDestination }) {
+// A customer attached only because the typed number matched a row (no pick)
+// is trusted as the link's recipient only when that number names exactly one
+// live customer account; two accounts on it, or an unreadable count, mean the
+// operator must pick the customer.
+const PICK_CUSTOMER_REFUSAL = 'This text carries a customer link, but the number is on file for more than one customer account (or could not be checked) — pick the customer instead of typing the number. Nothing was sent.';
+async function numberNamesOneAccount(toLast10) {
+  try {
+    const rows = await db('customers').whereNull('deleted_at')
+      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
+      .select('id', 'account_id');
+    return new Set(rows.map((row) => String(row.account_id || row.id))).size === 1;
+  } catch {
+    return false;
+  }
+}
+async function linkOwnerCheck({ body, customerId, email, usDestination, recipientSelected, toLast10 }) {
   const { owners, unresolved } = await links().linkOwnersInBody(body);
   if (unresolved.length) return { error: 'A customer link in this text matches no customer record — remove it and build a fresh one. Nothing was sent.', code: 'customer_link_unverified' };
   if (!owners.length) return null;
   if (!email && !usDestination) return { error: NON_US_LINK_REFUSAL, code: 'customer_link_recipient' };
   if (!customerId) return { error: 'This text carries a customer link, but the recipient is not a known customer — send it to that customer\'s own number (pick the customer). Nothing was sent.', code: 'customer_link_recipient' };
+  if (recipientSelected === false && !(await numberNamesOneAccount(toLast10))) return { error: PICK_CUSTOMER_REFUSAL, code: 'customer_link_recipient' };
   const accountKey = (row) => String(row?.account_id || row?.id || '');
   const recipient = await db('customers').where({ id: customerId }).first('id', 'account_id');
   const ownerRows = await db('customers').whereIn('id', [...new Set(owners.map((o) => o.customerId))]).select('id', 'account_id');
@@ -1524,24 +1542,21 @@ async function bearerSeamCheck({ body, toLast10, customerId, usDestination }) {
 // https://portal…/pay/<tok>", raw or percent-encoded) reads to every check
 // above as ONE foreign link, so the bearer inside would skip the owner and
 // seam checks and reach the outer site too. A text never carries one: the
-// link goes in the text as itself. (The email phase surfaces nested links in
-// renderedTextForLinkCheck and refuses every owned link.)
+// link goes in the text as itself: every token holding an owned-host link must
+// PARSE to an owned host with no userinfo and nothing nested in its path,
+// query or fragment (composer-customer-links.js wrappedOwnedLinkIn). (The
+// email phase surfaces nested links in renderedTextForLinkCheck and refuses
+// every owned link.)
 const WRAPPED_LINK_REFUSAL = 'This text has a Waves customer link wrapped inside another web address — put the customer link in the text as itself. Nothing was sent.';
 function wrappedOwnedLinkCheck({ body }) {
-  const wrapped = body.split(/\s+/).some((token) => {
-    const runs = links().nestedOwnedLinkRuns(token);
-    if (!runs.length) return false;
-    const bare = token.replace(/^[^A-Za-z0-9]+/, '').replace(/^https?:\/\//i, '').toLowerCase();
-    return !runs.some((run) => bare.startsWith(run.toLowerCase()));
-  });
-  return wrapped ? { error: WRAPPED_LINK_REFUSAL, code: 'customer_link_refused' } : null;
+  return links().wrappedOwnedLinkIn(body) ? { error: WRAPPED_LINK_REFUSAL, code: 'customer_link_refused' } : null;
 }
 const LINK_CHECKS_BY_PHASE = {
   proposal: [wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
   email: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
   commit: [wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
 };
-async function customerLinkSendRefusal(message, phone, customerId, { phase = 'commit' } = {}) {
+async function customerLinkSendRefusal(message, phone, customerId, { phase = 'commit', recipientSelected = true } = {}) {
   const body = String(message || '');
   if (!body.trim()) return null;
   const digits = String(phone || '').replace(/\D/g, '');
@@ -1549,7 +1564,7 @@ async function customerLinkSendRefusal(message, phone, customerId, { phase = 'co
   // Masked: the refusal rides into model context (and the email path's result).
   const refuse = (error, code) => ({ success: false, error, blocked: true, code, sent_to: toLast10.length >= 4 ? `***${toLast10.slice(-4)}` : null });
   const ctx = {
-    body, toLast10, customerId: customerId || null, email: phase === 'email',
+    body, toLast10, customerId: customerId || null, email: phase === 'email', recipientSelected,
     usDestination: digits.length === 10 || (digits.length === 11 && digits.startsWith('1')),
   };
   try {
@@ -1580,7 +1595,7 @@ async function sendSmsProposalRefusal(params = {}) {
   if (!params.message) return null;
   const recipient = await resolveSmsRecipient(params);
   if (recipient.error || !recipient.phone) return null;
-  const linkRefusal = await customerLinkSendRefusal(params.message, recipient.phone, recipient.custId || null, { phase: 'proposal' });
+  const linkRefusal = await customerLinkSendRefusal(params.message, recipient.phone, recipient.custId || null, { phase: 'proposal', recipientSelected: !recipient.inferred });
   if (linkRefusal) return linkRefusal;
   const verdict = await smsConsentVerdict({ customerId: recipient.custId || null, phone: recipient.phone, message: params.message, messageType });
   if (!verdict) return null;

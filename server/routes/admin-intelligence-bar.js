@@ -37,7 +37,7 @@ const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-ba
 const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
-const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
+const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool, sendEmailReplyProposalRefusal } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
@@ -1715,6 +1715,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           phone_last4: String(pinPhone).replace(/\D/g, '').slice(-4) || null,
         },
       };
+    }
+    if (toolUse.name === 'send_email_reply') {
+      // No card for a reply the send would refuse for a portal link in its body
+      // (the read-only 'email' phase check); the execution-time check stays.
+      const emailRefusal = await sendEmailReplyProposalRefusal(params);
+      if (emailRefusal) return { failed: true, modelResult: emailRefusal };
     }
     if (toolUse.name === 'send_email_reply' && params.email_id) {
       const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');

@@ -27,6 +27,7 @@ jest.mock('../services/composer-customer-links', () => ({
   linkOwnersInBody: jest.fn(async () => ({ owners: [], unresolved: [] })),
   // The real scanner: send_email_reply's rendered text surfaces nested links through it.
   nestedOwnedLinkRuns: jest.requireActual('../services/composer-customer-links').nestedOwnedLinkRuns,
+  wrappedOwnedLinkIn: jest.requireActual('../services/composer-customer-links').wrappedOwnedLinkIn,
 }));
 
 const db = require('../models/db');
@@ -226,6 +227,9 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
         'See https://other.example/?next=https://portal.wavespestcontrol.com/pay/tok',
         'See https://other.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Fpay%2Ftok',
         'See other.example/go#portal.wavespestcontrol.com/pay/tok',
+        // The portal link in the userinfo: the real host is other.example, whatever the text prefix says.
+        'See https://portal.wavespestcontrol.com%2Fpay%2Ftok@other.example/',
+        'See https://portal.wavespestcontrol.com%2Fpay%2Ftok%40other.example/',
       ]) {
         expect(await customerLinkSendRefusal(wrappedBody, '+19415550123', CUSTOMER_ID, { phase })).toMatchObject({ blocked: true, code: 'customer_link_refused' });
       }
@@ -242,6 +246,99 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
 
     links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [{ kind: 'estimate', token: 'gone' }] });
     expect(await customerLinkSendRefusal('See: portal.wavespestcontrol.com/estimate/gone', '+19415550123', CUSTOMER_ID)).toMatchObject({ code: 'customer_link_unverified' });
+  });
+
+  describe('a customer attached only because a typed number matched them', () => {
+    const OTHER = '7a7a7a7a-1111-4111-8111-111111111111';
+    const MINE = { id: CUSTOMER_ID, account_id: null };
+    const THEIRS = { id: OTHER, account_id: null };
+    const BODY = 'Pay here: portal.wavespestcontrol.com/pay/tok';
+    let numberQueries;
+
+    // customers: where({id}).first() is the recipient row, whereIn(...).select() the owner rows,
+    // and whereNull().whereRaw().select() the live customers on the typed number.
+    function wireNumber(onNumber) {
+      numberQueries = 0;
+      db.mockImplementation(() => {
+        const b = {}; let ids = null;
+        b.where = (w) => { ids = [w.id]; return b; };
+        b.whereNull = () => b;
+        b.whereRaw = () => b;
+        b.whereIn = (_c, list) => { ids = list; return b; };
+        b.first = async () => (ids ? { [CUSTOMER_ID]: MINE, [OTHER]: THEIRS }[ids[0]] || null : MINE);
+        b.select = async () => {
+          if (ids) return ids.map((id) => ({ [CUSTOMER_ID]: MINE, [OTHER]: THEIRS }[id])).filter(Boolean);
+          numberQueries += 1;
+          return onNumber();
+        };
+        return b;
+      });
+    }
+
+    beforeEach(() => {
+      links.autopayLinkSendCheck.mockResolvedValue({ present: false });
+      links.bearerLinkSendCheck.mockResolvedValue({ ok: true });
+      links.linkOwnersInBody.mockResolvedValue({ owners: [{ kind: 'pay', token: 'tok', customerId: CUSTOMER_ID }], unresolved: [] });
+    });
+
+    test('two accounts on the number, or an unreadable count, refuse at the card and at the send', async () => {
+      for (const phase of ['proposal', 'commit']) {
+        wireNumber(() => [MINE, THEIRS]);
+        const two = await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase, recipientSelected: false });
+        expect(two).toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+        expect(two.error).toMatch(/pick the customer/);
+
+        wireNumber(() => { throw new Error('db down'); });
+        expect(await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase, recipientSelected: false }))
+          .toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+
+        wireNumber(() => []);
+        expect(await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase, recipientSelected: false }))
+          .toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+      }
+      expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
+    });
+
+    test('one account on the number (even as two rows) passes; a selected customer is never counted; a plain text is never affected', async () => {
+      for (const phase of ['proposal', 'commit']) {
+        wireNumber(() => [MINE]);
+        expect(await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase, recipientSelected: false })).toBeNull();
+        wireNumber(() => [{ id: 'a', account_id: 'acct-1' }, { id: 'b', account_id: 'acct-1' }]);
+        expect(await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase, recipientSelected: false })).toBeNull();
+
+        wireNumber(() => [MINE, THEIRS]);
+        expect(await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase })).toBeNull();
+        expect(await customerLinkSendRefusal(BODY, '+19415550123', CUSTOMER_ID, { phase, recipientSelected: true })).toBeNull();
+        expect(numberQueries).toBe(0);
+
+        links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [] });
+        expect(await customerLinkSendRefusal('Running late, sorry!', '+19415550123', CUSTOMER_ID, { phase, recipientSelected: false })).toBeNull();
+        expect(numberQueries).toBe(0);
+        links.linkOwnersInBody.mockResolvedValue({ owners: [{ kind: 'pay', token: 'tok', customerId: CUSTOMER_ID }], unresolved: [] });
+      }
+    });
+
+    test('send_sms with only a typed phone is judged as inferred at the card; with a customer_id it is not', async () => {
+      const { sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
+      const row = { id: CUSTOMER_ID, first_name: 'Customer', last_name: 'Fixture', phone: '+19415550123', account_id: null };
+      let selectCalls = 0;
+      db.mockImplementation(() => {
+        const b = {}; let ids = null;
+        b.where = (w) => { ids = w && w.id ? [w.id] : ids; return b; };
+        b.whereNull = () => b; b.whereRaw = () => b; b.whereIn = (_c, list) => { ids = list; return b; };
+        b.first = async () => row;
+        b.select = async () => { if (ids) return [row]; selectCalls += 1; return [row, { id: OTHER, account_id: null }]; };
+        return b;
+      });
+      const inferred = await sendSmsProposalRefusal({ phone: '+19415550123', message: BODY });
+      expect(inferred).toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+      expect(inferred.error).toMatch(/pick the customer/);
+      expect(selectCalls).toBe(1);
+
+      selectCalls = 0;
+      await sendSmsProposalRefusal({ customer_id: CUSTOMER_ID, phone: '+19415550123', message: BODY }).catch(() => null);
+      expect(selectCalls).toBe(0);
+    });
   });
 
   test('proposal phase runs only the read-only checks — never the seam\'s stateful bearer check', async () => {
@@ -369,6 +466,39 @@ describe('send_email_reply carries the same guard', () => {
     ['inside an href', `<a href="https://evil.example/?u=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}">here</a>`],
   ])('a portal link nested %s is surfaced as its own run', (_label, body) => {
     expect(runsOf(body)).toContain(NESTED);
+  });
+
+  test('a portal link in the userinfo of a foreign host is surfaced too, so the email is refused', () => {
+    expect(runsOf(`Receipt: https://portal.wavespestcontrol.com%2Freceipt%2F${TOKEN}@evil.example/`)).toContain(`portal.wavespestcontrol.com/receipt/${TOKEN}@evil.example/`);
+    expect(runsOf(`Receipt: https://portal.wavespestcontrol.com%2Freceipt%2F${TOKEN}%40evil.example/`).some((run) => run.startsWith(`portal.wavespestcontrol.com/receipt/${TOKEN}`))).toBe(true);
+  });
+
+  test('the card is not offered for a reply the send would refuse (proposal phase), and the send still re-checks', async () => {
+    const { sendEmailReplyProposalRefusal } = require('../services/intelligence-bar/email-tools');
+    links.autopayLinkSendCheck.mockResolvedValue({ present: false });
+    links.composerOnlyLinkPresence.mockClear();
+    links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
+    const refused = await sendEmailReplyProposalRefusal({ email_id: 'em-1', body: `Receipt: https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${TOKEN}` });
+    expect(refused).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    expect(links.composerOnlyLinkPresence).toHaveBeenCalledWith(expect.stringContaining(NESTED), { includeVerifyOnly: true });
+    expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
+
+    links.composerOnlyLinkPresence.mockResolvedValue({ present: false, kinds: [] });
+    expect(await sendEmailReplyProposalRefusal({ email_id: 'em-1', body: 'Thanks, see you Tuesday.' })).toBeNull();
+    expect(await sendEmailReplyProposalRefusal({ email_id: 'em-1' })).toBeNull();
+
+    // An unreadable check refuses (fail closed) at the card as well.
+    links.composerOnlyLinkPresence.mockRejectedValue(new Error('db down'));
+    expect(await sendEmailReplyProposalRefusal({ email_id: 'em-1', body: 'See you Tuesday.' })).toMatchObject({ blocked: true, code: 'customer_link_unverified' });
+
+    // The send re-checks: a body that slipped past the card is still refused before Gmail.
+    const email = { id: 'em-3', customer_id: CUSTOMER_ID, from_address: 'fixture@example.com', subject: 'Visit', gmail_thread_id: 't3' };
+    db.mockImplementation((table) => { const b = {}; b.where = () => b; b.first = async () => (table === 'emails' ? email : null); return b; });
+    gmail.sendMessage.mockClear();
+    links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['receipt'] });
+    expect(await executeEmailTool('send_email_reply', { email_id: 'em-3', body: `Receipt: portal.wavespestcontrol.com/receipt/${TOKEN}` })).toMatchObject({ blocked: true });
+    expect(gmail.sendMessage).not.toHaveBeenCalled();
+    links.composerOnlyLinkPresence.mockResolvedValue({ present: false, kinds: [] });
   });
 
   test('a nested portal link reaches the owned-link refusal; a foreign URL with no owned link still passes', async () => {

@@ -961,6 +961,32 @@ function nestedOwnedLinkRuns(text) {
   }
   return [...found];
 }
+// True when a body carries an owned-host link that is NOT a plain owned link:
+// any whitespace token holding an owned-host run (nestedOwnedLinkRuns) must
+// itself PARSE, as a browser would, to an http(s) URL whose real host is an
+// owned host, with no userinfo, and with no owned-host run left in its path,
+// query or fragment. So "https://evil.example/?next=<portal link>", a portal
+// link in the userinfo ("https://portal…%2Fpay%2F<tok>@evil.example/"), a
+// portal link inside another portal URL's query, or a token that does not
+// parse at all are all "wrapped" (fail closed); a bare, schemed, bracketed or
+// period-ended owned link, and the branded short host, are not.
+function wrappedOwnedLinkIn(body) {
+  const hosts = ownedPortalHosts();
+  return String(body || '').split(/\s+/).some((token) => {
+    if (!nestedOwnedLinkRuns(token).length) return false;
+    const core = shedLinkRun(token);
+    let url;
+    try {
+      url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(core) ? core : `https://${core}`);
+    } catch {
+      return true;
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return true;
+    if (!hosts.includes(url.hostname.toLowerCase().replace(/\.$/, ''))) return true;
+    if (url.username || url.password) return true;
+    return nestedOwnedLinkRuns(`${url.pathname}${url.search}${url.hash}`).length > 0;
+  });
+}
 // ONE resolver for every owned /l/<code> in a body (the SMS link wrap's
 // wrapper codes — messaging/sms-link-wrap.js — are kind 'other' and carry a
 // bearer page as their target, e.g. /prep/, /secure/, /contract/,
@@ -3109,6 +3135,7 @@ module.exports = {
   composerOnlyLinkPresence,
   linkOwnersInBody,
   nestedOwnedLinkRuns,
+  wrappedOwnedLinkIn,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,
   consultationLinkRows,

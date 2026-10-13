@@ -166,6 +166,7 @@ const {
   composerOnlyLinkPresence,
   linkOwnersInBody,
   nestedOwnedLinkRuns,
+  wrappedOwnedLinkIn,
   buildAppointmentPageLink,
   buildCardRequestLink,
   buildPrepGuideLink,
@@ -3357,6 +3358,64 @@ describe('nestedOwnedLinkRuns', () => {
     expect(nestedOwnedLinkRuns('https://evil.example/?u=https://evilportal.wavespestcontrol.com/pay/x1 and https://x.portal.wavespestcontrol.com/pay/x1')).toEqual([]);
     expect(nestedOwnedLinkRuns('Thanks, see you Tuesday.')).toEqual([]);
     expect(nestedOwnedLinkRuns(null)).toEqual([]);
+  });
+});
+
+// A body may carry an owned-host link only as itself: it must parse, as a
+// browser would, to an owned host with no userinfo and no owned link nested in
+// its path, query or fragment.
+describe('wrappedOwnedLinkIn', () => {
+  const T = 'AbCdEfGhIjKlMnOpQrSt';
+
+  test.each([
+    ['owned link in the userinfo of a foreign host', `https://portal.wavespestcontrol.com%2Fpay%2F${T}@evil.example/`],
+    ['the same with the @ percent-encoded', `https://portal.wavespestcontrol.com%2Fpay%2F${T}%40evil.example/`],
+    ['the same double-encoded', `https://portal.wavespestcontrol.com%252Fpay%252F${T}%2540evil.example/`],
+    ['a backslash before the real foreign host', `https://evil.example\\@portal.wavespestcontrol.com/pay/${T}`],
+    ['raw in a foreign query', `https://evil.example/?next=https://portal.wavespestcontrol.com/pay/${T}`],
+    ['encoded in a foreign query', `https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Fpay%2F${T}`],
+    ['in a foreign fragment', `https://evil.example/#portal.wavespestcontrol.com/pay/${T}`],
+    ['in a foreign path', `https://evil.example/portal.wavespestcontrol.com/pay/${T}`],
+    ['in an owned URL\'s query', `https://portal.wavespestcontrol.com/pay/${T}?next=https://portal.wavespestcontrol.com/pay/${T}`],
+    ['in an owned URL\'s encoded query', `https://portal.wavespestcontrol.com/pay/${T}?next=https%3A%2F%2Fwavespest.co%2Fl%2Fab12cd`],
+    ['two owned links glued with a comma', `portal.wavespestcontrol.com/pay/${T},portal.wavespestcontrol.com/pay/${T}`],
+    ['a token that does not parse', `https://portal.wavespestcontrol.com:99999999/pay/${T}`],
+    ['a non-http scheme', `ftp://portal.wavespestcontrol.com/pay/${T}`],
+  ])('refuses %s', (_label, link) => {
+    expect(wrappedOwnedLinkIn(`Pay here: ${link} thanks`)).toBe(true);
+  });
+
+  test.each([
+    ['bare', `portal.wavespestcontrol.com/pay/${T}`],
+    ['with a scheme', `https://portal.wavespestcontrol.com/pay/${T}`],
+    ['mixed case host', `HTTPS://Portal.WavesPestControl.com/pay/${T}`],
+    ['in brackets', `[portal.wavespestcontrol.com/pay/${T}]`],
+    ['in parentheses', `(portal.wavespestcontrol.com/pay/${T})`],
+    ['with a trailing period', `portal.wavespestcontrol.com/pay/${T}.`],
+    ['with a trailing slash and a query of its own', `portal.wavespestcontrol.com/pay/${T}/?ref=sms`],
+    ['the FQDN form', `https://portal.wavespestcontrol.com./pay/${T}`],
+    ['the branded short host', 'wavespest.co/l/ab12cd'],
+    ['the bare portal home page', 'portal.wavespestcontrol.com'],
+  ])('allows an owned link that is just itself: %s', (_label, link) => {
+    expect(wrappedOwnedLinkIn(`Pay here: ${link} thanks`)).toBe(false);
+  });
+
+  test('foreign URLs and look-alike hosts carry no owned link, so there is nothing wrapped', () => {
+    expect(wrappedOwnedLinkIn('See https://evil.example/page?x=1 and https://other.example/pay/x')).toBe(false);
+    expect(wrappedOwnedLinkIn(`https://portal.wavespestcontrol.com.evil.example/pay/${T}`)).toBe(false);
+    expect(wrappedOwnedLinkIn(`https://x.portal.wavespestcontrol.com/pay/${T}`)).toBe(false);
+    expect(wrappedOwnedLinkIn(`https://evilportal.wavespestcontrol.com/pay/${T}`)).toBe(false);
+    expect(wrappedOwnedLinkIn('Running late, sorry!')).toBe(false);
+    expect(wrappedOwnedLinkIn('')).toBe(false);
+    expect(wrappedOwnedLinkIn(null)).toBe(false);
+  });
+
+  test('the userinfo form is also surfaced to the email-phase presence check (an email reply is refused)', async () => {
+    mockBuilders = {};
+    const link = `https://portal.wavespestcontrol.com%2Fpay%2F${T}@evil.example/`;
+    const surfaced = nestedOwnedLinkRuns(link).join(' ');
+    expect(surfaced).toContain(`portal.wavespestcontrol.com/pay/${T}`);
+    expect((await composerOnlyLinkPresence(`${link} ${surfaced}`, { includeVerifyOnly: true })).present).toBe(true);
   });
 });
 

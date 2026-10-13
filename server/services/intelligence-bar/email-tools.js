@@ -491,6 +491,24 @@ function renderedTextForLinkCheck(body) {
   return hostTokens.length ? `${decoded} ${[...new Set(hostTokens)].join(' ')}` : decoded;
 }
 
+// The read-only 'email' phase link check on a reply body, as the mail client
+// renders it. Fail closed: a body the check cannot read is refused.
+async function emailReplyLinkRefusal(body) {
+  try {
+    return await require('./comms-tools').customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:email] reply link pre-send check failed — refusing: ${err.message}`);
+    return { success: false, error: 'Could not verify the links in this reply — nothing was sent. Try again in a moment.', blocked: true, code: 'customer_link_unverified' };
+  }
+}
+
+// Proposal-time refusal for send_email_reply, so no card is offered for a body
+// the send would refuse (the execution-time check stays). Null = offer the card.
+async function sendEmailReplyProposalRefusal(params = {}) {
+  if (!params.body) return null;
+  return emailReplyLinkRefusal(params.body);
+}
+
 async function sendEmailReply({ email_id, body, _pinned_email }) {
   try {
     const email = await db('emails').where('id', email_id).first();
@@ -513,7 +531,7 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
     // as HTML, so it is judged as the mail client will render it: entities
     // decoded and host-shaped tokens inside markup surfaced (Codex security
     // review on #6266: `https&#58;&#47;&#47;…` decodes to a live link).
-    const linkRefusal = await require('./comms-tools').customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' });
+    const linkRefusal = await emailReplyLinkRefusal(body);
     if (linkRefusal) return linkRefusal;
 
     const gmailClient = require('../../services/email/gmail-client');
@@ -559,6 +577,10 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
     let phone = null;
     let custName = customer_name;
     let custId = null;
+    // False when the customer is only what an address or a name matched (first
+    // row), not the pinned/attributed one: the link guard then needs the number
+    // to name one account.
+    let recipientSelected = true;
 
     let sourceEmail = null;
     if (email_id) {
@@ -602,6 +624,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
           phone = customer.phone;
           custName = `${customer.first_name} ${customer.last_name}`;
           custId = customer.id;
+          recipientSelected = false;
         }
       }
     } else if (customer_name) {
@@ -612,6 +635,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
       if (customer) {
         phone = customer.phone;
         custId = customer.id;
+        recipientSelected = false;
       }
     }
 
@@ -623,7 +647,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
 
     // A customer link only the Communications composer may send (see
     // comms-tools customerLinkSendRefusal) is refused here too.
-    const linkRefusal = await require('./comms-tools').customerLinkSendRefusal(message, phone, custId || null);
+    const linkRefusal = await require('./comms-tools').customerLinkSendRefusal(message, phone, custId || null, { recipientSelected });
     if (linkRefusal) return linkRefusal;
 
     // Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
@@ -888,4 +912,4 @@ async function executeEmailTool(toolName, input, actionContext = {}) {
   }
 }
 
-module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply, renderedTextForLinkCheck };
+module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply, renderedTextForLinkCheck, sendEmailReplyProposalRefusal };
