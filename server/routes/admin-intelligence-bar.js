@@ -612,6 +612,12 @@ async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
 
+// A close or colloquial service name books, and shows on the card, as the exact
+// catalog name the proposal resolved it to; any other name stays as given.
+function bookedServiceTypeParam(booking, params) {
+  return { service_type: booking.bookedServiceType || params.service_type };
+}
+
 function summarizeProposal(toolName, params, displayParams = params) {
   if (toolName === 'save_customer_estimate') return params.estimate_id ? 'Revise saved lawn estimate' : 'Save lawn estimate draft';
   // One level of plain-object params flattens into the summary — without it
@@ -1542,6 +1548,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // shows and what the executor stamps; an empty one leaves the params.
       if (booking.customerRequest) params.customer_request = booking.customerRequest;
       else delete params.customer_request;
+      // A close name books, and shows on the card, as the exact catalog name.
+      Object.assign(params, bookedServiceTypeParam(booking, params));
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
       params._booking_list_price = booking.listPrice;
