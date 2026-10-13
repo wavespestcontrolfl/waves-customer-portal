@@ -146,9 +146,9 @@ describe('clearing rules', () => {
     expect(run([call()], [visit({ customer_id: 'other', sched_date: '2026-11-01', notes: 'Call SID: CAsynthetic001' })])).toEqual([]);
   });
 
-  it('clears when the call\'s customer has a live visit that day, at any time', () => {
+  it('clears when the call\'s customer has a live visit that day (a confirmed slot: near the agreed time)', () => {
     const linked = call({ customer_id: 'cust-1' });
-    expect(run([linked], [visit({ window_start: '16:00:00' })])).toEqual([]);
+    expect(run([linked], [visit({ window_start: '11:00:00' })])).toEqual([]);
     expect(run([call({ customer_id: 'cust-1', ai_extraction_enriched: dayOnly() })], [visit()])).toEqual([]);
   });
 
@@ -273,5 +273,22 @@ describe('the call marker and unit-first addresses', () => {
 
   it('gives the row the call id "Book it" writes', () => {
     expect(run([call()])[0].call_sid).toBe('CAsynthetic001');
+  });
+});
+
+describe('a confirmed promise has a time', () => {
+  it('an unrelated same-day visit outside the window tolerance does not clear it', () => {
+    const linked = call({ customer_id: 'cust-1' }); // agreed 11:00 AM
+    expect(run([linked], [visit({ window_start: '15:00:00' })])).toHaveLength(1);
+    expect(run([linked], [visit({ window_start: '12:00:00' })])).toEqual([]);
+    // The hand-booking rule keeps the same tolerance.
+    const byPhone = (window_start) => visit({ customer_id: 'cust-new', customer_phone: '+19415550100', window_start });
+    expect(run([call()], [byPhone('16:00:00')])).toHaveLength(1);
+    expect(run([call()], [byPhone('10:00:00')])).toEqual([]);
+  });
+
+  it('a day-only ask is answered by any live visit that day', () => {
+    const linked = call({ customer_id: 'cust-1', ai_extraction_enriched: dayOnly() });
+    expect(run([linked], [visit({ window_start: '15:00:00' })])).toEqual([]);
   });
 });

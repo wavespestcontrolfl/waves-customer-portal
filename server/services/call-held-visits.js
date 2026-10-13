@@ -21,12 +21,13 @@
  * A held row clears when the office has acted:
  *   - a visit carries the call (source_call_log_id, or the Call SID marker in its notes or
  *     internal notes; "Book it" prefills that marker), any date, any customer;
- *   - the call's customer has a live visit on the promised day;
+ *   - the call's customer has a live visit on the promised day (for a confirmed slot, inside
+ *     the watchdog's window tolerance of the agreed time);
  *   - a namesake account booked the confirmed slot after the call (the watchdog rule);
  *   - a live visit created after the call, on the promised day, sits under a customer who
  *     carries the caller's number, or at the property stated on the call (house number,
  *     street, unit, and the city and ZIP when stated). This covers the normal hand booking
- *     and "Book it", which carry no call reference;
+ *     when the marker is missing. A confirmed slot needs the same window tolerance;
  *   - the office closed the call's triage cards.
  * "Live" is on the calendar or done; a skipped, cancelled or rescheduled visit never counts.
  * A visit on ANOTHER day clears only through the call reference: a recurring visit generated
@@ -39,6 +40,7 @@ const db = require('../models/db');
 const {
   extractConfirmedSlot,
   rowCarriesCall,
+  rowClearsSlot,
   namesakeRowClearsSlot,
   loadNamesakeAccounts,
   officeClosedCall,
@@ -143,9 +145,15 @@ function heldCandidates(calls, dateET, now = new Date()) {
 function clearedByBooking({ call, extraction, kind, slot }, bookedRows, { dateET, namesakes }) {
   const sameName = namesakes.get(call.id);
   // A visit that is on the calendar or done; a skipped, cancelled or rescheduled one is not a booking.
+  // A confirmed promise has a time: a same-day visit answers it only inside the watchdog's
+  // window tolerance (rowClearsSlot), so a morning lawn visit never hides an unbooked afternoon
+  // slot. A day-only ask has no time: any live visit that day answers it.
+  const atTheTime = (row) => kind !== 'confirmed' || rowClearsSlot(row, call, slot);
   const ownOnDay = (row) => !!call.customer_id && row.customer_id === call.customer_id && LIVE_STATUSES.has(row.status) && row.sched_date === dateET;
   const namesake = (row) => kind === 'confirmed' && !!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot);
-  return bookedRows.some((row) => rowCarriesCall(row, call) || ownOnDay(row) || namesake(row) || bookedForCallerAfterCall(row, call, extraction, dateET));
+  return bookedRows.some((row) => rowCarriesCall(row, call)
+    || namesake(row)
+    || ((ownOnDay(row) || bookedForCallerAfterCall(row, call, extraction, dateET)) && atTheTime(row)));
 }
 
 // The display row for one held candidate.
