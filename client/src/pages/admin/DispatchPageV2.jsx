@@ -892,9 +892,9 @@ export default function DispatchPageV2({
   // customer is preloaded only when the call is linked to one; if that lookup
   // fails the modal still opens and the person picks the customer.
   const bookHeldVisit = useCallback(async (row) => {
-    // The form takes whole hours. An off-hour slot (2:30 PM) is left for the
-    // person to set; the strip says so. Prefilling 2:00 would book earlier
-    // than the time agreed on the call.
+    // Visits start on the hour. An off-hour slot (2:30 PM) is not prefilled:
+    // 2:00 would book earlier than the time agreed on the call. The strip and
+    // the form's internal notes both show the agreed time.
     const onTheHour = Number.isFinite(row.minutes) && row.minutes % 60 === 0;
     const windowStart = onTheHour ? `${String(row.minutes / 60).padStart(2, "0")}:00` : undefined;
     let customer;
@@ -908,7 +908,11 @@ export default function DispatchPageV2({
     }
     // The call marker makes the new visit carry the call under any customer,
     // so the held row (and the booking-miss bell) clears once it is booked.
-    const internalNotes = row.call_sid ? `Booked from a phone call. Call SID: ${row.call_sid}.` : "";
+    // An off-hour agreed time stays visible in the form, in the same notes.
+    const internalNotes = [
+      row.call_sid ? `Booked from a phone call. Call SID: ${row.call_sid}.` : "",
+      onTheHour || !row.time_label ? "" : `Time agreed on the call: ${row.time_label}. Visits start on the hour: agree a whole-hour time with the caller.`,
+    ].filter(Boolean).join(" ");
     setNewApptDefaults({ date: row.date_et, windowStart, customer, internalNotes });
     setShowNewAppt(true);
   }, []);

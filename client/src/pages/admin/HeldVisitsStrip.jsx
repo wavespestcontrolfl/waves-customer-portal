@@ -28,7 +28,7 @@ function fromCall(row) {
   return `${kindText(row).lead} ${day}, ${formatETTime(row.call_at)}`;
 }
 
-// The booking form takes whole hours: an agreed 2:30 PM is not prefilled.
+// Visits start on the hour: an agreed 2:30 PM cannot be booked as is, and is not prefilled.
 const offHour = (row) => Number.isFinite(row.minutes) && row.minutes % 60 !== 0;
 
 export default function HeldVisitsStrip({ heldVisits, onBook }) {
@@ -60,7 +60,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                 </div>
                 {offHour(row) && (
                   <div className="text-ink-secondary">
-                    The booking form takes whole hours. Set {row.time_label} by hand.
+                    Visits start on the hour. Agree a whole-hour time with the caller before you book; the form does not take {row.time_label}.
                   </div>
                 )}
               </div>

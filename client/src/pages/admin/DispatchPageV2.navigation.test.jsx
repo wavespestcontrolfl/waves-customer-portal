@@ -336,10 +336,13 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
   render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
   expect(await screen.findByText('From calls, not on the calendar')).toBeInTheDocument();
   expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-14');
-  // An off-hour slot is not prefilled (the form takes whole hours); no call id means no marker.
+  // An off-hour slot is not prefilled (visits start on the hour) and the agreed time rides in the notes; no call id means no marker.
   fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[1]);
   await screen.findByRole('dialog');
-  expect(appointmentModalState.props).toMatchObject({ defaultDate: '2026-10-14', defaultInternalNotes: '' });
+  expect(appointmentModalState.props).toMatchObject({
+    defaultDate: '2026-10-14',
+    defaultInternalNotes: 'Time agreed on the call: 2:30 PM. Visits start on the hour: agree a whole-hour time with the caller.',
+  });
   expect(appointmentModalState.props.defaultWindowStart).toBeUndefined();
   act(() => appointmentModalState.props.onClose());
   fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[0]);

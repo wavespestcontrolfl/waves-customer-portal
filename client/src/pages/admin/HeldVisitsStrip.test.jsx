@@ -41,9 +41,9 @@ describe('HeldVisitsStrip', () => {
     expect(screen.queryByText(/Promised/)).not.toBeInTheDocument();
   });
 
-  it('says an off-hour time must be set by hand', () => {
+  it('says an off-hour time cannot be booked as is', () => {
     render(<HeldVisitsStrip heldVisits={[{ ...timed, minutes: 870, time_label: '2:30 PM' }]} onBook={() => {}} />);
-    expect(screen.getByText('The booking form takes whole hours. Set 2:30 PM by hand.')).toBeInTheDocument();
+    expect(screen.getByText('Visits start on the hour. Agree a whole-hour time with the caller before you book; the form does not take 2:30 PM.')).toBeInTheDocument();
   });
 
   it('links Open call to the call in Communications', () => {
