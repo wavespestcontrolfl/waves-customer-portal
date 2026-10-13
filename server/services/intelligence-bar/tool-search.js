@@ -148,4 +148,41 @@ function stripServerSearchBlocks(messages) {
   return kept;
 }
 
-module.exports = { toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };
+// A tool search (server_tool_use) that has no result yet anywhere in the
+// history. Doc (server-tools, "Mixing server tools and client tools in one
+// turn"): the result can arrive in the NEXT response, and the continuation
+// must "keep the same `tools` array", so nothing may change the array while one
+// is pending.
+function hasPendingServerSearch(messages) {
+  const open = new Set();
+  for (const message of messages) {
+    for (const block of Array.isArray(message.content) ? message.content : []) {
+      if (block.type === 'server_tool_use') open.add(block.id);
+      else if (block.type === 'tool_search_tool_result') open.delete(block.tool_use_id);
+    }
+  }
+  return open.size > 0;
+}
+
+// What discover_capabilities found. Off the search path the definitions merge
+// at once (as before). On the search path they are HELD and merged only at a
+// round boundary where no server search is pending (releaseHeld).
+function holdDiscovered(tools, held, definitions, toolSearch) {
+  return toolSearch ? { tools, held: [...held, ...definitions] } : { tools: mergeDiscoveredTools(tools, definitions), held };
+}
+
+// Called before every request: merge the held definitions once nothing is pending.
+function releaseHeld(tools, held, messages) {
+  if (held.length === 0 || hasPendingServerSearch(messages)) return { tools, held };
+  return { tools: mergeDiscoveredTools(tools, held), held: [] };
+}
+
+// The discover result says the found tools are "loaded". When a server search is
+// still pending in this turn the definitions arrive one step later, so the
+// result says not to call them in this step.
+const HELD_NOTE = 'A tool search is still running in this turn, so the tools listed here become callable only after it finishes. Do not call them in this step.';
+function discoverResult(result, messages, toolSearch) {
+  return toolSearch && hasPendingServerSearch(messages) ? { ...result, note: `${result.note} ${HELD_NOTE}` } : result;
+}
+
+module.exports = { hasPendingServerSearch, holdDiscovered, releaseHeld, discoverResult, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };

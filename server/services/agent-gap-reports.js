@@ -536,9 +536,23 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     return { source, kind: 'missing_capability', summary: `Asked for a tool the bar does not have: ${name}`, closestTool: name };
   }
 
+  // Two queries are the same ask when the word sets behind their dedupe key
+  // (wordKeyOf) overlap by at least half of the smaller set.
+  function sameAsk(a, b) {
+    const left = new Set(wordKeyOf(a).split(' '));
+    const right = new Set(wordKeyOf(b).split(' '));
+    const shared = [...left].filter((word) => right.has(word)).length;
+    return shared > 0 && shared >= Math.min(left.size, right.size) / 2;
+  }
+
   function pendingSignals() {
+    // A tool-search search is dropped only when a discover_capabilities search in
+    // the same request is about the same thing (the prompt sends the model on to
+    // discover after an empty tool search). An unrelated tool-search miss stays.
     const discovered = searches.filter((search) => !search.fromToolSearch);
-    const signals = (discovered.length ? discovered : searches).map((search) => ({
+    const kept = searches.filter((search) => !search.fromToolSearch
+      || !discovered.some((other) => sameAsk(other.query, search.query)));
+    const signals = kept.map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
     }));

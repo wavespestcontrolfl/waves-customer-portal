@@ -200,3 +200,43 @@ describe('stripServerSearchBlocks and thinking blocks', () => {
     expect(out[0].role).toBe('user');
   });
 });
+
+describe('held discover results', () => {
+  const use = id => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'q' } });
+  const res = id => ({ type: 'tool_search_tool_result', tool_use_id: id, content: { type: 'tool_search_tool_search_result', tool_references: [] } });
+  const msgs = (...blocks) => [{ role: 'user', content: 'q' }, { role: 'assistant', content: blocks }];
+
+  test('hasPendingServerSearch: a call without a result is pending until a result with its id appears, even later', () => {
+    expect(ToolSearch.hasPendingServerSearch(msgs(use('s1')))).toBe(true);
+    expect(ToolSearch.hasPendingServerSearch(msgs(use('s1'), res('s1')))).toBe(false);
+    expect(ToolSearch.hasPendingServerSearch([...msgs(use('s1')), { role: 'assistant', content: [res('s1')] }])).toBe(false);
+    expect(ToolSearch.hasPendingServerSearch([...msgs(use('s1'), res('s1'), use('s2'))])).toBe(true);
+    expect(ToolSearch.hasPendingServerSearch([{ role: 'user', content: 'q' }])).toBe(false);
+  });
+
+  test('holdDiscovered: merges at once off the search path, holds on it', () => {
+    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
+    const found = [{ name: 'b' }, { name: 'c' }];
+    expect(ToolSearch.holdDiscovered(tools, [], found, false)).toEqual({ tools: [{ name: 'a' }, { name: 'b' }, { name: 'c' }], held: [] });
+    const held = ToolSearch.holdDiscovered(tools, [{ name: 'z' }], found, true);
+    expect(held.tools).toBe(tools);
+    expect(held.held).toEqual([{ name: 'z' }, ...found]);
+  });
+
+  test('releaseHeld: nothing held or a search pending keeps tools and held; otherwise merges and clears', () => {
+    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
+    const held = [{ name: 'b' }];
+    expect(ToolSearch.releaseHeld(tools, [], msgs(res('s1')))).toEqual({ tools, held: [] });
+    const pending = ToolSearch.releaseHeld(tools, held, msgs(use('s1')));
+    expect(pending.tools).toBe(tools);
+    expect(pending.held).toBe(held);
+    expect(ToolSearch.releaseHeld(tools, held, msgs(use('s1'), res('s1')))).toEqual({ tools: [{ name: 'a' }, { name: 'b' }], held: [] });
+  });
+
+  test('discoverResult adds the wait note only on the search path with a search pending', () => {
+    const result = { status: 'capabilities_found', note: 'Use only the listed executors.' };
+    expect(ToolSearch.discoverResult(result, msgs(use('s1')), true).note).toMatch(/still running in this turn/);
+    expect(ToolSearch.discoverResult(result, msgs(use('s1')), false)).toBe(result);
+    expect(ToolSearch.discoverResult(result, msgs(use('s1'), res('s1')), true)).toBe(result);
+  });
+});

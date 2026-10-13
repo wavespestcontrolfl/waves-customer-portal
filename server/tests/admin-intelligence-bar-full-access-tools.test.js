@@ -182,6 +182,32 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
     expect(new Set(names(requests[1].tools)).size).toBe(requests[1].tools.length);
   });
 
+  test('a discover result is held while a server search is pending, then loaded once at the next boundary', async () => {
+    const turns = [
+      { content: [{ type: 'server_tool_use', id: 'srvtoolu_m', name: 'tool_search_tool_bm25', input: { query: 'review stats' } },
+        { type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: { query: 'review stats' } }], usage: {}, stop_reason: 'tool_use' },
+      { content: [{ type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_m', content: { type: 'tool_search_tool_search_result', tool_references: [] } },
+        { type: 'tool_use', id: 'toolu_e', name: 'offer_choices', input: { options: ['A', 'B'] } }], usage: {}, stop_reason: 'tool_use' },
+      { content: [{ type: 'text', text: 'ok' }], usage: {} },
+    ];
+    const { requests } = await ask('owner', 'dashboard', turns);
+    expect(requests).toHaveLength(3);
+    // Request 2 continues the pending search with the SAME tools, and the discover result says to wait.
+    expect(requests[1].tools).toEqual(requests[0].tools);
+    expect(discoverResult(requests).note).toMatch(/still running in this turn/);
+    // Request 3: the search is resolved, so the found tool is loaded, once, not deferred.
+    const copies = requests[2].tools.filter(t => t.name === 'get_review_stats');
+    expect(copies).toHaveLength(1);
+    expect(copies[0].defer_loading).toBeUndefined();
+    expect(requests[2].tools).toHaveLength(requests[0].tools.length);
+  });
+
+  test('with no search pending, a discover result loads on the very next request and says nothing extra', async () => {
+    const { requests } = await ask('owner', 'dashboard', discoverTurns('review stats'));
+    expect(requests[1].tools.find(t => t.name === 'get_review_stats').defer_loading).toBeUndefined();
+    expect(discoverResult(requests).note).not.toMatch(/still running/);
+  });
+
   test('a search error block does not crash the request', async () => {
     const content = [
       { type: 'server_tool_use', id: 'srvtoolu_2', name: 'tool_search_tool_bm25', input: { query: 'anything' } },
