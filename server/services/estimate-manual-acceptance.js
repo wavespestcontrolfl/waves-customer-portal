@@ -1172,7 +1172,11 @@ async function settleEffects(trx, ctx, outcome, isCommercialProposal) {
   const plan = await planPostCommitSteps(trx, ctx, outcome);
   if (ctx.effects.enabled) {
     if (!isCommercialProposal) {
-      const taxabilityMap = await require('./estimate-proposal-generate').loadTaxabilityMap(trx);
+      // An optional read inside the accept's transaction runs in a savepoint,
+      // so a failed statement never aborts the accept (codex #6113 r55; the
+      // same shape as readEmailInputs' notification_prefs read).
+      const { loadTaxabilityMap } = require('./estimate-proposal-generate');
+      const taxabilityMap = trx.isTransaction ? await trx.transaction((sp) => loadTaxabilityMap(sp)) : await loadTaxabilityMap(trx);
       const { lines, refusal } = AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter, { billingTerm: ctx.billingTerm, taxabilityMap });
       throwRefusal(refusal);
       for (const line of lines) ctx.effects.add(line);

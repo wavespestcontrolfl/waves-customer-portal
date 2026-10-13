@@ -967,6 +967,20 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.includes[0], e.taxable])).toEqual([['Building B', undefined], ['Building A', true]]);
   });
+  test('round 55: the taxability read runs in a savepoint inside the accept transaction; a failed read leaves the accept usable (family default)', async () => {
+    const world = makeWorld({
+      estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify({ recurring: { services: solo }, result: { oneTime: { items: [{ service: 'wasp', name: 'Wasp Nest Removal', price: 100 }] } } }) },
+    });
+    // A database whose service_taxability read throws, standing in for the accept's transaction.
+    const realDb = world.database;
+    const broken = jest.fn((table) => { if (table === 'service_taxability') throw new Error('relation does not exist'); return realDb(table); });
+    Object.assign(broken, realDb);
+    broken.isTransaction = true;
+    broken.transaction = jest.fn(async (cb) => cb(broken));
+    const { effects } = await markEstimateManuallyAccepted(base({ ...world, database: broken }, fakeConverter(world), { dryRun: true }));
+    expect(broken.transaction.mock.calls.length).toBeGreaterThan(0);
+    expect(effects.find((e) => e.kind === 'one_time_line')).toMatchObject({ name: 'Wasp Nest Removal', amount: 100, taxable: true });
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
