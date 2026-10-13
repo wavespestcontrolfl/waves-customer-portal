@@ -67,7 +67,15 @@ describe('the error logger', () => {
   test('masks every query value for an admin-read request, keeps the path and keys', async () => {
     await call(`/api/admin/csr/overview?${QUERY}`, { [ADMIN_READ_HEADER]: '1' }, () => { throw new Error('boom'); });
     const [message] = logger.error.mock.calls[0];
-    expect(message).toBe('GET /api/admin/csr/overview?email=[REDACTED]&phone=[REDACTED]&name=[REDACTED]&days=[REDACTED]: boom');
+    expect(message).toBe('GET /api/admin/csr/overview?email=[REDACTED]&phone=[REDACTED]&name=[REDACTED]&days=[REDACTED]: [admin read] Error');
+  });
+  test('a database error that echoes an input value logs the error class and code only', async () => {
+    const dbError = Object.assign(new Error('invalid input syntax for type uuid: "9415550100"'), { code: '22P02' });
+    await call('/api/admin/customers/9415550100/credits', { [ADMIN_READ_HEADER]: '1;p=2' }, () => { throw dbError; });
+    const [message, meta] = logger.error.mock.calls[0];
+    expect(message).toBe('GET /api/admin/customers/[REDACTED]/credits: [admin read] Error, code 22P02');
+    expect(`${message} ${JSON.stringify(meta)}`).not.toContain('9415550100');
+    expect(meta.stack).toMatch(/^\s+at /);
   });
   test('is unchanged without the header', async () => {
     await call(`/api/admin/csr/overview?${QUERY}`, {}, () => { throw new Error('boom'); });
@@ -91,7 +99,7 @@ describe('path parameters on a marked request', () => {
     expect(leaks(line)).toBe(false);
     jest.clearAllMocks();
     await call(`${SERVICE}${NAME}?x=1`, header, () => { throw new Error('boom'); });
-    expect(logger.error.mock.calls[0][0]).toBe('GET /api/admin/job-forms/templates/by-service/[REDACTED]?x=[REDACTED]: boom');
+    expect(logger.error.mock.calls[0][0]).toBe('GET /api/admin/job-forms/templates/by-service/[REDACTED]?x=[REDACTED]: [admin read] Error');
     expect(leaks(logger.error.mock.calls[0][0])).toBe(false);
   });
 

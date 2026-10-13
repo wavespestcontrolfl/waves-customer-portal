@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const logger = require('../services/logger');
-const { redactRequestUrlFor } = require('../utils/redact-request-url');
+const { redactRequestUrlFor, isAdminReadRequest } = require('../utils/redact-request-url');
 
 // req.body is logged on every unhandled error, and a key-based denylist kept
 // leaking PII through keys it didn't anticipate — admin SMS payloads
@@ -75,11 +75,24 @@ function redactSensitiveBody(value, depth = 0, seen = new WeakSet()) {
   return out;
 }
 
+// An Intelligence Bar admin read (marked loopback request) carries
+// model-supplied values in its path and query, and a database error can echo
+// one of them ("invalid input syntax for type uuid: \"9415550100\""). For a
+// marked request the log keeps the error's class, code and status only, and
+// the stack's frames without its message line.
+function loggedErrorText(err, req) {
+  if (!isAdminReadRequest(req)) return { message: err.message, stack: err.stack };
+  const parts = [err.name || 'Error', err.code ? `code ${err.code}` : '', err.statusCode ? `status ${err.statusCode}` : ''].filter(Boolean);
+  const frames = String(err.stack || '').split('\n').filter(line => /^\s+at /.test(line)).join('\n');
+  return { message: `[admin read] ${parts.join(', ')}`, stack: frames };
+}
+
 function errorHandler(err, req, res, next) {
   // Public bearer tokens ride the PATH (/api/pay/<token>, …) — redact before
   // logging or the error log becomes a reusable-credential store.
-  logger.error(`${req.method} ${redactRequestUrlFor(req, req.originalUrl || req.path || '')}: ${err.message}`, {
-    stack: err.stack,
+  const { message, stack } = loggedErrorText(err, req);
+  logger.error(`${req.method} ${redactRequestUrlFor(req, req.originalUrl || req.path || '')}: ${message}`, {
+    stack,
     body: redactSensitiveBody(req.body),
   });
 
