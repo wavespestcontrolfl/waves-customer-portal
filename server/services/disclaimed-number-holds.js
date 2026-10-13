@@ -244,10 +244,12 @@ const legacyCardFitsArmingSql = (c, h) => `${c}.payload->'hold_bindings' IS NULL
   AND ${h}.held_at BETWEEN ${c}.created_at - ${LEGACY_BINDING_WINDOW} AND ${c}.created_at + ${LEGACY_BINDING_WINDOW}
   AND (${c}.resolved_at IS NULL OR ${h}.held_at <= ${c}.resolved_at)`;
 
-// Card `t` (unstamped) is bound to hold `h`: it fits the arming, is on the hold's line, and is the only card that fits.
+// Card `t` (unstamped) is bound to hold `h`: it fits the arming, is on the hold's line, and is the only card ON THAT
+// LINE that fits (a card for another line of the same call does not compete: one call can file an X card and a Y card).
 const legacyCardBoundSql = (t, h) => `${legacyCardFitsArmingSql(t, h)}
   AND ${holdPhoneKeySql(`${t}.payload->>'ani_phone'`)} = ${h}.phone_e164
-  AND NOT EXISTS (SELECT 1 FROM triage_items t2 WHERE t2.id <> ${t}.id AND ${legacyCardFitsArmingSql('t2', h)})`;
+  AND NOT EXISTS (SELECT 1 FROM triage_items t2 WHERE t2.id <> ${t}.id AND ${legacyCardFitsArmingSql('t2', h)}
+                     AND ${holdPhoneKeySql("t2.payload->>'ani_phone'")} = ${h}.phone_e164)`;
 
 const LEGACY_CARD_FOR_HOLD_SQL = legacyCardBoundSql('t', 'h');
 
@@ -390,32 +392,43 @@ async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, cle
  *      unless the card is still bound to another ACTIVE hold of its call: one card can carry several lines, and
  *      closing it would take the release surface of a line that is still held.
  *   3. Keep call_log.review_status in step with the cards that closed.
+ * Cards whose row is locked are skipped (SKIP LOCKED): see the comment in the function body.
  * No per-call lock is taken here (the order is call lock, then line lock; taking a second call's lock under a line
  * lock could cross an arm waiting on that line): every write is a single atomic statement.
  */
 async function settleSiblingTextCards(conn, { callLogIds, lineKey, releasedFromCallLogId = null, clearedBy = null }) {
   const ids = callLogIds.map(() => '?').join(', ');
+  // Both writes pick their rows with FOR UPDATE SKIP LOCKED (#6292 r9). A transition locks its OWN card row first
+  // and takes the line lock after; this function runs under the line lock. Waiting here on a card row that a
+  // sibling's transition holds, while that transition waits on the line lock we hold, would deadlock. A card whose
+  // row is locked is being transitioned by its owner right now, so it is left alone: the owner's own release then
+  // finds the hold already cleared (nothing bound and active, lines_released []) and resolves its own card normally.
   await conn.raw(
-    `UPDATE triage_items t
-        SET payload = COALESCE(t.payload, '{}'::jsonb)
-          || jsonb_build_object('hold_bindings', jsonb_build_array(jsonb_build_object('line_e164', h.phone_e164, 'held_at', h.held_at::text)))
-       FROM ${TABLE} h
-      WHERE h.phone_e164 = ? AND h.source_call_log_id IN (${ids})
-        AND t.payload->'hold_bindings' IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL})`,
+    `UPDATE triage_items u
+        SET payload = COALESCE(u.payload, '{}'::jsonb)
+          || jsonb_build_object('hold_bindings', jsonb_build_array(jsonb_build_object('line_e164', c.line_e164, 'held_at', c.held_at)))
+       FROM (SELECT t.id, h.phone_e164 AS line_e164, h.held_at::text AS held_at
+               FROM triage_items t JOIN ${TABLE} h ON h.phone_e164 = ? AND h.source_call_log_id IN (${ids})
+              WHERE t.payload->'hold_bindings' IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL})
+                FOR UPDATE OF t SKIP LOCKED) c
+      WHERE u.id = c.id`,
     [lineKey, ...callLogIds],
   );
   const masked = `***${lineKey.slice(-4)}`;
   const note = `line released from ${masked} via call ${releasedFromCallLogId || 'another call'}`.slice(0, 500);
   const closed = await conn.raw(
-    `UPDATE triage_items t
+    `UPDATE triage_items u
         SET status = 'resolved', resolution_source = 'human', resolution_note = ?, assigned_to = ?,
             resolved_at = now(), updated_at = now()
-      WHERE t.call_log_id IN (${ids}) AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
-        AND EXISTS (SELECT 1 FROM ${TABLE} h
-                     WHERE h.phone_e164 = ? AND h.source_call_log_id = t.call_log_id AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
-        AND NOT EXISTS (SELECT 1 FROM ${TABLE} h
-                         WHERE h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
-      RETURNING t.call_log_id`,
+      WHERE u.id IN (
+        SELECT t.id FROM triage_items t
+         WHERE t.call_log_id IN (${ids}) AND t.reason_code = 'text_number_differs' AND t.status IN ('open', 'in_progress')
+           AND EXISTS (SELECT 1 FROM ${TABLE} h
+                        WHERE h.phone_e164 = ? AND h.source_call_log_id = t.call_log_id AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
+           AND NOT EXISTS (SELECT 1 FROM ${TABLE} h
+                            WHERE h.source_call_log_id = t.call_log_id AND h.cleared_at IS NULL AND (${NO_TEXT_CARD_FOR_HOLD_SQL}))
+           FOR UPDATE SKIP LOCKED)
+      RETURNING u.call_log_id`,
     [note, clearedBy ? String(clearedBy).slice(0, 100) : null, ...callLogIds, lineKey],
   );
   const closedCalls = [...new Set((closed?.rows || []).map((r) => r.call_log_id).filter(Boolean))];

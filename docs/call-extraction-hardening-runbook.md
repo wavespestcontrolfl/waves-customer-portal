@@ -138,7 +138,11 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   any call, the card still resolves, and the reply says `release: 'deferred'` with `lines_blocked`. **Sibling calls:** when a release clears a hold on ANOTHER call, that call's card for the line is settled in the same
   transaction (`settleSiblingTextCards`): a legacy card is bound to the hold being cleared first (its provenance is then
   immutable), then the call's open `text_number_differs` card is closed (resolved, note `line released from ***1234 via
-  call <id>`) unless it is still bound to another active line of that call, and `call_log.review_status` follows. A later
+  call <id>`) unless it is still bound to another active line of that call, and `call_log.review_status` follows. Both writes pick
+  their rows with `FOR UPDATE SKIP LOCKED`: a transition locks its own card row first and the line lock after, so waiting
+  here on a card row a sibling's transition holds would deadlock against it. A locked card is being transitioned by its
+  owner right now; that owner's release then finds its hold already cleared (`lines_released: []`) and resolves its own
+  card normally. A later
   ownership-only re-arm of that call is then neither listed nor cleared by that card. **Access:** `GET /held-lines` and a
   resolve that names a line (`line_e164`) are admin-only (403 for technicians); the inbox-card release with no line
   keeps its existing reach. The panel shows
@@ -160,7 +164,8 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   line's (`lineOwnershipBlockSql`, the same predicate as the release check).
   **Legacy cards** (filed before the bindings, no `hold_bindings`): a legacy card binds only when the match is
   unambiguous. The hold is of the same call, on the card's line, armed within 5 minutes of the card's `created_at`
-  and not after the card closed (`resolved_at`), and no other unstamped card of that call fits the same arming.
+  and not after the card closed (`resolved_at`), and no other unstamped card of that call ON THE SAME LINE fits the same arming (an X card and a Y card of one call do not
+  compete).
   A card that fails any of these binds to nothing: it is not listed and releases nothing. The line match is the hold
   writer's own rule (`holdPhoneKey`: `toE164`, accepted only when `isLikelyE164`), in SQL as `holdPhoneKeySql`; a
   `+` number keeps its country code and needs 10 to 15 digits, any other input with at least ten digits is

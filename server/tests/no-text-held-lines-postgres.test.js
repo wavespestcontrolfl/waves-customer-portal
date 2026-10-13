@@ -255,6 +255,19 @@ postgres('held lines SQL against PostgreSQL', () => {
       expect(await listed()).toEqual([]);
     });
 
+    test('one call with a legacy X card and a legacy Y card inside the window: each binds its OWN line (cards for other lines do not compete)', async () => {
+      const callId = randomUUID();
+      await insertHold(callId, X, T('2030-02-01T10:00:04Z'));
+      await insertHold(callId, Y, T('2030-02-01T10:00:20Z'));
+      const cx = await insertCard(callId, T('2030-02-01T10:00:00Z'), { status: 'resolved', ani: X });
+      const cy = await insertCard(callId, T('2030-02-01T10:00:10Z'), { status: 'resolved', ani: Y });
+      const pairs = (await Holds.boundCardsForActiveHolds(database, callId)).map((p) => [p.phone_e164, p.card_id]);
+      expect(pairs.sort()).toEqual([[X, cx], [Y, cy]].sort());
+      // two cards for the SAME line and arming are still ambiguous
+      await insertCard(callId, T('2030-02-01T10:01:00Z'), { status: 'resolved', ani: X });
+      expect((await Holds.boundCardsForActiveHolds(database, callId)).map((p) => p.phone_e164)).toEqual([Y]);
+    });
+
     test('a card closed BEFORE the hold was armed again cannot own that arming, even inside the window', async () => {
       const callId = randomUUID();
       const card = await insertCard(callId, T('2030-02-01T10:00:00Z'), { status: 'resolved' });
@@ -360,5 +373,109 @@ postgres('held lines SQL against PostgreSQL', () => {
     expect([...await Holds.linesBlockedByOwnershipCard(database, [X, Y])]).toEqual([X]);
     await database('triage_items').where({ id: cb }).update({ status: 'resolved' });
     expect((await Holds.linesBlockedByOwnershipCard(database, [X])).size).toBe(0);
+  });
+});
+
+// Two real connections (#6292 r9). The tables are real tables in a private schema (TEMP tables are per session), so a
+// transition on call B can hold B's card row while call A releases the same line from its own connection.
+postgres('sibling settle skips a card another transaction holds (no deadlock)', () => {
+  const SCHEMA = 'hl_two_conn';
+  const X = '+19415551234';
+  let admin;
+  let connA;
+  let connB;
+  let Holds;
+  let server;
+  let baseUrl;
+  let previousConnection;
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a local disposable database');
+    const make = (searchPath) => require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 1, max: 2 }, searchPath });
+    admin = make(['public']);
+    await admin.raw(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    await admin.raw(`CREATE SCHEMA ${SCHEMA}`);
+    connA = make([SCHEMA]);
+    connB = make([SCHEMA]);
+    await connA.raw(`CREATE TABLE disclaimed_number_holds (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), phone_e164 text NOT NULL, customer_id uuid, source_call_log_id uuid NOT NULL,
+      held_at timestamptz NOT NULL DEFAULT now(), cleared_at timestamptz, cleared_by text, clear_reason text, updated_at timestamptz DEFAULT now(),
+      UNIQUE (phone_e164, source_call_log_id))`);
+    await connA.raw(`CREATE TABLE triage_items (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), call_log_id uuid, reason_code text, status text, payload jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz,
+      resolution_note text, resolution_source text, assigned_to text)`);
+    await connA.raw('CREATE TABLE call_log (id uuid PRIMARY KEY, created_at timestamptz DEFAULT now(), customer_id uuid, review_status text, updated_at timestamptz)');
+    await connA.raw('CREATE TABLE customers (id uuid PRIMARY KEY, first_name text, last_name text, phone text)');
+    await connA.raw(`CREATE TABLE scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), source_call_log_id uuid, customer_id uuid, status text,
+      callback_number_hold_at timestamptz, call_sms_cleared_at timestamptz, updated_at timestamptz)`);
+    const dbModule = require('../models/db');
+    previousConnection = dbModule.connection;
+    dbModule.connection = connA;
+    Holds = require('../services/disclaimed-number-holds');
+    const app = express();
+    app.use(express.json());
+    app.use('/admin/triage', require('../routes/admin-triage'));
+    server = app.listen(0);
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+
+  afterAll(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (previousConnection !== undefined) require('../models/db').connection = previousConnection;
+    if (admin) await admin.raw(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+    for (const c of [connA, connB, admin]) if (c) await c.destroy();
+  });
+
+  async function seedCall() {
+    const callId = randomUUID();
+    await connA('call_log').insert({ id: callId });
+    const cardId = randomUUID();
+    await connA('triage_items').insert({ id: cardId, call_log_id: callId, reason_code: 'text_number_differs', status: 'open',
+      created_at: new Date('2030-02-01T09:59:59Z'), updated_at: new Date('2030-02-01T10:00:01Z'), payload: JSON.stringify({ ani_phone: X }) });
+    await connA('disclaimed_number_holds').insert({ phone_e164: X, source_call_log_id: callId, held_at: new Date('2030-02-01T10:00:00Z') });
+    await Holds.stampOpenNoTextCards(connA, callId, { phone: X });
+    return { callId, cardId };
+  }
+
+  test('call A releases the line while call B\'s transition holds B\'s card row: A completes, B\'s hold is cleared, B\'s card is left to B, and B\'s own release then resolves it with no lines', async () => {
+    const a = await seedCall();
+    const b = await seedCall();
+    const trxB = await connB.transaction();
+    let timer;
+    try {
+      await trxB.raw('SELECT id FROM triage_items WHERE id = ? FOR UPDATE', [b.cardId]); // B's transition has locked its own card
+      const released = await Promise.race([
+        connA.transaction(async (trx) => {
+          await Holds.lockNoTextLines(trx, [X]);
+          return Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: a.callId, clearedBy: 'tech-1', reason: 'verified_same_number', conn: trx });
+        }),
+        new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error('release waited on a locked sibling card (deadlock)')), 8000); }),
+      ]);
+      expect(released).toEqual([b.callId]);
+    } finally {
+      clearTimeout(timer);
+      await trxB.rollback(); // frees B's card row (and ends the test's stand-in for B's transaction)
+    }
+    expect((await connA('disclaimed_number_holds').where({ source_call_log_id: b.callId }).first()).cleared_at).not.toBeNull();
+    const cardB = await connA('triage_items').where({ id: b.cardId }).first();
+    expect(cardB.status).toBe('open'); // skipped: left to its owner
+    // B's own release finds the hold already cleared and resolves its card normally
+    const res = await fetch(`${baseUrl}/admin/triage/${b.cardId}/resolve`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expected_updated_at: new Date(cardB.updated_at).toISOString(), line_can_get_texts: true }),
+    });
+    const out = await res.json();
+    expect({ status: res.status, error: out.error }).toEqual({ status: 200, error: undefined });
+    expect(out.callback_number.lines_released).toEqual([]);
+    expect((await connA('triage_items').where({ id: b.cardId }).first()).status).toBe('resolved');
+  });
+
+  test('an unlocked sibling card is bound-then-closed as before', async () => {
+    const a = await seedCall();
+    const b = await seedCall();
+    expect(await Holds.clearNoTextHoldsForPhone({ phoneE164: X, exceptCallLogId: a.callId, clearedBy: 'tech-1', reason: 'verified_same_number', conn: connA })).toContain(b.callId);
+    expect((await connA('triage_items').where({ id: b.cardId }).first()).status).toBe('resolved');
   });
 });

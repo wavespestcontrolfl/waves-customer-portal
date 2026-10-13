@@ -162,7 +162,7 @@ describe('clearNoTextHoldsForPhone', () => {
   test('clearing a hold on another call binds then closes that call\'s card, with a masked note and review_status kept in step', async () => {
     const raw = jest.fn(async (sql) => {
       if (/UPDATE disclaimed_number_holds/.test(sql)) return { rows: [{ source_call_log_id: 'call-b' }] };
-      if (/RETURNING t.call_log_id/.test(sql)) return { rows: [{ call_log_id: 'call-b' }] };
+      if (/RETURNING u.call_log_id/.test(sql)) return { rows: [{ call_log_id: 'call-b' }] };
       return { rows: [] };
     });
     await Holds.clearNoTextHoldsForPhone({ phoneE164: '+19415551234', exceptCallLogId: 'call-a', clearedBy: 'tech-1', reason: 'verified_same_number', conn: { raw } });
@@ -173,6 +173,9 @@ describe('clearNoTextHoldsForPhone', () => {
     expect(sqls[2]).toContain("SET status = 'resolved'"); // then close
     expect(sqls[2]).toContain('NOT EXISTS'); // unless still bound to another active line of the call
     expect(sqls[3]).toContain('UPDATE call_log c');
+    // a card whose row another transaction holds is skipped, never waited on (deadlock with that owner's own release)
+    expect(sqls[1]).toContain('FOR UPDATE OF t SKIP LOCKED');
+    expect(sqls[2]).toContain('FOR UPDATE SKIP LOCKED');
     const note = raw.mock.calls[2][1][0];
     expect(note).toBe('line released from ***1234 via call call-a');
     expect(note).not.toContain('941');
@@ -299,6 +302,8 @@ describe('card <-> hold binding SQL', () => {
     expect(sql).toContain('NOT EXISTS (SELECT 1 FROM triage_items t2 WHERE t2.id <> t.id');
     expect(sql).toContain('h.held_at <= t.resolved_at');
     expect(sql).toContain('h.held_at <= t2.resolved_at');
+    // the competing card must be on the SAME line: an X card and a Y card of one call do not make each other ambiguous
+    expect(sql).toContain(`${Holds.holdPhoneKeySql("t2.payload->>'ani_phone'")} = h.phone_e164`);
   });
 
   test('the legacy phone match is the hold writer rule (toE164 + isLikelyE164), not a second identity rule', () => {

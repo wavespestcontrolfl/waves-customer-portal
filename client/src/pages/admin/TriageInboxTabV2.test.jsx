@@ -1010,9 +1010,20 @@ describe('held lines panel on the page', () => {
     });
   }
 
+  it('a technician is not offered the chip or the panel (the route is admin-only), and nothing is fetched; an admin sees the chip', async () => {
+    wire({ lines: [line] });
+    const { unmount } = render(<TriageInboxTabV2 isAdmin={false} />);
+    await screen.findByText('No calls awaiting review.');
+    expect(screen.queryByRole('button', { name: /held lines/i })).not.toBeInTheDocument();
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/held-lines');
+    unmount();
+    render(<TriageInboxTabV2 isAdmin />);
+    expect(await screen.findByRole('button', { name: /held lines/i })).toBeInTheDocument();
+  });
+
   it('loads only when opened, then lists one row per line with its number, since-date, call and card state', async () => {
     wire({ lines: [line, { ...line, hold_id: 'h2', source_call_log_id: 'call-10', card_id: 'tn-2', held_at: '2026-10-05T15:00:00.000Z' }] });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     await screen.findByText('No calls awaiting review.');
     expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/held-lines');
     fireEvent.click(screen.getByRole('button', { name: /held lines/i }));
@@ -1027,7 +1038,7 @@ describe('held lines panel on the page', () => {
 
   it('"Line can get texts" asks the same confirm, resolves the card with line_can_get_texts, then reloads the panel', async () => {
     wire({ lines: [line] });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
     const row = await screen.findByTestId('held-line');
     fireEvent.click(within(row).getByRole('button', { name: /line can get texts/i }));
@@ -1043,7 +1054,7 @@ describe('held lines panel on the page', () => {
   it('shows the server\'s deferred message and keeps the line listed', async () => {
     const message = 'Card closed, but the line stays blocked for texts: this call also has an open "not my number" card. Resolve that card first.';
     wire({ lines: [{ ...line, blocked_by_ownership_card: true }], release: { ok: true, callback_number: { disclaimed_number_hold: 'kept', release: 'deferred', message } } });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
     const row = await screen.findByTestId('held-line');
     expect(row.textContent).toContain('open "not my number" card');
@@ -1058,7 +1069,7 @@ describe('held lines panel on the page', () => {
   it('with two lines on one call, each row releases ITS line (line_e164), not the call\'s newest', async () => {
     const other = { ...line, hold_id: 'h9', phone_e164: '+19415557777', held_at: '2026-10-03T15:00:00.000Z' };
     wire({ lines: [other, line] });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
     const rows = await screen.findAllByTestId('held-line');
     expect(rows).toHaveLength(2);
@@ -1078,7 +1089,7 @@ describe('held lines panel on the page', () => {
       if (url === '/admin/triage/tn-old/resolve') throw Object.assign(new Error('That line is no longer held by this call. Reload the held lines and review the latest.'), { status: 409, code: 'NO_TEXT_LINE_NOT_HELD' });
       return base(url, opts);
     });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
     fireEvent.click(within(await screen.findByTestId('held-line')).getByRole('button', { name: /line can get texts/i }));
     fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
@@ -1094,7 +1105,7 @@ describe('held lines panel on the page', () => {
       if (url === '/admin/triage/held-lines') return { lines: [line] };
       return { ok: true, callback_number: { disclaimed_number_hold: 'cleared', number_holds_cleared: 1 } };
     });
-    render(<TriageInboxTabV2 />);
+    render(<TriageInboxTabV2 isAdmin />);
     fireEvent.click(await screen.findByRole('button', { name: /held lines/i }));
     await screen.findByTestId('held-line');
     const heldLoads = () => adminFetch.mock.calls.filter(([u]) => u === '/admin/triage/held-lines').length;

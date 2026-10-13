@@ -1153,7 +1153,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
               </span>
             </button>
           ))}
-          <HeldLinesChip held={held} />
+          {isAdmin && <HeldLinesChip held={held} />}
           {(status === "resolved" || status === "dismissed") && (
             <button
               type="button"
@@ -1178,7 +1178,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
         </div>
       )}
 
-      <HeldLinesPanel held={held} triageMode={isTriage} actioning={actioning} onRelease={setLineCanTextFor} />
+      {isAdmin && <HeldLinesPanel held={held} triageMode={isTriage} actioning={actioning} onRelease={setLineCanTextFor} />}
 
       {!isTriage && (
         <p className="text-12 text-ink-tertiary -mb-1">
