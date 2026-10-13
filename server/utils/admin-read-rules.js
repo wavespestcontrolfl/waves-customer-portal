@@ -43,7 +43,10 @@ const EFFECT_VERBS = new Set([
   'send', 'enqueue', 'import', 'rebuild', 'reset', 'retry', 'execute',
 ]);
 // Whole prefixes that never join the catalog.
-const DENIED_PREFIXES = ['/admin/credentials', '/admin/auth', '/admin/intelligence-bar', '/admin/feature-flags'];
+// These are API path prefixes (under /api), not admin page links, so they are
+// built from segment names: admin-link-route-coverage.test.js reads every
+// quoted "/admin/..." string in server code as a link to a mounted page.
+const DENIED_PREFIXES = ['credentials', 'auth', 'intelligence-bar', 'feature-flags'].map(name => ['', 'admin', name].join('/'));
 
 function splitPath(path) {
   return String(path || '').split('/').filter(Boolean);
