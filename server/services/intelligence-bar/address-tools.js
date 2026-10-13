@@ -106,9 +106,10 @@ function localityParts(input, parsed, text, directionAsCity) {
 // named means the unit is incomplete, and the result says so.
 // A unit value holds a digit ("4", "B12", "2-A") or is one lone letter ("B"),
 // as in the shared parser's UNIT_VALUE; a street word after a designator
-// ("Space Coast Blvd", "Lot Rd") is not a unit part.
+// ("Space Coast Blvd", "Lot Rd") is not a unit part. "Fl 3" is a floor;
+// "FL 34236" (the state before a ZIP) is not.
 const UNIT_VALUE_SRC = '(?:[A-Za-z]{0,3}\\d[A-Za-z0-9-]*|[A-Za-z](?![A-Za-z0-9]))';
-const UNIT_PART_RE = new RegExp(`\\b(?:apartment|apt|unit|ste|suite|building|bldg|floor|space|spc|lot)\\b\\.?\\s*#?\\s*${UNIT_VALUE_SRC}|#\\s*${UNIT_VALUE_SRC}`, 'gi');
+const UNIT_PART_RE = new RegExp(`\\b(?:apartment|apt|unit|ste|suite|building|bldg|floor|space|spc|lot)\\b\\.?\\s*#?\\s*${UNIT_VALUE_SRC}|\\bfl\\b\\.?\\s*#?\\s*(?!\\d{5}\\b)${UNIT_VALUE_SRC}|#\\s*${UNIT_VALUE_SRC}`, 'gi');
 const unitPartCount = text => (cleanText(text).match(UNIT_PART_RE) || []).length;
 
 function givenParts(input) {

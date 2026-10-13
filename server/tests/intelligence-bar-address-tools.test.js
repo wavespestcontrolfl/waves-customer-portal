@@ -365,6 +365,13 @@ describe('check_address round 2 cases', () => {
       expect(out.note).toMatch(/Do not save yet/);
     }
   });
+  test('an abbreviated floor counts as a unit part; the state before a ZIP does not', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way Bldg 2 Fl 3 Sarasota FL 34236' });
+    if (out.unit !== 'Bldg 2 Fl 3') expect(out.unit_incomplete).toBe(true);
+    const plain = await run({ address: '100 Example Way Sarasota FL 34236' });
+    expect(plain.unit_incomplete).toBe(false);
+  });
   test.each(['100 Example Way, Bldg 2 Apt 4, Sarasota, FL 34236', '100 Example Way Apt 4, Sarasota, FL 34236', '100 Example Way #12, Sarasota, FL 34236', '100 Example Way, Sarasota, FL 34236',
     '100 Space Coast Blvd, Sarasota, FL 34236', '100 Lot Rd, Sarasota, FL 34236', '100 Unit Way Unit B, Sarasota, FL 34236'])('%s has a complete unit reading', async (address) => {
     validateAddress.mockResolvedValue(google());
