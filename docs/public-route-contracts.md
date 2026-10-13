@@ -201,7 +201,8 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
+and the pest PDF key suffix is `-pex5` (2026-10-05, `-pex4`: the Gentrol growth regulator line gained its label's 4-month duration; 2026-10-12, `-pex5`: see the next paragraph).
+**Owner 2026-10-12: the non-repellent line in `expectations.whatToExpect.lines` can omit its timeframe.** When every non-repellent application on the visit is Alpine WSG with no ant target recorded (roach-tagged or untagged; legacy keys such as `ghost_ant` and `ants_general` count as ant targets), the general non-repellent line ends at "…carry it back to their harborage." and omits "Activity can spike for a few days, then declines over the next couple of weeks." The Alpine label states no roach die-off time. No key is added or removed; only that string's content changes. Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the
@@ -2528,6 +2529,31 @@ condition, so no instruction that waits for drying, including one followed by a
 water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
 `holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
 "ended" note past it; the key is absent when there is no claim).
+A pre-emergent whose label allows 14 days for its water (a water-in window over
+168 hours, owner 2026-10-09) is a long-window water-in: one sentence
+"Today’s treatment needs about ½ inch of water by <date>." and "Rain and your
+regular watering both count.", with no minutes; `waterInBy` and `expiresAt` are
+completion plus that window. It never merges with a short water-in on the same
+visit: the short one keeps its own amount and deadline in `waterInBy`, the long
+sentence follows as a fourth line ("In all, it needs about ½ inch of water by
+<date>. Rain and your regular watering both count."), so `lines` is then at
+most four sentences, and `expiresAt` is the LONG deadline (or `null` beside a
+hold that waits for drying). Such a visit, and only such a visit, also carries
+the optional key `reportV2.banner.later` `{ at, state, lines }`: `at` is the
+short deadline (the same ISO instant as `waterInBy`), `state` is `water_in` or
+`hold_then_water_in`, and `lines` are the two long-window sentences as on a
+long-only visit (after an until-dry hold line, without its clock time, when the
+visit has one). It is frozen with the instruction; nothing is recomputed at
+read time. The live banner prints `later.lines` in place of `lines` once `at`
+has passed (and drops `forecastLine`, `observedRain` and `setupLine`, which are
+about the short run), until `expiresAt`, so a deadline that has passed is never
+shown as current. LIVE VIEW ONLY: the key is removed from every printed / PDF
+render, which keeps `lines` as written at the visit. The key is absent when the
+frozen block is malformed, and once rain has covered the water-in
+(`state: 'water_in_by_rain'`, below; for such a visit the rain is measured from
+completion through the LONG deadline against the larger amount, so rain after
+the short deadline still closes the later phase). No new route, token, privacy or
+rate-limit surface; `reportV2.aftercare` is unchanged by it.
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
@@ -2637,9 +2663,9 @@ hold-then-water-in; it is deleted from every non-live render
 `reportV2.lead`'s word budget when present. The client shows it as a link to the
 portal property tab. The watering text, PDF, hero task and Ask Waves read `lines`
 only. No new route, query parameter or customer message.
-`GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
-key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
-optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
+Lawn reports carry `reportV2.lead` (the former `GATE_LAWN_REPORT_LEAD`, live
+since early October 2026 and removed; no gate reads or turns it off now) `{ headline, why, applied, yourPart, next }` (plus the
+optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below),
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `applied` the treatment summary (never filtered), `yourPart` at most two
@@ -2658,26 +2684,26 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
+until it fits (the lawn v6 copy is always live, so the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
-not be carried as `lead.next`. While the gate is on the lawn payload also
+not be carried as `lead.next`. The lawn payload also
 drops stock copy (lawn only; every field keeps its key): the unverifiable
 past-tense `insights[].wavesAction` lines and four stock `whyItMatters` lines
 become null (product-grounded `wavesAction` and every watering
 `customerAction` / `nextVisitPlan` are unchanged), and `mowing.recommendation`
 is null for a too-short / too-tall reading when the mowing finding is among the
 three findings the web card shows. The sprinkler-coverage water finding
-carries `kind: 'coverage_watch'` (lead mode only) so the water card knows the
+carries `kind: 'coverage_watch'` so the water card knows the
 finding owns that guidance even after a narrative headline rewrite. The web report folds secondary finding,
 water and photo-note detail into expanders that print open. The lawn PDF, when
 `lead` is present, prints `lead.why` as the status detail, finding bullets as
 headline + what we saw (+ why it matters only for needs_attention) with no
 "What Waves did" line, and skips the follow-up's stock "No action is needed"
-line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
-stamp while the gate is on, so gate-off PDFs are never served after the flip
-(or the reverse on rollback).
+line; tree & shrub ignores `lead`. The lawn PDF cache signature always carries
+a constant `:lead=1` stamp, so a PDF cached before the lead went live is never
+served again.
 `GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES` (dark, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) changes the lawn
 `/api/reports/:token/data` payload and the PDF that share `buildReportV1Data`
@@ -2804,14 +2830,14 @@ visit whose record cannot be read: each keeps the old peak / shoulder / dormant
 note. The retired per-grass sentences were removed, so a permanent past report
 is never rewritten with a program its visit did not run. The payload shape
 (keys, types, route, token, privacy, rate limit) is unchanged.
-The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
-lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
+A lawn payload with no `lead` (a derive failure) still renders `seasonalNote` in
+the snapshot hero. The lead layout, which never renders `seasonalNote`,
 renders a program line once as a small "This time of year" card above the
 trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
 print `seasonalNote`, so its content and cache signature are unchanged.
 `GATE_LAWN_PROGRAM_DETAIL` (dark, owner 2026-10-06; strict `'true'` only, and
-effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above
-and `GATE_LAWN_REPORT_LEAD` is on, because only the lead layout mounts it; gate
+effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above;
+only the lead layout mounts it; gate
 off leaves the lawn payload unchanged, key for key) adds one key to the lawn
 report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow }`, present only beside `seasonalNoteSource: "program"` (lawn only;
 no new route, token, privacy or rate-limit surface). The text is static copy
@@ -2853,9 +2879,8 @@ and `Object.keys` never see it and the `/api/reports/:token/data` payload is wha
 it was (a test pins that). The block itself never reaches the payload; the only
 thing a customer sees of it is the sentences below. Pure, no read, no write, and
 a failure cannot break a render.
-`GATE_LAWN_REPORT_COPY_V6` (dark; effective only while `GATE_LAWN_REPORT_LEAD` is
-also live, so gate off, or lead off, leaves the lawn payload, render and PDF
-unchanged, key for key, and makes no read or write) swaps the old
+The lawn v6 copy (always on; the `GATE_LAWN_REPORT_COPY_V6` and
+`GATE_LAWN_REPORT_LEAD` gates were removed after they held) swaps the old
 `LAWN_REPORT_V2_NARRATIVE` overlay for the lawn v6 copy
 (`server/services/service-report/lawn-copy-v6.js`, P14; lawn only, never tree &
 shrub; no new route, token, privacy or rate-limit surface). Every field is a FIXED
@@ -2897,11 +2922,11 @@ retryable `lawn_copy_v6_unfrozen` error instead of sending it.
 The fields reach the lead through a non-enumerable
 in-process hand-off (`reportV2.copyV6`, read first by
 `applyLawnReportReconciliation`, like `reportV2.progress`), never as a payload
-key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one
-under this gate, so a later assessment correction cannot make the PDF and the
+key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen one,
+so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live.
+and its cache signature carries the constant `:lead=1:copyv6=1` stamp.
 The lawn PDF prints watering only from the reconciled `reportV2` (the `aftercare`
 and customer-action lines the web report prints too): with a lawn `reportV2` it
 prints no "Hold irrigation until ..." line from the raw product-advisory timer
@@ -2927,7 +2952,7 @@ of `whatToExpect` and the rest of the frozen copy stands. The by-next-visit
 sentences are LIVE-VIEW ONLY, like `snapshot.nextVisit` itself: a non-live render
 (PDF, static) prints `whatToExpect` without them (`stripLiveOnlyScheduleFields`),
 so a stored PDF never depends on the customer's bookings and its cache signature
-carries no booking state. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
+carries no booking state. The "Next visit" line reads the same property-scoped lookup. The v6 copy keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an
@@ -3025,8 +3050,8 @@ printable selection, so other visits keep their key. The web report and the PDF
 never in print or the browser's print of the live page. The server probe
 (`collectRenderedImageUrls`) checks the thumbnails beside the set.
 
-`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
-`GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
+`GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
+also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
 `{ priorDate: 'YYYY-MM-DD', lines: string[] }` on LIVE views only
 (`mode: 'live'`), and the web report prints it in the lead as "Since your last
@@ -3058,8 +3083,7 @@ permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
 
 `GATE_LAWN_TECH_PARAGRAPH` (owner 2026-10-05; rebuilt as FIXED SENTENCES 2026-10-06,
-owner "lawn fixed sentences", the tree & shrub design; effective only while
-`GATE_LAWN_REPORT_LEAD` is also live; off leaves the lawn payload, the render, the
+owner "lawn fixed sentences", the tree & shrub design; off leaves the lawn payload, the render, the
 PDF and its cache signature unchanged, key for key, with no model call and no read)
 adds ONE optional string, `reportV2.lead.techParagraph`: the "From your technician"
 paragraph. Every word comes from `LAWN_SENTENCES` in
@@ -3267,13 +3291,13 @@ of these overall numbers, so they can still move when only the light did:
 - the portal's "N pts since first visit" and "+N pts improvement" overall deltas
   (`PortalPage.jsx`; the overall score includes color);
 - the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
-  bypassed whenever `GATE_LAWN_REPORT_COPY_V6` is live);
+  bypassed, since the lawn v6 copy is always live);
 - the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
 
 `GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
-live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
+live; off
 leaves the lawn payload and render unchanged, key for key, with no weather read
 and no write) adds ONE fixed sentence to `reportV2.lead.watching` on LIVE views
 only (`mode: 'live'`): "Our weather data shows rain soon after your treatment,

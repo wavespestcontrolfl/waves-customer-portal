@@ -464,6 +464,80 @@ Return ONLY the email body text, no subject line, no metadata.`
   }
 }
 
+// What an HTML-sent reply body reads as once a mail client renders it: HTML
+// entities decoded with the repo's own `entities` (every named, decimal and
+// hex form a client knows — &Tab; and &NewLine; included, Codex r6 on
+// #6266), then every host-shaped token — including one sitting inside a tag
+// attribute, and every owned-host link nested inside another URL — appended
+// as its own whitespace-separated run so the link check sees it as a link.
+function renderedTextForLinkCheck(body) {
+  const { decodeHTML } = require('entities');
+  let decoded = String(body || '');
+  // Nested encodings (&amp;#58;) unwrap in a couple of passes; bounded.
+  for (let i = 0; i < 3; i += 1) {
+    const next = decodeHTML(decoded);
+    if (next === decoded) break;
+    decoded = next;
+  }
+  // A URL parser drops tab, CR and LF anywhere in its input (WHATWG), so a
+  // host token is read with those removed too (Codex r5 on #6266 P2).
+  const hostTokenRe = /[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\/[^\s"'<>]*)?/g;
+  const stripped = decoded.replace(/[\t\r\n]/g, '');
+  // A portal link nested in a foreign URL's path, query or fragment (raw or
+  // percent-encoded, even twice) reads above as one foreign-host token, so
+  // each owned-host occurrence inside any URL is surfaced as its own run too.
+  const { nestedOwnedLinkRuns } = require('../composer-customer-links');
+  const hostTokens = [...(decoded.match(hostTokenRe) || []), ...(stripped.match(hostTokenRe) || []), ...nestedOwnedLinkRuns(decoded), ...nestedOwnedLinkRuns(stripped)];
+  return hostTokens.length ? `${decoded} ${[...new Set(hostTokens)].join(' ')}` : decoded;
+}
+
+// The read-only 'email' phase link check on a reply body, as the mail client
+// renders it. Fail closed: a body the check cannot read is refused.
+async function emailReplyLinkRefusal(body) {
+  try {
+    return await require('./comms-tools').customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:email] reply link pre-send check failed — refusing: ${err.message}`);
+    return { success: false, error: 'Could not verify the links in this reply — nothing was sent. Try again in a moment.', blocked: true, code: 'customer_link_unverified' };
+  }
+}
+
+// Proposal-time refusal for reply_via_sms, so no card is offered for a text a
+// customer link in it would make the send refuse (the execution-time check
+// stays). Resolves the recipient as the send does (resolveReplyTarget) and
+// runs the read-only 'proposal' phase. An unresolvable recipient or a missing
+// message is not judged here: the pin step refuses that on its own.
+// A proposal that names only a customer (no id, no email) is pinned by the
+// route through the live, uniqueness-enforcing resolver (comms-tools
+// resolveCustomer: archived rows excluded, an ambiguous name refused), and the
+// confirmed send then runs on that pinned id. The check judges the same row:
+// never the first of several name matches, never an archived one.
+async function proposalReplyTarget(params, sourceEmail) {
+  if (params.customer_id || params.email_id || !params.customer_name) return resolveReplyTarget(params, sourceEmail);
+  const customer = await require('./comms-tools').resolveCustomer({ customer_name: params.customer_name });
+  if (!customer || customer.error) return { phone: null };
+  return { phone: customer.phone, custId: customer.id, recipientSelected: false };
+}
+async function replyViaSmsProposalRefusal(params = {}) {
+  if (!params.message) return null;
+  try {
+    const sourceEmail = params.email_id ? await db('emails').where('id', params.email_id).first() : null;
+    const target = await proposalReplyTarget(params, sourceEmail);
+    if (target.error || !target.phone) return null;
+    return await require('./comms-tools').customerLinkSendRefusal(params.message, target.phone, target.custId || null, { phase: 'proposal', recipientSelected: target.recipientSelected });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:email] reply_via_sms link pre-check failed — refusing: ${err.message}`);
+    return { success: false, error: 'Could not verify the links in this text — nothing was proposed. Try again in a moment.', blocked: true, code: 'customer_link_unverified' };
+  }
+}
+
+// Proposal-time refusal for send_email_reply, so no card is offered for a body
+// the send would refuse (the execution-time check stays). Null = offer the card.
+async function sendEmailReplyProposalRefusal(params = {}) {
+  if (!params.body) return null;
+  return emailReplyLinkRefusal(params.body);
+}
+
 async function sendEmailReply({ email_id, body, _pinned_email }) {
   try {
     const email = await db('emails').where('id', email_id).first();
@@ -476,6 +550,18 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
         return { error: 'This email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
       }
     }
+
+    // No customer bearer rides an email reply (comms-tools
+    // customerLinkSendRefusal, 'email' phase): the reply goes to the sender's
+    // address, which the email's customer attribution does not prove is the
+    // customer's, so appointment/report/receipt links are refused along with
+    // the composer-only kinds (an emailed prepared-contract token would also
+    // be a dead link — the composer's send activates it). The body goes out
+    // as HTML, so it is judged as the mail client will render it: entities
+    // decoded and host-shaped tokens inside markup surfaced (Codex security
+    // review on #6266: `https&#58;&#47;&#47;…` decodes to a live link).
+    const linkRefusal = await emailReplyLinkRefusal(body);
+    if (linkRefusal) return linkRefusal;
 
     const gmailClient = require('../../services/email/gmail-client');
     // ADMIN-BUG-R22 (same class): relayed mail (contact forms, lead
@@ -514,143 +600,162 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
   }
 }
 
+// Who a reply_via_sms goes to, resolved ONE way for the send and for the
+// card's read-only link check (replyViaSmsProposalRefusal), so they cannot
+// drift: a pinned customer_id, else the source email's attributed customer,
+// else the customer whose email is the sender's address, else a name match.
+// recipientSelected is false when the customer is only what an address or a
+// name matched (first row), not the pinned/attributed one: the link guard then
+// needs the number to name one account.
+async function resolveReplyTarget({ email_id, customer_name, customer_id }, sourceEmail) {
+  const found = (customer, extra = {}) => ({
+    phone: customer.phone, custName: `${customer.first_name} ${customer.last_name}`, custId: customer.id, recipientSelected: true, ...extra,
+  });
+  if (customer_id) {
+    // Pinned recipient (Intelligence Bar confirm card, W0B): the proposal
+    // resolved the customer and the operator approved THAT identity —
+    // send to exactly that row, never a fresh name/email match.
+    const customer = await db('customers').where('id', customer_id).first();
+    return customer ? found(customer) : { error: 'Pinned customer no longer exists' };
+  }
+  if (email_id) {
+    if (sourceEmail?.customer_id) {
+      const customer = await db('customers').where('id', sourceEmail.customer_id).first();
+      // An attributed customer with no phone falls through to the address match.
+      if (customer?.phone) return found(customer);
+    }
+    // Try matching by email address
+    const byAddress = sourceEmail ? await db('customers').where('email', sourceEmail.from_address).first() : null;
+    return byAddress ? found(byAddress, { recipientSelected: false }) : { custName: customer_name, custId: null, phone: null, recipientSelected: true };
+  }
+  if (customer_name) {
+    const customer = await db('customers').where(function () {
+      const s = `%${customer_name}%`;
+      this.whereILike('first_name', s).orWhereILike('last_name', s);
+    }).first();
+    // The name match keeps the typed name (it never overwrote custName).
+    if (customer) return { phone: customer.phone, custName: customer_name, custId: customer.id, recipientSelected: false };
+  }
+  return { custName: customer_name, custId: null, phone: null, recipientSelected: true };
+}
+
+// The source email as the confirmed run reads it: { sourceEmail } or { refusal }.
+// W0B source-email pin (GH r13 P2): the card disclosed the inbox update on
+// THIS email's identity and attributed customer — asserted on the executor's
+// own read, so a row re-synced or re-attributed after the confirm preflight
+// refuses instead of receiving another customer's replied-via-SMS stamp.
+async function pinnedSourceEmail(email_id, _pinned_email) {
+  if (!email_id) return { sourceEmail: null };
+  const sourceEmail = await db('emails').where('id', email_id).first();
+  if (!_pinned_email) return { sourceEmail };
+  const { emailPinFingerprint } = require('./proposal-pins');
+  const same = !!sourceEmail && emailPinFingerprint(sourceEmail) === String(_pinned_email);
+  return same ? { sourceEmail } : { refusal: { error: 'The source email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true } };
+}
+
+// Why the resolved recipient may not be texted, or null: no phone, a phone
+// that is not the approved one (W0B pinned recipient, enforced at the send
+// boundary), or a customer link only the Communications composer may send
+// (comms-tools customerLinkSendRefusal).
+async function replyRecipientRefusal({ phone, custId, recipientSelected }, message, _pinned_phone) {
+  if (!phone) return { error: 'Could not find phone number for this customer' };
+  if (_pinned_phone && String(phone) !== String(_pinned_phone)) {
+    return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+  }
+  return require('./comms-tools').customerLinkSendRefusal(message, phone, custId || null, { recipientSelected });
+}
+
+// Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
+function sendReplyText({ phone, custId }, message, email_id) {
+  return sendManualCustomerSms({
+    to: phone,
+    body: message,
+    channel: 'sms',
+    audience: custId ? 'customer' : 'lead',
+    purpose: 'conversational',
+    customerId: custId || undefined,
+    identityTrustLevel: custId ? 'phone_matches_customer' : 'phone_provided_unverified',
+    entryPoint: 'intelligence_bar_email_sms_reply',
+    metadata: {
+      original_message_type: 'manual',
+      adminUserId: 'intelligence_bar_email',
+      email_id,
+    },
+  });
+}
+
+// Mark the email as responded via SMS; returns a warning, or null. The card
+// disclosed this inbox update — a zero-row update (email deleted while the
+// card was pending) must surface as a warning, never a silent Done (GH r9 P2).
+// The approved customer attribution rides into the UPDATE's own WHERE (GH r13
+// P2): a row re-attributed between the executor's read and this write misses
+// and surfaces the warning, never stamping an email that now belongs to a
+// different customer.
+async function markEmailRepliedViaSms(email_id, sourceEmail, _pinned_email) {
+  if (!email_id) return null;
+  let markQuery = db('emails').where('id', email_id);
+  if (sourceEmail && _pinned_email) {
+    markQuery = sourceEmail.customer_id == null
+      ? markQuery.whereNull('customer_id')
+      : markQuery.where('customer_id', sourceEmail.customer_id);
+  }
+  const marked = await markQuery.update({
+    auto_action: db.raw("COALESCE(auto_action, '') || ',replied_via_sms'"),
+    is_read: true,
+    updated_at: new Date(),
+  });
+  return marked ? null : 'The SMS was sent, but the source email no longer exists or was re-attributed — it could not be marked read/replied.';
+}
+
+// The provider took the text: the accepted result, with whatever followed it.
+function acceptedReplyResult(accepted, extra) {
+  return {
+    success: true,
+    state: 'provider_accepted',
+    providerMessageId: accepted.providerMessageId || null,
+    auditLogId: accepted.auditLogId || null,
+    ...extra,
+  };
+}
+
 async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone, _pinned_email }) {
   let providerOutcome = null;
   try {
-    let phone = null;
-    let custName = customer_name;
-    let custId = null;
+    const source = await pinnedSourceEmail(email_id, _pinned_email);
+    if (source.refusal) return source.refusal;
+    const { sourceEmail } = source;
 
-    let sourceEmail = null;
-    if (email_id) {
-      sourceEmail = await db('emails').where('id', email_id).first();
-      // W0B source-email pin (GH r13 P2): the card disclosed the inbox
-      // update on THIS email's identity and attributed customer — asserted
-      // on the executor's own read, so a row re-synced or re-attributed
-      // after the confirm preflight refuses instead of receiving another
-      // customer's replied-via-SMS stamp.
-      if (_pinned_email) {
-        const { emailPinFingerprint } = require('./proposal-pins');
-        if (!sourceEmail || emailPinFingerprint(sourceEmail) !== String(_pinned_email)) {
-          return { error: 'The source email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
-        }
-      }
-    }
+    const target = await resolveReplyTarget({ email_id, customer_name, customer_id }, sourceEmail);
+    if (target.error) return target;
+    const refusal = await replyRecipientRefusal(target, message, _pinned_phone);
+    if (refusal) return refusal;
 
-    if (customer_id) {
-      // Pinned recipient (Intelligence Bar confirm card, W0B): the proposal
-      // resolved the customer and the operator approved THAT identity —
-      // send to exactly that row, never a fresh name/email match.
-      const customer = await db('customers').where('id', customer_id).first();
-      if (!customer) return { error: 'Pinned customer no longer exists' };
-      phone = customer.phone;
-      custName = `${customer.first_name} ${customer.last_name}`;
-      custId = customer.id;
-    } else if (email_id) {
-      const email = sourceEmail;
-      if (email?.customer_id) {
-        const customer = await db('customers').where('id', email.customer_id).first();
-        if (customer) {
-          phone = customer.phone;
-          custName = `${customer.first_name} ${customer.last_name}`;
-          custId = customer.id;
-        }
-      }
-      // Try matching by email address
-      if (!phone && email) {
-        const customer = await db('customers').where('email', email.from_address).first();
-        if (customer) {
-          phone = customer.phone;
-          custName = `${customer.first_name} ${customer.last_name}`;
-          custId = customer.id;
-        }
-      }
-    } else if (customer_name) {
-      const customer = await db('customers').where(function () {
-        const s = `%${customer_name}%`;
-        this.whereILike('first_name', s).orWhereILike('last_name', s);
-      }).first();
-      if (customer) {
-        phone = customer.phone;
-        custId = customer.id;
-      }
-    }
-
-    if (!phone) return { error: 'Could not find phone number for this customer' };
-    // W0B pinned recipient: enforce the approved phone at the send boundary.
-    if (_pinned_phone && String(phone) !== String(_pinned_phone)) {
-      return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
-    }
-
-    // Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
-    const smsResult = await sendManualCustomerSms({
-      to: phone,
-      body: message,
-      channel: 'sms',
-      audience: custId ? 'customer' : 'lead',
-      purpose: 'conversational',
-      customerId: custId || undefined,
-      identityTrustLevel: custId ? 'phone_matches_customer' : 'phone_provided_unverified',
-      entryPoint: 'intelligence_bar_email_sms_reply',
-      metadata: {
-        original_message_type: 'manual',
-        adminUserId: 'intelligence_bar_email',
-        email_id,
-      },
-    });
+    const smsResult = await sendReplyText(target, message, email_id);
     if (!smsResult.sent) {
       return { error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' };
     }
     providerOutcome = smsResult;
 
-    // Mark the email as responded via SMS. The card disclosed this inbox
-    // update — a zero-row update (email deleted while the card was pending)
-    // must surface as a warning, never a silent Done (GH r9 P2).
-    let inboxWarning = null;
-    if (email_id) {
-      // The approved customer attribution rides into the UPDATE's own WHERE
-      // (GH r13 P2): a row re-attributed between the read above and this
-      // write misses and surfaces the warning, never stamping an email that
-      // now belongs to a different customer.
-      let markQuery = db('emails').where('id', email_id);
-      if (sourceEmail && _pinned_email) {
-        markQuery = sourceEmail.customer_id == null
-          ? markQuery.whereNull('customer_id')
-          : markQuery.where('customer_id', sourceEmail.customer_id);
-      }
-      const marked = await markQuery.update({
-        auto_action: db.raw("COALESCE(auto_action, '') || ',replied_via_sms'"),
-        is_read: true,
-        updated_at: new Date(),
-      });
-      if (!marked) {
-        inboxWarning = 'The SMS was sent, but the source email no longer exists or was re-attributed — it could not be marked read/replied.';
-      }
-    }
+    const inboxWarning = await markEmailRepliedViaSms(email_id, sourceEmail, _pinned_email);
 
     // Log internal ids, not the customer name/phone (PII stays out of logs).
-    logger.info(`[intelligence-bar:email] SMS reply for customer ${custId || 'lead'} (email ${email_id})`);
+    logger.info(`[intelligence-bar:email] SMS reply for customer ${target.custId || 'lead'} (email ${email_id})`);
 
-    return {
-      success: true,
-      state: 'provider_accepted',
-      providerMessageId: smsResult.providerMessageId || null,
-      auditLogId: smsResult.auditLogId || null,
-      sent_to: phone,
-      customer: custName,
+    return acceptedReplyResult(smsResult, {
+      sent_to: target.phone,
+      customer: target.custName,
       message,
       note: 'The SMS provider accepted the reply; delivery is not yet confirmed.',
       ...(inboxWarning ? { warning: inboxWarning, partial: true } : {}),
-    };
+    });
   } catch (err) {
     const accepted = providerOutcome || err.providerOutcome;
-    if (accepted?.sent === true) return {
-      success: true, state: 'provider_accepted',
-      providerMessageId: accepted.providerMessageId || null,
-      auditLogId: accepted.auditLogId || null,
-      partial: !!email_id,
-      warning: 'The provider accepted the SMS, but the local inbox or audit update failed. Check its status before retrying.',
-    };
+    if (accepted?.sent === true) {
+      return acceptedReplyResult(accepted, {
+        partial: !!email_id,
+        warning: 'The provider accepted the SMS, but the local inbox or audit update failed. Check its status before retrying.',
+      });
+    }
     logger.error(`[intelligence-bar:email] reply_via_sms failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
@@ -844,4 +949,4 @@ async function executeEmailTool(toolName, input, actionContext = {}) {
   }
 }
 
-module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply };
+module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply, renderedTextForLinkCheck, sendEmailReplyProposalRefusal, replyViaSmsProposalRefusal };

@@ -360,7 +360,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     err.retryable = true;
     throw err;
   }
-  // GATE_LAWN_REPORT_COPY_V6: the lawn lead copy could not be FROZEN on this
+  // Lawn v6 copy: the lawn lead copy could not be FROZEN on this
   // render (a failed read or a failed freeze write). The live report will
   // freeze it on a later render, possibly with different words, so an emailed
   // attachment now could disagree with it forever. Retryable: defer the send.

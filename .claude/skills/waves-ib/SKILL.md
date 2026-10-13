@@ -71,6 +71,20 @@ display only, a tap sends exactly the button text as ordinary operator text
 and never confirms a write). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
 their UI-confirm card.
+Customer links ride every admin context too (`customer-link-tools.js`,
+admin-only, carded): `create_customer_link` builds any kind the composer's
+Insert Link sheet offers (except review request, Auto Pay, which stays on the
+Customers page button and the composer, the card request link, which stays
+on the composer / visit card because it can enroll a saved card for Auto Pay, the payer
+statement, which needs the payer's AP phone, and contract signing, whose send
+needs the composer's own Insert Link state) through the SAME exported route handlers
+(`customerLinkInsert` / `rescheduleLinkInsert` / `reserviceLinkInsert` on
+`routes/admin-communications.js`) and sends nothing. The
+composer's `/sms` route is the only sender that records some kinds (card
+claim, contract activation, prep/statement marks, project claim,
+consultation lead), so `comms-tools` `customerLinkSendRefusal` makes
+`send_sms` / `reply_via_sms` refuse a body carrying one of those or an Auto
+Pay link — never re-implement that bookkeeping in a tool.
 Tech portal is isolated — no base tools, strictly read-only, lower
 max_tokens for field speed.
 
@@ -85,8 +99,9 @@ max_tokens for field speed.
   boundary is unconditional (`GATE_IB_UI_CONFIRM` is retired and ignored);
   the emergency stop is `IB_WRITES_DISABLED=true`. Write tools never execute
   from the model loop: the call returns a preview, the route persists a
-  pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload
-  hash, single-use), and the client renders a Confirm/Cancel card
+  pending action (`ib_pending_actions` — actor-bound, payload hash,
+  single-use; card life 10 min, or 60 min for the pinned internal-edit
+  allowlist `LONG_TTL_TOOL_NAMES` in `pending-actions.js`), and the client renders a Confirm/Cancel card
   (`PendingActionsCard`). Only the operator's click commits, via
   `/confirm-action` — never a model tool, and the pending id is never
   model-visible. The gated tool list lives in

@@ -245,7 +245,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(writeAt).toBeGreaterThan(-1);
     expect(writeAt).toBeLessThan(fileAt);
     const write = src.slice(writeAt, fileAt);
-    expect(write).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: item\.payload/);
+    expect(write).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: require\('\.\/disclaimed-number-holds'\)\.refreshedCardPayload\(trx, item\.payload\)/);
     expect(write).not.toContain('.merge(');
     // …and the stand-alone writer runs it inside ONE transaction that takes the per-call triage lock
     // first and checks the processing claim before the write
@@ -256,9 +256,9 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   test('the decision-point pair (hold + release card) commits in ONE transaction: the card is written by afterArm inside armDisclaimedNumberHold', () => {
     const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
     // afterArm runs inside the arm transaction, after the hold row and the no-text marks, before return
-    expect(holds).toMatch(/const recorded = await recordDisclaimedNumberHold\(\{ phone, customerId, callLogId, conn: trx \}\);[^]*?if \(noTextHold\) \{[^]*?\}\s*(?:\/\/[^\n]*\n\s*)*if \(afterArm\) await afterArm\(trx\);\s*return recorded;/);
+    expect(holds).toMatch(/const recorded = await recordDisclaimedNumberHold\(\{ phone, customerId, callLogId, conn: trx \}\);[^]*?if \(noTextHold\) \{[^]*?\}\s*(?:\/\/[^\n]*\n\s*)*if \(afterArm\) await afterArm\(trx, \{ heldAt: recorded\.heldAt \}\);\s*return recorded;/);
     // the processor hands the card write to afterArm and never files the decision-point card separately
-    expect(src).toContain('afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,');
+    expect(src).toContain('afterArm: item ? async (trx, arming) => writeTextNumberCard(trx, item, { refresh: false, heldAt: arming?.heldAt }) : null,');
     expect(src).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Extraction }))) return abandonToPeer('the disclaimed-number hold write');");
     expect(src).toContain("if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Ext }))) return abandonToPeer('the disclaimed-number hold write');");
     expect(src).not.toMatch(/armCallbackNumberHoldAtDecision\(\)\)\) return abandonToPeer\('the disclaimed-number hold write'\);\s*if \(aniCannotText\([^)]*\)\) await fileTextNumberCard/);
@@ -324,10 +324,12 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     const at = holds.indexOf('async function clearNoTextHoldsForPhone(');
     expect(at).toBeGreaterThan(-1);
     const fn = holds.slice(at, at + 1600);
-    expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t");
-    expect(fn).toContain("t.reason_code = 'text_number_differs'");
-    expect(fn).toContain("AND NOT EXISTS (SELECT 1 FROM triage_items d");
-    expect(fn).toContain("OWNERSHIP_DISCLAIMER_CARD_SQL.replaceAll('payload', 'd.payload')");
+    expect(fn).toContain("AND EXISTS (SELECT 1 FROM triage_items t WHERE ${NO_TEXT_CARD_FOR_HOLD_SQL})");
+    const bound = require('../services/disclaimed-number-holds').NO_TEXT_CARD_FOR_HOLD_SQL;
+    expect(bound).toContain("t.reason_code = 'text_number_differs'");
+    // exact per (line, arming): the card's own list of { line_e164, held_at }, no suffix and no created_at compare
+    expect(bound).toContain("b->>'line_e164' = h.phone_e164 AND (b->>'held_at')::timestamptz = h.held_at");
+    expect(bound).not.toContain('right(t.payload'); // no last-10-digit suffix match on the card
     // the dual-signal stamp and the disclaimer predicate
     const gates = fs.readFileSync(require.resolve('../services/call-routing-gates'), 'utf8');
     expect(gates).toContain("? { no_text_hold: true, ...(extraction?.caller?.caller_id_disclaimed === true ? { ownership_disclaimed: true } : {}) }");
@@ -336,9 +338,13 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(triage).toContain('.whereRaw(OWNERSHIP_DISCLAIMER_CARD_SQL)');
     const rel = triage.slice(triage.indexOf('async function releaseNoTextHold('), triage.indexOf('async function releaseClosedNoTextHold('));
     expect(rel).toContain('if (release) {');
-    expect(rel).toContain('Holds.clearNoTextHoldsForPhone({');
-    expect(rel).toContain('exceptCallLogId: item.call_log_id');
-    expect(rel).toMatch(/for \(const otherCallLogId of otherCalls\) \{\s*await clearCallbackNumberHold\(trx, otherCallLogId, \{ clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT\.VERIFIED_SAME_NUMBER \}\);/);
+    const lines = triage.slice(triage.indexOf('async function releaseNoTextLines('), triage.indexOf('async function releaseNoTextHold('));
+    // the phone-wide lock is taken before the first hold row is cleared
+    expect(lines.indexOf('Holds.lockNoTextLines(')).toBeGreaterThan(-1);
+    expect(lines.indexOf('Holds.lockNoTextLines(')).toBeLessThan(lines.indexOf('clearCallbackNumberHold(trx, callLogId'));
+    expect(lines).toContain('Holds.clearNoTextHoldsForPhone({');
+    expect(lines).toContain('exceptCallLogId: callLogId');
+    expect(lines).toMatch(/for \(const otherCallLogId of otherCalls\) \{\s*await clearCallbackNumberHold\(trx, otherCallLogId, \{ clearedBy: assignedTo, numberVerdict: VERIFIED, phoneKeys: \[key\] \}\);/);
   });
 
   test('arming the no-text hold also marks a callback_number_needed card an earlier pass left open (no stale unmarked card can release it)', () => {
@@ -423,5 +429,22 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(triage.slice(ownResolveAt, ownResolveAt + 400)).toContain("...(item.reason_code !== 'auto_booking_skipped_after_approval'");
     expect(triage).toContain('text_number_differs: \'This card is a no-text line');
     expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'text_number_differs'/);
+  });
+});
+
+describe('card-to-hold binding is stamped where the card is filed', () => {
+  test('writeTextNumberCard stamps the open card with the hold arming after the card write, before the review-status sync', () => {
+    const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = processor.indexOf('const writeTextNumberCard = async (trx, item');
+    const section = processor.slice(at, at + 3200);
+    const stamp = section.indexOf("stampOpenNoTextCards(trx, call.id, { phone: contactPhone, heldAt: heldAt || armingHeldAt })");
+    expect(stamp).toBeGreaterThan(section.indexOf('.onConflict('));
+    expect(stamp).toBeLessThan(section.indexOf('await syncCallReviewStatus(trx, call.id);'));
+  });
+
+  test('the card write is bound to the arming of THIS pass: afterArm hands the held_at in, and the helper remembers it', () => {
+    const processor = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(processor).toContain('afterArm: item ? async (trx, arming) => writeTextNumberCard(trx, item, { refresh: false, heldAt: arming?.heldAt }) : null,');
+    expect(processor).toContain('armingHeldAt = armed?.heldAt ?? armingHeldAt;');
   });
 });

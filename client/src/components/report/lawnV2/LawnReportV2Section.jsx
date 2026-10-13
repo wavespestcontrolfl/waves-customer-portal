@@ -28,7 +28,7 @@ import {
   LawnProgramLine,
 } from './LawnReportV2';
 
-// GATE_LAWN_REPORT_LEAD: a payload carrying `lead` renders the lead layout.
+// A payload carrying `lead` renders the lead layout.
 // The lead card itself is mounted by ReportViewPage right under the watering
 // banner (the real top of the report, codex P1 #5496 r1), so this section
 // opens with the photo strip (its summary outside the lead's word budget) →

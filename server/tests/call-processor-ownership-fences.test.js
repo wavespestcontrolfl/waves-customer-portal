@@ -163,7 +163,7 @@ describe('processRecording call_log writes are ownership-fenced', () => {
   test('the retrying stat mirrors the sweep\'s media and duration eligibility (codex #3736 gh-r16 P2)', () => {
     const at = source.indexOf(') as retrying"');
     expect(at).toBeGreaterThan(-1);
-    const stat = source.slice(source.lastIndexOf('db.raw(`COUNT(*) FILTER (WHERE (processing_status = \'no_transcription\'', at), at);
+    const stat = source.slice(source.lastIndexOf('db.raw(`COUNT(*) FILTER (WHERE ((processing_status = \'no_transcription\' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)})', at), at);
     expect(stat).toContain("NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)");
     expect(stat).toContain("COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
     expect(stat).toContain('${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days');

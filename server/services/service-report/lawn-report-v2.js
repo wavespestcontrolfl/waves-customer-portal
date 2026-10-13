@@ -16,7 +16,6 @@ const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-d
 const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const featureGates = require('../../config/feature-gates');
-const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
@@ -510,8 +509,10 @@ function buildAftercare(applications, opts = {}) {
     const plan = opts.weekPlan;
     // Nullish BEFORE coercion: Number(null) is 0 and would credit any water-in.
     const runDepth = plan?.depthInches == null || plan.depthInches === '' ? NaN : Number(plan.depthInches);
-    const creditsRun = !plan?.title || plan.prescribesRun !== true
-      || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
+    // A long-window water-in IS the regular schedule plus rain: it never
+    // replaces a plan run.
+    const creditsRun = instruction.longWindow !== true && (!plan?.title || plan.prescribesRun !== true
+      || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001));
     return normalizeLawnAftercare({
       // Every treatment sentence: the PDF and Ask Waves read only this field.
       watering: instruction.lines.join(' '),
@@ -911,13 +912,13 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
   // we only drop it from the customer-facing cards.
   const displayDiagnosis = diagnosis.filter((c) => c.key !== 'water_moisture_stress');
 
-  // Lead mode (GATE_LAWN_REPORT_LEAD): an out-of-band mowing reading drops the
+  // An out-of-band mowing reading drops the
   // gauge's own recommendation only when the mowing finding card is on screen
   // to say "Raise/Lower the mower one setting". The web findings card shows the
   // top LEAD_VISIBLE_FINDINGS by priority, so a mowing card ranked below them
   // keeps the gauge line, or the step would print nowhere (codex P1 pre-push).
   // The PDF prints every finding's step, so it never loses it.
-  if (lawnReportLeadLive() && mowing && (mowing.status === 'too_short' || mowing.status === 'too_tall')) {
+  if (mowing && (mowing.status === 'too_short' || mowing.status === 'too_tall')) {
     const shown = insights
       .filter(Boolean)
       .slice()

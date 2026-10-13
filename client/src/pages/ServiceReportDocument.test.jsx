@@ -502,7 +502,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Water the front strip by hand.');
   });
 
-  it('prints the lawn lead "What to expect" sentences (GATE_LAWN_REPORT_COPY_V6) and nothing when the key is absent', () => {
+  it('prints the lawn lead "What to expect" sentences (lawn v6 copy) and nothing when the key is absent', () => {
     const expectLine = 'By your next visit, most treated weeds should be yellowing, browning or both.';
     const snapshot = { overallScore: 86, statusHeadline: 'Looking healthy' };
     const withKey = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy', whatToExpect: expectLine } } };
@@ -2055,7 +2055,7 @@ describe('ServiceReportDocument: the four-section report', () => {
 });
 
 // Lawn PDF diet (lawn report rebuild P8): a payload carrying `lead`
-// (GATE_LAWN_REPORT_LEAD) prints the lead's reason as the status detail, finding
+// prints the lead's reason as the status detail, finding
 // bullets as headline + what we saw (+ why it matters only for needs_attention),
 // never the "What Waves did" line, and not the follow-up's stock no-action line.
 // The same payload without `lead`, and tree & shrub, print exactly as before.

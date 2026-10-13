@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { URL as NodeURL } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
-  carrierOf, gallonsBodyFields, gallonsTooLarge, gallonsToArea, maxGallons, mixHelpOf, mixLine, rememberTank, rememberedTank, weedCarrier, weedMixLines, withGallonsArea,
+  capGallonsArea, cappedNote, carrierOf, gallonsBodyFields, gallonsTooLarge, gallonsToArea, maxGallons, lawnCapOf, mixHelpOf, mixLine, rememberTank, rememberedTank, weedCarrier, weedMixLines, withGallonsArea,
 } from './lawn-mix-help';
 
 const dose = (text, coversSqft = 1000) => ({ text, coversSqft });
@@ -115,5 +117,68 @@ describe('gallons sprayed', () => {
     expect(weedCarrier({ ...HELP, rows: { ...HELP.rows, bbb: entry({ carrierGalPer1000: 2 }) } }, rows)).toBeNull();
     expect(weedCarrier({ ...HELP, rows: { ...HELP.rows, bbb: entry({ carrierGalPer1000: null }) } }, rows)).toBeNull();
     expect(carrierOf(HELP, 'ccc')).toBeNull();
+  });
+});
+
+describe('the gallons preview is held to the lawn (as /complete records it)', () => {
+  const spot = { productId: 'AAA', spotRule: true, spotGallons: '4', spotArea: null };
+  const weed = { productId: 'BBB', spotRule: true, weedGroup: true };
+
+  test('the cap order is the server\'s: the visit area, then the plan\'s lawn size, else none', () => {
+    expect(lawnCapOf({ planLawnSqft: 3000 }, 1900.4)).toEqual({ sqft: 1900, source: 'visit_area' });
+    expect(lawnCapOf({ planLawnSqft: 2600.6 }, null)).toEqual({ sqft: 2601, source: 'plan' });
+    expect(lawnCapOf({ planLawnSqft: 2600 }, 0)).toEqual({ sqft: 2600, source: 'plan' });
+    expect(lawnCapOf({}, null)).toBeNull();
+    expect(lawnCapOf(null, undefined)).toBeNull();
+    expect(lawnCapOf({ planLawnSqft: 'x' }, 'x')).toBeNull();
+  });
+
+  test('mixHelpOf keeps the plan\'s lawn size only when positive', () => {
+    const block = { v: 1, tanks: [1, 2], rows: {} };
+    expect(mixHelpOf({ plannedProducts: { mixHelp: { ...block, planLawnSqft: 1900 } } }).planLawnSqft).toBe(1900);
+    expect(mixHelpOf({ plannedProducts: { mixHelp: block } }).planLawnSqft).toBeNull();
+    expect(mixHelpOf({ plannedProducts: { mixHelp: { ...block, planLawnSqft: -5 } } }).planLawnSqft).toBeNull();
+  });
+
+  test('capGallonsArea mirrors the server: capped only when strictly larger than the lawn', () => {
+    expect(capGallonsArea(4000, { sqft: 1900 })).toEqual({ area: 1900, capped: true, uncapped: 4000 });
+    expect(capGallonsArea(1900, { sqft: 1900 })).toEqual({ area: 1900, capped: false, uncapped: 1900 });
+    expect(capGallonsArea(1000, { sqft: 1900 })).toMatchObject({ area: 1000, capped: false });
+    expect(capGallonsArea(4000, null)).toEqual({ area: 4000, capped: false, uncapped: 4000 });
+    expect(capGallonsArea(null, { sqft: 1900 })).toEqual({ area: null, capped: false, uncapped: null });
+    expect(cappedNote({ sqft: 1900 })).toBe("Capped at the lawn's 1,900 sq ft.");
+    expect(cappedNote({ sqft: 12000 })).toBe("Capped at the lawn's 12,000 sq ft.");
+  });
+
+  test('capped by the visit area (4 gal at 1 gal per 1,000 = 4,000 sq ft on a 1,900 sq ft lawn)', () => {
+    const lawn = lawnCapOf(HELP, 1900);
+    expect(withGallonsArea(spot, { help: HELP, weedGallons: '', lawn })).toMatchObject({ spotArea: 1900, spotFigureArea: 4000, areaFromGallons: 4 });
+    expect(withGallonsArea(weed, { help: HELP, weedGallons: '4', lawn })).toMatchObject({ spotArea: 1900, areaFromGallons: 4 });
+  });
+
+  test('capped by the plan\'s lawn size when the sheet has no visit area', () => {
+    const lawn = lawnCapOf({ ...HELP, planLawnSqft: 2500 }, null);
+    expect(withGallonsArea(spot, { help: HELP, weedGallons: '', lawn })).toMatchObject({ spotArea: 2500, areaFromGallons: 4 });
+  });
+
+  test('a smaller figure and an unknown lawn show the figure itself (as before)', () => {
+    expect(withGallonsArea({ ...spot, spotGallons: '1' }, { help: HELP, weedGallons: '', lawn: lawnCapOf(HELP, 1900) })).toMatchObject({ spotArea: 1000 });
+    expect(withGallonsArea({ ...spot, spotGallons: '1' }, { help: HELP, weedGallons: '', lawn: lawnCapOf(HELP, 1900) })).not.toHaveProperty('spotFigureArea');
+    expect(withGallonsArea(spot, { help: HELP, weedGallons: '', lawn: lawnCapOf(HELP, null) })).toMatchObject({ spotArea: 4000, areaFromGallons: 4 });
+    expect(withGallonsArea(spot, { help: HELP, weedGallons: '' })).toMatchObject({ spotArea: 4000 });
+  });
+
+  test('source pin: the conversion and the cap are the server\'s, character for character', () => {
+    const server = readFileSync(new NodeURL('../../../server/services/lawn-mix-help.js', import.meta.url), 'utf8');
+    const client = readFileSync(new NodeURL('./lawn-mix-help.js', import.meta.url), 'utf8');
+    for (const line of ['const area = Math.round((gal * 1000) / per);', 'return Number.isFinite(area) ? Math.max(1, area) : null;']) {
+      expect(server).toContain(line);
+      expect(client).toContain(line);
+    }
+    // The server caps when the derived area is strictly larger than the lawn, in the order visit area, plan, whole-lawn row.
+    expect(server).toContain('const capped = lawn && area > lawn.sqft;');
+    expect(client).toContain('const capped = !!lawn && area > lawn.sqft;');
+    expect(server).toMatch(/if \(positive\(serviceSqft\)\) return \{ sqft: Math\.round\(serviceSqft\), source: 'visit_area' \};\s+if \(planLawnSqft\) return \{ sqft: Math\.round\(planLawnSqft\), source: 'plan' \};/);
+    expect(client).toMatch(/if \(positive\(visitSqft\)\) return \{ sqft: Math\.round\(visitSqft\), source: 'visit_area' \};\s+if \(positive\(help\?\.planLawnSqft\)\) return \{ sqft: Math\.round\(help\.planLawnSqft\), source: 'plan' \};/);
   });
 });

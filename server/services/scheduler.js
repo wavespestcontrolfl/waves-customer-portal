@@ -2172,7 +2172,24 @@ function initScheduledJobs() {
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
-    if (!require('./callback-cards').enabled()) return;
+    if (!require('./callback-cards').enabled()) {
+      // Cards off: the callback-spam reconcile keeps its five-minute cadence
+      // on its own, gate or no gate (the reconciler itself gates only the
+      // forward settlements; its correction half runs through a rollback), so
+      // a lost settlement or correction never waits for the daily sweep.
+      const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+      const t0 = Date.now();
+      const lockRes = await runExclusive('callback-verdict-reconcile', () => require('./call-recording-processor').reconcileCorrectedCallbackVerdicts())
+        .catch((err) => { logger.warn(`[callback-verdict-reconcile] tick failed: ${err.message}`); return null; });
+      // runExclusive resolves { skipped, reason } instead of throwing: a
+      // no_connection skip is a missed run and is recorded as a failed job,
+      // like the adjacent ticks; a held lease is another pod's run.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordJobStart('callback-verdict-reconcile').catch(() => {});
+        await recordJobEnd('callback-verdict-reconcile', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+      }
+      return;
+    }
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
       const result = await runCallCommitmentsWatchdog();

@@ -346,6 +346,8 @@ const SCOPE_SNAPSHOT = {
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
     // accept_estimate carries estimate_id + customer_id (validateRecordTarget binds the estimate to that customer).
     'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate',
+    // create_customer_link carries customer_id: the link is that customer's own.
+    'create_customer_link',
     // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).
     'send_invoice',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
@@ -353,7 +355,7 @@ const SCOPE_SNAPSHOT = {
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.
     'reprice_future_visits',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
-    'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'submit_review_reply',
+    'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'remove_customer_property', 'submit_review_reply',
     'switch_appointment_property', 'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer',
     'update_customer_property', 'update_lead_contact', 'update_lead_status', 'update_property_access',
     // delete_duplicate_customer carries customer_id directly (the empty duplicate record).
@@ -456,4 +458,23 @@ test('every tool with a non-none scope is a PII tool, every reviewed PII tool is
   }
   expect(validScope({ kind: 'read', scope: 'route_wide' })).toBe(false);
   expect(validScope({ kind: 'external_action', scope: 'broad' })).toBe(false);
+});
+
+// Owner IB history 10-12: on the dashboard the bar searched the "schedule"
+// domain for a booking tool, got only schedule-domain tools back and told the
+// operator it could not book. Booking is filed under "customers".
+test('a domain is a ranking hint, so a schedule search still finds the booking tool', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  const found = registry.discover({ query: 'create a new appointment', domain: 'schedule' }, scope);
+  expect(found.result.capabilities.map(c => c.id)).toContain('create_appointment');
+  expect(found.definitions.some(tool => tool.name === 'create_appointment')).toBe(true);
+  // An unknown domain no longer hides every match.
+  expect(registry.discover({ query: 'create a new appointment', domain: 'scheduling' }, scope)
+    .result.capabilities.map(c => c.id)).toContain('create_appointment');
+});
+
+test('a tool in the named domain outranks an equal match from another domain', () => {
+  const scope = { role: 'admin', context: 'dashboard' };
+  const ids = registry.discover({ query: 'switch appointment property', domain: 'schedule' }, scope).result.capabilities.map(c => c.id);
+  expect(ids[0]).toBe('switch_appointment_property');
 });

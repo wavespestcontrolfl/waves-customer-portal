@@ -1,5 +1,5 @@
 /**
- * Lawn report LEAD (lawn report rebuild P7, GATE_LAWN_REPORT_LEAD).
+ * Lawn report LEAD (lawn report rebuild P7).
  *
  * The above-the-fold block of the web report: state, why, what was
  * applied, the homeowner's part this week and the next visit, in one place so
@@ -25,7 +25,7 @@
  * handed in. The key exists only when there is something to say, so a lead
  * without it is byte-identical to the lead before the field existed.
  *
- * `whatToExpect` and `watching` (GATE_LAWN_REPORT_COPY_V6) are not read off the
+ * `whatToExpect` and `watching` (the v6 copy) are not read off the
  * payload either: the v6 copy (lawn-copy-v6.js) builds them as fixed sentences in
  * report-data.js and hands them in. Its `headline`
  * takes the headline's place when present; its `whatWeDid` is the ONLY applied
@@ -49,7 +49,7 @@ const LEAD_WORD_BUDGET = 250;
 // generated treatment narrative can run to 1,200 characters (codex P2 #5496
 // r4); what was applied is still listed in full under "What Waves did today"
 // and Products Applied further down, so it goes last of the three.
-// Writer fields (GATE_LAWN_REPORT_COPY_V6): `watching` goes right after why
+// Writer fields (the v6 copy): `watching` goes right after why
 // (optional, and the top finding card carries the same concern), and
 // `whatToExpect` after applied, since it is the only place an approved
 // expectation sentence appears. "Since your last visit" goes last of all: it

@@ -24,6 +24,8 @@ const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
 const mockSendSmsProposalRefusal = jest.fn(async () => null);
+const mockSendEmailReplyProposalRefusal = jest.fn(async () => null);
+const mockReplyViaSmsProposalRefusal = jest.fn(async () => null);
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
@@ -112,7 +114,11 @@ jest.mock('../services/intelligence-bar/leads-tools', () => ({
   previewBulkLeadUpdate: (...args) => mockPreviewBulkLeadUpdate(...args),
   BULK_LEAD_UPDATE_CAP: 500,
 }));
-jest.mock('../services/intelligence-bar/email-tools', () => ({ EMAIL_TOOLS: [], executeEmailTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/email-tools', () => ({
+  EMAIL_TOOLS: [], executeEmailTool: jest.fn(),
+  sendEmailReplyProposalRefusal: (...args) => mockSendEmailReplyProposalRefusal(...args),
+  replyViaSmsProposalRefusal: (...args) => mockReplyViaSmsProposalRefusal(...args),
+}));
 jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS: [], executeEstimateTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/banking-tools', () => ({
   BANKING_TOOLS: [], BANKING_QUERY_TOOLS: [], executeBankingTool: jest.fn(),
@@ -957,6 +963,50 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('send_email_reply with a portal link in the body: no card, the refusal goes back to the model; a clean body still gets its card', async () => {
+    mockSendEmailReplyProposalRefusal.mockResolvedValueOnce({
+      success: false, error: 'An email reply cannot carry a portal link', blocked: true, code: 'customer_link_composer_only',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_email_reply', input: { email_id: 'synthetic-email', body: 'Receipt: portal.wavespestcontrol.com/receipt/AbCdEfGhIjKlMnOpQrSt' } }],
+      [{ type: 'text', text: 'I cannot put a portal link in an email.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'email them the receipt', context: 'comms' });
+      expect(mockSendEmailReplyProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ email_id: 'synthetic-email', body: expect.stringContaining('/receipt/') }));
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    });
+  });
+
+  test('reply_via_sms with a customer link the send would refuse: no card, nothing pinned, the refusal goes back to the model', async () => {
+    mockReplyViaSmsProposalRefusal.mockResolvedValueOnce({
+      success: false, error: 'This text carries a customer link the Communications composer must send', blocked: true, code: 'customer_link_composer_only',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'reply_via_sms', input: { customer_name: 'Alpha', message: 'Prep: portal.wavespestcontrol.com/prep/abc' } }],
+      [{ type: 'text', text: 'That link has to go from the composer.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text Alpha the prep guide', context: 'comms' });
+      // Asked with the proposal's own params, before the recipient is resolved and pinned.
+      expect(mockReplyViaSmsProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ customer_name: 'Alpha', message: expect.stringContaining('/prep/') }));
+      expect(mockResolveCommsCustomer).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    });
+  });
+
   test('create_appointment by tech name: pinned technician_id in stored params, tech NAME on the card', async () => {
     mockResolveTechnician.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
     scriptModelTurns([
@@ -1176,6 +1226,26 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.price).toBe('$180.00 (price you gave) — invoiced when the visit is completed');
+    });
+  });
+
+  test('create_appointment with a close service name: the card and the stored call carry the exact catalog name the proposal resolved', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 125, source: 'stated', serviceId: 'svc-slab', serviceName: 'Slab Pre-Treat Termite Service', bookedServiceType: 'Slab Pre-Treat Termite Service',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'a pre-slab termite treatment', price: 125 } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a pre-slab termite treatment for $125', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'a pre-slab termite treatment', 125, undefined, undefined);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.service_type).toBe('Slab Pre-Treat Termite Service');
+      expect(stored.params._booking_service_id).toBe('svc-slab');
+      expect(body.pendingActions[0].params.service).toBe('Slab Pre-Treat Termite Service');
     });
   });
 

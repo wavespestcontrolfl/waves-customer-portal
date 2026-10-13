@@ -161,6 +161,17 @@ describe('contextBlock', () => {
     expect(await help.contextBlock({ loaded, weed, chinch, month: 10, knex: {}, ...r })).toEqual({});
   });
 
+  test('the plan\'s lawn size rides on the block (for the sheet\'s gallons preview cap) only when known', async () => {
+    const withSize = { ...loaded, plan: { ...loaded.plan, mixCalculator: { lawnSqft: 1900.4 } } };
+    const out = await help.contextBlock({ loaded: withSize, weed, chinch, month: 10, knex: {}, isLive: () => true, ...readers() });
+    expect(out.mixHelp.planLawnSqft).toBe(1900);
+    for (const lawnSqft of [null, 0, undefined]) {
+      const none = await help.contextBlock({ loaded: { ...loaded, plan: { ...loaded.plan, mixCalculator: { lawnSqft } } }, weed, chinch, month: 10, knex: {}, isLive: () => true, ...readers() });
+      expect(none.mixHelp).not.toHaveProperty('planLawnSqft');
+    }
+    expect((await help.contextBlock({ loaded, weed, chinch, month: 10, knex: {}, isLive: () => true, ...readers() })).mixHelp).not.toHaveProperty('planLawnSqft');
+  });
+
   test('the gate reader needs the spot rules and the v13 program too', () => {
     const featureGates = require('../config/feature-gates');
     process.env.GATE_LAWN_MIX_HELP = 'true';

@@ -5,6 +5,9 @@
 // produces for each shape while the guards that must stay closed still hold.
 // All names, numbers and addresses are synthetic.
 const { buildExtractionPrompt, PROMPT_VERSION, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const {
+  bareTimeNoDayRule, MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE,
+} = require('../services/prompts/appointment-confirmed-rules');
 const { canAutoRoute } = require('../services/call-triage-flags');
 const { callTimeETString } = require('../services/call-recording-processor')._test;
 
@@ -26,6 +29,16 @@ describe('version stamp', () => {
   test('prompt v22 is a new cohort', () => {
     expect(PROMPT_VERSION).toBe('v31');
     expect(PROMPT_HASH).toMatch(/^v31-[a-f0-9]{12}$/);
+  });
+});
+
+describe('shared confirmation rules (also graded by the call self-audit)', () => {
+  test('the V2 prompt renders each shared rule verbatim, bare-time rule with its own date reference', () => {
+    expect(PROMPT).toContain(bareTimeNoDayRule('2026-10-05'));
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(PROMPT).toContain(rule);
+    const { system } = require('../services/prompts/call-extraction-v1').buildExtractionPromptParts('Agent: hi', '+19415550100', '2026-10-05', { callTimeET: '1:12 PM' });
+    expect(system).toContain(bareTimeNoDayRule('the "Call date in Eastern Time" given in the user message'));
+    for (const rule of [MISSING_AMPM_RULE, STAFF_HEDGE_RULE, CALLER_PROPOSED_TIME_RULE]) expect(system).toContain(rule);
   });
 });
 

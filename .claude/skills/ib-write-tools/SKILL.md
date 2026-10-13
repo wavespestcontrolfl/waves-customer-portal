@@ -11,7 +11,9 @@ never executes from the model loop. The flow is:
 
 1. The tool call returns a **preview** (no side effects).
 2. The route persists a pending action in `ib_pending_actions`
-   (actor-bound, 10-minute expiry, payload hash, single-use).
+   (actor-bound, payload hash, single-use). The card stays open 10 minutes,
+   except for the pinned internal-edit allowlist, which stays open 60 (see
+   "Card life" below).
 3. The client renders a Confirm/Cancel card (`PendingActionsCard`).
 4. Only the operator's click commits, via `/confirm-action` — never a model
    tool; the pending id is never model-visible.
@@ -39,6 +41,22 @@ gets its card. (2) Notes — an `update_customer` `notes` edit replaces
 read (`preview.notes_replaced`, contract `pinned_notes_replaced`, the card says
 what it deletes) and `executesWithoutCard` runs it direct only over empty notes.
 
+## Card life (owner 2026-10-12)
+
+A confirm card stays open **10 minutes** (`TTL_MINUTES`), except the tools in
+`LONG_TTL_TOOL_NAMES` (`server/services/intelligence-bar/pending-actions.js`,
+`ttlMinutesFor(tool)`), which stay open **60 minutes**. The short life is not
+what makes a commit safe; the commit re-checks (live preview fingerprint, pinned
+version or pinned values). The 60-minute list is the pinned internal-edit
+allowlist only: each tool re-checks at Confirm and sends nothing to a customer,
+moves no money and deletes nothing. The exact list is frozen by a snapshot test,
+`server/tests/intelligence-bar-pending-actions.test.js` ("the 60-minute class is
+exactly the reviewed list"). Everything else stays at 10 minutes: customer
+messages, money, deletes and merges, bookings and schedule moves,
+outside-service writes, and any write with no commit-time pin. Adding a tool to
+the long list requires a commit-time pin that refuses on drift (name it in the
+comment above `LONG_TTL_TOOL_NAMES`) and an update to that snapshot test.
+
 ## Adding a new write tool — checklist
 
 1. Implement the tool in the context module
@@ -55,3 +73,6 @@ what it deletes) and `executesWithoutCard` runs it direct only over empty notes.
    (recipient, amount, date — no hidden fields).
 5. Tech-portal contexts stay read-only. Never add a write tool to
    `tech-tools`.
+6. Card life defaults to 10 minutes. Add the tool to `LONG_TTL_TOOL_NAMES` only
+   if its commit re-checks a pin and it is not a message, money, delete,
+   merge, booking or outside-service write (see "Card life").

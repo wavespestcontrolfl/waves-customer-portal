@@ -18,6 +18,8 @@ const { applyAssignable, assertAssignableTechnician } = require('../technician-e
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { isReService } = require('../re-service');
+const { MAX_RESULTS: MAX_NAME_MATCHES, isNameLikeSearch, rankNameMatches } = require('./name-match');
+const { resolveCloseCatalogService } = require('./booking-service-match');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -71,7 +73,8 @@ Use for: "what do we know about large patch on zoysia", "how has K-Flow performe
     name: 'query_customers',
     description: `Search/filter the customer database. Returns matching customers with key fields.
 Use for: finding customers by attribute, missing data, filtering by city/tier/stage/tags/service type.
-Supports SQL-like conditions via the filters parameter.`,
+Supports SQL-like conditions via the filters parameter.
+When a name search (no digits) finds nothing exact on the first page, it falls back to at most 5 sound-alike / close-spelling matches, honoring limit and never offset (result has approximate: true, rows show company_name); offer those with offer_choices and confirm with the operator before acting on one.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -319,7 +322,8 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+service_type is a catalog name, but the words the user says also work ("pre-slab termite treatment"): one close catalog service books as that service, and when several are close the tool lists them, so ask the user which and propose again with the exact name. A service that is not in the catalog cannot be booked.
+price: the visit price in dollars when the user states one; it rides the resolved catalog service, quote-required services included. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -449,7 +453,7 @@ async function queryCustomers(input, readCustomerIds = []) {
 
   let query = db('customers')
     .select(
-      'customers.id', 'customers.first_name', 'customers.last_name',
+      'customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name',
       'customers.email', 'customers.phone', 'customers.city', 'customers.state', 'customers.zip',
       'customers.address_line1', 'customers.waveguard_tier', 'customers.pipeline_stage',
       'customers.monthly_rate', 'customers.lifetime_revenue', 'customers.lead_score',
@@ -468,6 +472,41 @@ async function queryCustomers(input, readCustomerIds = []) {
   const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));
   if (unsupported.length) return { error: `Unsupported customer filters: ${unsupported.join(', ')}` };
 
+  query = applyCustomerFilters(query, filters);
+
+  // Inside a customer-scoped task every customer list — searched, filtered or
+  // bare — may only return that customer; a genuinely unscoped request
+  // arrives with an empty scope and stays broad.
+  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
+  const unsearched = query.clone(); // filters + scope, no text search
+  if (search) query = applyCustomerSearch(query, search);
+
+  // Sort
+  const sortMap = {
+    name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
+    lead_score: 'lead_score', health_score: 'health_score',
+    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
+  };
+  const sortCol = sortMap[sort_by] || 'last_name';
+  query = query.orderBy(sortCol, sort_dir);
+
+  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
+  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
+  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
+
+  const result = {
+    customers: customers.map(customerListRow),
+    total_matching: Number(matched.count),
+    returned_count: customers.length,
+    has_more: offset + customers.length < Number(matched.count),
+    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
+    total_customers: parseInt(total.count),
+  };
+  return Number(matched.count) === 0 ? await withApproximateCustomers(result, unsearched, { search, limit, offset }) : result;
+}
+
+// Every non-search filter of query_customers, in one place.
+function applyCustomerFilters(query, filters) {
   // Table-driven exact filters keep the public names and DB columns aligned.
   for (const [key, column] of Object.entries({ state: 'state', zip: 'zip', stage: 'pipeline_stage', lead_source: 'lead_source', active: 'active' })) {
     if (filters[key] != null) query = query.where(column, filters[key]);
@@ -504,66 +543,78 @@ async function queryCustomers(input, readCustomerIds = []) {
         .whereILike('service_type', `%${filters.service_type}%`);
     });
   }
+  return query;
+}
 
-  // Free text search
-  // Inside a customer-scoped task every customer list — searched, filtered or
-  // bare — may only return that customer; a genuinely unscoped request
-  // arrives with an empty scope and stays broad.
-  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
-  if (search) {
-    const s = `%${search}%`;
-    query = query.where(function () {
-      this.whereILike('first_name', s).orWhereILike('last_name', s)
-        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
-        .orWhereILike('phone', s).orWhereILike('email', s)
-        .orWhereILike('address_line1', s).orWhereILike('city', s)
-        .orWhereILike('company_name', s);
-    });
-  }
+function applyCustomerSearch(query, search) {
+  const s = `%${search}%`;
+  return query.where(function () {
+    this.whereILike('first_name', s).orWhereILike('last_name', s)
+      .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
+      .orWhereILike('phone', s).orWhereILike('email', s)
+      .orWhereILike('address_line1', s).orWhereILike('city', s)
+      .orWhereILike('company_name', s);
+  });
+}
 
-  // Sort
-  const sortMap = {
-    name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
-    lead_score: 'lead_score', health_score: 'health_score',
-    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
-  };
-  const sortCol = sortMap[sort_by] || 'last_name';
-  query = query.orderBy(sortCol, sort_dir);
-
-  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
-  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
-  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
-
+function customerListRow(c) {
   return {
-    customers: customers.map(c => ({
-      id: c.id,
-      name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
-      first_name: c.first_name,
-      last_name: c.last_name,
-      email: c.email || null,
-      phone: c.phone || null,
-      city: c.city || null,
-      state: c.state || null,
-      zip: c.zip || null,
-      address: c.address_line1 || null,
-      tier: c.waveguard_tier || null,
-      stage: c.pipeline_stage,
-      monthly_rate: parseFloat(c.monthly_rate || 0),
-      lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
-      lead_score: c.lead_score,
-      health_score: c.health_score ? parseInt(c.health_score) : null,
-      active: c.active,
-      member_since: c.member_since,
-      last_service_date: c.last_service_date,
-      next_service_date: c.next_service_date,
-      last_contact_date: c.last_contact_date,
-      lead_source: c.lead_source,
-    })),
-    total_matching: Number(matched.count),
+    id: c.id,
+    name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+    first_name: c.first_name,
+    last_name: c.last_name,
+    company_name: c.company_name || null,
+    email: c.email || null,
+    phone: c.phone || null,
+    city: c.city || null,
+    state: c.state || null,
+    zip: c.zip || null,
+    address: c.address_line1 || null,
+    tier: c.waveguard_tier || null,
+    stage: c.pipeline_stage,
+    monthly_rate: parseFloat(c.monthly_rate || 0),
+    lifetime_revenue: parseFloat(c.lifetime_revenue || 0),
+    lead_score: c.lead_score,
+    health_score: c.health_score ? parseInt(c.health_score) : null,
+    active: c.active,
+    member_since: c.member_since,
+    last_service_date: c.last_service_date,
+    next_service_date: c.next_service_date,
+    last_contact_date: c.last_contact_date,
+    lead_source: c.lead_source,
+  };
+}
+
+const APPROXIMATE_CUSTOMER_NOTE = 'No customer matched that search exactly. These are sound-alike / close-spelling matches, best first, and may be the wrong people. Show them to the operator with offer_choices and get a confirmed pick before any write or send.';
+// Name columns only, so 20,000 rows stay a light read; a larger book is
+// scanned in id order and the fallback is best-effort past the cap.
+const APPROXIMATE_CANDIDATE_CAP = 20000;
+
+// Rescue path for a dictated, misspelled name. `unsearched` is the main query
+// with its filters and customer scope but no text search. Contract: only the
+// first page (offset 0) gets a fallback, capped at min(limit, 5) rows, so
+// has_more is false and there is no page 2 of guesses. Ranks the candidates by
+// sound and spelling in Node, then reads the best few with the main query's
+// columns. Returns `result` unchanged when nothing is close.
+async function withApproximateCustomers(result, unsearched, { search, limit, offset }) {
+  if (offset > 0 || !search || !isNameLikeSearch(search)) return result;
+  const candidates = await unsearched.clone().clearSelect().clearOrder()
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name')
+    .orderBy('customers.id').limit(APPROXIMATE_CANDIDATE_CAP);
+  const ranked = rankNameMatches(search, candidates, { limit: Math.min(limit, MAX_NAME_MATCHES) });
+  if (!ranked.length) return result;
+  const rows = await unsearched.clone().whereIn('customers.id', ranked.map(r => r.id));
+  const rank = new Map(ranked.map((r, i) => [r.id, i]));
+  const customers = rows.sort((a, b) => rank.get(a.id) - rank.get(b.id)).map(customerListRow);
+  return {
+    ...result,
+    approximate: true,
+    note: APPROXIMATE_CUSTOMER_NOTE,
+    customers,
+    total_matching: customers.length,
     returned_count: customers.length,
-    has_more: offset + customers.length < Number(matched.count),
-    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
-    total_customers: parseInt(total.count),
+    has_more: false,
+    next_offset: null,
   };
 }
 
@@ -3007,24 +3058,47 @@ function resolveBookingCatalogRow(services, serviceType) {
   return { row: null };
 }
 
+// The exact resolver above first; only when it finds nothing, a close or
+// colloquial name ("a pre-slab termite treatment") resolves to ONE catalog
+// service, or to several (returned as `ambiguous`, so the bar asks the owner
+// which). A close match is marked on the row it returns (closeMatch) so the
+// caller books the exact catalog name. Free visit types stay exact-only.
+function resolveBookingCatalogRowWithClose(services, serviceType) {
+  const exact = resolveBookingCatalogRow(services, serviceType);
+  if (exact.row || exact.ambiguous || isAlwaysFreeServiceType(serviceType)) return exact;
+  const close = resolveCloseCatalogService(services, serviceType);
+  if (close.candidates) return { ambiguous: close.candidates };
+  return close.row ? { row: { ...close.row, closeMatch: true } } : exact;
+}
+
+// The service_type to store and show: the catalog name when the operator's
+// wording was only a close match, else the wording as given.
+function bookedServiceTypeFor(booking, serviceType) {
+  return booking?.catalogRow?.closeMatch ? booking.catalogRow.name : serviceType;
+}
+
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
   const services = await conn('services').where({ is_active: true })
-    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
-  const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'frequency');
+  const match = resolveBookingCatalogRowWithClose(Array.isArray(services) ? services : [], serviceType);
   if (match.ambiguous) {
     const names = match.ambiguous.map((r) => r.name).join(', ');
     return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
   }
   const catalogRow = match.row;
+  // Every classification below reads the RESOLVED catalog name (a close phrase
+  // like "trap follow" is the free "Rodent Trapping Follow-Up Visit"), so the
+  // proposal, the executor and the locked recheck all see the same service.
+  const bookedType = bookedServiceTypeFor({ catalogRow }, serviceType);
   // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
   // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
   if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
     return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
   }
   const stated = statedPrice !== undefined && statedPrice !== null;
-  if (isAlwaysFreeServiceType(serviceType)) {
+  if (isAlwaysFreeServiceType(bookedType)) {
     if (stated) {
-      return { error: `"${serviceType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
+      return { error: `"${bookedType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
     }
     return { price: null, source: null, catalogRow, pricing: null };
   }
@@ -3112,7 +3186,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     : false;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
-    serviceType,
+    serviceType: bookedType,
     serviceId: catalogRow.id,
     primaryLinePrice: stated ? statedPrice : catalogDefault,
     ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.row.id } } : {}),
@@ -3256,7 +3330,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
   if (booking.error) return { error: booking.error };
-  const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
+  const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
   if (request?.error) return { error: request.error };
@@ -3267,7 +3341,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   let catalogPrice = null;
   if (booking.source === 'stated') {
     try {
-      const catalog = await ibBookingPricing({ customer, serviceType });
+      const catalog = await ibBookingPricing({ customer, serviceType: bookedServiceTypeFor(booking, serviceType) });
       if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
     } catch (err) {
       logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
@@ -3279,6 +3353,9 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
     catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
+    // What the visit is booked as: the exact catalog name when the operator's
+    // words were a close match (the route pins it into the call).
+    bookedServiceType: bookedServiceTypeFor(booking, serviceType),
     // The reason exactly as the insert will save it (trimmed, capped), so
     // the card shows the saved words; null when none was given.
     customerRequest: request?.text || null,
@@ -3398,7 +3475,9 @@ function ibBookingWindowRefusal(timeWindow) {
 }
 
 async function createAppointment(input, actionContext = {}) {
-  const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
+  const { customer_id, scheduled_date, technician_name, time_window, notes } = input;
+  // Reassigned once the catalog resolves a close name to its exact one.
+  let { service_type } = input;
 
   const dateStr = validScheduleDate(scheduled_date);
   if (!dateStr) {
@@ -3431,14 +3510,6 @@ async function createAppointment(input, actionContext = {}) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
-  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
-  // already on that plan — the shared admin write gate (codex r13 on #4786).
-  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
-    customerId: customer_id, serviceTypes: [service_type],
-  });
-  if (notHeldRetired.length) {
-    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
-  }
   // Same live-customer bar as update_customer (GH r9 P1): a profile
   // merged/soft-deleted while the card was pending must not receive a new
   // appointment after its records were repointed.
@@ -3452,6 +3523,17 @@ async function createAppointment(input, actionContext = {}) {
   // (never proposed through a card) may only book unpriced.
   const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
   if (booking.error) return { error: booking.error };
+  // A close or colloquial name books as the exact catalog name it resolved to.
+  service_type = bookedServiceTypeFor(booking, service_type);
+  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
+  // already on that plan — the shared admin write gate (codex r13 on #4786).
+  // Asked on the resolved name, so a close name cannot slip past it.
+  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
+    customerId: customer_id, serviceTypes: [service_type],
+  });
+  if (notHeldRetired.length) {
+    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
+  }
   const approvedPrice = input._booking_price === undefined ? null : input._booking_price;
   const approvedServiceId = input._booking_service_id === undefined
     ? (booking.catalogRow?.id || null) : input._booking_service_id;

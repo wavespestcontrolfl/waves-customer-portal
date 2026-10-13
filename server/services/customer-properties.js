@@ -951,15 +951,19 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
       preview = { ...base, property: { id: target.id, address: propertyAddressLabel(target) },
         before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
         effects: 'Updates only this saved property’s label, relationship or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
-    } else if (kind === 'primary') {
-      preview = { ...base, ...await previewPrimaryPropertyChange(conn, customerId, target, primary, customer) };
+    } else if (TARGET_PREVIEWS[kind]) {
+      preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer, properties) };
     } else throw propertyActionError('Unknown property operation');
   }
-  preview._version = require('crypto').createHash('sha256').update(JSON.stringify([
-    kind, customerId, propertyId, changes, customer.row_version,
+  preview._version = manualPropertyPreviewVersion([kind, customerId, propertyId, changes], customer, properties, preview);
+  return preview;
+}
+
+function manualPropertyPreviewVersion(action, customer, properties, preview) {
+  return require('crypto').createHash('sha256').update(JSON.stringify([
+    ...action, customer.row_version,
     properties.map(p => [p.id, p.row_version]), preview._invoice_ids || [],
   ])).digest('hex');
-  return preview;
 }
 
 // Relationships that record the property as something other than the home
@@ -1019,6 +1023,166 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
     ] };
 }
 
+// True when a free-standing address (an unlinked visit's stamp, or an
+// estimate's parsed quoted address) can name this property. Partial addresses
+// are legal (street only, or missing city / ZIP), so a missing component is a
+// wildcard and only a present, different one rules the address out: the
+// removal check fails closed on anything that could be this address.
+function addressCanNameProperty(rawAddress, rawTarget) {
+  // Unit-first lines ("Unit 4, 100 Beach Rd") are a supported legacy form
+  // (estimate-property-linkage parseEstimateAddress splits it the same way):
+  // the unit moves to line 2 on both sides before anything is compared.
+  const unitFirst = (record) => {
+    const lead = String(record.address_line1 || '').match(/^((?:unit|apt|apartment|suite|ste|#)\.?\s*[\w-]+)\s*,?\s+(\d.*)$/i);
+    return lead ? { ...record, address_line1: lead[2].trim(), address_line2: record.address_line2 || lead[1].trim() } : record;
+  };
+  const [address, target] = [unitFirst(rawAddress), unitFirst(rawTarget)];
+  // The property SCOPE street (estimate-property-linkage normalizedStampedStreet):
+  // suffixes AND directionals canonical ("Dr E" == "Drive East"), unit stripped.
+  const scopeStreet = line => canonicalizeScopeAddress(stripTrailingUnit(line)).replace(/[^a-z0-9]/g, '');
+  const [street, targetStreet] = [scopeStreet(address.address_line1), scopeStreet(target.address_line1)];
+  if (!street || !targetStreet) return false;
+  const [zip, targetZip] = [normalizeZip(address.zip), normalizeZip(target.zip)];
+  // An unparsed one-line address keeps its locality inside the street text.
+  const unparsed = street !== targetStreet && !address.city && !zip && street.startsWith(targetStreet);
+  if (street !== targetStreet && !unparsed) return false;
+  // A missing unit is a wildcard; a present, different unit is another
+  // address. An unparsed line's trailing text is locality, so its unit is
+  // the designator found inside the line ("100 Main St Apt 5 Sarasota FL").
+  const unitOf = (line1, line2) => unitKey(line2) || streetEmbeddedUnitKey(line1);
+  const differs = (a, b) => !!a && !!b && a !== b;
+  const inlineUnit = line => unitKey((String(line || '').match(/\s(?:apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+/i) || [''])[0]);
+  const unit = unparsed ? (unitKey(address.address_line2) || inlineUnit(address.address_line1)) : unitOf(address.address_line1, address.address_line2);
+  if (differs(unit, unitOf(target.address_line1, target.address_line2))) return false;
+  // ZIP first, like addressKey: mailing-city aliases (Bradenton / Lakewood
+  // Ranch) name one address, so cities are compared only without two ZIPs.
+  if (zip && targetZip) return zip === targetZip;
+  return !differs(normStreet(address.city), normStreet(target.city));
+}
+
+const VISIT_POINTER_COLUMNS = ['id', 'property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip'];
+
+// Open rows that still depend on a saved property. Every estimate and every
+// unsettled visit of the customer is read, and a row depends on the property
+// when its property link or its own address names it, or (a visit with no
+// location of its own) its source estimate does. A row linked to another
+// property but carrying this address still counts.
+async function propertyRemovalDependents(conn, customerId, target) {
+  // 'rescheduled' is settled history once its date has passed (the cancel
+  // and recreate pattern leaves such rows behind). A row dated today or
+  // later is still outstanding: a customer reschedule request parks the
+  // visit in that status with no replacement visit yet (routes/schedule.js).
+  const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
+  const today = require('../utils/datetime-et').etDateString(new Date());
+  const { TERMINAL_ESTIMATE_STATUSES } = require('../utils/estimate-claim-sql');
+  const { parseEstimateAddress } = require('./estimate-property-linkage');
+  const estimates = await conn('estimates').where({ customer_id: customerId })
+    .orderBy('id').select('id', 'status', 'archived_at', 'property_id', 'address');
+  const quotesTarget = estimate => {
+    const quoted = estimate.property_id === target.id ? null : parseEstimateAddress(estimate.address);
+    return estimate.property_id === target.id || (!!quoted && addressCanNameProperty(quoted, target));
+  };
+  const targetEstimateIds = new Set(estimates.filter(quotesTarget).map(estimate => estimate.id));
+  const openEstimates = estimates.filter(estimate => targetEstimateIds.has(estimate.id)
+    && !estimate.archived_at && !TERMINAL_ESTIMATE_STATUSES.includes(estimate.status));
+  const visits = await conn('scheduled_services').where({ customer_id: customerId })
+    .where(q => q.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .orWhere(parked => parked.where('status', 'rescheduled').where('scheduled_date', '>=', today))
+      // A completed visit can still get a follow-up booked from it for seven
+      // days (POST /admin/dispatch/:serviceId/schedule-followup copies its
+      // property link), so it stays a dependent for that window.
+      .orWhere(recent => recent.where('status', 'completed').whereRaw('scheduled_date >= (?::date - 7)', [today]))
+      .orWhere(root => root.where({ is_recurring: true, recurring_ongoing: true }).whereNull('recurring_parent_id')))
+    .orderBy('id')
+    .select(...VISIT_POINTER_COLUMNS);
+  const visitNamesProperty = visit => visit.property_id === target.id
+    || addressCanNameProperty({ address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
+      city: visit.service_address_city, zip: visit.service_address_zip }, target)
+    // The source estimate speaks only for a visit with no location of its
+    // own: a reused quote-wizard draft can later name another property, and
+    // a visit already stamped elsewhere must not follow it.
+    || (!visit.property_id && !visit.service_address_line1 && !!visit.source_estimate_id && targetEstimateIds.has(visit.source_estimate_id));
+  const openVisits = visits.filter(visitNamesProperty);
+  // A grouped visit (service_visits) stays 'open' until closeout and 'closing'
+  // while a submitted closeout is still processing, after its child
+  // scheduled_services rows are already completed. Either state at this
+  // property is an unfinished visit.
+  const groups = await conn('service_visits').where({ customer_id: customerId }).whereIn('status', ['open', 'closing'])
+    .orderBy('id').select('id', 'property_id');
+  const children = groups.length ? await conn('scheduled_services').where({ customer_id: customerId })
+    .whereIn('visit_id', groups.map(group => group.id)).select(...VISIT_POINTER_COLUMNS, 'visit_id') : [];
+  const openVisitIds = new Set(openVisits.map(visit => visit.id));
+  const openGroups = groups.filter(group => group.property_id === target.id
+    || children.some(child => child.visit_id === group.id && !openVisitIds.has(child.id) && visitNamesProperty(child)));
+  const prepaidTerms = await livePrepaidTermsOnEstimates(conn, customerId, targetEstimateIds, today);
+  return { visits: openVisits.length + openGroups.length, estimates: openEstimates.length, prepaidTerms };
+}
+
+// A prepaid annual plan sold on an estimate that names a property seeds its
+// future coverage visits there, even while no visit is open. A renewal carries
+// no estimate of its own: annual-prepay-renewals termiteRenewalScope walks it
+// back to its first term's estimate, so each LIVE term is walked the same way.
+// Live = not refunded or cancelled (a cancel that ends at term stays live), and inside its term (through term_end plus
+// the 30-day renewal grace window); an ended term with no live successor is
+// history and blocks nothing.
+async function livePrepaidTermsOnEstimates(conn, customerId, estimateIds, today) {
+  if (!estimateIds.size) return 0;
+  const terms = await conn('annual_prepay_terms').where({ customer_id: customerId }).orderBy('id')
+    .select('id', 'status', 'cancel_disposition', 'source_estimate_id', 'renewed_from_term_id',
+      conn.raw('(term_end IS NULL OR term_end >= (?::date - 30)) as in_term', [today]));
+  const byId = new Map(terms.map(term => [term.id, term]));
+  const namesEstimate = (term) => {
+    const seen = new Set();
+    for (let current = term; current && !seen.has(current.id); current = byId.get(current.renewed_from_term_id)) {
+      seen.add(current.id);
+      if (current.source_estimate_id && estimateIds.has(current.source_estimate_id)) return true;
+    }
+    return false;
+  };
+  // A plan cancelled 'end_at_term' keeps its paid coverage through term_end
+  // (keepEndAtTermLapseCoverage can reseed a visit), so it is still live.
+  const ended = term => term.status === 'refunded'
+    || (['cancelled', 'canceled'].includes(term.status) && term.cancel_disposition !== 'end_at_term');
+  return terms.filter(term => term.in_term && !ended(term) && namesEstimate(term)).length;
+}
+
+function assertNoRemovalDependents({ visits, estimates, prepaidTerms }) {
+  if (!visits && !estimates && !prepaidTerms) return;
+  const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+  const parts = [visits && count(visits, 'open, recurring or just-completed visit'), estimates && count(estimates, 'open estimate'),
+    prepaidTerms && count(prepaidTerms, 'prepaid annual plan')].filter(Boolean);
+  throw propertyActionError(`This property still has ${parts.join(' and ')}. Move, cancel or close them before removing it; a visit completed in the last 7 days blocks until its follow-up window ends.`, 409, 'property_in_use');
+}
+
+// Removal is a deactivation (active=false), never a row delete: visit history,
+// reports and estimates keep their property link. It is refused, fail-closed,
+// while anything open still depends on the row: the primary, the account
+// address, an open, reschedule-requested or ongoing-recurring visit, or an open estimate.
+async function previewPropertyRemoval(conn, customerId, target, _primary, customer, properties = []) {
+  if (target.is_primary) {
+    throw propertyActionError('This is the primary property. Make another saved property primary before removing it.', 409, 'primary_property');
+  }
+  // Partial-tolerant like the visit and estimate checks: a legacy account
+  // address with the same street and no city or ZIP is still this property.
+  if (customer.address_line1 && addressCanNameProperty(customer, target)) {
+    throw propertyActionError('This property is the account address. Change the account address before removing it.', 409, 'account_address');
+  }
+  assertNoRemovalDependents(await propertyRemovalDependents(conn, customerId, target));
+  // has_multi_home is fill-forward only (refreshHasMultiHome) and staff also
+  // hand-set it, so a removal never clears it: the card says it stays on.
+  const lastSecondHome = customer.has_multi_home === true && properties.filter(p => p.active && p.id !== target.id).length < 2;
+  return { removed_property: { id: target.id, address: propertyAddressLabel(target), label: target.label || null },
+    effects: [
+      'Removes this saved property from the customer. It no longer shows on the customer record or in the customer portal, and it cannot be chosen for a booking or an estimate.',
+      'Completed visits, service reports, closed estimates, invoices and receipts keep this address.',
+      'The address stays on file as removed: a later call or the Add property action does not save it again.',
+      'The primary property and the account address are unchanged. Sends no messages.',
+      ...(lastSecondHome ? ['The multi-home status on this customer stays ON. It controls the multi-home discount; turn it off on the customer record if this customer no longer has a second home.'] : []),
+    ] };
+}
+
+const TARGET_PREVIEWS = { primary: previewPrimaryPropertyChange, remove: previewPropertyRemoval };
+
 async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
   const changes = manualPropertyFields(kind, input);
   return db.transaction(async trx => {
@@ -1039,6 +1203,13 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     });
     const properties = await listProperties(customerId, trx);
     const saved = properties.find(p => p.id === savedId);
+    if (kind === 'remove') {
+      const row = await trx('customer_properties').where({ id: savedId, customer_id: customerId }).first('active');
+      if (saved || !row || row.active !== false) throw propertyActionError('The property was not removed', 409, 'verification_failed');
+      return { success: true, propertyId: savedId, customer_id: customerId, properties, audit_id: auditId,
+        verification: { property_id: savedId, persisted: true, removed: true },
+        href: `/admin/customers?customerId=${encodeURIComponent(customerId)}` };
+    }
     const matches = saved && Object.entries(preview.changes || {}).every(([key, value]) => saved[key] === value);
     if (!matches || (kind === 'primary' && (!saved.is_primary || saved.occupancy_type !== 'owner_occupied'))) throw propertyActionError('The saved property did not match the requested change', 409, 'verification_failed');
     if (saved.is_primary && kind !== 'edit') {
@@ -1065,6 +1236,30 @@ async function editManualProperty(customerId, propertyId, input, options = {}) {
   return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
       .update({ ...changes, updated_at: trx.fn.now() });
+    return propertyId;
+  });
+}
+
+async function removeManualProperty(customerId, propertyId, options = {}) {
+  if (!options.expectedVersion) throw propertyActionError('Review the removal preview first', 409, 'preview_required');
+  return writeManualProperty(customerId, 'remove', {}, propertyId, options, async trx => {
+    const removed = await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true, is_primary: false })
+      .update({ active: false, updated_at: trx.fn.now() });
+    if (removed !== 1) throw propertyActionError('The property changed. Request a fresh preview.', 409, 'preview_changed');
+    // Re-check on a fresh statement snapshot: a booking or estimate that read
+    // this property as active before the update and committed its reference
+    // while it ran is invisible to the preview above. A late reference rolls
+    // the removal back (same doctrine as migration 20260829000050).
+    // Known limit: a writer that validated the property before this
+    // transaction locked it and inserts its reference after this commit is
+    // not seen. A foreign-key insert waits on the row lock held here, so the
+    // window is only that writer's own read-to-insert gap. The admin estimate
+    // save deliberately takes no property lock for it: a lock there must be
+    // ordered against the address-verdict, property-preferences and
+    // customer-comms locks of every estimate path, and a deadlocked estimate
+    // save is a worse failure than an open estimate on a removed property.
+    const target = await trx('customer_properties').where({ id: propertyId, customer_id: customerId }).first();
+    assertNoRemovalDependents(await propertyRemovalDependents(trx, customerId, target));
     return propertyId;
   });
 }
@@ -1155,6 +1350,8 @@ module.exports = {
   addManualProperty,
   editManualProperty,
   changePrimaryProperty,
+  removeManualProperty,
+  addressCanNameProperty,
   sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,

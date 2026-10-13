@@ -18,6 +18,8 @@ const { randomUUID } = require('crypto');
 const {
   pickNamedAccountHolder, normName, fullNameKey, statedAddressCorroborates,
   findLiveCustomersByFullName, suggestFamilyAccounts, fileFamilyAccountCard, CARD_REASON, RETIRE_RULE,
+  matchCallerOwnAccounts, OWN_ACCOUNT_REASONS, MAX_OWN_CANDIDATES, RECENT_DAYS,
+  matchContactPhoneAccounts, contactPhones,
 } = require('../services/call-family-name-link');
 const { buildTriageItem } = require('../services/call-routing-gates');
 
@@ -168,6 +170,46 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
   });
 });
 
+// 2026-10-12 call audit: a caller on an unknown number gave the homeowner's number, which was
+// the phone on an existing account; the call became a new lead.
+describe('contactPhones (numbers the caller gave for other people)', () => {
+  const call = { from_phone: '+19415550101' };
+  const person = (phone, over = {}) => ({ first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: phone, ...over });
+  test('one entry per distinct number, with both stored forms of a NANP number', () => {
+    expect(contactPhones({
+      call,
+      v2CanonicalExtraction: { secondary_contact: person('+19415550177'), secondary_contacts: [person('+19415550177')] },
+    })).toEqual([{ phone: '+19415550177', forms: ['19415550177', '9415550177'] }]);
+  });
+  test('the line the call arrived on is never a contact phone; a copied callback number still is', () => {
+    expect(contactPhones({ call, v2CanonicalExtraction: { secondary_contact: person('+19415550101') } })).toEqual([]);
+    // The model slip that copies the other person's number into the caller's callback slot
+    // must not hide it: extracted.phone is not consulted.
+    expect(contactPhones({ call, extracted: { phone: '+19415550177' }, v2CanonicalExtraction: { secondary_contact: person('+19415550177') } })).toHaveLength(1);
+  });
+  test('an international number keeps its full digits and never a ten-digit form', () => {
+    expect(contactPhones({ call, v2CanonicalExtraction: { secondary_contact: person('+442079460958') } }))
+      .toEqual([{ phone: '+442079460958', forms: ['442079460958'] }]);
+  });
+  test('a mirror entry that conflicts with the canonical contact is dropped; later entries are kept', () => {
+    const out = contactPhones({
+      call,
+      v2CanonicalExtraction: {
+        secondary_contact: person('+19415550177'),
+        secondary_contacts: [
+          { first_name: 'Someone', last_name: 'Else', role: 'unknown', phone_e164: '+19415550155' },
+          { first_name: 'Third', last_name: 'Person', role: 'tenant', phone_e164: '+19415550166' },
+        ],
+      },
+    });
+    expect(out.map((p) => p.phone)).toEqual(['+19415550177', '+19415550166']);
+  });
+  test('no second person, or one without a number: nothing', () => {
+    expect(contactPhones({ call, v2CanonicalExtraction: null })).toEqual([]);
+    expect(contactPhones({ call, v2CanonicalExtraction: { secondary_contact: person(null) } })).toEqual([]);
+  });
+});
+
 const SKIP = !process.env.DATABASE_URL;
 (SKIP ? describe.skip : describe)('family account suggestions on PostgreSQL', () => {
   jest.setTimeout(30000);
@@ -260,6 +302,187 @@ const SKIP = !process.env.DATABASE_URL;
     expect(card.payload.customer_ids).toHaveLength(5);
     await trx('customers').where({ city: 'City5' }).update({ deleted_at: new Date() });
     expect((await suggestFamilyAccounts(input(await call()))).more_accounts).toBe(false);
+  });
+
+  // 2026-10-10 call audit (owner 2026-10-12): three callers on a number no account carried.
+  describe('the caller\'s OWN account (suggest only)', () => {
+    const CALL_AT = '2026-10-09T19:54:00Z';
+    const day = (offset) => new Date(Date.parse(CALL_AT) + offset * 86400000).toISOString().slice(0, 10);
+    const own = (callLogId, over = {}) => input(callLogId, {
+      call: { id: callLogId, from_phone: '+19415550101', customer_id: null, created_at: CALL_AT },
+      extracted: { first_name: 'Robin', last_name: 'Example', is_voicemail: false },
+      v2CanonicalExtraction: { caller: { relationship_to_property: 'property_manager' }, call_nature: 'existing_customer_scheduling', meta: { call_summary: 'x' } },
+      statedAddress: {},
+      ...over,
+    });
+    const visit = (customerId, over = {}) => trx('scheduled_services').insert({ customer_id: customerId, scheduled_date: day(2), service_type: 'pest', status: 'pending', ...over });
+
+    test('basis 1: the caller\'s exact full name on a live account under another number files the card', async () => {
+      const account = await customer({ first_name: 'Robin', last_name: 'Example', city: 'Sampleton' });
+      const callLogId = await call();
+      const out = await fileFamilyAccountCard(own(callLogId));
+      expect(out).toMatchObject({ basis: 'caller_full_name', candidates: [{ id: String(account), name: 'Robin Example', city: 'Sampleton' }] });
+      const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(card).toMatchObject({ reason_code: 'family_account_candidates', severity: 'advisory', status: 'open' });
+      expect(card.payload).toMatchObject({
+        account_holder_name: null, match_basis: 'caller_full_name', caller_name: 'Robin Example',
+        customer_ids: [String(account)], reason: OWN_ACCOUNT_REASONS.caller_full_name,
+      });
+      const row = await trx('call_log').where({ id: callLogId }).first();
+      expect(row.customer_id).toBeNull(); // nothing is linked
+    });
+
+    test('basis 1 needs a live customer and never matches a number an account already knows or a linked call', async () => {
+      await customer({ first_name: 'Robin', last_name: 'Example', pipeline_stage: 'new_lead' });
+      expect(await fileFamilyAccountCard(own(await call()))).toBeNull();
+      const account = await customer({ first_name: 'Robin', last_name: 'Example', phone: '+19415550101' });
+      expect(await fileFamilyAccountCard(own(await call()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ phone: '+19415559999' });
+      const elsewhere = await customer({ first_name: 'Pat', last_name: 'Other' });
+      const linked = await call({ customer_id: elsewhere });
+      expect(await fileFamilyAccountCard(own(linked, { call: { id: linked, from_phone: '+19415550101', customer_id: elsewhere, created_at: CALL_AT } }))).toBeNull();
+    });
+
+    test('basis 2: an existing-customer call, the caller\'s first name, and a visit within the window, under another last name', async () => {
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      await visit(account);
+      const out = await matchCallerOwnAccounts(own(await call()));
+      expect(out).toMatchObject({ basis: 'caller_first_name_recent_visit', candidates: [{ id: String(account), name: 'Robin Otherwise' }] });
+    });
+
+    // Codex r1: the window is counted in Eastern calendar days from the call's ET day.
+    test('basis 2 counts the window in Eastern days: a 9 PM ET call is still that ET day', async () => {
+      const lateEt = '2026-10-10T01:00:00Z'; // Oct 9, 9 PM ET
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      const at = (callLogId) => own(callLogId, { call: { id: callLogId, from_phone: '+19415550101', customer_id: null, created_at: lateEt } });
+      await visit(account, { scheduled_date: '2026-10-24' }); // 15 ET days after Oct 9
+      expect(await matchCallerOwnAccounts(at(await call()))).toBeNull();
+      await visit(account, { scheduled_date: '2026-09-25' }); // exactly 14 ET days before
+      expect((await matchCallerOwnAccounts(at(await call()))).basis).toBe('caller_first_name_recent_visit');
+    });
+
+    test('basis 2 does not fire: a new-lead call, a visit outside the window, a cancelled visit, or too many first-name matches', async () => {
+      const account = await customer({ first_name: 'Robin', last_name: 'Otherwise' });
+      await visit(account, { scheduled_date: day(RECENT_DAYS + 3) });
+      await visit(account, { scheduled_date: day(1), status: 'cancelled' });
+      expect(await matchCallerOwnAccounts(own(await call()))).toBeNull();
+      await visit(account, { scheduled_date: day(-3), status: 'completed' });
+      const newLead = { caller: {}, call_nature: 'new_lead', meta: {} };
+      expect(await matchCallerOwnAccounts(own(await call(), { v2CanonicalExtraction: newLead }))).toBeNull();
+      expect((await matchCallerOwnAccounts(own(await call()))).basis).toBe('caller_first_name_recent_visit');
+      for (let i = 0; i < MAX_OWN_CANDIDATES; i += 1) await visit(await customer({ first_name: 'Robin', last_name: `Many${i}` }));
+      expect(await matchCallerOwnAccounts(own(await call()))).toBeNull();
+    });
+
+    test('basis 3: a first name only, the stated city, and a record created in the last two weeks', async () => {
+      const recent = new Date(Date.parse(CALL_AT) - 86400000);
+      const account = await customer({ first_name: 'Robin', last_name: 'E', city: 'Sampleton', created_at: recent });
+      const firstOnly = ({ city = ' sampleton ' } = {}) => ({ extracted: { first_name: 'Robin', city: 'Sampleton', is_voicemail: false }, statedAddress: { city }, v2CanonicalExtraction: { caller: {}, call_nature: 'new_lead', meta: {} } });
+      const out = await matchCallerOwnAccounts(own(await call(), firstOnly()));
+      expect(out).toMatchObject({ basis: 'caller_first_name_city_recent', candidates: [{ id: String(account), name: 'Robin E', city: 'Sampleton' }] });
+      // Another city, no city, an older record, a record created after the call, or a record with no last name: nothing.
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly({ city: 'Elsewhere' })))).toBeNull();
+      // No city was SAID: the merged record's city (address validation may have filled it) is not used.
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly({ city: null })))).toBeNull();
+      await trx('customers').where({ id: account }).update({ created_at: new Date(Date.parse(CALL_AT) - (RECENT_DAYS + 2) * 86400000) });
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ created_at: new Date(Date.parse(CALL_AT) + 3600000) });
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ created_at: recent, last_name: null });
+      expect(await matchCallerOwnAccounts(own(await call(), firstOnly()))).toBeNull();
+    });
+
+    test('the customer this call created for the caller is never its own match; a voicemail, an outbound call or no first name suggests nothing', async () => {
+      const mine = await customer({ first_name: 'Robin', last_name: 'Example', phone: '+19415550101' });
+      const callLogId = await call({ customer_id: mine, metadata: { created_customer_id: mine } });
+      const reprocess = own(callLogId, { call: { id: callLogId, from_phone: '+19415550101', customer_id: mine, created_at: CALL_AT, metadata: { created_customer_id: mine } } });
+      expect(await matchCallerOwnAccounts(reprocess)).toBeNull();
+      await customer({ first_name: 'Robin', last_name: 'Example' });
+      expect((await matchCallerOwnAccounts(reprocess)).basis).toBe('caller_full_name');
+      expect(await matchCallerOwnAccounts(own(await call(), { isOutbound: true }))).toBeNull();
+      expect(await matchCallerOwnAccounts(own(await call(), { extracted: { first_name: 'Robin', last_name: 'Example', is_voicemail: true } }))).toBeNull();
+      expect(await matchCallerOwnAccounts(own(await call(), { extracted: { last_name: 'Example', is_voicemail: false } }))).toBeNull();
+    });
+
+    test('the family rule still wins when both could suggest', async () => {
+      await customer({ first_name: 'Dana', last_name: 'Lee', phone: '+19415558888' });
+      const mom = await customer();
+      const out = await fileFamilyAccountCard(input(await call()));
+      expect(out.holder).toMatchObject({ first_name: 'Angelina' });
+      expect(out.candidates.map((c) => c.id)).toEqual([String(mom)]);
+    });
+  });
+
+  describe('a number the caller gave for another person (suggest only)', () => {
+    const HOLDER_PHONE = '+19415550177';
+    const byPhone = (callLogId, over = {}) => input(callLogId, {
+      extracted: { first_name: null, last_name: null, phone: '+19415550101', is_voicemail: false },
+      v2CanonicalExtraction: {
+        caller: { relationship_to_property: 'other' },
+        secondary_contact: { first_name: 'Angela', last_name: 'Testersen', role: 'unknown', phone_e164: HOLDER_PHONE },
+        meta: { call_summary: 'x' },
+      },
+      phone: '+19415550101',
+      phones: ['+19415550101'],
+      ...over,
+    });
+
+    test('the number is an account\'s own phone: ONE advisory card on that basis; nothing is linked', async () => {
+      const account = await customer({ phone: HOLDER_PHONE });
+      const callLogId = await call();
+      const out = await fileFamilyAccountCard(byPhone(callLogId));
+      expect(out).toMatchObject({ basis: 'contact_phone_on_account', contact_phones: [HOLDER_PHONE], candidates: [{ id: String(account), name: 'Angelina Testerson', address_matches: true, matched_phone: HOLDER_PHONE }] });
+      const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(card).toMatchObject({ reason_code: 'family_account_candidates', severity: 'advisory', status: 'open' });
+      expect(card.payload).toMatchObject({ match_basis: 'contact_phone_on_account', matched_contact_phones: [HOLDER_PHONE], customer_ids: [String(account)], reason: OWN_ACCOUNT_REASONS.contact_phone_on_account });
+      expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+    });
+
+    test('the number copied into the caller\'s callback slot still files the card; a known calling line does not', async () => {
+      const account = await customer({ phone: HOLDER_PHONE });
+      const copied = await fileFamilyAccountCard(byPhone(await call(), { phone: HOLDER_PHONE }));
+      expect(copied).toMatchObject({ basis: 'contact_phone_on_account', candidates: [{ id: String(account) }] });
+      // The line the call arrived on already belongs to an account: no card.
+      await customer({ first_name: 'Pat', last_name: 'Other', phone: '+19415550101' });
+      expect(await fileFamilyAccountCard(byPhone(await call()))).toBeNull();
+    });
+
+    test('the secondary phone counts; a service-contact slot, an inactive or a deleted account does not', async () => {
+      const account = await customer({ secondary_phone: '(941) 555-0177' });
+      expect((await matchContactPhoneAccounts(byPhone(await call()))).candidates.map((c) => c.id)).toEqual([String(account)]);
+      await trx('customers').where({ id: account }).update({ secondary_phone: null, service_contact_phone: HOLDER_PHONE });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ phone: HOLDER_PHONE, active: false });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+      await trx('customers').where({ id: account }).update({ active: true, deleted_at: new Date() });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+    });
+
+    test('more accounts than the cap, a voicemail or an outbound call suggests nothing', async () => {
+      for (let i = 0; i <= MAX_OWN_CANDIDATES; i += 1) await customer({ phone: HOLDER_PHONE, city: `City${i}` });
+      expect(await matchContactPhoneAccounts(byPhone(await call()))).toBeNull();
+      await trx('customers').where({ city: 'City0' }).update({ deleted_at: new Date() });
+      expect((await matchContactPhoneAccounts(byPhone(await call()))).candidates).toHaveLength(MAX_OWN_CANDIDATES);
+      expect(await matchContactPhoneAccounts(byPhone(await call(), { isOutbound: true }))).toBeNull();
+      expect(await matchContactPhoneAccounts(byPhone(await call(), { extracted: { is_voicemail: true } }))).toBeNull();
+    });
+
+    test('the family rule still wins; the number wins over the caller\'s own name', async () => {
+      const byNumber = await customer({ first_name: 'Pat', last_name: 'Other', phone: HOLDER_PHONE });
+      const mom = await customer();
+      const family = await fileFamilyAccountCard(input(await call(), {
+        v2CanonicalExtraction: {
+          caller: { relationship_to_property: 'family_member' },
+          secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'family_member', phone_e164: HOLDER_PHONE },
+          meta: { call_summary: 'x' },
+        },
+      }));
+      expect(family.holder).toMatchObject({ first_name: 'Angelina' });
+      expect(family.candidates.map((c) => c.id)).toEqual([String(mom)]);
+      await customer({ first_name: 'Robin', last_name: 'Example', phone: '+19415558888' });
+      const out = await fileFamilyAccountCard(byPhone(await call(), { extracted: { first_name: 'Robin', last_name: 'Example', phone: '+19415550101', is_voicemail: false } }));
+      expect(out).toMatchObject({ basis: 'contact_phone_on_account', candidates: [{ id: String(byNumber) }] });
+    });
   });
 
   describe('reprocess: refresh the open card, retire it when the suggestion is gone', () => {

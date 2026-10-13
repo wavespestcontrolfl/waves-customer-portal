@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -1033,6 +1033,464 @@ async function updateUnifiedVoiceMessage(call, patch = {}) {
 
 function isOutboundCall(call = {}) {
   return String(call.direction || '').toLowerCase().startsWith('outbound');
+}
+
+// A callback (the admin "Call back" action on a voicemail writes
+// metadata.relatedCallId on the outbound row) that reaches a SOLICITOR
+// settles the parent voicemail too: its open Needs Review cards and its open
+// callback promise are nobody's work once the callee turned out to be spam
+// (2026-10-09: the 11:00 voicemail kept 3 cards and a callback task open all
+// day after the 11:38 callback was classified spam). Dark behind
+// GATE_CALLBACK_SPAM_CLOSES_PARENT. Runs AFTER the callback's fenced terminal
+// write, so only a verdict that landed closes anything; fail-soft, the
+// callback's own verdict never depends on it. The parent's processing_status
+// and lead stay as they are: this closes the asks, it does not re-grade the
+// voicemail. Nothing is sent.
+const CALLBACK_PARENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CALLBACK_SPAM_RULE = 'callback_spam';
+// The parent's standing callback-spam verdict (closeParentOnCallbackSpam's
+// stamp; moved or cleared by reopenParentOnCallbackCorrected), read by the
+// card-filter site so a reprocess of the voicemail files no moot card.
+function callbackVerdictSpam(call) {
+  return isEnabled('callbackSpamClosesParent') && callMetadataObject(call).callback_verdict?.spam === true;
+}
+function callMetadataObject(call) {
+  try {
+    return typeof call?.metadata === 'string' ? (JSON.parse(call.metadata) || {}) : (call?.metadata || {});
+  } catch (_e) {
+    return {};
+  }
+}
+// The parent's end is reliable only once Twilio reported its duration: the
+// voice webhook marks a voicemail before the recorder runs, with duration
+// still null, and a callback started while the caller is still recording
+// says nothing about what the voicemail then captured.
+function callEndOf(row) {
+  if (row?.duration_seconds == null) return null;
+  const started = new Date(row?.created_at || 0).getTime();
+  return started + Math.max(0, Number(row.duration_seconds) || 0) * 1000;
+}
+function callbackAfterCallEnd(child, parent) {
+  const at = new Date(child?.created_at || 0).getTime();
+  const ended = callEndOf(parent);
+  return ended != null && Number.isFinite(at) && at > ended;
+}
+function isVoicemailParent(row) {
+  return row?.call_outcome === 'voicemail' || row?.answered_by === 'voicemail' || row?.processing_status === 'voicemail';
+}
+// Settled (call-commitments isSettledParentRow, the one definition): ended,
+// no pass holding its token, not retryable, no adopted recording waiting.
+function isSettledParent(row) { return require('./call-commitments').isSettledParentRow(row); }
+// The office callback this verdict belongs to, or null: an OUTBOUND row the
+// admin "Call back" action wrote (call_log.source admin-callback +
+// metadata.relatedCallId naming the voicemail).
+// A CORRECTION reads through the gate: turning the gate off blocks new
+// settlements; it never strands cards and promises a settlement already closed.
+function callbackParentId(call, { correction = false } = {}) {
+  if (!correction && !isEnabled('callbackSpamClosesParent')) return null;
+  if (!isOutboundCall(call) || call?.source !== 'admin-callback' || !call?.id) return null;
+  const parentId = callMetadataObject(call).relatedCallId;
+  return parentId && CALLBACK_PARENT_UUID_RE.test(String(parentId)) ? String(parentId) : null;
+}
+// Shared head of both settlement writers, inside the caller's transaction:
+// the per-call triage lock FIRST (utils/triage-locks.js, the contract every
+// card writer that syncs review_status keeps), then the fence (the callback
+// row must still carry the verdict this pass landed: `status`, the pass's
+// generation, no live token), then the parent (an inbound voicemail the
+// callback was dialed to, or its customer). Null = nothing to write.
+async function lockCallbackPair(trx, call, parentId, { status, procGeneration, correction = false }) {
+  await lockTriageCall(trx, parentId);
+  const childQ = trx('call_log').where({ id: call.id, processing_status: status }).whereNull('processing_token');
+  if (procGeneration != null) childQ.where('processing_generation', procGeneration);
+  const child = await childQ.forUpdate().first('id', 'to_phone', 'customer_id', 'source', 'created_at', 'metadata');
+  if (!child || child.source !== 'admin-callback') return { reason: 'verdict_superseded' };
+  const parent = await trx('call_log').where({ id: parentId, direction: 'inbound' }).forUpdate()
+    .first('id', 'from_phone', 'customer_id', 'call_outcome', 'answered_by', 'processing_status', 'processing_token', 'recording_sid', 'metadata', 'created_at', 'duration_seconds');
+  if (!parent) return { reason: 'parent_not_found' };
+  // A CORRECTION retires whatever this callback settled, whether or not the
+  // parent still qualifies today (a replaced recording may have cleared its
+  // voicemail markers; a relink its number): the eligibility below is for
+  // settling, never for giving back. Nothing settled = no_verdict, no write.
+  if (correction) return { child, parent };
+  // Admin provenance, stamped by the call route from the verified session: a
+  // technician's callback never settles a voicemail's admin review.
+  if (callMetadataObject(child).placed_by_role !== 'admin') return { reason: 'not_admin_placed' };
+  if (!isVoicemailParent(parent)) return { reason: 'parent_not_voicemail' };
+  // The parent must have ended and settled: a reported duration (callEndOf)
+  // and no pass still holding its token.
+  if (!isSettledParent(parent)) return { reason: 'parent_not_settled' };
+  // The callback must postdate the voicemail's end: a callback started while
+  // the inbound call was still underway says nothing about what the
+  // voicemail then recorded (same boundary as the promise lifecycle's).
+  if (!callbackAfterCallEnd(child, parent)) return { reason: 'callback_before_call_end' };
+  // Phone evidence only: the callback dialed the number the voicemail came
+  // from. A customer link is not evidence; a later relink or unlink of the
+  // parent would take it away with no path back for the closed cards.
+  if (!samePhone(parent.from_phone, child.to_phone)) return { reason: 'parent_mismatch' };
+  return { child, parent };
+}
+// Durability of the correction (codex #6271 r13): a callback's non-spam
+// terminal write commits before settleParentForCallbackVerdict runs and that
+// call is fail-soft, so a crash or a failed transaction in between would
+// leave the parent settled on a callback that no longer reads spam. The
+// commitments watchdog calls this every tick: it finds every such callback
+// from the data itself (the parent still stamped with it, a promise still
+// dismissed on it, or a card the sweep closed on it; partial indexes in
+// migrations 20261010280000, 20261010290000, 20261010310000 and
+// 20261010320000; every source bounded to rows changed in the last 30 days) and runs
+// the same correction. Converges: a correction clears the stamp and reopens
+// or re-points the dismissal, so the row leaves both scans.
+async function reconcileCorrectedCallbackVerdicts({ limit = 50 } = {}) {
+  // The correction half runs whatever the gate says (a rollback must not
+  // strand what the feature closed); the forward halves below are gated.
+  const gateOn = isEnabled('callbackSpamClosesParent');
+  // settledParentSql for a NEW settlement (strict); the terminal twins for corrections.
+  const { terminalNonSpamCallbackSql, obsoleteParentSql, settledParentSql } = require('./call-commitments');
+  // Terminal on anything but spam, an exhausted extraction_failed included (no
+  // pass will ever say spam about it); the promise proof's positive predicate
+  // is stricter and never counts an exhausted failure as contact.
+  // Every source is bounded to rows that CHANGED inside the scan window (a
+  // reprocess or a replacement recording rewrites updated_at; indexes
+  // call_log_outbound_updated_at_index for the callback,
+  // call_log_callback_verdict_parent_updated_at_index for a stamped parent):
+  // the stamped and dismissed sets grow forever, the recent slice does not.
+  const RECONCILE_WINDOW_DAYS = 30;
+  // Each carries its partial index's own predicate (outbound; inbound + stamp),
+  // so the planner can use it.
+  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const recentCb = (q) => whereNotSandboxCall(q.where('cb.direction', 'like', 'outbound%').whereRaw(`cb.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`), 'cb.source');
+  const recentParent = (q) => q.where('p.direction', 'inbound').whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`);
+  const settledNonSpam = (q) => q.modify(recentCb).whereRaw(terminalNonSpamCallbackSql('cb')).whereNot('cb.processing_status', 'spam');
+  const stamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL").modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
+  const dismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'"))
+    .where({ 'cc.status': 'dismissed' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'").modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
+  // The parent re-read as something other than a voicemail (a replaced
+  // recording, settled) while the callback still reads spam: the proof no
+  // longer applies (callbackReachedSolicitor refuses it), so the stamp, the
+  // cards and the dismissal it holds are retired through the same correction
+  // (standingSpamCallbacks is empty for a non-voicemail parent).
+  const notVoicemail = (q) => whereNotSandboxCall(q, 'cb.source').where('cb.processing_status', 'spam').whereNull('cb.processing_token')
+    // obsoleteParentSql: markers cleared and terminal, OR the last pass ran out
+    // of retries (an ordinary voicemail keeps its dial stamp through a replacement).
+    .whereRaw("p.processing_status IS DISTINCT FROM 'spam'").whereRaw(obsoleteParentSql('p'));
+  const obsoleteStamped = await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+    .modify(recentParent).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
+  // Driven by the dismissed set (its partial index); the parent, stamped or
+  // not, is read by primary key and bounded by its own change time.
+  const obsoleteDismissed = await db('call_commitments as cc').join('call_log as cb', db.raw("cb.id::text = cc.fulfillment->>'record_id'")).join('call_log as p', 'p.id', 'cc.call_log_id')
+    .where({ 'cc.status': 'dismissed', 'p.direction': 'inbound' }).whereRaw("cc.fulfillment->>'kind' = 'callback_spam'")
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`).modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).select('cb.*');
+  // Cards the nightly sweep closed on callback-spam evidence carry no stamp:
+  // start from the card (resolved callback_spam, no live row for its reason,
+  // parent unstamped) and every settled non-spam office callback linked to
+  // that parent. A correction reopens the card or stamps a standing
+  // callback, so the parent leaves this scan either way.
+  // Only callbacks lockCallbackPair would accept (inbound voicemail parent
+  // with a reported end, same number, placed after that end): an ineligible
+  // callback would be a no-op forever and could fill the batch.
+  const digits = (col) => `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10)`;
+  const swept = await db('triage_items as ti').join('call_log as p', 'p.id', 'ti.call_log_id')
+    .join('call_log as cb', db.raw("cb.metadata->>'relatedCallId' = p.id::text"))
+    .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback', 'p.direction': 'inbound' })
+    .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
+    .where('cb.direction', 'like', 'outbound%')
+    .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    // A parent itself reprocessed to spam keeps its cards closed on its own
+    // verdict (parentSpam): nothing to correct, so it never fills the batch.
+    .whereRaw("p.processing_status IS DISTINCT FROM 'spam'")
+    // The parent: a settled voicemail (the proof still applied, the callback
+    // alone corrected), OR terminally no longer one (both sides corrected
+    // before the immediate correction ran: neither source above sees that
+    // pair, codex #6271 r43 P1). Either way the correction reopens the card.
+    .whereRaw(`(((p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail') AND p.duration_seconds IS NOT NULL AND p.processing_token IS NULL)
+      OR ${obsoleteParentSql('p')})`)
+    .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(COALESCE(p.duration_seconds, 0), 0))")
+    .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
+    // ...and only the NEWEST row for its reason: a later row of any status
+    // (one the correction reopened and staff then resolved, a reprocess's
+    // fresh ask) means this one is history, not an uncorrected closure.
+    .whereNotExists(function newerRowForReason() {
+      this.select(db.raw('1')).from('triage_items as later')
+        .whereRaw('later.call_log_id = ti.call_log_id AND later.reason_code = ti.reason_code AND later.id <> ti.id')
+        .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
+    })
+    .modify(settledNonSpam).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
+  // ...and the same sweep-closed cards when the PARENT stopped being a
+  // voicemail (a replaced recording read as an answered call) while the
+  // callback still reads spam: no stamp, no dismissal, so neither obsolete
+  // source sees it (codex #6271 r40 P1). Same correction; standingSpamCallbacks
+  // is empty for a non-voicemail parent, so the card reopens for good.
+  const sweptObsolete = await db('triage_items as ti').join('call_log as p', 'p.id', 'ti.call_log_id')
+    .join('call_log as cb', db.raw("cb.metadata->>'relatedCallId' = p.id::text"))
+    .where({ 'ti.status': 'resolved', 'ti.resolution_rule': CALLBACK_SPAM_RULE, 'cb.source': 'admin-callback', 'p.direction': 'inbound' })
+    .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
+    .where('cb.direction', 'like', 'outbound%')
+    .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .whereRaw(`${digits('cb.to_phone')} <> '' AND ${digits('cb.to_phone')} = ${digits('p.from_phone')}`)
+    .whereNotExists(function newerRowForReason() {
+      this.select(db.raw('1')).from('triage_items as later')
+        .whereRaw('later.call_log_id = ti.call_log_id AND later.reason_code = ti.reason_code AND later.id <> ti.id')
+        .whereRaw('(later.created_at > ti.created_at OR (later.created_at = ti.created_at AND later.id > ti.id))');
+    })
+    // Recent by the PARENT's change (no stamp: the sweep writes none, so
+    // recentParent's stamp arm would contradict the IS NULL above; r42 P1).
+    .whereRaw(`p.updated_at > now() - interval '${RECONCILE_WINDOW_DAYS} days'`)
+    .modify(notVoicemail).modify((q) => whereNotSandboxCall(q, 'cb.source')).limit(limit).distinct('cb.*');
+  const callbacks = new Map([...stamped, ...dismissed, ...obsoleteStamped, ...obsoleteDismissed, ...swept, ...sweptObsolete].map((cb) => [cb.id, cb]));
+  // The FORWARD half: a settlement whose promise refresh was lost (the cards
+  // closed and the stamp written, the callback still settled spam, a callback
+  // promise still open). Recent stamps only (7 days), judged again by
+  // refreshFulfillment under this gate alone, whatever the commitments gate.
+  const forward = !gateOn ? [] : await db('call_log as p').join('call_log as cb', db.raw("cb.id::text = p.metadata->'callback_verdict'->>'callback_call_log_id'"))
+    .whereRaw("p.metadata->'callback_verdict' IS NOT NULL")
+    .whereRaw("(p.metadata->'callback_verdict'->>'at')::timestamptz > now() - interval '7 days'")
+    .where({ 'cb.processing_status': 'spam' }).whereNull('cb.processing_token').modify((q) => whereNotSandboxCall(q, 'cb.source'))
+    .whereExists(function openCallbackPromise() {
+      // ...a promise that callback could still dismiss: made before the
+      // callback and not renewed (a staff reopen / edit, obligationRenewedAt's
+      // events) since it; a renewed promise is owed and never refills the batch.
+      this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' })
+        // ...and one THIS callback is linked to (callbackReachedSolicitor's
+        // linkage arm): a card callback names its promise; a Call Log callback
+        // (no relatedCommitmentId) covers the call's promises.
+        .whereRaw("(cb.metadata->>'relatedCommitmentId' = cc.id::text OR (cb.metadata->>'relatedCommitmentId' IS NULL AND cb.metadata->>'relatedCallId' = p.id::text))")
+        .whereRaw('cc.created_at < cb.created_at')
+        .whereNotExists(function renewedSince() {
+          this.select(db.raw('1')).from('audit_log as a').whereRaw("a.resource_type = 'call_commitment' AND a.resource_id = cc.id").whereIn('a.action', ['callback_edit', 'callback_reopen']).whereRaw('a.created_at > cb.created_at');
+        });
+    })
+    .limit(limit).distinct('p.id');
+  const refreshed = [];
+  for (const { id } of forward) {
+    const r = await require('./call-commitments').refreshFulfillment(db, id).catch((err) => ({ error: err.message }));
+    refreshed.push({ callLogId: id, ...r });
+  }
+  // ...and a settlement lost BEFORE the stamp: the callback's spam write
+  // committed, the parent transaction failed or never ran. Recent (7 days)
+  // admin-placed spam callbacks whose parent carries no stamp and still has
+  // a moot card or a callback promise it could settle, run through the same
+  // closeParentOnCallbackSpam (every eligibility check again, under the
+  // locks; a settled parent is stamped and leaves this source).
+  // lockCallbackPair's eligibility mirrored in SQL, so a callback that can
+  // settle nothing (answered parent, another number, placed before the
+  // voicemail ended) never occupies the batch.
+  const phoneKey = (col) => `(CASE WHEN length(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g')) = 11 AND left(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 1) = '1' THEN substr(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 2) ELSE regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g') END)`;
+  const unsettled = !gateOn ? [] : await db('call_log as cb').join('call_log as p', db.raw("p.id::text = cb.metadata->>'relatedCallId'"))
+    .where({ 'cb.source': 'admin-callback', 'cb.processing_status': 'spam' }).whereNull('cb.processing_token').modify((q) => whereNotSandboxCall(q, 'cb.source'))
+    .where('cb.direction', 'like', 'outbound%')
+    .whereRaw("cb.metadata->>'placed_by_role' = 'admin'")
+    // Bounded by the VERDICT write, not the call's age: an admin reprocess of
+    // an old callback that newly reads spam is as recent a settlement as any
+    // (codex #6271 r40 P2; the outbound updated_at index carries it).
+    .whereRaw("cb.updated_at > now() - interval '7 days'")
+    .whereRaw("p.metadata->'callback_verdict' IS NULL")
+    .where({ 'p.direction': 'inbound' }).whereRaw(settledParentSql('p'))
+    .whereRaw("(p.call_outcome = 'voicemail' OR p.answered_by = 'voicemail' OR p.processing_status = 'voicemail')")
+    .whereRaw("cb.created_at > p.created_at + make_interval(secs => GREATEST(0, p.duration_seconds))")
+    .whereRaw(`${phoneKey('cb.to_phone')} <> '' AND ${phoneKey('cb.to_phone')} = ${phoneKey('p.from_phone')}`)
+    .where((q) => {
+      q.whereExists(function mootCard() {
+        this.select(db.raw('1')).from('triage_items as t').whereRaw('t.call_log_id = p.id').whereIn('t.status', ['open', 'in_progress']).whereIn('t.reason_code', [...CALLBACK_SPAM_MOOT_CODES]);
+      }).orWhereExists(function openPromise() {
+        this.select(db.raw('1')).from('call_commitments as cc').whereRaw('cc.call_log_id = p.id').where({ 'cc.status': 'open', 'cc.party': 'waves', 'cc.kind': 'callback' }).whereRaw('cc.created_at < cb.created_at');
+      });
+    })
+    .limit(limit).distinct('cb.*');
+  const settled = [];
+  for (const cb of unsettled) {
+    const r = await closeParentOnCallbackSpam(cb, { callSid: cb.twilio_call_sid });
+    settled.push({ callbackCallId: cb.id, ...r });
+    if (r.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} settled its parent after a lost settlement: cards=${r.cards} promises=${r.promises}`);
+  }
+  const results = [];
+  for (const cb of callbacks.values()) {
+    const result = await reopenParentOnCallbackCorrected(cb, { callSid: cb.twilio_call_sid, status: cb.processing_status });
+    results.push({ callbackCallId: cb.id, ...result });
+    if (result.applied) logger.info(`[call-processor] callback ${maskSid(cb.twilio_call_sid)} reconciled after a lost correction: cards=${result.cards} promises=${result.promises}`);
+  }
+  return { skipped: false, gateOn, scanned: callbacks.size, applied: results.filter((r) => r.applied).length, results, refreshed, settled };
+}
+// The callback promise is NOT written here. It belongs to call-commitments'
+// fulfillment lifecycle: resolveCallback reads the spam callback as a
+// `callback_spam` proof (callbackReachedSolicitor) and refreshFulfillment
+// dismisses the promise under its own renewal boundary and human-verdict
+// fences; the commitments watchdog retires the promise's reminders. This
+// writer only asks for that refresh now instead of at the next sweep.
+async function closeParentOnCallbackSpam(call, { callSid = null, procGeneration = null } = {}) {
+  if (!isEnabled('callbackSpamClosesParent')) return { applied: false, reason: 'gated_off' };
+  if (!isOutboundCall(call)) return { applied: false, reason: 'not_outbound' };
+  if (call?.source !== 'admin-callback') return { applied: false, reason: 'not_admin_callback' };
+  const parentId = callbackParentId(call);
+  if (!parentId) return { applied: false, reason: 'no_parent' };
+  try {
+    const settled = await db.transaction(async (trx) => {
+      const pair = await lockCallbackPair(trx, call, parentId, { status: 'spam', procGeneration });
+      if (!pair.parent) return { applied: false, reason: pair.reason };
+      const now = new Date();
+      const cards = await trx('triage_items')
+        .where({ call_log_id: parentId })
+        .whereIn('status', ['open', 'in_progress'])
+        .whereIn('reason_code', [...CALLBACK_SPAM_MOOT_CODES])
+        .update({
+          status: 'resolved',
+          resolution_note: 'Closed: the callback reached a solicitor, so the voicemail was spam.',
+          resolution_source: 'auto',
+          resolution_rule: CALLBACK_SPAM_RULE,
+          resolved_at: now,
+          updated_at: now,
+        });
+      let reviewSynced = false;
+      if (cards > 0) reviewSynced = (await syncCallReviewStatus(trx, parentId, 'resolved')) === 'resolved';
+      await trx('call_log').where({ id: parentId }).update({
+        metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
+          [JSON.stringify({ spam: true, callback_call_log_id: call.id, at: now.toISOString() })]),
+        updated_at: now,
+      });
+      return { applied: true, cards, reviewSynced };
+    });
+    if (!settled.applied) return settled;
+    // The promise, through its own lifecycle (see above). Fail-soft: the
+    // watchdog's next refresh lands the same verdict.
+    let promises = 0;
+    try {
+      promises = (await require('./call-commitments').refreshFulfillment(db, parentId)).fulfilled || 0;
+    } catch (err) {
+      logger.warn(`[call-proc] callback ${maskSid(callSid)} was spam: parent promise refresh failed (the watchdog retries): ${err.message}`);
+    }
+    logger.info(`[call-proc] callback ${maskSid(callSid)} was spam: parent voicemail settled (${settled.cards} card(s) resolved, ${promises} promise(s) closed${settled.reviewSynced ? ', review closed' : ''})`);
+    return { ...settled, promises };
+  } catch (err) {
+    logger.warn(`[call-proc] callback ${maskSid(callSid)} was spam but the parent voicemail could not be settled: ${err.message}`);
+    return { applied: false, reason: 'error', error: err.message };
+  }
+}
+// One hook for every fenced terminal write of an office callback: a spam
+// verdict settles the parent voicemail, any other terminal verdict (processed,
+// voicemail, a failed-creation status — a force reprocess can land on any of
+// them) gives back what an earlier spam verdict closed. `status` is the
+// processing_status this pass just wrote; the pair read fences on it.
+async function settleParentForCallbackVerdict(call, { callSid = null, procGeneration = null, status }) {
+  if (!callbackParentId(call, { correction: status !== 'spam' })) return { applied: false, reason: 'no_parent' };
+  return status === 'spam'
+    ? closeParentOnCallbackSpam(call, { callSid, procGeneration })
+    : reopenParentOnCallbackCorrected(call, { callSid, procGeneration, status });
+}
+// Other office callbacks to this voicemail whose spam verdict still stands
+// (settled, no live token, dialed to the same number or customer). The
+// parent's verdict is the set of them, not the last stamp written.
+async function standingSpamCallbacks(trx, parent, exceptCallId) {
+  // Today's parent eligibility first: a parent that no longer reads as a
+  // settled inbound voicemail (a replaced recording, a pass in flight) has no
+  // standing verdict, whatever its other callbacks say.
+  if (!isVoicemailParent(parent) || !isSettledParent(parent)) return [];
+  // Not gated: a sibling's standing spam verdict stays visible through a
+  // rollback. Hiding it made a correction of callback B clear the stamp and
+  // reopen the cards while the promise A dismissed stayed dismissed (B's
+  // correction cannot reopen A's), and A, still spam, was never corrected
+  // (codex #6271 r48). The gate blocks NEW settlements (closeParentOnCallbackSpam,
+  // callbackReachedSolicitor); what already stands is retired by its own correction.
+  const rows = await trx('call_log')
+    .where('direction', 'like', 'outbound%')
+    .where({ source: 'admin-callback', processing_status: 'spam' })
+    .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q))
+    .whereNull('processing_token')
+    .whereNot('id', exceptCallId)
+    .whereRaw("metadata->>'relatedCallId' = ?", [String(parent.id)])
+    .whereRaw("metadata->>'placed_by_role' = 'admin'")
+    .orderBy('created_at', 'asc')
+    // Share-locked for the correction's transaction: a pass that would claim
+    // one of these rows (its token write) waits, so a verdict retained or a
+    // dismissal re-pointed here rests on a callback that still reads settled
+    // spam at commit.
+    .forShare()
+    .select('id', 'to_phone', 'customer_id', 'created_at', trx.raw("metadata->>'relatedCommitmentId' as related_commitment_id"));
+  // The same eligibility as the callback being judged: dialed to the
+  // voicemail's number, and placed after the voicemail ended.
+  return rows.filter((c) => callbackAfterCallEnd(c, parent) && samePhone(parent.from_phone, c.to_phone));
+}
+// The correction: a callback first classified spam, reprocessed into anything
+// that is not spam. The parent's verdict is recomputed from every linked
+// callback: while another spam callback still stands the cards stay closed
+// and the stamp names that one; otherwise the cards callback_spam resolved
+// reopen, the stamp goes and review_status follows. The promise lifecycle's
+// dismissal for THIS callback reopens in the same transaction
+// (reopenCallbackSpamDismissals; human verdicts stand). Nothing else about
+// the parent is touched.
+async function reopenParentOnCallbackCorrected(call, { callSid = null, procGeneration = null, status = 'processed' } = {}) {
+  const parentId = callbackParentId(call, { correction: true });
+  if (!parentId) return { applied: false, reason: 'no_parent' };
+  try {
+    const undone = await db.transaction(async (trx) => {
+      const pair = await lockCallbackPair(trx, call, parentId, { status, procGeneration, correction: true });
+      if (!pair.parent) return { applied: false, reason: pair.reason };
+      const now = new Date();
+      const standing = await standingSpamCallbacks(trx, pair.parent, call.id);
+      const commitments = require('./call-commitments');
+      const hadVerdict = !!callMetadataObject(pair.parent).callback_verdict;
+      // The parent's OWN verdict: force-reprocessed to spam since, its asks
+      // are moot on their own and the cards stay closed whatever the
+      // callbacks say (a later pass that clears the parent files its cards
+      // afresh). The promise is still judged below: nothing may stay
+      // dismissed on a callback that no longer proves anything.
+      const parentSpam = pair.parent.processing_status === 'spam';
+      if (standing.length || parentSpam) {
+        // Still settled: the stamp moves to a callback that still stands (or
+        // goes, when the parent's own verdict is all that stands), and each
+        // promise this callback dismissed is judged again with the full
+        // proof (its own evidence boundary and linkage; a sibling promise's
+        // callback, or one before a staff renewal, keeps nothing).
+        if (standing.length) {
+          await trx('call_log').where({ id: parentId }).update({
+            metadata: trx.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{callback_verdict}', ?::jsonb, true)",
+              [JSON.stringify({ spam: true, callback_call_log_id: standing[0].id, at: now.toISOString() })]),
+            updated_at: now,
+          });
+        } else if (hadVerdict) {
+          await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
+        }
+        const judged = await commitments.rejudgeCallbackSpamDismissals(trx, parentId, call.id);
+        return { applied: true, cards: 0, promises: judged.reopened, standing: standing.length > 0, ...(parentSpam ? { parentSpam: true } : {}) };
+      }
+      // One canonical card per reason comes back: the newest callback_spam
+      // row for each reason, and only where no LATER row of any status exists
+      // for that reason (a reprocess after the settlement may have filed one
+      // that is open, or that staff already resolved: either way that newer
+      // row owns the ask and the history row stays resolved; the scans'
+      // newerRowForReason twin, codex #6271 r43 P2).
+      const cards = await trx('triage_items')
+        .whereIn('id', trx('triage_items').distinctOn('reason_code').select('id')
+          .where({ call_log_id: parentId, status: 'resolved', resolution_rule: CALLBACK_SPAM_RULE })
+          .orderBy([{ column: 'reason_code' }, { column: 'resolved_at', order: 'desc', nulls: 'last' }, { column: 'id', order: 'desc' }]))
+        .whereNotExists(function newerRowForReason() {
+          this.select(trx.raw('1')).from('triage_items as later')
+            .whereRaw('later.call_log_id = triage_items.call_log_id AND later.reason_code = triage_items.reason_code AND later.id <> triage_items.id')
+            .whereRaw('(later.created_at > triage_items.created_at OR (later.created_at = triage_items.created_at AND later.id > triage_items.id))');
+        })
+        .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now });
+      // Only a settlement that existed is undone: a first-time non-spam
+      // callback with nothing to give back leaves the parent's aggregate
+      // review_status and metadata exactly as they were.
+      if (cards > 0) await syncCallReviewStatus(trx, parentId, 'resolved');
+      if (hadVerdict) await trx('call_log').where({ id: parentId }).update({ metadata: trx.raw("metadata - 'callback_verdict'"), updated_at: now });
+      const promises = await commitments.reopenCallbackSpamDismissals(trx, parentId, call.id);
+      if (!hadVerdict && !cards && !promises) return { applied: false, reason: 'no_verdict' };
+      return { applied: true, cards, promises, standing: false };
+    });
+    if (undone.applied) logger.info(`[call-proc] callback ${maskSid(callSid)} is not spam after all (${status}): parent voicemail ${undone.standing ? 'stays settled on another spam callback' : 'reopened'} (${undone.cards} card(s), ${undone.promises} promise(s))`);
+    // A promise owed again is judged at once: the corrected callback itself
+    // (a real conversation) may keep it, so it never waits for the next
+    // watchdog tick in Owed or on the pager. Fail-soft, like the settlement.
+    if (undone.applied && undone.promises > 0) {
+      await require('./call-commitments').refreshFulfillment(db, parentId)
+        .catch((err) => logger.warn(`[call-proc] callback ${maskSid(callSid)} corrected; the parent's promise refresh failed: ${err.message}`));
+    }
+    return undone;
+  } catch (err) {
+    logger.warn(`[call-proc] callback ${maskSid(callSid)} corrected but the parent voicemail could not be reopened: ${err.message}`);
+    return { applied: false, reason: 'error', error: err.message };
+  }
 }
 
 // The customer's OWN inbound contact, and recent (owner ruling 2026-09-30: a
@@ -3861,16 +4319,25 @@ const shutdownStampSql = (conn) => conn.raw(
   `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
   [new Date().toISOString()],
 );
+// The V2 verdict that an unknown caller's voicemail asks for a call back: a
+// valid extraction that is not spam and whose disposition is the callback task.
+// Only while V2 is the primary extractor: in shadow mode (V2 on, routing off)
+// its verdict is recorded for evaluation and rings nothing.
+function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled() } = {}) {
+  if (!v2Primary) return false;
+  const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
+  return v2?.recommended_disposition === 'callback_task_created' && v2?.spam_verdict?.spam_kind === 'not_spam';
+}
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
 // row. That silence lost a WDO-closing lead in May 2026 (recovered only by a
 // manual re-key that minted a duplicate account). Returns the notification
 // payload for the customer_voicemail_callback bell, or null when the
-// voicemail carries no workable service signal (plain "call me back" messages
-// stay bell-free). Pure decision core — the caller owns the gate check, the
+// voicemail carries no workable service signal, comes from no known customer
+// and asks for no callback. Pure decision core — the caller owns the gate check, the
 // customer lookup, and the dedupe.
-function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false, knownCustomer = false, transcript = '' } = {}) {
+function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false, knownCustomer = false, transcript = '', callbackAsked = false } = {}) {
   if (!voicemailChannel || voicemailLeadPath) return null;
   // An OUTBOUND call reaching the customer's voicemail records OUR message —
   // a staff recording that names the service would otherwise satisfy the
@@ -3885,9 +4352,13 @@ function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, 
   // stay bell-free. Dead-air recordings ([VOICEMAIL]/[NO SPEECH] markers with
   // no spoken content, e.g. a customer pocket dial) never ring on the
   // known-customer basis.
+  // Owner 2026-10-12 (call audit): an UNKNOWN caller who asks for a callback
+  // rings too. Four such voicemails in 14 days ended with no bell, no card and
+  // no lead. The basis is the V2 verdict (callbackAsked: not spam + a callback
+  // disposition), so a solicitor or robocall voicemail still stays bell-free.
   const workable = hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true });
   const spokenContent = String(transcript || '').replace(/\[(?:VOICEMAIL|NO SPEECH)\]/gi, '').trim();
-  if (!workable && !(knownCustomer && spokenContent)) return null;
+  if (!workable && !((knownCustomer || callbackAsked) && spokenContent)) return null;
   const name = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
     .filter(Boolean)
     .join(' ');
@@ -7223,12 +7694,19 @@ function existingStructureTermiteWork(words) {
 //     one split on the conjunctions; a bare V2 category word is a placeholder
 //     and is skipped) is the
 //     pre-slab service or plain "pre-treat" wording; one that classifies as
-//     anything else, or as nothing, keeps the card. Narrative sentences
+//     anything else, or as nothing, keeps the card. On a VALID V2 record the
+//     proof reads the SERVICE fields only (view service words,
+//     service_request.specific_service_name, secondary_categories,
+//     pests_observed); objections_raised is sentiment, checked apart for
+//     another service family. Bora-Care / wood treatment counts as pre-treat
+//     wording with new-construction context (same fragment, or the service
+//     name for narrative) and no existing-structure wording. Narrative sentences
 //     (call_summary) may be anything that carries no cue and is not another
 //     termite service, and at least one fragment overall is the pre-treat.
 //  6. No unit, suite, bay or condo wording anywhere in the transcript.
 // Any doubt keeps the card. Do not add one regex per Codex round: add a cue
 // to the matching class above.
+const SERVICE_SENTENCE_SPLIT_RE = /[.!?;,]\s+/;
 const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
 // A pre-treat IS a soil treatment, so bare "soil treatment" is pre-treat wording
 // (existing-structure context still vetoes it when a building qualifier follows).
@@ -7247,14 +7725,39 @@ function hasTermiteAddonWording(text) {
     && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
 }
 const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+const ATTIC_CRAWLSPACE_RE = /\b(?:attic|crawl\s?space)\b/i;
 const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b/i;
 const NEW_BUILD_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|new[-\s]build|pre[-\s]?slab)\b/i;
 function hasExistingStructureContext(text) {
-  return EXISTING_STRUCTURE_CONTEXT_RE.test(text) && !NEW_BUILD_WORDING_RE.test(text);
+  return (EXISTING_STRUCTURE_CONTEXT_RE.test(text) || ATTIC_CRAWLSPACE_RE.test(text)) && !NEW_BUILD_WORDING_RE.test(text);
 }
-function hasNonPretreatTermiteCue(text) {
+// New-construction wording for the wood-treatment exemption below: Bora-Care
+// sprayed on new framing is a builder's pre-construction add-on, not work on an
+// existing structure.
+const NEW_CONSTRUCTION_CONTEXT_RE = /\bpre[-\s]?(?:slab|construction)\b|\bslab\s+pre[-\s]?treat\w*|\bnew[-\s](?:construction|build)\b|\bnew\s+framing\b|\bframing\s+(?:before|prior to)\s+(?:the\s+)?(?:slab|pour)\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bpour\b|\bbuilder\b/i;
+// Wood treatment / Bora-Care is a cue only without new-construction context
+// (the caller supplies it: the same fragment, or the call's service name).
+// Existing-structure context and a second service still veto on their own.
+// Termite treatments that are NOT a pre-construction pre-treat, named by what
+// they are rather than by the family label canonicalWavesService gives a generic
+// phrase: drywood work, tent / no-tent / fumigation, subterranean treatment or
+// control of an existing infestation, Termidor around or trenched at a building,
+// localized and injection work. One class for the objection check and every
+// service-word veto: a match is another ask whatever the family label says.
+const TERMITE_OTHER_TREATMENT_RE = /\bdry[-\s]?wood\b|\bno[-\s]tent\b|\btent(?:s|ing|ed)?\b|\bfumigat\w*|\blocalized\b/i;
+// The liquid / subterranean / injection class is soil work too, so a fragment
+// that says outright it is pre-construction ("injection before the slab pour")
+// is the pre-treat itself. Existing-structure wording on the fragment still vetoes.
+const TERMITE_LIQUID_TREATMENT_RE = /\bsubterranean\s+(?:termite\s+)?(?:treatment|control)\b|\btermidor\s+(?:around|trench\w*|foam\w*|perimeter)\b|\binject\w*|\bliquid\s+(?:termite\b|treatment\b)|\btermite\s+liquid\b/i;
+const EXPLICIT_PRECONSTRUCTION_RE = /\bpre[-\s]?(?:slab|construction)\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bnew[-\s]construction\b|\bslab\s+pre[-\s]?treat\w*/i;
+function isLiquidTreatmentVeto(value, softTreatmentOk) {
+  if (softTreatmentOk || !TERMITE_LIQUID_TREATMENT_RE.test(value)) return false;
+  const explicit = EXPLICIT_PRECONSTRUCTION_RE.test(value);
+  return !explicit || EXISTING_WORK_WORDING_RE.test(value) || EXISTING_STRUCTURE_CONTEXT_RE.test(value);
+}
+function hasNonPretreatTermiteCue(text, { woodTreatmentOk = false, softTreatmentOk = false } = {}) {
   const value = String(text || '').toLowerCase();
-  return TERMITE_WOOD_TREATMENT_CUE_RE.test(value) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+  return TERMITE_OTHER_TREATMENT_RE.test(value) || isLiquidTreatmentVeto(value, softTreatmentOk) || (!woodTreatmentOk && TERMITE_WOOD_TREATMENT_CUE_RE.test(value)) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
     || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
     || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
 }
@@ -7279,8 +7782,25 @@ function isV2CategoryPlaceholder(fragment, field, v2Extraction) {
   const legacy = category ? mapServiceCategoryToLegacy(category) : null;
   return !!legacy && value === String(legacy).toLowerCase();
 }
-// Every structured field is split on the conjunctions, not only pain_points.
-function structuredFragmentsOf(view, v2Extraction) {
+// Legacy (V1-only) view: the structured fields are requested_service,
+// matched_service, specific_service_name and every pain_points item, each split
+// on the conjunctions.
+// VALID V2 record (follow-up to #6105, Codex r17 P2): flatView copies
+// sentiment_and_lead.objections_raised into pain_points, so an ordinary
+// objection ("price") read as a service fragment and the fail-closed proof
+// never held. The V2 proof reads SERVICE fields only: the view's service
+// words, service_request.specific_service_name, the second-service fields
+// (secondary_categories, pests_observed). Objections are checked apart
+// (objectionNamesOtherService), never as proof.
+function v2SecondServiceWords(v2Extraction) {
+  const request = v2Extraction?.service_request || {};
+  const secondary = Array.isArray(request.secondary_categories) ? request.secondary_categories : [];
+  const pests = Array.isArray(request.pests_observed) ? request.pests_observed.map((p) => p?.pest_type) : [];
+  return [...secondary, ...pests]
+    .filter((word) => word && word !== 'unspecified')
+    .map((word) => String(word).replace(/_/g, ' '));
+}
+function structuredFragmentsOf(view, v2Extraction, { v2Proof = false } = {}) {
   const out = [];
   const add = (text, field) => {
     for (const fragment of splitFragments(text)) {
@@ -7289,28 +7809,117 @@ function structuredFragmentsOf(view, v2Extraction) {
   };
   add(view.requested_service, 'requested_service');
   add(view.matched_service, 'matched_service');
-  add(view.specific_service_name, 'specific_service_name');
+  // "Pre-slab pre-treat with Bora-Care" splits on "with": the Bora-Care piece
+  // keeps the whole service name beside it so its new-construction context
+  // travels with it. Only the service name does this, no other field.
+  const addServiceName = (name) => {
+    for (const fragment of splitFragments(name)) {
+      if (isV2CategoryPlaceholder(fragment, 'specific_service_name', v2Extraction)) continue;
+      const wood = TERMITE_WOOD_TREATMENT_CUE_RE.test(fragment.toLowerCase()) && fragment !== String(name).trim();
+      out.push(wood ? `${fragment} (${name})` : fragment);
+    }
+  };
+  addServiceName(view.specific_service_name);
+  if (v2Proof) {
+    addServiceName(v2Extraction?.service_request?.specific_service_name);
+    // A second service named by the V2 record is never a placeholder.
+    for (const word of v2SecondServiceWords(v2Extraction)) out.push(word);
+    return out;
+  }
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
   for (const item of painPoints) add(item, 'pain_points');
   return out;
 }
-function pretreatIsOnlyTermiteWork(view, v2Extraction = null) {
-  const structured = structuredFragmentsOf(view, v2Extraction);
+// Objections and pain points on a V2 call are sentiment: "price" is not a
+// service. Only one that names a service family (or classifies to a service)
+// other than the pre-slab service is another ask and keeps the card.
+function objectionNamesOtherService(fragment) {
+  // Any non-pre-treat termite treatment is another ask, pre-treat wording or not.
+  if (hasNonPretreatTermiteCue(fragment)) return true;
+  if (isPretreatFragment(fragment)) return false;
+  // The current service family is not another ask ("termite treatment is too
+  // expensive"). Another ask is a non-termite family or a catalog service
+  // outside the termite family.
+  if (familiesIn(fragment).some((f) => f.key !== 'termite')) return true;
+  const label = canonicalWavesService(fragment);
+  return !!(label && !TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor');
+}
+function v2ObjectionTexts(view, v2Extraction) {
+  const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
+  const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
+  return [...(Array.isArray(objections) ? objections : []), ...painPoints];
+}
+function v2ObjectionFragments(view, v2Extraction) {
+  return v2ObjectionTexts(view, v2Extraction).flatMap(splitFragments);
+}
+const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|already built|attic|crawl\s?space)\b/i;
+// The service name's new-construction context may be borrowed only by a
+// sentence about the SAME job. A separate-job marker or a different location
+// ("also Bora-Care at the sales office") must carry its own context.
+const SEPARATE_JOB_MARKER_RE = /\b(?:also|another|other|second|separate|additional|as well|in addition|plus)\b/i;
+const DIFFERENT_LOCATION_RE = /\b(?:offices?|units?|suites?|garages?|sheds?|barns?|guest house|next door|across|their home|the house)\b/i;
+// "building <identifier>" names a distinct building (B, 2, beta, annex); a
+// function or construction word after "building" ("the building before the
+// pour", "building permit") is the same job (codex #6289 r4).
+const DIFFERENT_BUILDING_RE = /\bbuilding\s+(?!(?:is|was|are|were|be|being|been|has|have|had|will|would|can|that|which|and|or|but|so|under|before|after|once|when|while|for|to|on|in|at|with|by|from|of|the|a|an|this|it|its|site|pad|slab|footprint|permit|inspector|department|code|codes|plans|next|now|too|also|as|we|they|he|she|i|you)\b)[A-Za-z0-9][\w-]*\b/i;
+function isSeparateJobSentence(text) {
+  return SEPARATE_JOB_MARKER_RE.test(text) || DIFFERENT_LOCATION_RE.test(text) || DIFFERENT_BUILDING_RE.test(text);
+}
+function isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction) {
+  const text = String(fragment || '');
+  return TERMITE_WOOD_TREATMENT_CUE_RE.test(text.toLowerCase())
+    && !EXISTING_WORK_WORDING_RE.test(text)
+    && (NEW_CONSTRUCTION_CONTEXT_RE.test(text) || (nameHasNewConstruction && !isSeparateJobSentence(text)));
+}
+// The marker is read on the whole SENTENCE (splitting on "also" and "plus"
+// would drop it); the new-construction context on the conjunction FRAGMENT
+// ("slab pre-treat and Bora-Care on building B": the pre-treat half must not
+// vouch for the Bora-Care half).
+function woodSentenceNeedsOwnContext(texts, nameHasNewConstruction) {
+  return texts.flatMap((t) => String(t || '').split(SERVICE_SENTENCE_SPLIT_RE)).some((sentence) => {
+    const borrow = nameHasNewConstruction && !isSeparateJobSentence(sentence);
+    return splitFragments(sentence).some((fragment) => (
+      TERMITE_WOOD_TREATMENT_CUE_RE.test(fragment.toLowerCase()) && !isWoodTreatmentOnNewConstruction(fragment, borrow)
+    ));
+  });
+}
+function isPretreatFragment(fragment, nameHasNewConstruction = false) {
+  return canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment)
+    || isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction);
+}
+// Wood treatment is judged per sentence (woodSentenceNeedsOwnContext).
+function narrativeNamesOtherTermite(narrative) {
+  return narrative.some((fragment) => {
+    const label = canonicalWavesService(fragment);
+    if (!label || !TERMITE_SERVICE_LABELS.has(label) || label === 'Pre-Slab Termidor' || label === 'Termite Wood Treatment') return false;
+    return label !== 'Termite Inspection' || !TERMITE_NEW_SLAB_WORDING_RE.test(fragment);
+  });
+}
+function pretreatIsOnlyTermiteWork(view, v2Extraction = null, { v2Proof = false } = {}) {
+  const structured = structuredFragmentsOf(view, v2Extraction, { v2Proof });
   const narrative = splitFragments(view.call_summary);
-  const fragments = [...structured, ...narrative];
-  if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
+  const objections = v2Proof ? v2ObjectionFragments(view, v2Extraction) : [];
+  // The call's service name decides whether a Bora-Care sentence in the
+  // narrative is new-construction work. A structured fragment needs its own
+  // context (structuredFragmentsOf carries the service name's along).
+  const nameHasNewConstruction = NEW_CONSTRUCTION_CONTEXT_RE.test(
+    [view.specific_service_name, v2Proof ? v2Extraction?.service_request?.specific_service_name : null].filter(Boolean).join(' '),
+  );
+  // The joined check skips the wood cue (a single-word cue judged per fragment).
+  const joined = [...structured, ...narrative, ...objections].join('. ');
+  if (hasNonPretreatTermiteCue(joined, { woodTreatmentOk: true, softTreatmentOk: true })) return false;
+  // Wood treatment: a structured fragment carries its own context; narrative and
+  // objection sentences may borrow the service name's only for the same job.
+  if (structured.some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: isWoodTreatmentOnNewConstruction(f, false) }))) return false;
+  if ([...narrative, ...objections].some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: true }))) return false;
+  if (woodSentenceNeedsOwnContext([view.call_summary, ...(v2Proof ? v2ObjectionTexts(view, v2Extraction) : [])], nameHasNewConstruction)) return false;
   // Fail closed: a structured fragment that is not the pre-slab service (or
   // plain pre-treat wording) keeps the card, including one nothing classifies.
-  const isPretreat = (fragment) => canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment);
-  if (!structured.every(isPretreat)) return false;
+  if (!structured.every((f) => isPretreatFragment(f)) || objections.some(objectionNamesOtherService)) return false;
   // Narrative sentences may be anything without a cue, but none may be some
   // other termite service.
-  const narrativeOtherTermite = narrative.some((fragment) => {
-    const label = canonicalWavesService(fragment);
-    return label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
-      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment));
-  });
-  return !narrativeOtherTermite && fragments.some(isPretreat);
+  if (narrativeNamesOtherTermite(narrative)) return false;
+  return [...structured, ...narrative].some((f) => isPretreatFragment(f));
 }
 
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
@@ -7336,7 +7945,10 @@ function propertyHasNoUnitToAsk(v2Extraction) {
     && !(Array.isArray(secondary) && secondary.length);
 }
 
-function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+// v2Valid: the caller's word that the V2 payload passed validation. A valid V2
+// record gives the structured proof from its SERVICE fields (pretreatIsOnlyTermiteWork
+// v2Proof); the V1 view heard before adoption keeps the legacy flat-view proof.
+function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false, v2Valid = true } = {}) {
   // Same conservative views as wholeStructureUnitWaiverForCall: a call the
   // unclear-service rule may book as a Waves Assessment is not whole-structure,
   // and the V1 service as heard BEFORE V2-primary adoption must agree too.
@@ -7344,8 +7956,13 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
   if (!propertyHasNoUnitToAsk(v2Extraction)) return false;
   // A revisit, complaint, callback or cancellation is not a new slab job.
   if (EXISTING_SERVICE_INTENTS.has(String(v2Extraction?.service_request?.service_intent || ''))) return false;
-  const views = [preAdoptionExtracted, extracted, v2BookingServiceView(extracted, v2Extraction)].filter(Boolean);
-  return views.every((view) => {
+  const useV2Proof = !!v2Valid && isV2Extraction(v2Extraction);
+  const views = [
+    preAdoptionExtracted ? { view: preAdoptionExtracted, v2Proof: false } : null,
+    { view: extracted, v2Proof: useV2Proof },
+    { view: v2BookingServiceView(extracted, v2Extraction), v2Proof: useV2Proof },
+  ].filter((entry) => entry && entry.view);
+  return views.every(({ view, v2Proof }) => {
     const coarse = resolveSchedulableCallService(view, { transcription });
     const row = resolveCallBookingCatalogService({
       extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
@@ -7368,7 +7985,7 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
     const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
     const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
     const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords)
-      && pretreatIsOnlyTermiteWork(view, v2Extraction);
+      && pretreatIsOnlyTermiteWork(view, v2Extraction, { v2Proof });
     return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
@@ -8192,6 +8809,190 @@ Rules:
   }
 }
 
+// Why the contact pass / decoder runs for this transcript, or null when it does not.
+// 'signals' = the dictation detector (always on). 'collapse:<signal>' = a collapsed
+// spelling's marks (GATE_CALL_SPELLING_COLLAPSE_TRIGGER, dark): the ONLY case the new
+// trigger adds a pass, so it is the one that is logged. `ctx` carries { extracted,
+// knownCustomer } once the extraction exists; the second pass runs before it, so the
+// near-miss signal can only fire at the decoder gate.
+function contactPassTrigger(transcription, ctx = {}) {
+  if (!transcription) return null;
+  if (detectContactDictationSignals(transcription).any) return 'signals';
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
+  // The name-only trigger feeds the name-spelling card, which never files on an outbound call
+  // (outbound diarization can swap the labels): no paid pass for it there.
+  if (ctx.call && isOutboundCall(ctx.call)) return null;
+  const sig = spellingCollapseSignals(transcription, ctx);
+  if (!sig.any) return null;
+  return `collapse:${['repeated', 'announced', 'nearMiss'].filter((k) => sig[k]).join('+')}`;
+}
+
+function contactPassTriggerLogged(transcription, call, stage, ctx = {}) {
+  const trigger = contactPassTrigger(transcription, ctx);
+  logCollapseTrigger(trigger, call?.twilio_call_sid, stage);
+  return trigger !== null;
+}
+
+function logCollapseTrigger(trigger, callSid, stage) {
+  if (typeof trigger === 'string' && trigger.startsWith('collapse:')) {
+    logger.info(`[call-proc] spelling collapse trigger (${stage}): ${trigger.slice(9)} for ${maskSid(callSid)}`);
+  }
+}
+
+// The expected recording length to verify a download against, or null. Verification (and the
+// retryable not-ready classification) only applies inside the CDN propagation window: an old row's
+// recording is as complete as it will ever get, and verifying it would reject it forever (Codex
+// #3037 P2). The window is anchored at call END (created_at + duration), since the recording only
+// exists once the call ends (Codex #3037 round-2 P2). Shared by the primary download and the late
+// contact pass so a truncated CDN response is never transcribed by either.
+function propagationExpectedSeconds(call) {
+  const callCreatedMs = call?.created_at ? new Date(call.created_at).getTime() : null;
+  const callEndMs = Number.isFinite(callCreatedMs)
+    ? callCreatedMs + recordingDurationSeconds(call || {}) * 1000
+    : null;
+  const withinPropagationWindow = Number.isFinite(callEndMs)
+    && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
+  return withinPropagationWindow ? (recordingDurationSeconds(call || {}) || null) : null;
+}
+
+// One extra dictation-focused transcription pass over the call audio, scrubbed like the primary.
+// Returns { text, model, chars } or, when this pass is the first leg to hear a card number,
+// { pan: true, panCount } with no text: the caller quarantines the recording and decodes nothing.
+async function lateContactPass(call) {
+  let buffer;
+  try {
+    buffer = await downloadRecording(call.recording_url, { expectedSeconds: propagationExpectedSeconds(call) });
+  } catch (err) {
+    if (err.code !== RECORDING_NOT_READY) throw err;
+    // A short or missing CDN read: never transcribe or persist it. The pass simply does not run.
+    logger.warn(`[call-proc] late contact pass: recording not ready, pass skipped: ${err.message}`);
+    return null;
+  }
+  const second = await transcribeWithOpenAI(buffer, {
+    model: process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe',
+    prompt: CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
+  });
+  if (!second?.text) return null;
+  const scrubbed = scrubPansDetailed(second.text);
+  const panCount = Math.max(Number(second.panCount || 0), scrubbed.count);
+  if (panCount > 0) return { pan: true, panCount };
+  return { text: scrubbed.text, model: second.model || null, chars: scrubbed.text.length };
+}
+
+// The same card-number handling the normal wrapper and the choke-point scrub use: quarantine the
+// recording (Twilio delete, strip the URL, stamp pan_detected, alert the office) and clear the URL
+// on the in-memory row so nothing downstream re-downloads the audio.
+async function quarantineLatePanPass(call, panCount) {
+  await quarantineCardRecording(call, { source: 'late_contact_pass' });
+  call.recording_url = null;
+  return panCount;
+}
+
+// Whether the late (post-extraction) pass may run at all: gate on, contact dictation not switched
+// off, an inbound call whose recording is still there, and an extraction with a name to work with.
+// The wrapper already bought (and may have lost) the pass for the transcript-only signals; only the
+// near miss, which needs the extraction, is new after it, and the near miss needs a last name.
+function lateContactPassAllowed({ call, extracted, contactPassAttempted }) {
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return false;
+  if (process.env.CONTACT_DICTATION_ENABLED === 'false') return false;
+  if (!call.recording_url || isOutboundCall(call)) return false;
+  if (!extracted?.first_name && !extracted?.last_name) return false;
+  return !(contactPassAttempted && !extracted.last_name);
+}
+
+// The collapse trigger for the late pass, or null. Either extracted name is context for the
+// repeated-name signal; only the stored-last-name near miss needs a customer lookup. After a pass
+// the wrapper already tried, only the near miss counts.
+async function lateContactPassTrigger({ call, contactPhone, transcription, extracted, contactPassAttempted }) {
+  let known = null;
+  if (extracted.last_name) {
+    known = call.customer_id
+      ? await db('customers').where({ id: call.customer_id }).first('last_name')
+      : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
+  }
+  const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known, call });
+  if (!trigger || (contactPassAttempted && !trigger.includes('nearMiss'))) return null;
+  return trigger;
+}
+
+// The decoder gate. Runs when a second-pass transcript exists or the dictation detector fires
+// (as before). With GATE_CALL_SPELLING_COLLAPSE_TRIGGER on it also runs for a collapsed spelling the
+// wrapper could not see before the extraction existed (the near miss): one late second pass on a
+// fresh, verified download. A pass that hears a card number is quarantined and nothing is decoded.
+// Fail-open: any failure leaves the decoder off. `late` carries what the caller must persist;
+// `panCount` means the recording is gone.
+async function contactDecoderGate(args) {
+  const { call, transcription, contactPassTranscript, callSid } = args;
+  const off = { run: false, lateContactPass: null, late: null, panCount: 0 };
+  if (contactPassTranscript) return { ...off, run: true };
+  if (detectContactDictationSignals(transcription).any) return { ...off, run: true };
+  if (!lateContactPassAllowed(args)) return off;
+  try {
+    const trigger = await lateContactPassTrigger(args);
+    if (!trigger) return off;
+    logCollapseTrigger(trigger, callSid, 'decoder');
+    const late = await lateContactPass(call);
+    if (late?.pan) return { ...off, panCount: await quarantineLatePanPass(call, late.panCount) };
+    return late ? { ...off, run: true, lateContactPass: late.text, late } : off;
+  } catch (err) {
+    logger.warn(`[call-proc] spelling collapse decoder gate skipped for ${maskSid(callSid)}: ${err.message}`);
+    return off;
+  }
+}
+
+// transcript_structured as the main transcript write builds it: the diarized segments plus the
+// dictation-focused second stream as the audit trail.
+function structuredTranscriptJson(result, contactPassTranscript) {
+  return JSON.stringify({
+    provider: result.provider,
+    model: result.model || OPENAI_TRANSCRIPTION_MODEL,
+    segments: result.structuredSegments || null,
+    ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
+  });
+}
+
+// What a late pass adds to the call row's transcription metadata: the second stream's model and
+// size, or, for a pass that heard a card number, pan_detected + pan_count (quarantineCardRecording
+// already stripped the URL and stamped the quarantine). Plain object, merged into the caller's
+// in-memory provenance too so a later metadata write does not restore an older pan_count.
+function lateContactPassMeta({ provenanceMetadata, gate }) {
+  if (gate.panCount > 0) {
+    return { pan_detected: true, pan_count: Math.max(Number(provenanceMetadata?.pan_count || 0), gate.panCount) };
+  }
+  return { contact_pass_model: gate.late.model, contact_pass_chars: gate.late.chars };
+}
+
+// Written through the same token-fenced, quarantine-preserving metadata write as the main
+// transcript. The second stream is merged INTO whatever transcript_structured the accepted
+// transcript already has (primary segments, a fallback's, or none): it never replaces them. A
+// composite relay call has no structured form, so only the metadata is written there. Returns
+// false when the fence says a peer owns the call.
+async function persistLateContactPass({ call, procToken, provenanceMetadata, gate, relay }) {
+  if (!gate?.late && !(gate?.panCount > 0)) return true;
+  const meta = lateContactPassMeta({ provenanceMetadata, gate });
+  if (provenanceMetadata) Object.assign(provenanceMetadata, meta);
+  // Only the new fields are merged into the CURRENT jsonb: a relay close or summary write between
+  // the main transcript write and this one may have added keys the in-memory provenance lacks.
+  const metaWrite = db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(meta)]);
+  const patch = { transcription_metadata: metaWrite, updated_at: new Date() };
+  if (gate.late && !relay) {
+    patch.transcript_structured = db.raw(
+      "COALESCE(transcript_structured, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({ contact_pass_transcript: gate.late.text })],
+    );
+  }
+  const rows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update(patch);
+  return Number(rows) > 0;
+}
+
+// Persists a late contact pass and answers whether the claim is still ours: null to carry on, or
+// the same ownership-lost result the transcript write returns when a peer reclaimed the call.
+async function settleLateContactPass({ callSid, ...rest }) {
+  if (await persistLateContactPass(rest)) return null;
+  logger.warn(`[call-proc] late contact pass write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer; abandoning this pass`);
+  return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+}
+
 // Wrapper: primary transcription + (when the call dictated contact info) a
 // SECOND full-call pass on a promptable model. The diarized primary cannot be
 // prompted, so token-level dictation fidelity ("W, C as in Charlie, W, six
@@ -8209,8 +9010,11 @@ async function transcribeRecording(mp3Url, opts = {}) {
       // forceContactPass (bounce re-verify): the primary transcript may have
       // normalized a misheard address into a shape that no longer trips the
       // dictation signals — the caller knows an email was dictated.
-      && (opts.forceContactPass === true || detectContactDictationSignals(result.transcription).any)
+      && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass', { call: opts.call }))
     ) {
+      // Recorded BEFORE the paid call: a pass that returns nothing or throws still counts as tried, so
+      // the late decoder gate never repeats it for the same signal.
+      result.contactPassAttempted = true;
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
         model: contactModel,
@@ -8284,24 +9088,10 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
     // as it will ever get — verifying it would either reject it forever
     // (starving the sweep on dead URLs, Codex #3037 P2) or block a partial
     // recording that is still better transcribed than dropped.
-    const callCreatedMs = opts.call?.created_at ? new Date(opts.call.created_at).getTime() : null;
-    // Anchor the window at call END (created_at + duration), not call start —
-    // the recording only exists once the call ends, so an hour-long call
-    // anchored at creation would already be outside the window when the
-    // recording-completed webhook fires and would never get verification
-    // (Codex #3037 round-2 P2).
-    const callEndMs = Number.isFinite(callCreatedMs)
-      ? callCreatedMs + recordingDurationSeconds(opts.call || {}) * 1000
-      : null;
-    const withinPropagationWindow = Number.isFinite(callEndMs)
-      && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
+    const expectedSeconds = propagationExpectedSeconds(opts.call);
     let audioBuffer;
     try {
-      audioBuffer = await downloadRecording(mp3Url, {
-        expectedSeconds: withinPropagationWindow
-          ? (recordingDurationSeconds(opts.call || {}) || null)
-          : null,
-      });
+      audioBuffer = await downloadRecording(mp3Url, { expectedSeconds });
     } catch (err) {
       if (err.code === RECORDING_NOT_READY) {
         // CDN propagation lag (404 or truncated buffer for the known
@@ -9799,8 +10589,11 @@ const CallRecordingProcessor = {
           // seconds instead of the intended 10-minute spacing, or keep poking a
           // row already at the cap. Enforce both atomically at claim time.
           // Admin Reprocess (force=true) takes the other branch and is exempt.
+          // no_transcription shares the cap and the spacing (codex #6271 r40
+          // P1): a recording-status callback must not reclaim a row the sweep
+          // treats as terminal and push its count past the cap.
           .where(function () {
-            this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
+            this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed' AND processing_status IS DISTINCT FROM 'no_transcription'")
               .orWhere(function () {
                 this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
                   .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
@@ -10156,6 +10949,8 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // The wrapper already tried the second pass (it may have returned nothing).
+    let contactPassAttempted = false;
     // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
     // near-silence) is discarded here so the Twilio-builtin fallback below can
     // supply a real transcript; the terminal rejection only fires if the
@@ -10289,6 +11084,7 @@ const CallRecordingProcessor = {
       transcription = result.transcription;
       recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
+      contactPassAttempted = result.contactPassAttempted === true;
       // PAN redaction guard (card-on-file spec Phase 0): a card number
       // blurted on the recorded line must become a non-event — scrubbed
       // BEFORE the plausibility gate, BEFORE persistence, and therefore
@@ -10327,6 +11123,7 @@ const CallRecordingProcessor = {
         rejectedPrimaryChars = transcription.length; // keep the metric before discarding
         transcription = null;
         contactPassTranscript = null;
+        contactPassAttempted = false; // the wrapper's pass belonged to the discarded transcript
       }
       if (transcription) {
         transcriptionProvenance = {
@@ -10369,14 +11166,9 @@ const CallRecordingProcessor = {
         if (relaySegment) {
           transcriptUpdate.transcript_structured = null;
         } else if (result.structuredSegments || contactPassTranscript) {
-          transcriptUpdate.transcript_structured = JSON.stringify({
-            provider: result.provider,
-            model: result.model || OPENAI_TRANSCRIPTION_MODEL,
-            segments: result.structuredSegments || null,
-            // Audit trail for the contact-field decoder's second evidence
-            // stream (dictation-focused re-transcription of the same audio).
-            ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
-          });
+          // Includes the audit trail for the contact-field decoder's second evidence
+          // stream (dictation-focused re-transcription of the same audio).
+          transcriptUpdate.transcript_structured = structuredTranscriptJson(result, contactPassTranscript);
         }
         // Token-fenced like the terminal writes: this runs AFTER a
         // multi-minute provider await, by which time a peer may have
@@ -10636,6 +11428,9 @@ const CallRecordingProcessor = {
         // settled-vs-blocked rule read.
         return { success: false, skipped: true, reason: 'transcription_rejected_ownership_lost' };
       }
+      // A rejected transcript is a terminal voicemail verdict too: an office
+      // callback reprocessed here is no longer spam (settleParentForCallbackVerdict).
+      await settleParentForCallbackVerdict(call, { callSid, procGeneration, status: 'voicemail' });
       // Dismiss any open Needs Review cards a prior hallucinated extraction
       // filed for this call — clearing review_status alone doesn't remove them
       // (the inbox lists from triage_items.status), so they'd stay actionable.
@@ -10726,9 +11521,17 @@ const CallRecordingProcessor = {
         .update({
           processing_status: 'no_transcription',
           processing_token: null,
+          // Counted like an extraction failure: the sweep retries a
+          // no_transcription row under CALL_EXTRACTION_MAX_ATTEMPTS, and a
+          // recording adoption resets the count (codex #6271 r38/r39).
+          extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
           updated_at: new Date(),
-        });
-      if (!released) {
+        }, ['extraction_attempts']);
+      // PG returns the updated rows ([] = ownership lost); count-shaped
+      // results (0/1) come from environments without RETURNING — accept
+      // both, as the claim write does (the shadow-regression suite's mock).
+      const releasedRows = Array.isArray(released) ? released : null;
+      if (releasedRows ? !releasedRows.length : !released) {
         logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
         // Ownership loss, not a transcription failure — same treatment as the
         // extraction branch. This pass persisted nothing and the peer that
@@ -10737,6 +11540,11 @@ const CallRecordingProcessor = {
         // (codex P1).
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // At the cap the lane has ended: the call produced no lead, customer or
+      // routing decision and no pass will try again, so the same permanent
+      // processing-failure card the extraction lane files is owed here
+      // (codex #6271 r43 P1). fileExtractionExhaustedTriage is a no-op under the cap.
+      await fileExtractionExhaustedTriage(call.id, Number(releasedRows?.[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
       return { success: false, error: 'No transcription available' };
     }
 
@@ -11063,7 +11871,10 @@ const CallRecordingProcessor = {
         etWallClock: v2IsoToEtWallClock,
         callerPhone: contactPhone,
       });
-      extracted = adoption.merged;
+      // Stamped on the stored extraction: V2-primary adoption ran for this call, so its decisive
+      // answers are V2's. The nightly self-audit reads it to grade by the right extractor's rules
+      // (call-self-audit baselineFromV2); the live environment cannot tell it for an older row.
+      extracted = { ...adoption.merged, v2_primary_adopted: true };
       if (adoption.adoptedFields.length) {
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         logger.info(`[call-proc] V2-primary adopted ${adoption.adoptedFields.length} field(s) for ${maskSid(callSid)}: ${adoption.adoptedFields.join(', ')}`);
@@ -11116,6 +11927,9 @@ const CallRecordingProcessor = {
     // threw before the decision point arms the pair there instead of refreshing a card that
     // does not exist (codex r7 P1).
     let noTextDecisionLanded = false;
+    // The held_at of the hold this pass armed (full-precision text): the arming every card write in this pass is
+    // bound to. null until the decision point arms; then the card binds the line's current active hold instead.
+    let armingHeldAt = null;
     // cardExtraction: on a no-text hold, the VALID extraction the release card is built from. The
     // card insert runs INSIDE armDisclaimedNumberHold's transaction (afterArm), under the per-call
     // triage lock and the processing-claim fence, so the hold and its only release card commit or
@@ -11137,9 +11951,10 @@ const CallRecordingProcessor = {
         const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
           phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
           procToken, procGeneration, noTextHold: noTextHoldArming,
-          afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,
+          afterArm: item ? async (trx, arming) => writeTextNumberCard(trx, item, { refresh: false, heldAt: arming?.heldAt }) : null,
         });
         if (armed?.claimLost) return false;
+        armingHeldAt = armed?.heldAt ?? armingHeldAt;
         callbackNumberHoldArmed = true;
         if (item) noTextDecisionLanded = true;
         return true;
@@ -11180,7 +11995,7 @@ const CallRecordingProcessor = {
     };
     // The card write itself. The caller holds the per-call triage lock and has verified the
     // processing claim (armDisclaimedNumberHold's transaction, or fileTextNumberCard's own).
-    const writeTextNumberCard = async (trx, item, { refresh = false } = {}) => {
+    const writeTextNumberCard = async (trx, item, { refresh = false, heldAt = null } = {}) => {
       // A callback_number_needed card filed by an earlier pass (before this call was known to be a
       // no-text line) keeps its old payload; mark it, or its Resolve could release the hold we arm now.
       await trx('triage_items')
@@ -11192,13 +12007,15 @@ const CallRecordingProcessor = {
         await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
           .whereIn('status', ['open', 'in_progress'])
-          .update({ payload: item.payload, updated_at: new Date() });
+          .update({ payload: require('./disclaimed-number-holds').refreshedCardPayload(trx, item.payload), updated_at: new Date() });
       } else {
         await trx('triage_items').insert(item)
           .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
       }
       // The call-level aggregate follows the card in the same locked transaction: the tech follow-up
       // and voicemail branches return before the pass's usual review-status write (codex r14 P2).
+      // Durable card-to-hold binding: the open card carries the arming (held_at) of the hold it releases.
+      await require('./disclaimed-number-holds').stampOpenNoTextCards(trx, call.id, { phone: contactPhone, heldAt: heldAt || armingHeldAt });
       await syncCallReviewStatus(trx, call.id);
     };
     const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {
@@ -11409,6 +12226,10 @@ const CallRecordingProcessor = {
         // this pass finished nothing. See the note on the rejection path.
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // An office callback's verdict settles (spam) or gives back (anything
+      // else) its parent voicemail (settleParentForCallbackVerdict, dark
+      // GATE_CALLBACK_SPAM_CLOSES_PARENT).
+      await settleParentForCallbackVerdict(call, { callSid, procGeneration, status: extracted.is_spam ? 'spam' : 'voicemail' });
       // A previously classified call reprocessed into spam/non-workable
       // must not leave its property_role_confirm card actionable — the
       // office could still one-click property mutations from the
@@ -11490,6 +12311,7 @@ const CallRecordingProcessor = {
             outbound: isOutboundCall(call),
             knownCustomer: Boolean(vmAlertCustomer?.id),
             transcript: transcription,
+            callbackAsked: voicemailCallbackAsked(v2Result),
           });
           if (alertPlan) {
             // One alert per call even across reprocessing (retranscription
@@ -11742,8 +12564,20 @@ const CallRecordingProcessor = {
     // address-recovery lookup below. Fail-open.
     let contactDictation = null;
     let dictationEmailPayload = null;
+    // The late contact pass (paid) is persisted OUTSIDE the fail-open try below: a lost claim abandons
+    // the pass like the transcript write above, and a THROWN fence write escapes to the outer
+    // processing-failure path instead of marking the call processed with the late transcript
+    // neither saved nor decoded.
+    const decoderGate = transcription
+      ? await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, contactPassAttempted, extracted, callSid })
+      : null;
+    if (decoderGate?.lateContactPass) contactPassTranscript = decoderGate.lateContactPass;
+    const lost = decoderGate
+      ? await settleLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate: decoderGate, relay: Boolean(recordedSegmentText), callSid })
+      : null;
+    if (lost) return lost;
     try {
-      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
+      if (decoderGate?.run) {
         contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
       }
       if (contactDictation) {
@@ -12229,7 +13063,7 @@ const CallRecordingProcessor = {
             canonicalStreet: extracted?.address_line1,
             preConstructionPretreat: finalFlags.includes('missing_unit_number')
               && callIsPreConstructionPretreat({
-                extracted, preAdoptionExtracted, v2Extraction, transcription,
+                extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
           }).dropped);
@@ -12237,6 +13071,12 @@ const CallRecordingProcessor = {
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
           // routing reason, so it is never in finalFlags.
           for (const code of noActionCallCards(v2Extraction, { canonicalStreet: extracted?.address_line1 })) unneededCards.add(code);
+          // A voicemail whose office callback reached a solicitor (the standing
+          // callback_verdict, written under the parent lock, so it is current
+          // for this pass): the asks a return call would have answered are
+          // moot and file no card again (CALLBACK_SPAM_MOOT_CODES' contract;
+          // codex #6271 r51 P2). The route decision keeps every flag.
+          if (callbackVerdictSpam(call)) for (const code of CALLBACK_SPAM_MOOT_CODES) unneededCards.add(code);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier
@@ -13058,6 +13898,10 @@ const CallRecordingProcessor = {
         // this pass finished nothing. See the note on the rejection path.
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // An office callback's verdict settles (spam) or gives back (anything
+      // else) its parent voicemail (settleParentForCallbackVerdict, dark
+      // GATE_CALLBACK_SPAM_CLOSES_PARENT).
+      await settleParentForCallbackVerdict(call, { callSid, procGeneration, status: extracted.is_spam ? 'spam' : 'processed' });
       // Retire any open property_role_confirm card from a prior pass — the
       // veto blocks every canonical write, so its parked mutations are
       // superseded and must not stay one-click applicable (codex #3418
@@ -17711,6 +18555,10 @@ const CallRecordingProcessor = {
         extracted.preferred_date_time = v2WallClock;
       }
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
+      // Stamped for the nightly self-audit (call-self-audit baselineFromV2): this approved V2
+      // extraction wrote the appointment answer, also when V2-primary adoption is switched off
+      // (CALL_EXTRACTION_V2_PRIMARY=false with enforce routing on; codex #6294 r6).
+      extracted.v2_appointment_written = true;
       // flatView.matched_service is the coarse category→legacy map ("Termite
       // Inspection" for every termite call). Overwriting V1's specific label
       // with it downgraded e.g. a pre-slab soil-treatment booking to a plain
@@ -23275,6 +24123,11 @@ const CallRecordingProcessor = {
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
 
+      // A callback once classified spam that this pass settled on any other
+      // verdict gives the parent voicemail back what the spam verdict closed
+      // (settleParentForCallbackVerdict, dark GATE_CALLBACK_SPAM_CLOSES_PARENT).
+      await settleParentForCallbackVerdict(call, { callSid, procGeneration, status: finalStatus });
+
       // Reschedule apply (applyCallRescheduleStep): an existing customer's
       // agent-committed move of an on-the-books visit lands on the visit.
       // No customer comms. Generation-fenced, never blocking.
@@ -23614,7 +24467,9 @@ const CallRecordingProcessor = {
     //     IS NULL (fresh — gated by a 10-min CDN-settle age window so the cron can't beat
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
-    //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
+    //   - processing_status='no_transcription' with retry budget left (extraction_attempts
+    //     < CALL_EXTRACTION_MAX_ATTEMPTS, 10-min spacing; no creation fence, so adopted
+    //     audio on an old call still retries after the adoption resets the count)
     //   - processing_status='extraction_failed' with retry budget left (extraction_attempts
     //     < CALL_EXTRACTION_MAX_ATTEMPTS) — 10-min age gate spaces the attempts so a
     //     provider brown-out isn't burned through in one cron tick. 7-day created_at fence:
@@ -23697,7 +24552,18 @@ const CallRecordingProcessor = {
           })
           .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         })
-        .orWhere('processing_status', 'no_transcription')
+        // no_transcription: retried under the same attempt cap as
+        // extraction_failed, spaced 10 min, with NO creation fence — an
+        // operator adopting replacement audio for an old call resets the
+        // count and that audio must still retry. At the cap the lane ends:
+        // the row is terminal, and a settlement its old verdict made is
+        // retired (codex #6271 r38 P1 / r39 P2; the predicate twin is
+        // exhaustedExtractionSql in call-commitments).
+        .orWhere(function () {
+          this.where('processing_status', 'no_transcription')
+            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        })
         .orWhere(function () {
           this.where('processing_status', 'extraction_failed')
             .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
@@ -24009,7 +24875,7 @@ const CallRecordingProcessor = {
       // P2): the failure state alone is not "queued work" — the row must
       // still carry audio (or a PAN-marked stored transcript) and clear the
       // sweep's duration floor, or the sweep will never pick it up.
-      db.raw(`COUNT(*) FILTER (WHERE (processing_status = 'no_transcription' OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
+      db.raw(`COUNT(*) FILTER (WHERE ((processing_status = 'no_transcription' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}) OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)} AND created_at > NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`
         + " AND (NULLIF(btrim(recording_url), '') IS NOT NULL OR ((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL))"
         + " AND (COALESCE(recording_duration_seconds, duration_seconds, 0) > 10 OR (transcription_metadata::jsonb ->> 'pan_detected') = 'true')) as retrying"),
       db.raw("COUNT(*) FILTER (WHERE review_status IN ('open', 'in_progress')) as review_open"),
@@ -24262,6 +25128,12 @@ function legacyDisputeServiceIntent(extracted) {
 
 CallRecordingProcessor._test = {
   fileNameSpellingCard,
+  contactPassTrigger,
+  contactPassTriggerLogged,
+  contactDecoderGate,
+  persistLateContactPass,
+  settleLateContactPass,
+  lateContactPassMeta,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
@@ -24366,6 +25238,7 @@ CallRecordingProcessor._test = {
   leadContactCompleteness,
   hasWorkableLeadSignal,
   voicemailCallbackAlertPlan,
+  voicemailCallbackAsked,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
   emailCardSignature,
@@ -24510,6 +25383,13 @@ CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCust
 // same reason as the two promotions above — promoted rather than
 // reimplemented (CLAUDE.md rule 15).
 CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
+
+// Callback-spam parent settlement: on the module surface for its live-PG
+// suite (callback-spam-closes-parent.test.js), which drives it directly.
+CallRecordingProcessor.closeParentOnCallbackSpam = closeParentOnCallbackSpam;
+CallRecordingProcessor.reopenParentOnCallbackCorrected = reopenParentOnCallbackCorrected;
+CallRecordingProcessor.settleParentForCallbackVerdict = settleParentForCallbackVerdict;
+CallRecordingProcessor.reconcileCorrectedCallbackVerdicts = reconcileCorrectedCallbackVerdicts;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

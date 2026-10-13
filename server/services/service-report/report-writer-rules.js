@@ -11,7 +11,7 @@
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 
-const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v4';
+const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v5';
 
 // Remaining-service modules that belong to the lawn and tree/shrub/palm lanes.
 const WRITER_RULES_EXCLUDED_MODULES = new Set(['physical_lawn', 'palm_care']);
@@ -212,11 +212,15 @@ First sort every sentence of the TECHNICIAN NOTE into one of: work done, seen to
 
 WHAT WE FOUND. Fill from, in this order: the customer's words (BOOKED REASON, Customer concern, WHAT THE CUSTOMER TOLD US, note sentences about what the customer said), attributed to the customer; then what the technician saw today (Observations, note sentences about what was seen, the Pest activity rating in words only, "Findings observed" lines); then one earlier visit, with its date and marked as past, only when the prior visits show the same pest or the same place. Lead with the customer's concern when there is one. Name the pest as the technician named it and the place as recorded. A target tagged on a product that the technician did not record seeing is not a finding.
 
-WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of webs is work: describe it with only the places the record names for it, and add none. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
+WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of webs is work: when the TECHNICIAN NOTE names the places swept, name only those places, even when Actions completed lists more; when the note names none, use the places Actions completed lists; add none.
+
+PRODUCT FACTS are how you know what each treatment is for. Write each treatment by its job words, never by a name. Each entry also says what that one treatment was "tagged today for": when you say what a treatment was for, use that entry's own tags ("the treatment along the foundation is the one for the ants you saw"). An entry that is not tagged has no recorded reason; the TECHNICIAN NOTE may give one. Take the "why" from HOW IT WORKS. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
 
 WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
 
 WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice. With none of these recorded (no next step, no pest found, no customer concern, no EXPECTATIONS, no REACH-OUT DATE), write the one sentence rule 1 gives an empty section, and invent no sign, no contact trigger and no follow-up.
+
+Reassure with recorded facts: what the treatment is for, what the EXPECTATIONS lines say the customer may see and that seeing it is expected, where the technician checked and found none, and when to contact us.
 
 A thin record gets one sentence per section, each one from the record. Write as the technician who was there would say it to the homeowner at the door.
 
@@ -392,7 +396,7 @@ const DURATION_PHRASE_RE = new RegExp(
   + `|\\b(?:(?:over|in|during|for|within)\\s+)?the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?\\b`,
   'gi',
 );
-// Lawn model copy under GATE_LAWN_REPORT_COPY_V6 (P15) states NO result
+// Lawn model copy with the v6 copy live (P15) states NO result
 // timing: the report's "What to expect" carries it in owner-approved words.
 // CLOSED WORLD on calendar language, not a list of forward phrasings (those
 // never converge): every time-unit word ("days", "a week", "this week",

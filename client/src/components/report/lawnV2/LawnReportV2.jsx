@@ -18,6 +18,7 @@ import Icon from '../../Icon';
 import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
 import RAIN_COPY from '../../../../../shared/lawn-water-rain-copy.json';
 import { weekPlanOnCard, rainSensorLineOnCard } from '@lawn-water-card';
+import { bannerAtNow, bannerNextChangeMs } from './lawnLayoutRules';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -346,7 +347,7 @@ export function sinceLastLabel(sinceLast) {
   return day ? `Since your last visit, ${day}` : 'Since your last visit';
 }
 
-// ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
+// ── 1b. Lead ────────────────────────────────────────────
 // The above-the-fold block when the payload carries reportV2.lead (server:
 // lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
 // what we applied, the homeowner's part, and ONE next
@@ -410,7 +411,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
           </div>
         ) : null}
 
-        {/* GATE_LAWN_REPORT_COPY_V6: approved expectation sentences (selected, never
+        {/* Lawn v6 copy: approved expectation sentences (selected, never
             model-written) and the short guarded "watching" line. Absent keys render nothing. */}
         {lead.whatToExpect ? (
           <div data-testid="lawn-lead-expect" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
@@ -928,27 +929,37 @@ const IRRIGATION_SETUP_HREF = '/?tab=property';
 // GATE_LAWN_REPORT_POLISH: the water card's button lands on the Irrigation section of that tab (the portal gives the
 // section id="irrigation" and scrolls to it). Used only while the payload carries water.scheduleKind (the gate is live).
 export const IRRIGATION_SECTION_HREF = '/?tab=property#irrigation';
-export function LawnWateringBanner({ banner, style = null, setupHref = IRRIGATION_SETUP_HREF }) {
-  const print = usePrint();
-  const printing = usePrintRequested();
-  const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
-  // An open tab crosses the deadline too: re-render once when it passes
-  // (setTimeout's ceiling is ~24.8 days; a later expiry re-arms on reload).
-  const [, setTick] = useState(0);
+// The watering note as it reads now. An open tab crosses a deadline too: re-render when the short water-in's
+// deadline passes (banner.later: from then on only the long line) and again when the note ends (setTimeout's
+// ceiling is ~24.8 days; a later moment re-arms on reload). Printing keeps the lines as written at the visit.
+function useBannerNow(frozenBanner, printing) {
+  const expiresAt = frozenBanner?.expiresAt || null;
+  const laterAt = frozenBanner?.later?.at || null;
+  const [tick, setTick] = useState(0);
   useEffect(() => {
-    if (!Number.isFinite(expiresMs)) return undefined;
-    const wait = expiresMs - Date.now() + 1000;
-    if (wait <= 0 || wait > 2147483647) return undefined;
+    const nextMs = bannerNextChangeMs({ expiresAt, later: { at: laterAt } });
+    if (nextMs == null) return undefined;
+    const wait = nextMs - Date.now() + 1000;
+    if (wait > 2147483647) return undefined;
     const timer = setTimeout(() => setTick((n) => n + 1), wait);
     return () => clearTimeout(timer);
-  }, [expiresMs]);
+  }, [expiresAt, laterAt, tick]);
+  return bannerAtNow(frozenBanner, Date.now(), printing);
+}
+
+export function LawnWateringBanner({ banner: frozenBanner, style = null, setupHref = IRRIGATION_SETUP_HREF }) {
+  const print = usePrint();
+  const printing = usePrintRequested();
+  const printed = print || printing;
+  const banner = useBannerNow(frozenBanner, printed);
+  const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
   const watering = !!banner && Array.isArray(banner.lines) && banner.lines.length > 0;
   // A label mow hold (banner.mowHold.line) is its own last line. It is part of
   // the visit record, so it stays after the watering note has ended.
   const mowLine = typeof banner?.mowHold?.line === 'string' && banner.mowHold.line ? banner.mowHold.line : null;
   if (!watering && !mowLine) return null;
   const [heading, ...rest] = watering ? banner.lines : [mowLine];
-  const ended = watering && !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
+  const ended = watering && !printed && Number.isFinite(expiresMs) && Date.now() > expiresMs;
   const hold = watering && BANNER_HOLD_STATES.includes(banner.state);
   const mowAsBody = watering && mowLine;
   // GATE_LAWN_WATERING_FORECAST. Both lines are LIVE-VIEW additions the server
@@ -958,14 +969,14 @@ export function LawnWateringBanner({ banner, style = null, setupHref = IRRIGATIO
   // it: the customer may still need it) and, once it exists, supersedes the
   // forecast sentence. lawn-report-lead.js leadWords() counts exactly one of
   // the two with this same rule.
-  const live = watering && !ended && !(print || printing) && !hold;
+  const live = watering && !ended && !printed && !hold;
   const observedLine = live && typeof banner.observedRain?.line === 'string' && banner.observedRain.line ? banner.observedRain.line : null;
   const forecastLine = live && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
   // GATE_LAWN_REPORT_CLARITY: the invitation under a water-in that gives the
   // amount and no minutes (no sprinkler setup on file). Live view only, like the
   // lines above, but it also shows under a hold-then-water-in; the server only
   // sends it for a water-in.
-  const setupLine = watering && !ended && !(print || printing) && typeof banner.setupLine === 'string' && banner.setupLine ? banner.setupLine : null;
+  const setupLine = watering && !ended && !printed && typeof banner.setupLine === 'string' && banner.setupLine ? banner.setupLine : null;
   return (
     <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
       <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>

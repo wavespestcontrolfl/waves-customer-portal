@@ -18,7 +18,6 @@
 
 const { aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
 const { deriveLawnLead } = require('./lawn-report-lead');
-const { lawnReportLeadLive } = require('../../config/feature-gates');
 
 // Customer-facing lead extraction for the today's-result hero. Unlike
 // firstSentence (whose callers want a short excerpt and tolerate a "…"),
@@ -894,7 +893,7 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // non-enumerable hand-off (report-data.js); the fixes below rebuild
   // reportV2 by spread, which would drop it, so it is read first.
   const sinceLast = (data && data.reportV2 && data.reportV2.sinceLastCopy) || null;
-  // The v6 copy writer's fields (GATE_LAWN_REPORT_COPY_V6) ride the built report
+  // The v6 copy writer's fields ride the built report
   // as a non-enumerable hand-off (report-data.js); the fixes below rebuild
   // reportV2 by spread, which would drop it, so it is read first. They reach
   // the customer only through reportV2.lead, never as a payload key.
@@ -908,12 +907,12 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // reportV2.lead.techParagraph.
   const techParagraph = (data && data.reportV2 && data.reportV2.techParagraph) || null;
   applyReconciliationFixes(data, dynamicContext);
-  // The lead (GATE_LAWN_REPORT_LEAD) is derived from the FINAL reconciled
+  // The lead is derived from the FINAL reconciled
   // strings, so it runs after the fixes above and even when
   // reconcileLawnReport returned null. Lawn only: the reportV2 slot also
   // carries tree & shrub payloads, which never get a lead. Its own try/catch —
   // a lead failure leaves the payload exactly as reconciled.
-  if (data && data.reportV2 && data.serviceLine === 'lawn' && lawnReportLeadLive()) {
+  if (data && data.reportV2 && data.serviceLine === 'lawn') {
     try {
       const lead = deriveLawnLead(data.reportV2, { sinceLast, copyV6, rainfastWatch, techParagraph });
       if (lead) data.reportV2 = { ...data.reportV2, lead };

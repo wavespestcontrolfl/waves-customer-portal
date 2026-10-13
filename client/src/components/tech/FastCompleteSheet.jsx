@@ -103,10 +103,9 @@ import {
 } from '../../lib/typed-findings-rules';
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
-  SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
+  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
-import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
 export { isSendableRateUnit };
@@ -765,8 +764,6 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const dictating = useDictationSources(onDictationPending);
   const serviceId = service?.id;
   const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), []);
-  // What the tech tapped or said lifts the advice for it; never a pick.
-  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { pests: [...form.pests], note: form.note }), [tips, form.pests, form.note]);
 
   const chooseMethod = useCallback((next) => {
     setField('method', next);
@@ -898,8 +895,6 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               tipId={form.tipId}
               customTip={form.customTip}
               locked={formLocked}
-              priorityTipIds={liftedTipIds}
-              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={setCustomTip}
               mic={{ serviceId, onPendingChange: dictating.tip }}
@@ -1806,25 +1801,10 @@ function ReportFlowForm({
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
   usePartBusy('pest-report', !!writing);
-  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section on the report step. The report flow posted no
+  // GATE_FAST_COMPLETE_WRAP_UP: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
   // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
-  // After the note's read: the best tip for the pests the reader heard and the
-  // words of the note. Offered only while the tech has no tip of their own
-  // choosing (or has taken this one); never picked for them.
-  const tipOffer = useMemo(() => {
-    const readPests = draft?.facts?.pests;
-    if (!tips || !draft || form.customTip.trim()) return null;
-    const id = pestSheetTipIds(tips, { // The reader names pests in its own words ("ghost ants"): read as a note is.
-      pests: pestsInNote(Array.isArray(readPests) ? readPests.join('. ') : ''), note: form.note })[0];
-    if (!id || (form.tipId && form.tipId !== id)) return null;
-    const tip = [...(tips.groups || []).flatMap((group) => group.tips || []), ...(tips.more || [])].find((entry) => entry.id === id);
-    return tip ? {
-      library: tips, tip, pressed: form.tipId === id,
-      onPick: () => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' })),
-    } : null;
-  }, [tips, draft, form.note, form.tipId, form.customTip]);
   const [step, setStep] = useState('visit');
   // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL): the products the note names are
   // read when the report is written and land as rows the tech confirms. On a
@@ -2037,7 +2017,6 @@ function ReportFlowForm({
         trace={stepTrace}
         traced={!!(mode ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
         pestHeard={!mode}
-        tipOffer={tipOffer}
         productVoice={productVoice}
         laneCard={recordState.card({ draft, locked, writing })}
         onRetryTrace={trace.failed ? trace.reload : null}
@@ -2147,7 +2126,7 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
 function ReportStep({
   wrapUp, service, report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, tipOffer, reuse = NO_REUSE, onAutoTrace = null,
+  onBackFromPrompt, reuse = NO_REUSE, onAutoTrace = null,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2204,8 +2183,6 @@ function ReportStep({
         {/* Voice fill: the product rows the note filled, each waiting on the tech's
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
-        {/* The note has been read: one tip for what it heard, a tap to add. */}
-        {showDraft && <TipSuggestion {...tipOffer} locked={locked} />}
         {laneCard}
         {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
         {wrapUp.enabled && <fieldset className="tech-visit-form" disabled={locked}><FastCompleteWrapUp wrapUp={wrapUp} /></fieldset>}
@@ -2229,8 +2206,6 @@ function VisitStep({
   const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
   const dictating = useDictationSources(onDictationPending);
   const setCustomTip = useCallback((value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId })), [setForm]);
-  // The pests the note names lift the advice for them; never a pick.
-  const liftedTipIds = useMemo(() => pestSheetTipIds(tips, { note: form.note }), [tips, form.note]);
   // Each dictated chunk joins what is already in the box (stable for the mic).
   const appendNote = useCallback(
     (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
@@ -2320,8 +2295,6 @@ function VisitStep({
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
-              priorityTipIds={liftedTipIds}
-              priorityOrdered
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={setCustomTip}
               mic={{ serviceId: service?.id, onPendingChange: dictating.tip, onClip: tipClip.onClip, error: tipClip.error }}
@@ -2339,6 +2312,8 @@ function VisitStep({
               onChange={(next) => setField('promiseMarks', next)}
             />
           )}
+          {/* The Wrap-up on the first screen too (owner 2026-10-12): the same choices the report step shows. Draws nothing while it is off. */}
+          <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
       </div>
       <StepFooter reason={footer.reason} warn={warn} label={footer.label} busy={writing} disabled={writing} onAction={footer.onAction} coverProps={picker.coverProps}>
