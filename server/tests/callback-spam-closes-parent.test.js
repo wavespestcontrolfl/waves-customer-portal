@@ -412,8 +412,10 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
     const link = (commitmentId) => JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: parentId, relatedCommitmentId: commitmentId });
     const childA = await insertChild(SIBLING_CHILD_A_SID, parentId, { to_phone: '+15555550123', metadata: link(p1), created_at: new Date(Date.now() - 5 * 60 * 1000) });
     await insertChild(SIBLING_CHILD_B_SID, parentId, { to_phone: '+15555550123', metadata: link(p2) });
-    expect(await close(SIBLING_CHILD_A_SID)).toMatchObject({ applied: true, cards: 1, promises: 1 });
-    expect(await close(SIBLING_CHILD_B_SID)).toMatchObject({ applied: true, cards: 0, promises: 1 });
+    // The refresh judges every open promise with the full proof: B, already spam and linked to
+    // p2, settles p2 at A's close; B's own settlement then finds nothing left.
+    expect(await close(SIBLING_CHILD_A_SID)).toMatchObject({ applied: true, cards: 1, promises: 2 });
+    expect(await close(SIBLING_CHILD_B_SID)).toMatchObject({ applied: true, cards: 0, promises: 0 });
     const statuses = async () => Object.fromEntries((await db('call_commitments').where({ call_log_id: parentId })).map((r) => [r.commitment_key, [r.status, r.fulfillment?.record_id || null]]));
     expect(await statuses()).toEqual({ 'cb-one': ['dismissed', childA], 'cb-two': ['dismissed', (await readCall(SIBLING_CHILD_B_SID)).id] });
 
@@ -491,10 +493,14 @@ maybeDescribe('callback spam settles the parent voicemail (live Postgres)', () =
   test('a promise kept on a callback that is later reprocessed to spam is judged again: dismissed, reminder closed, listed by the lapse scan', async () => {
     const commitments = require('../services/call-commitments');
     const parentId = await insertCall(KEPT_SPAM_PARENT_SID, { from_phone: '+15555550127' });
-    const childId = await insertChild(KEPT_SPAM_CHILD_SID, parentId, { to_phone: '+15555550127' });
+    // A confirmed row is refreshable only through its card's attempt (refreshableVerdictSql:
+    // an attempt linked by relatedCommitmentId), so the callback names the promise.
+    const promiseId = require('crypto').randomUUID();
+    const childId = await insertChild(KEPT_SPAM_CHILD_SID, parentId, { to_phone: '+15555550127',
+      metadata: JSON.stringify({ source: 'admin-callback', placed_by_role: 'admin', relatedCallId: parentId, relatedCommitmentId: promiseId }) });
     // The connected call kept the promise (resolveCallback's direct proof); staff had confirmed the card first.
-    const [{ id: promiseId }] = await db('call_commitments').insert([{ ...promise(parentId, 'cb-kept', 'callback', 'fulfilled'), human_state: 'confirmed', fulfilled_at: new Date(),
-      fulfillment: JSON.stringify({ kind: 'outbound_call', record_type: 'call_log', record_id: childId, strength: 'direct', basis: 'outbound_call_to_caller', matched_at: new Date().toISOString() }) }]).returning('id');
+    await db('call_commitments').insert([{ id: promiseId, ...promise(parentId, 'cb-kept', 'callback', 'fulfilled'), human_state: 'confirmed', fulfilled_at: new Date(),
+      fulfillment: JSON.stringify({ kind: 'outbound_call', record_type: 'call_log', record_id: childId, strength: 'direct', basis: 'outbound_call_to_caller', matched_at: new Date().toISOString() }) }]);
     const [{ id: bellId }] = await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Callback overdue', body: 'test', metadata: JSON.stringify({ commitment_id: promiseId }) }).returning('id');
     // The promise-chaser alert names the promise at metadata.payload.commitmentId.
     const [{ id: chaserId }] = await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Still owe them a call', body: 'test', metadata: JSON.stringify({ triggerKey: 'promise_chaser', payload: { commitmentId: promiseId } }) }).returning('id');
