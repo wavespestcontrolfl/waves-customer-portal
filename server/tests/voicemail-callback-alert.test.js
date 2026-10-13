@@ -9,7 +9,7 @@
 const { _test } = require('../services/call-recording-processor');
 const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 
-const { voicemailCallbackAlertPlan } = _test;
+const { voicemailCallbackAlertPlan, voicemailCallbackAsked } = _test;
 
 // Synthetic caller only — no real customer data in fixtures (AGENTS.md).
 const TEST_PHONE = '+15005550006';
@@ -71,6 +71,43 @@ describe('voicemailCallbackAlertPlan', () => {
       knownCustomer: false,
       transcript: 'hey give me a call back when you can',
     })).toBeNull();
+  });
+
+  test('unknown caller who asks for a callback rings the bell (owner 2026-10-12)', () => {
+    const plan = voicemailCallbackAlertPlan({
+      extracted: wdoVoicemail({ matched_service: null, requested_service: null }),
+      voicemailChannel: true,
+      voicemailLeadPath: false,
+      vmPhone: TEST_PHONE,
+      knownCustomer: false,
+      callbackAsked: true,
+      transcript: 'my name is Sam Example, I would like you to give me a call back',
+    });
+    expect(plan).toMatchObject({ name: 'Sam Example', service: null, phone: TEST_PHONE });
+    // Dead air never rings on this basis either.
+    expect(voicemailCallbackAlertPlan({
+      extracted: wdoVoicemail({ matched_service: null, requested_service: null }),
+      voicemailChannel: true,
+      voicemailLeadPath: false,
+      vmPhone: TEST_PHONE,
+      callbackAsked: true,
+      transcript: '[VOICEMAIL]',
+    })).toBeNull();
+  });
+
+  test('callback-asked needs V2 as the primary extractor and a valid verdict that is not spam', () => {
+    const v2 = (extraction, status = 'valid') => ({ status, extraction });
+    const asked = { recommended_disposition: 'callback_task_created', spam_verdict: { spam_kind: 'not_spam' } };
+    const primary = { v2Primary: true };
+    expect(voicemailCallbackAsked(v2(asked), primary)).toBe(true);
+    expect(voicemailCallbackAsked(v2(asked, 'invalid'), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...asked, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...asked, recommended_disposition: 'voicemail_processed' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(null, primary)).toBe(false);
+    // Shadow mode (V2 on, routing off): the verdict is evaluation data and rings nothing.
+    expect(voicemailCallbackAsked(v2(asked), { v2Primary: false })).toBe(false);
+    // The default reads the live mode; this test process runs with V2 off.
+    expect(voicemailCallbackAsked(v2(asked))).toBe(false);
   });
 
   test('KNOWN customer without service intent rings the bell (owner ruling 2026-07-30)', () => {
