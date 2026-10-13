@@ -923,11 +923,6 @@ function finishCorrectiveWork(work, { gated, comped, storedOneTime }) {
 // ── deriveCorrectiveWork helpers ──────────────────────────────────────────
 // The selected engine result plus, when a mapped `result` sits beside it,
 // the agent-draft `engineResult` as a SEPARATE container (codex 1A-ii r18).
-function oneTimeResultContainers(estimateData) {
-  const engineResult = estimateData.result || estimateData.engineResult || estimateData || {};
-  const extra = estimateData.engineResult && estimateData.engineResult !== engineResult ? estimateData.engineResult : null;
-  return { engineResult, extra };
-}
 // Mapped one-time items from every container (canonical extractor, never a
 // narrower parallel walk, codex 1A-ii r2/r2b/r3c/r3d/r4b), plus the gated
 // identities read from the UNCOLLAPSED extraction so a dropped mirror's
