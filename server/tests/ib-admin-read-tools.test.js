@@ -896,3 +896,18 @@ describe('untrusted text in a read answer', () => {
     expect((await read({ endpoint: NO_PARAM.endpoint })).note.startsWith(UNTRUSTED)).toBe(true);
   });
 });
+
+// Codex: protocol-relative links get the same checks as absolute ones.
+describe('protocol-relative links', () => {
+  const { redactString, newState } = require('../utils/signed-link-redaction');
+  test.each([
+    ['See //user:secretpw@example.test/private for it.', 'See [signed link removed] for it.'],
+    ['File: //bucket.s3.amazonaws.com/private/object.pdf', 'File: [signed link removed]'],
+    ['Pay at //portal.wavespestcontrol.com/l/abc234def5.', 'Pay at [private link removed].'],
+  ])('%s', (text, expected) => {
+    expect(redactString(text, newState())).toBe(expected);
+  });
+  test.each(['A plain //example.test/about page', 'a // comment in a note', 'ratio 3//4 and https://example.test/about'])('left alone: %s', (text) => {
+    expect(redactString(text, newState())).toBe(text);
+  });
+});

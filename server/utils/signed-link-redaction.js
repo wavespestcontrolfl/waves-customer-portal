@@ -161,6 +161,8 @@ function splitTail(match) {
 // link (parsed with https:// put in front); one that is neither signed nor
 // private is left as it was, so ordinary dotted words stay.
 const HOST_LINK_RE = /(?<![\w@./:-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:[/?#][^\s"'<>\\]*)?/gi;
+// A protocol-relative link: "//host/…", not inside "https://…" or a path.
+const PROTOCOL_RELATIVE_RE = /(?<![\w:/.@-])\/\/(?=[A-Za-z0-9])[^\s"'<>\\]+/g;
 // A relative link: "/pay/<token>", "/portal/<token>?x=1". The "/" must not
 // follow a word character, "/", ":" or "." (so "10/12/2026", "and/or" and the
 // inside of an absolute URL are not starts).
@@ -219,7 +221,15 @@ function redactString(text, state) {
     const verdict = absoluteLinkVerdict(link);
     return verdict ? count(verdict) + tail : match;
   });
-  const hosted = absolute.replace(HOST_LINK_RE, (match) => {
+  // "//user:pw@host/path", "//bucket.s3.amazonaws.com/key": a link with no
+  // scheme. Judged exactly like an absolute link (userinfo, storage host,
+  // credential query, own host, token path).
+  const protocolRelative = absolute.replace(PROTOCOL_RELATIVE_RE, (match) => {
+    const { link, tail } = splitTail(match);
+    const verdict = absoluteLinkVerdict(`https:${link}`);
+    return verdict ? count(verdict) + tail : match;
+  });
+  const hosted = protocolRelative.replace(HOST_LINK_RE, (match) => {
     const { link, tail } = splitTail(match);
     if (!/[/?#]/.test(link) && !/^www\./i.test(link)) return match;
     let candidate;
