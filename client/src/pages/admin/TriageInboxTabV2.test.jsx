@@ -599,6 +599,16 @@ describe('FamilyEvidence — family account suggestions', () => {
 // 2026-10-10 call audit: the same card also suggests the caller's OWN account (no named holder).
 describe('FamilyEvidence — the caller\'s own account', () => {
   const A = '11111111-2222-4333-8444-555555555555';
+  it('shows the spoken number that matched the account (contact_phone_on_account)', () => {
+    render(<FamilyEvidence payload={{
+      flag: 'family_account_candidates', caller_name: null, caller_phone: '+19415550101',
+      account_holder_name: null, match_basis: 'contact_phone_on_account', matched_contact_phones: ['+19415550177'],
+      holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Sampleton', address_matches: true, matched_phone: '+19415550177' }],
+      customer_ids: [A], reason: 'The caller gave a phone number for another person, and an account carries that number.',
+    }} />);
+    expect(screen.getByText('Angelina Testerson · Sampleton · has the number +19415550177 · address matches')).toBeInTheDocument();
+  });
+
   it('shows the caller, the suggested account and the reason, with no Named row', () => {
     render(<FamilyEvidence payload={{
       flag: 'family_account_candidates', caller_name: 'Robin Example', caller_phone: '+19415550101',

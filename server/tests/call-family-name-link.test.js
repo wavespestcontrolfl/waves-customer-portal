@@ -19,7 +19,7 @@ const {
   pickNamedAccountHolder, normName, fullNameKey, statedAddressCorroborates,
   findLiveCustomersByFullName, suggestFamilyAccounts, fileFamilyAccountCard, CARD_REASON, RETIRE_RULE,
   matchCallerOwnAccounts, OWN_ACCOUNT_REASONS, MAX_OWN_CANDIDATES, RECENT_DAYS,
-  matchContactPhoneAccounts, contactPhoneKeys,
+  matchContactPhoneAccounts, contactPhones,
 } = require('../services/call-family-name-link');
 const { buildTriageItem } = require('../services/call-routing-gates');
 
@@ -172,26 +172,41 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
 
 // 2026-10-12 call audit: a caller on an unknown number gave the homeowner's number, which was
 // the phone on an existing account; the call became a new lead.
-describe('contactPhoneKeys (numbers the caller gave for other people)', () => {
+describe('contactPhones (numbers the caller gave for other people)', () => {
   const call = { from_phone: '+19415550101' };
-  test('second-person phones, de-duplicated, as 10-digit keys', () => {
-    expect(contactPhoneKeys({
+  const person = (phone, over = {}) => ({ first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: phone, ...over });
+  test('one entry per distinct number, with both stored forms of a NANP number', () => {
+    expect(contactPhones({
       call,
-      extracted: { phone: '+19415550101' },
-      v2CanonicalExtraction: {
-        secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: '+19415550177' },
-        secondary_contacts: [{ first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: '+19415550177' }],
-      },
-    })).toEqual(['9415550177']);
+      v2CanonicalExtraction: { secondary_contact: person('+19415550177'), secondary_contacts: [person('+19415550177')] },
+    })).toEqual([{ phone: '+19415550177', forms: ['19415550177', '9415550177'] }]);
   });
-  test('the caller\'s own line and callback number are never a contact phone', () => {
-    const v2 = (phone) => ({ secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'unknown', phone_e164: phone } });
-    expect(contactPhoneKeys({ call, extracted: {}, v2CanonicalExtraction: v2('+19415550101') })).toEqual([]);
-    expect(contactPhoneKeys({ call, extracted: { phone: '(941) 555-0188' }, v2CanonicalExtraction: v2('+19415550188') })).toEqual([]);
+  test('the line the call arrived on is never a contact phone; a copied callback number still is', () => {
+    expect(contactPhones({ call, v2CanonicalExtraction: { secondary_contact: person('+19415550101') } })).toEqual([]);
+    // The model slip that copies the other person's number into the caller's callback slot
+    // must not hide it: extracted.phone is not consulted.
+    expect(contactPhones({ call, extracted: { phone: '+19415550177' }, v2CanonicalExtraction: { secondary_contact: person('+19415550177') } })).toHaveLength(1);
+  });
+  test('an international number keeps its full digits and never a ten-digit form', () => {
+    expect(contactPhones({ call, v2CanonicalExtraction: { secondary_contact: person('+442079460958') } }))
+      .toEqual([{ phone: '+442079460958', forms: ['442079460958'] }]);
+  });
+  test('a mirror entry that conflicts with the canonical contact is dropped; later entries are kept', () => {
+    const out = contactPhones({
+      call,
+      v2CanonicalExtraction: {
+        secondary_contact: person('+19415550177'),
+        secondary_contacts: [
+          { first_name: 'Someone', last_name: 'Else', role: 'unknown', phone_e164: '+19415550155' },
+          { first_name: 'Third', last_name: 'Person', role: 'tenant', phone_e164: '+19415550166' },
+        ],
+      },
+    });
+    expect(out.map((p) => p.phone)).toEqual(['+19415550177', '+19415550166']);
   });
   test('no second person, or one without a number: nothing', () => {
-    expect(contactPhoneKeys({ call, extracted: {}, v2CanonicalExtraction: null })).toEqual([]);
-    expect(contactPhoneKeys({ call, extracted: {}, v2CanonicalExtraction: { secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'unknown' } } })).toEqual([]);
+    expect(contactPhones({ call, v2CanonicalExtraction: null })).toEqual([]);
+    expect(contactPhones({ call, v2CanonicalExtraction: { secondary_contact: person(null) } })).toEqual([]);
   });
 });
 
@@ -416,10 +431,10 @@ const SKIP = !process.env.DATABASE_URL;
       const account = await customer({ phone: HOLDER_PHONE });
       const callLogId = await call();
       const out = await fileFamilyAccountCard(byPhone(callLogId));
-      expect(out).toMatchObject({ basis: 'contact_phone_on_account', candidates: [{ id: String(account), name: 'Angelina Testerson', address_matches: true }] });
+      expect(out).toMatchObject({ basis: 'contact_phone_on_account', contact_phones: [HOLDER_PHONE], candidates: [{ id: String(account), name: 'Angelina Testerson', address_matches: true, matched_phone: HOLDER_PHONE }] });
       const [card] = await trx('triage_items').where({ call_log_id: callLogId });
       expect(card).toMatchObject({ reason_code: 'family_account_candidates', severity: 'advisory', status: 'open' });
-      expect(card.payload).toMatchObject({ match_basis: 'contact_phone_on_account', customer_ids: [String(account)], reason: OWN_ACCOUNT_REASONS.contact_phone_on_account });
+      expect(card.payload).toMatchObject({ match_basis: 'contact_phone_on_account', matched_contact_phones: [HOLDER_PHONE], customer_ids: [String(account)], reason: OWN_ACCOUNT_REASONS.contact_phone_on_account });
       expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
     });
 
