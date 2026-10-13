@@ -272,6 +272,31 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
     expect(await customerLinkSendRefusal('See: portal.wavespestcontrol.com/estimate/gone', '+19415550123', CUSTOMER_ID)).toMatchObject({ code: 'customer_link_unverified' });
   });
 
+  describe('a portal host broken by a URL-dropped character (TAB, CR, LF)', () => {
+    const TOKEN = 'AbCdEfGhIjKlMnOpQrSt';
+    test.each([['%09'], ['%0A'], ['%0D'], ['%2509']])('inside a foreign URL (%s): refused in both SMS phases and the email phase', async (esc) => {
+      links.autopayLinkSendCheck.mockResolvedValue({ present: false });
+      links.bearerLinkSendCheck.mockResolvedValue({ ok: true });
+      const body = `See https://other.example/?next=https://port${esc}al.wavespestcontrol.com/pay/${TOKEN}`;
+      for (const phase of ['proposal', 'commit']) {
+        expect(await customerLinkSendRefusal(body, '+19415550123', CUSTOMER_ID, { phase })).toMatchObject({ blocked: true, code: 'customer_link_refused' });
+      }
+      // The email path: the rendered text surfaces the nested portal link as its own run, and the owned-link refusal sees it.
+      const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
+      expect(renderedTextForLinkCheck(body).split(/\s+/)).toContain(`portal.wavespestcontrol.com/pay/${TOKEN}`);
+      links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['portal_link'] });
+      expect(await customerLinkSendRefusal(renderedTextForLinkCheck(body), '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    });
+
+    test('a raw tab or newline left in an HTML reply body is dropped like the URL parser does, so the email path still surfaces the link', () => {
+      const { renderedTextForLinkCheck } = require('../services/intelligence-bar/email-tools');
+      for (const gap of ['\t', '\n', '\r']) {
+        const run = renderedTextForLinkCheck(`<a href="https://other.example/?next=https://port${gap}al.wavespestcontrol.com/pay/${TOKEN}">x</a>`).split(/\s+/);
+        expect(run.some((r) => r.startsWith(`portal.wavespestcontrol.com/pay/${TOKEN}`))).toBe(true);
+      }
+    });
+  });
+
   describe('a link encoded past the scan cap', () => {
     const enc = (text, times) => { let out = text; for (let i = 0; i < times; i += 1) out = out.replace(/%/g, '%25').replace(/:/g, '%3A').replace(/\//g, '%2F'); return out; };
     const pad = (times) => 'https://other.example/?next=' + enc('https://portal.wavespestcontrol.com/pay/tok', times);
