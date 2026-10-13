@@ -628,109 +628,123 @@ async function resolveReplyTarget({ email_id, customer_name, customer_id }, sour
   return { custName: customer_name, custId: null, phone: null, recipientSelected: true };
 }
 
+// The source email as the confirmed run reads it: { sourceEmail } or { refusal }.
+// W0B source-email pin (GH r13 P2): the card disclosed the inbox update on
+// THIS email's identity and attributed customer — asserted on the executor's
+// own read, so a row re-synced or re-attributed after the confirm preflight
+// refuses instead of receiving another customer's replied-via-SMS stamp.
+async function pinnedSourceEmail(email_id, _pinned_email) {
+  if (!email_id) return { sourceEmail: null };
+  const sourceEmail = await db('emails').where('id', email_id).first();
+  if (!_pinned_email) return { sourceEmail };
+  const { emailPinFingerprint } = require('./proposal-pins');
+  const same = !!sourceEmail && emailPinFingerprint(sourceEmail) === String(_pinned_email);
+  return same ? { sourceEmail } : { refusal: { error: 'The source email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true } };
+}
+
+// Why the resolved recipient may not be texted, or null: no phone, a phone
+// that is not the approved one (W0B pinned recipient, enforced at the send
+// boundary), or a customer link only the Communications composer may send
+// (comms-tools customerLinkSendRefusal).
+async function replyRecipientRefusal({ phone, custId, recipientSelected }, message, _pinned_phone) {
+  if (!phone) return { error: 'Could not find phone number for this customer' };
+  if (_pinned_phone && String(phone) !== String(_pinned_phone)) {
+    return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+  }
+  return require('./comms-tools').customerLinkSendRefusal(message, phone, custId || null, { recipientSelected });
+}
+
+// Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
+function sendReplyText({ phone, custId }, message, email_id) {
+  return sendManualCustomerSms({
+    to: phone,
+    body: message,
+    channel: 'sms',
+    audience: custId ? 'customer' : 'lead',
+    purpose: 'conversational',
+    customerId: custId || undefined,
+    identityTrustLevel: custId ? 'phone_matches_customer' : 'phone_provided_unverified',
+    entryPoint: 'intelligence_bar_email_sms_reply',
+    metadata: {
+      original_message_type: 'manual',
+      adminUserId: 'intelligence_bar_email',
+      email_id,
+    },
+  });
+}
+
+// Mark the email as responded via SMS; returns a warning, or null. The card
+// disclosed this inbox update — a zero-row update (email deleted while the
+// card was pending) must surface as a warning, never a silent Done (GH r9 P2).
+// The approved customer attribution rides into the UPDATE's own WHERE (GH r13
+// P2): a row re-attributed between the executor's read and this write misses
+// and surfaces the warning, never stamping an email that now belongs to a
+// different customer.
+async function markEmailRepliedViaSms(email_id, sourceEmail, _pinned_email) {
+  if (!email_id) return null;
+  let markQuery = db('emails').where('id', email_id);
+  if (sourceEmail && _pinned_email) {
+    markQuery = sourceEmail.customer_id == null
+      ? markQuery.whereNull('customer_id')
+      : markQuery.where('customer_id', sourceEmail.customer_id);
+  }
+  const marked = await markQuery.update({
+    auto_action: db.raw("COALESCE(auto_action, '') || ',replied_via_sms'"),
+    is_read: true,
+    updated_at: new Date(),
+  });
+  return marked ? null : 'The SMS was sent, but the source email no longer exists or was re-attributed — it could not be marked read/replied.';
+}
+
+// The provider took the text: the accepted result, with whatever followed it.
+function acceptedReplyResult(accepted, extra) {
+  return {
+    success: true,
+    state: 'provider_accepted',
+    providerMessageId: accepted.providerMessageId || null,
+    auditLogId: accepted.auditLogId || null,
+    ...extra,
+  };
+}
+
 async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone, _pinned_email }) {
   let providerOutcome = null;
   try {
-    let sourceEmail = null;
-    if (email_id) {
-      sourceEmail = await db('emails').where('id', email_id).first();
-      // W0B source-email pin (GH r13 P2): the card disclosed the inbox
-      // update on THIS email's identity and attributed customer — asserted
-      // on the executor's own read, so a row re-synced or re-attributed
-      // after the confirm preflight refuses instead of receiving another
-      // customer's replied-via-SMS stamp.
-      if (_pinned_email) {
-        const { emailPinFingerprint } = require('./proposal-pins');
-        if (!sourceEmail || emailPinFingerprint(sourceEmail) !== String(_pinned_email)) {
-          return { error: 'The source email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
-        }
-      }
-    }
+    const source = await pinnedSourceEmail(email_id, _pinned_email);
+    if (source.refusal) return source.refusal;
+    const { sourceEmail } = source;
 
     const target = await resolveReplyTarget({ email_id, customer_name, customer_id }, sourceEmail);
     if (target.error) return target;
-    const { phone, custName, custId, recipientSelected } = target;
+    const refusal = await replyRecipientRefusal(target, message, _pinned_phone);
+    if (refusal) return refusal;
 
-    if (!phone) return { error: 'Could not find phone number for this customer' };
-    // W0B pinned recipient: enforce the approved phone at the send boundary.
-    if (_pinned_phone && String(phone) !== String(_pinned_phone)) {
-      return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
-    }
-
-    // A customer link only the Communications composer may send (see
-    // comms-tools customerLinkSendRefusal) is refused here too.
-    const linkRefusal = await require('./comms-tools').customerLinkSendRefusal(message, phone, custId || null, { recipientSelected });
-    if (linkRefusal) return linkRefusal;
-
-    // Operator-confirmed reply: the interlocked wrapper, so it never crosses an automatic reply.
-    const smsResult = await sendManualCustomerSms({
-      to: phone,
-      body: message,
-      channel: 'sms',
-      audience: custId ? 'customer' : 'lead',
-      purpose: 'conversational',
-      customerId: custId || undefined,
-      identityTrustLevel: custId ? 'phone_matches_customer' : 'phone_provided_unverified',
-      entryPoint: 'intelligence_bar_email_sms_reply',
-      metadata: {
-        original_message_type: 'manual',
-        adminUserId: 'intelligence_bar_email',
-        email_id,
-      },
-    });
+    const smsResult = await sendReplyText(target, message, email_id);
     if (!smsResult.sent) {
       return { error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' };
     }
     providerOutcome = smsResult;
 
-    // Mark the email as responded via SMS. The card disclosed this inbox
-    // update — a zero-row update (email deleted while the card was pending)
-    // must surface as a warning, never a silent Done (GH r9 P2).
-    let inboxWarning = null;
-    if (email_id) {
-      // The approved customer attribution rides into the UPDATE's own WHERE
-      // (GH r13 P2): a row re-attributed between the read above and this
-      // write misses and surfaces the warning, never stamping an email that
-      // now belongs to a different customer.
-      let markQuery = db('emails').where('id', email_id);
-      if (sourceEmail && _pinned_email) {
-        markQuery = sourceEmail.customer_id == null
-          ? markQuery.whereNull('customer_id')
-          : markQuery.where('customer_id', sourceEmail.customer_id);
-      }
-      const marked = await markQuery.update({
-        auto_action: db.raw("COALESCE(auto_action, '') || ',replied_via_sms'"),
-        is_read: true,
-        updated_at: new Date(),
-      });
-      if (!marked) {
-        inboxWarning = 'The SMS was sent, but the source email no longer exists or was re-attributed — it could not be marked read/replied.';
-      }
-    }
+    const inboxWarning = await markEmailRepliedViaSms(email_id, sourceEmail, _pinned_email);
 
     // Log internal ids, not the customer name/phone (PII stays out of logs).
-    logger.info(`[intelligence-bar:email] SMS reply for customer ${custId || 'lead'} (email ${email_id})`);
+    logger.info(`[intelligence-bar:email] SMS reply for customer ${target.custId || 'lead'} (email ${email_id})`);
 
-    return {
-      success: true,
-      state: 'provider_accepted',
-      providerMessageId: smsResult.providerMessageId || null,
-      auditLogId: smsResult.auditLogId || null,
-      sent_to: phone,
-      customer: custName,
+    return acceptedReplyResult(smsResult, {
+      sent_to: target.phone,
+      customer: target.custName,
       message,
       note: 'The SMS provider accepted the reply; delivery is not yet confirmed.',
       ...(inboxWarning ? { warning: inboxWarning, partial: true } : {}),
-    };
+    });
   } catch (err) {
     const accepted = providerOutcome || err.providerOutcome;
-    if (accepted?.sent === true) return {
-      success: true, state: 'provider_accepted',
-      providerMessageId: accepted.providerMessageId || null,
-      auditLogId: accepted.auditLogId || null,
-      partial: !!email_id,
-      warning: 'The provider accepted the SMS, but the local inbox or audit update failed. Check its status before retrying.',
-    };
+    if (accepted?.sent === true) {
+      return acceptedReplyResult(accepted, {
+        partial: !!email_id,
+        warning: 'The provider accepted the SMS, but the local inbox or audit update failed. Check its status before retrying.',
+      });
+    }
     logger.error(`[intelligence-bar:email] reply_via_sms failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
