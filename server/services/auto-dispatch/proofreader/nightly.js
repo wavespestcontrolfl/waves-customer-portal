@@ -94,10 +94,13 @@ function openMembers(conn, visitId) {
     .select('id', 'service_type', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
 }
 
-// Who is at the stop and where each member sits, as one comparable string.
+// Who is at the stop, where each member sits and whether it is still open
+// (pending and confirmed read the same; a member that went en route, on site
+// or to a reschedule request does not: Codex #6313 r6), as one comparable string.
 function stopSignature(members) {
+  const state = (m) => (OPEN_STATUSES.includes(m.status) ? 'open' : String(m.status));
   return members
-    .map((m) => [m.id, toDateStr(m.scheduled_date), textOrNull(m.window_start), textOrNull(m.technician_id)].join('|'))
+    .map((m) => [m.id, toDateStr(m.scheduled_date), textOrNull(m.window_start), textOrNull(m.technician_id), state(m)].join('|'))
     .sort().join(';');
 }
 

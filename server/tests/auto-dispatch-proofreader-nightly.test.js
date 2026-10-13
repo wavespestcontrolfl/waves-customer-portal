@@ -203,16 +203,20 @@ describe('the write of a checked move', () => {
   describe('the grouped stop at the write is the one the model read', () => {
     const refuse = (id, why) => new Error(`${id} ${why}`);
     const members = [
-      { id: 's1', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
-      { id: 's2', scheduled_date: new Date('2026-10-20T00:00:00Z'), window_start: '10:00', technician_id: 't1' },
+      { id: 's1', status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
+      { id: 's2', status: 'pending', scheduled_date: new Date('2026-10-20T00:00:00Z'), window_start: '10:00', technician_id: 't1' },
     ];
     const approved = nightly.stopSignature(members);
     test('the same members on the same placements pass, in any order', () => {
       expect(() => nightly.assertApprovedStop([members[1], members[0]], approved, refuse, 's1')).not.toThrow();
+      // pending and confirmed are both open: a confirmation is not a change of the stop.
+      expect(() => nightly.assertApprovedStop([members[0], { ...members[1], status: 'confirmed' }], approved, refuse, 's1')).not.toThrow();
     });
     test.each([
       ['a member that moved', [members[0], { ...members[1], window_start: '15:00' }]],
       ['a member that left', [members[0]]],
+      ['a member that went en route', [members[0], { ...members[1], status: 'en_route' }]],
+      ['a member with a reschedule request', [members[0], { ...members[1], status: 'rescheduled' }]],
       ['a member that joined', [...members, { id: 's3', scheduled_date: '2026-10-20', window_start: '11:00', technician_id: 't1' }]],
     ])('%s refuses the move', (_name, now) => {
       expect(() => nightly.assertApprovedStop(now, approved, refuse, 's1')).toThrow('s1 changed since the move was checked');
@@ -347,8 +351,8 @@ describe('raiseNotices', () => {
 
   test('a grouped stop whose other member changed since the check raises nothing', async () => {
     const members = [
-      { id: 's1', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
-      { id: 's2', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
+      { id: 's1', status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
+      { id: 's2', status: 'pending', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
     ];
     const stopConn = (rows) => (table) => {
       const chain = {
@@ -380,8 +384,8 @@ describe('raiseNotices', () => {
 
   test('the close also retires a grouped-stop notice whose other member changed while the tapped visit stayed', async () => {
     const members = [
-      { id: 's1', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
-      { id: 's2', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
+      { id: 's1', status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
+      { id: 's2', status: 'pending', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
     ];
     const notice = (id, visitId) => ({ metadata: { scheduledServiceId: id, visitId, stop: nightly.stopSignature(members) } });
     const store = storeOf([notice('s1', 'same'), notice('a1', 'retimed'), notice('b1', 'left'), notice('c1', 'unreadable')], {
