@@ -11195,8 +11195,12 @@ const CallRecordingProcessor = {
           // recording adoption resets the count (codex #6271 r38/r39).
           extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
           updated_at: new Date(),
-        }).returning(['extraction_attempts']);
-      if (!released.length) {
+        }, ['extraction_attempts']);
+      // PG returns the updated rows ([] = ownership lost); count-shaped
+      // results (0/1) come from environments without RETURNING — accept
+      // both, as the claim write does (the shadow-regression suite's mock).
+      const releasedRows = Array.isArray(released) ? released : null;
+      if (releasedRows ? !releasedRows.length : !released) {
         logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
         // Ownership loss, not a transcription failure — same treatment as the
         // extraction branch. This pass persisted nothing and the peer that
@@ -11209,7 +11213,7 @@ const CallRecordingProcessor = {
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
       // (codex #6271 r43 P1). fileExtractionExhaustedTriage is a no-op under the cap.
-      await fileExtractionExhaustedTriage(call.id, Number(released[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
+      await fileExtractionExhaustedTriage(call.id, Number(releasedRows?.[0]?.extraction_attempts) || 0, new Error('No transcription available'), callSid);
       return { success: false, error: 'No transcription available' };
     }
 
