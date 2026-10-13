@@ -33,9 +33,62 @@ const REGISTRY_ONLY = new Set(['add_customer_property', 'set_primary_property', 
 const LEGACY_CORE = CORE.filter(name => !REGISTRY_ONLY.has(name));
 const names = tools => tools.map(t => t.name);
 
-test('the shared list names exactly the core tools, each with a reviewed policy', () => {
-  expect([...registry.EVERY_PAGE_TOOL_NAMES].sort()).toEqual([...CORE].sort());
-  for (const name of CORE) expect(registry.actions.get(name)).toBeDefined();
+// The general admin read rides every page for the owner login only, behind its gate.
+const GENERAL_READ = ['find_admin_reads', 'read_admin_data'];
+
+test('the shared list names exactly the core tools and the general read pair, each with a reviewed policy', () => {
+  expect([...registry.EVERY_PAGE_TOOL_NAMES].sort()).toEqual([...CORE, ...GENERAL_READ].sort());
+  for (const name of [...CORE, ...GENERAL_READ]) expect(registry.actions.get(name)).toBeDefined();
+});
+
+describe('the general admin read on every page', () => {
+  const owner = context => ({ role: 'admin', context, fullAccess: true });
+  let gateBefore;
+  let platformBefore;
+  beforeEach(() => {
+    gateBefore = process.env.GATE_IB_GENERAL_READ;
+    platformBefore = process.env.GATE_IB_PLATFORM;
+    process.env.GATE_IB_GENERAL_READ = 'true';
+    process.env.GATE_IB_PLATFORM = 'true'; // the general read needs the platform gate
+  });
+  afterEach(() => {
+    if (gateBefore === undefined) delete process.env.GATE_IB_GENERAL_READ; else process.env.GATE_IB_GENERAL_READ = gateBefore;
+    if (platformBefore === undefined) delete process.env.GATE_IB_PLATFORM; else process.env.GATE_IB_PLATFORM = platformBefore;
+  });
+
+  test.each(['customers', 'dashboard', 'revenue', 'comms', 'email', 'ops'])('the owner login on %s is offered the finder and the read, once each', (context) => {
+    const offered = names(registry.initialTools(context, owner(context)));
+    for (const name of GENERAL_READ) expect(offered.filter(n => n === name)).toHaveLength(1);
+  });
+
+  test.each(['customers', 'dashboard'])('another admin on %s is not offered either', (context) => {
+    const offered = names(registry.initialTools(context, { role: 'admin', context, fullAccess: false }));
+    for (const name of GENERAL_READ) expect(offered).not.toContain(name);
+    expect(names(registry.initialTools(context, { role: 'admin', context }))).not.toContain('find_admin_reads');
+  });
+
+  test.each(['customers', 'dashboard', 'ops'])('with the gate off the owner login on %s is not offered either', (context) => {
+    process.env.GATE_IB_GENERAL_READ = 'false';
+    const offered = names(registry.initialTools(context, owner(context)));
+    for (const name of GENERAL_READ) expect(offered).not.toContain(name);
+  });
+
+  test('technicians, the tech rail and the agent-estimate rail never see them', () => {
+    for (const list of [
+      registry.initialTools('customers', { role: 'technician', context: 'customers', fullAccess: true }),
+      registry.initialTools('tech', { role: 'technician', context: 'tech', fullAccess: true }),
+      registry.initialTools('tech', { role: 'admin', context: 'tech', fullAccess: true }),
+      registry.initialTools('agent_estimate', owner('agent_estimate')),
+      getToolsForContext('dashboard', true, true),
+    ]) for (const name of GENERAL_READ) expect(names(list)).not.toContain(name);
+  });
+
+  test('with tool search the owner finds them deferred, not eager', () => {
+    const list = registry.initialTools('dashboard', { ...owner('dashboard'), toolSearch: true });
+    for (const name of GENERAL_READ) {
+      expect(list.find(t => t.name === name)).toMatchObject({ defer_loading: true });
+    }
+  });
 });
 
 test.each(['customers', 'dashboard', 'revenue', 'comms'])('platform list on %s offers every core tool', (context) => {

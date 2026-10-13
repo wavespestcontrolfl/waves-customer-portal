@@ -319,7 +319,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
 // The persisted-turn markers are defined once, with the thread store.
-const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER } = IbThreads;
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -435,7 +435,7 @@ function stripInternalHistoryMarkers(message) {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER && line.trim() !== PII_TAINT_MARKER)
+      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER].includes(line.trim()))
       .join('\n')
       .trim(),
   };
@@ -3611,6 +3611,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     if (req.ibResumedTask) {
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
+    // Once the general admin read returned data, nothing after it runs without
+    // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
+    const requestTaint = await OwnerDirect.loadRequestTaint({
+      history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
+      fullAccess: actionScope.fullAccess, conversationHistory,
+    });
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
@@ -3719,7 +3725,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
         ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
-          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope))))
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint))
         : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
@@ -3848,7 +3854,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // its card (Codex r2), and before the approval is stored, so
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
-                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview)) return null;
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint)) return null;
                 return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
               } : null,
             });
@@ -3856,7 +3862,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
@@ -3907,6 +3913,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // an owner-direct fallback read is unscoped.
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
+              // General admin read (owner ruling 2026-10-12): the request's own
+              // login and bearer token, set here from the authenticated request,
+              // never from model input; read_admin_data forwards the token on
+              // its loopback GET and it is persisted nowhere. Only the platform
+              // contexts carry full access, so the tech and agent_estimate rails
+              // refuse these reads even for a forced call.
+              fullAccess: platformEnabled && ibFullAccess(req), staffAuthorization: req.headers.authorization,
             });
             // Breaker: faults only. A coded refusal is a decision, not an outage;
             // `failed` below is unchanged (activity line, ledger, model view).
@@ -3960,6 +3973,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        OwnerDirect.noteUntrustedRead(requestTaint, toolUse.name, result);
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         offeredChoices = toolUse.name === OFFER_CHOICES_TOOL_NAME && !failed && result?.status === 'choices_shown' ? result.choices : null;
         // A clarification stays open until the same operation succeeds in a
@@ -4064,9 +4078,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       PII_TAINT_MARKER,
     );
     const persistedAssistantTurn = appendTaintMarker(
-      appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
-      piiTainted,
-      PII_TAINT_MARKER,
+      appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
+      requestTaint.untrustedRead,
+      UNTRUSTED_READ_MARKER,
     );
 
     // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
@@ -4405,7 +4419,7 @@ router.post('/execute', async (req, res, next) => {
     }
 
     if (gateEnvValue('GATE_IB_PLATFORM') && !CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
-      const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform' });
+      const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform', fullAccess: ibFullAccess(req) });
       if (invalid) return res.status(invalid.code === 'permission_denied' ? 403 : 400).json(invalid);
     }
 
@@ -4429,6 +4443,8 @@ router.post('/execute', async (req, res, next) => {
       // Request-derived actor for actor-bound reads (recall) — same source
       // the /query loop uses, never the client params.
       actorId: getAdminActorId(req),
+      // General admin read (owner ruling 2026-10-12): see the /query loop.
+      fullAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization,
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 

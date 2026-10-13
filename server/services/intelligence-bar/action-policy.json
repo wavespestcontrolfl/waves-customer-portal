@@ -1998,5 +1998,21 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "find_admin_reads": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "read_admin_data": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
   }
 }

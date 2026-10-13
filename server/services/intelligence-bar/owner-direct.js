@@ -28,6 +28,9 @@
  * parse cohorts" (2026-09-08). Every other admin login and every technician
  * keeps both, gate on or off. IB_WRITES_DISABLED still stops every write.
  *
+ * After a general admin read (`read_admin_data`) returned data, nothing in the
+ * rest of the request runs direct: see UNTRUSTED READS below.
+ *
  * No customer communication: nothing on the list sends a customer text or
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
@@ -36,6 +39,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
+const IbThreads = require('./threads');
 
 // Internal single-record edits that execute without a card. A tool is added
 // here deliberately; anything new keeps its card until someone lists it.
@@ -106,7 +110,7 @@ const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().rep
 // `preview` is the mutation-free preview the proposal just ran (two-step
 // tools); the decision reads it where the input alone cannot tell a single
 // record from a group.
-function executesWithoutCard(toolName, input = {}, preview = null) {
+function directEditAllowed(toolName, input = {}, preview = null) {
   // A change to any part of a street address always keeps its card, so the
   // operator sees the exact address before it is saved (#6297).
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
@@ -155,6 +159,94 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
   return true;
 }
 
+// UNTRUSTED READS. Text inside a read result can be typed by anyone (a
+// customer name a public quote visitor entered) and can read like an
+// instruction to the next model round. Once the general admin read
+// (`read_admin_data`) has returned data in a request, no write in the REST of
+// that request executes without a card: the owner-direct decisions above all
+// return false when this per-request flag is set, so the write is carded
+// exactly like a non-owner admin's. The flag lives in one `requestTaint`
+// object the route creates once per request (seeded from the saved history, so
+// a resumed task keeps it) and passes to the three decision functions. Scope:
+// this covers the general read only, because its catalog is broad and grows by
+// review; other read tools are unchanged by this rule.
+const GENERAL_READ_TOOL = 'read_admin_data';
+
+// A general-read result that carries data: a 2xx answer with a `data` field.
+// An error, a refusal or a bare note does not taint.
+function isDataAnswer(result) {
+  return Boolean(result) && typeof result === 'object' && !result.error && !result.code
+    && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
+}
+
+function noteUntrustedRead(taint, toolName, result) {
+  if (taint && toolName === GENERAL_READ_TOOL && isDataAnswer(result)) taint.untrustedRead = true;
+}
+
+// Pure: does a saved message history hold a general read that returned data?
+// A read with no saved result (the runner stopped between the call and its
+// result) counts as returned, so a resume fails closed.
+function untrustedReadInHistory(messages) {
+  const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
+  const readIds = blocks.filter(block => block?.type === 'tool_use' && block.name === GENERAL_READ_TOOL).map(block => block.id);
+  if (!readIds.length) return false;
+  const answers = new Map(blocks.filter(block => block?.type === 'tool_result').map(block => [block.tool_use_id, block]));
+  return readIds.some((id) => {
+    const answer = answers.get(id);
+    if (!answer) return true;
+    try { return isDataAnswer(JSON.parse(answer.content)); } catch { return true; }
+  });
+}
+
+function newRequestTaint(history) {
+  return { untrustedRead: untrustedReadInHistory(history) };
+}
+
+// What the server's own thread record says: true (an earlier exchange read
+// admin data, or the thread cannot be read: fail closed), false (a verified
+// thread with no such exchange), or null when there is no thread id to look up.
+// Consulted whatever the gates say: the saved marker stays authoritative even
+// after the general read is turned off.
+async function threadTaintVerdict(actorId, threadId) {
+  if (!threadId) return null;
+  try {
+    return (await IbThreads.hasUntrustedRead(actorId, threadId)) === true;
+  } catch {
+    return true;
+  }
+}
+
+// The flag for a new request, called once per request. It starts from the
+// message history this request carries (a resumed task's saved blocks), then
+// from the SERVER's own record of the conversation:
+//   - whenever owner-direct is on and there is a thread id, the thread record
+//     decides, whatever the general read gate says: a marked exchange taints
+//     the thread for its life, an unreadable thread is tainted (fail closed),
+//     and a verified thread without a marker is not (one query; see
+//     IbThreads.hasUntrustedRead);
+//   - with NO record to consult (no thread id, or the thread append failed so
+//     the client detached) a FOLLOW-UP turn (history, or a thread id) is
+//     tainted, because an earlier turn may have used the general read and
+//     nothing trusted says it did not: cards are required. This holds for a
+//     full-access login whatever the general read gate says NOW: the gate may
+//     have been on for the earlier turn and turned off since, and no trusted
+//     record exists to tell. The cost is narrow: with thread persistence on
+//     (production) a follow-up has a verified thread record, so this branch
+//     is only reached with threads off or after a failed append;
+//   - the first message of a conversation (no history, no thread id) is not.
+// `needed` is false when owner-direct is off, where the flag decides nothing.
+async function loadRequestTaint({ history, threadId, actorId, needed = true, fullAccess = false, conversationHistory = [] }) {
+  const taint = newRequestTaint(history);
+  if (taint.untrustedRead || !needed) return taint;
+  const verdict = await threadTaintVerdict(actorId, threadId);
+  if (verdict !== null) {
+    taint.untrustedRead = verdict;
+    return taint;
+  }
+  taint.untrustedRead = fullAccess === true && Array.isArray(conversationHistory) && conversationHistory.length > 0;
+  return taint;
+}
+
 // Bulk cap (owner ruling 2026-10-02): one request may make at most two
 // direct edits with the same tool; three or more get one bulk card instead,
 // so "mark these leads lost" cannot fan a bulk change out into card-free
@@ -172,9 +264,9 @@ const DIRECT_CAP = 3;
 const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
-// The preview-free half of executesWithoutCard: could this call run direct?
-function mayExecuteWithoutCard(toolName, input = {}) {
-  // A call that carries address text gets a card anyway (executesWithoutCard), so it never counts toward the direct cap.
+// The preview-free half of directEditAllowed: could this call run direct?
+function directEditPossible(toolName, input = {}) {
+  // A call that carries address text gets a card anyway (directEditAllowed), so it never counts toward the direct cap.
   if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
   if (toolName === 'assign_technician') return Array.isArray(input?.service_ids) && input.service_ids.length === 1;
   if (toolName === 'update_lead_contact' || toolName === 'update_lead_status') return Boolean(input?.lead_id) && !input.lead_name;
@@ -186,6 +278,16 @@ function mayExecuteWithoutCard(toolName, input = {}) {
     return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
   }
   return true;
+}
+
+// The two decisions the route asks, each checking the per-request flag first
+// (UNTRUSTED READS above): after a general read returned data, never direct.
+function executesWithoutCard(toolName, input = {}, preview = null, taint = null) {
+  return taint?.untrustedRead ? false : directEditAllowed(toolName, input, preview);
+}
+
+function mayExecuteWithoutCard(toolName, input = {}, taint = null) {
+  return taint?.untrustedRead ? false : directEditPossible(toolName, input);
 }
 
 // Direct commits already made for this task, by tool (proposePendingWrite
@@ -215,10 +317,10 @@ async function seedDirectCounts(task, dbh = null) {
   return counts;
 }
 
-function messageDirectPlan(toolUses, isValid = () => true) {
+function messageDirectPlan(toolUses, isValid = () => true, taint = null) {
   const plan = new Map();
   for (const toolUse of toolUses || []) {
-    if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
+    if (mayExecuteWithoutCard(toolUse?.name, toolUse?.input, taint) && isValid(toolUse)) plan.set(toolUse.name, (plan.get(toolUse.name) || 0) + 1);
   }
   return plan;
 }
@@ -325,4 +427,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

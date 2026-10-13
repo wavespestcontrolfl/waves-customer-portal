@@ -49,6 +49,14 @@ const OUTSIDE_WRITE_TOOL_NAMES = new Set([
 // that is NOT an outside write does not silently inherit the restriction.
 const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([...OUTSIDE_WRITE_TOOL_NAMES]);
 
+// General admin reads (owner ruling 2026-10-12, GATE_IB_GENERAL_READ):
+// find_admin_reads and read_admin_data read what an admin screen reads, on the
+// owner login only. Reads, not writes, so they are in none of the write sets;
+// named here beside FULL_ACCESS_TWO_STEP_TOOL_NAMES because they use the same
+// one predicate (ibFullAccess). action-registry.js allowed() refuses them
+// without fullAccess, so no tool list offers them to another login.
+const FULL_ACCESS_READ_TOOL_NAMES = new Set(['find_admin_reads', 'read_admin_data']);
+
 // Writes with a structural preview→confirmed two-step in their executor.
 // Their no-confirmed call produces the rich preview shown to the operator.
 const WRITE_TWO_STEP_TOOL_NAMES = new Set([
@@ -139,4 +147,5 @@ module.exports = {
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   OUTSIDE_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+  FULL_ACCESS_READ_TOOL_NAMES,
 };
