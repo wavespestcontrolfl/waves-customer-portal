@@ -318,16 +318,19 @@ describe('rule D: a pre-emergent window over 7 days follows the label (owner 202
       'Today’s treatment needs about ½ inch of water by Wed, Oct 14 at 2 PM.',
       'Rain and your regular watering both count.',
     ];
+    // The long water-in's own amount and deadline (the rain check reads them).
+    const LONG_FACTS = { waterInInches: 0.5, waterInBy: '2026-10-14T18:00:00.000Z' };
     // No hold, and a timed hold (over before the short deadline): the long line as on a long-only visit.
-    expect(build([ARENA(), PRE_EM()], ROTOR).later).toEqual({ at: '2026-10-01T18:00:00.000Z', state: 'water_in', lines: LONG_ONLY });
+    expect(build([ARENA(), PRE_EM()], ROTOR).later).toEqual({ at: '2026-10-01T18:00:00.000Z', state: 'water_in', ...LONG_FACTS, lines: LONG_ONLY });
     const timed = build([HOLD(24), ARENA(), PRE_EM()], ROTOR);
-    expect(timed.later).toEqual({ at: timed.waterInBy, state: 'water_in', lines: LONG_ONLY });
+    expect(timed.later).toEqual({ at: timed.waterInBy, state: 'water_in', ...LONG_FACTS, lines: LONG_ONLY });
     expect(Date.parse(timed.later.at)).toBeGreaterThanOrEqual(Date.parse(timed.holdUntil));
     // A hold that waits for drying has no clock end: its line stays, without the clock time that has passed.
     const dry = build([CELSIUS(), ARENA(), PRE_EM()], ROTOR);
     expect(dry.later).toEqual({
       at: '2026-10-02T19:00:00.000Z',
       state: 'hold_then_water_in',
+      ...LONG_FACTS,
       lines: [
         'Skip your turf watering until today’s treatment has dried.',
         'Today’s treatment then needs about ½ inch of water by Wed, Oct 14 at 2 PM.',

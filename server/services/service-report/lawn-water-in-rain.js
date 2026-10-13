@@ -98,7 +98,18 @@ function thresholdInches(instruction, products) {
     amounts.push(parseWaterInInches(facts.precautionSummary) ?? DEFAULT_WATER_IN_INCHES);
   }
   const base = amounts.length ? Math.max(...amounts) : DEFAULT_WATER_IN_INCHES;
-  return Math.max(base, finite(instruction && instruction.waterInInches) ?? 0);
+  return Math.max(base, finite(instruction && instruction.waterInInches) ?? 0, finite(instruction && instruction.later && instruction.later.waterInInches) ?? 0);
+}
+
+/**
+ * When the visit's water-in window closes. A visit with a short water-in beside a 14-day one (instruction.later) keeps
+ * the SHORT deadline in waterInBy; its rain counts through the long water-in's own deadline, or rain on days 2 to 14
+ * would never be measured against the half inch the later banner still asks for.
+ */
+function windowEndMs(instruction) {
+  const longMs = toMs(instruction.later && instruction.later.waterInBy);
+  const shortMs = toMs(instruction.waterInBy);
+  return Number.isFinite(longMs) && longMs > shortMs ? longMs : shortMs;
 }
 
 /** Whether a frozen instruction is one this gate may change: a water-in (alone or after a hold) with a completion instant and a deadline. */
@@ -125,7 +136,7 @@ async function resolveRainCoverage({
     if (!appliesTo(instruction) || typeof fetchForecast !== 'function') return null;
     const fromMs = toMs(instruction.completedAt);
     const nowMs = now instanceof Date ? now.getTime() : Date.now();
-    const endMs = Math.min(nowMs, toMs(instruction.waterInBy));
+    const endMs = Math.min(nowMs, windowEndMs(instruction));
     if (!Number.isFinite(nowMs) || endMs - fromMs < HOUR_MS) return null;
     const threshold = thresholdInches(instruction, products);
     const closed = endMs <= nowMs - HOUR_MS;
@@ -196,6 +207,7 @@ module.exports = {
   DEFAULT_WATER_IN_INCHES,
   parseWaterInInches,
   thresholdInches,
+  windowEndMs,
   appliesTo,
   resolveRainCoverage,
   coveredByRain,

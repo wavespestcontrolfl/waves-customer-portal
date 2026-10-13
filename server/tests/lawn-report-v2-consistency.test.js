@@ -999,7 +999,9 @@ describe('watering instruction drives the aftercare through the existing verdict
       completedAt: COMPLETED,
     });
     const twoWindowBanner = buildWateringBanner(twoWindows);
-    expect(twoWindowBanner.later).toEqual(twoWindows.later);
+    // The page gets what it prints (at, state, lines); the long amount and deadline stay server-side for the rain check.
+    expect(twoWindowBanner.later).toEqual({ at: twoWindows.later.at, state: 'water_in', lines: twoWindows.later.lines });
+    expect(twoWindows.later).toMatchObject({ waterInInches: 0.5 });
     expect(twoWindowBanner.later.at).toBe(twoWindows.waterInBy);
     expect(Date.parse(twoWindowBanner.expiresAt)).toBeGreaterThan(Date.parse(twoWindowBanner.later.at));
     const { stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');

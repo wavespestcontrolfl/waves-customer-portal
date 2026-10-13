@@ -2549,7 +2549,9 @@ about the short run), until `expiresAt`, so a deadline that has passed is never
 shown as current. LIVE VIEW ONLY: the key is removed from every printed / PDF
 render, which keeps `lines` as written at the visit. The key is absent when the
 frozen block is malformed, and once rain has covered the water-in
-(`state: 'water_in_by_rain'`, below). No new route, token, privacy or
+(`state: 'water_in_by_rain'`, below; for such a visit the rain is measured from
+completion through the LONG deadline against the larger amount, so rain after
+the short deadline still closes the later phase). No new route, token, privacy or
 rate-limit surface; `reportV2.aftercare` is unchanged by it.
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,

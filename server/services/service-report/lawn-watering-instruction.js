@@ -490,12 +490,16 @@ function applyLongOnly(out, long) {
 // instruction; nothing is recomputed at read time. A timed hold has ended by
 // then (waterInDeadline never puts the short deadline before the printed hold
 // end); a hold that waits for drying has no clock end, so its line stays,
-// without its clock time.
+// without its clock time. waterInInches / waterInBy are the long water-in's
+// own amount and deadline: the read-time rain check (lawn-water-in-rain.js)
+// measures rain through that deadline against that amount.
 function laterPhase(out, hold, long) {
   const dry = !!hold && hold.waitsForDry;
   return {
     at: out.waterInBy,
     state: dry ? 'hold_then_water_in' : 'water_in',
+    waterInInches: long.inches,
+    waterInBy: long.by.toISOString(),
     lines: [
       ...(dry ? [`Skip your turf watering until ${DRY_LABEL}.`] : []),
       ...longWaterInLines(long, dry ? 'Today’s treatment then' : 'Today’s treatment', false),
