@@ -949,6 +949,60 @@ describe('idle conversations start fresh', () => {
     });
   });
 
+  describe('the server rolls the conversation over', () => {
+    const THREAD_B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const cardX = { id: 'action-old', tool: 'update_customer', summary: 'Old synthetic card', expiresInMs: 100 * 3600000 };
+    const cardY = { id: 'action-new', tool: 'update_customer', summary: 'New synthetic card', expiresInMs: 100 * 3600000 };
+    const history = (ask, answer) => [{ role: 'user', content: ask }, { role: 'assistant', content: answer }];
+    const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
+    const confirms = () => screen.queryAllByRole('button', { name: 'Confirm', exact: true });
+    async function sendTwo(secondReply) {
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) {
+          const n = queryBodies().length;
+          if (n === 1) return ok({ response: 'Prepared.', taskId: 'task-old', taskState: 'awaiting_approval', pendingActions: [cardX],
+            conversationHistory: history('Synthetic first ask', 'Prepared.'), threadId: THREAD, threadSeq: 2, threadsEnabled: true });
+          if (n === 2) return ok(secondReply);
+          return ok({ response: 'Third.', conversationHistory: history('x', 'Third.'), threadId: THREAD_B, threadSeq: 4, threadsEnabled: true });
+        }
+        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      await mount();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+      submit('Synthetic first ask');
+      await screen.findByRole('button', { name: 'Confirm', exact: true });
+      submit('Synthetic second ask');
+      await waitFor(() => expect(queryBodies()).toHaveLength(2));
+    }
+
+    it('sent thread A, reply carries thread B: only the new card remains, and history is only the new exchange', async () => {
+      await sendTwo({ response: 'Fresh.', pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'Fresh.'),
+        threadId: THREAD_B, threadSeq: 2, threadsEnabled: true });
+      expect(queryBodies()[1].thread_id).toBe(THREAD);
+      await screen.findByText('Fresh.');
+      expect(confirms()).toHaveLength(1);
+      submit('Synthetic third ask');
+      await waitFor(() => expect(queryBodies()).toHaveLength(3));
+      expect(queryBodies()[2].thread_id).toBe(THREAD_B);
+      expect(queryBodies()[2].conversationHistory).toEqual(history('Synthetic second ask', 'Fresh.'));
+    });
+
+    it('a rolled-over reply shows its own choice buttons, with no old card beside them', async () => {
+      await sendTwo({ response: 'Which?', choices: ['Option A', 'Option B'], conversationHistory: history('Synthetic second ask', 'Which?'),
+        threadId: THREAD_B, threadSeq: 2, threadsEnabled: true });
+      expect(await screen.findByRole('group', { name: 'Answer choices' })).toBeInTheDocument();
+      expect(confirms()).toHaveLength(0);
+    });
+
+    it('a reply on the same thread still adds to the cards on screen', async () => {
+      await sendTwo({ response: 'More.', pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'More.'),
+        threadId: THREAD, threadSeq: 4, threadsEnabled: true });
+      await screen.findByText('More.');
+      expect(confirms()).toHaveLength(2);
+    });
+  });
+
   describe('a saved task restored into the palette', () => {
     const TASK_THREAD = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
     const taskHistory = [{ role: 'user', content: 'Synthetic saved ask' }, { role: 'assistant', content: 'Saved answer' }];

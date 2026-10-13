@@ -570,6 +570,15 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     threadReopenedRef.current = deliberate;
   }, []);
 
+  // Holds a thread (or none, id null): its id, tail seq and idle clock. History
+  // open, the automatic resume, a loaded saved task and every query reply set
+  // the held thread through here.
+  const holdThread = useCallback((id, seq, deliberate = false, idleForMs = 0) => {
+    setThreadId(id);
+    threadSeqRef.current = Number.isInteger(seq) ? seq : null;
+    anchorThreadClock(deliberate, idleForMs);
+  }, [anchorThreadClock]);
+
   // deliberate: the operator picked this conversation (History). Otherwise it
   // is the automatic resume, and the idle clock starts at the thread's own last
   // exchange, not at the moment the palette loaded it.
@@ -577,9 +586,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     const hist = thread?.conversationHistory;
     if (!hist?.length) return false;
     setConversationHistory(hist);
-    setThreadId(thread.id);
-    threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
-    anchorThreadClock(deliberate, thread.idleForMs);
+    holdThread(thread.id, thread.lastSeq, deliberate, thread.idleForMs);
     setPendingActions([]);
     setChoices(null);
     setToolActivity([]);
@@ -597,7 +604,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         : null,
     );
     return true;
-  }, [anchorThreadClock]);
+  }, [holdThread]);
 
   // Picker: fetch the actor's recent threads (server-side actor-bound).
   const loadThreads = useCallback(() => {
@@ -721,10 +728,30 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setResponse(null);
   }, [open]);
 
+  // Applies a server reply to the conversation: the answer, its cards (added to
+  // any card already on screen, deduplicated), the open task, tool activity,
+  // knowledge-gap prompts and history. Shared by a query reply and a loaded
+  // saved task. sentThreadId: the thread the request was sent on; a reply on a
+  // different thread means the server rolled the conversation over (a stale
+  // clock or limit on this side), so the old conversation's state goes first.
+  const applyServerReply = useCallback((data, { sentThreadId = null, fallbackTaskId = null } = {}) => {
+    if (sentThreadId && data.threadId && data.threadId !== sentThreadId) startNewConversation();
+    const taskId = data.taskId || fallbackTaskId;
+    setResponse(data.response);
+    setPendingActions(previous => [...previous, ...(data.pendingActions || [])
+      .filter(action => !previous.some(old => old.id === action.id))
+      .map(action => ({ ...action, taskId, receivedAt: Date.now() }))]);
+    setActiveTask(data.taskId ? data : null);
+    setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
+    knowledgeGaps.load(data.knowledgeMisses, taskId);
+    setConversationHistory(data.conversationHistory || []);
+  }, [startNewConversation]);
+
   const submit = useCallback(
     async (text, selectedTarget) => {
       const q = (text || prompt).trim();
-      if (!q || loading || submittingRef.current || attachmentsLoadingRef.current || dictationPendingRef.current) return;
+      const busy = [loading, submittingRef.current, attachmentsLoadingRef.current, dictationPendingRef.current].some(Boolean);
+      if (!q || busy) return;
       submittingRef.current = true;
       // A NEW question on a thread idle past the server's limit starts a new
       // conversation; the unresolved request being retried never does.
@@ -764,38 +791,19 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
-          setResponse(data.response);
-          setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
-          setActiveTask(data.taskId ? data : null);
+          applyServerReply(data, { sentThreadId });
           setChoices(Array.isArray(data.choices) ? data.choices.filter(choice => typeof choice === "string" && choice.trim()) : null);
-          setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
-          knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
-          setConversationHistory(data.conversationHistory || []);
-          if (data.threadId) {
-            setThreadId(data.threadId);
-            threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-            threadActivityRef.current = Date.now();
-            threadReopenedRef.current = false;
-          } else if (data.threadsEnabled === true && sentThreadId) {
-            // Threads are on but this exchange wasn't appended — the server
-            // rejected it (another tab appended first, or the thread is
-            // gone) or the best-effort write failed. Detach so the next
-            // exchange starts a fresh thread instead of interleaving.
-            setThreadId(null);
-            threadSeqRef.current = null;
-          }
           // The server states thread availability on every query, so a
           // RUNTIME gate change is reflected: off → detach and return to
           // ephemeral mode (the kill switch's promise); on → thread mode
-          // even if the availability probe failed earlier or this
-          // exchange's best-effort append didn't return an id.
-          if (data.threadsEnabled === true) {
-            markThreadsAvailable(true);
-          } else if (data.threadsEnabled === false) {
-            markThreadsAvailable(false);
-            setThreadId(null);
-            threadSeqRef.current = null;
-          }
+          // even if the availability probe failed earlier. A reply with a
+          // thread id attaches it; a reply that states availability but has
+          // none means this exchange wasn't appended (another tab appended
+          // first, the thread is gone, the best-effort write failed): detach
+          // so the next exchange starts a fresh thread, not an interleaved one.
+          if (data.threadId && data.threadsEnabled !== false) holdThread(data.threadId, data.threadSeq);
+          else if (data.threadsEnabled !== undefined) holdThread(null);
+          if (typeof data.threadsEnabled === "boolean") markThreadsAvailable(data.threadsEnabled);
         }
       } catch (err) {
         // Only a definitive 4xx answer settles the identity; a server failure
@@ -817,7 +825,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, conversationHistory, context, threadId, resolveSendState, location.pathname, location.search, attachments, resetAttachments, ibPageData],
+    [prompt, loading, conversationHistory, context, threadId, resolveSendState, applyServerReply, holdThread, location.pathname, location.search, attachments, resetAttachments, ibPageData],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -835,15 +843,10 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       operation ? { method: 'POST', body: JSON.stringify({ session_id: sessionIdRef.current,
         ...(candidate ? { customer_id: candidate.customer_id } : {}) }) } : {});
       if (threadEpochRef.current !== epoch) return;
-      setActiveTask(data);
-      setResponse(data.response);
-      setConversationHistory(data.conversationHistory || []);
-      setThreadId(data.threadId || null);
-      threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-      anchorThreadClock(taskLoadReopens(data.threadId, held), 0);
-      setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
-      setToolActivity(data.toolActivity || []);
-      knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);
+      // A loaded task replaces what is on screen, so its cards replace too.
+      setPendingActions([]);
+      applyServerReply(data, { fallbackTaskId: id });
+      holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data.threadId, held));
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);
