@@ -11,8 +11,9 @@
  *   confirmed - scheduling.status 'confirmed' with a concrete slot on the
  *               requested ET date (the same slot the booking-miss watchdog
  *               pages on; its helpers are reused here, not copied).
- *   day_only  - a requested / offered / ambiguous visit whose date range is
- *               exactly the requested day, with no time ("time not set").
+ *   day_only  - a requested / offered / ambiguous visit on a two-party call whose date
+ *               range is exactly the requested day, with no time ("time not set").
+ *               Never a voicemail, spam or a call that needed no action.
  * One row per call; confirmed wins when a call qualifies as both.
  *
  * A held row clears when the office has acted: a visit carries the call (any
@@ -33,6 +34,7 @@ const {
   INACTIVE_STATUSES,
 } = require('./call-booking-miss-watchdog');
 const { etDateString } = require('../utils/datetime-et');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const LOOKBACK_DAYS = 30;
 const NOTES_MAX_CHARS = 200;
@@ -82,6 +84,9 @@ function heldCandidates(calls, dateET, now = new Date()) {
     if (!DAY_ONLY_STATUSES.has(sched.status)) continue;
     if (!ISO_DATE.test(String(start || '')) || start !== dateET || sched.requested_date_range_end !== start) continue;
     if (call.processing_status !== 'processed') continue;
+    // A voicemail lead is 'processed' too, but a one-sided message is a request, not a visit
+    // staff agreed on the line.
+    if (extraction.meta?.is_voicemail === true || call.answered_by === 'voicemail') continue;
     const spamKind = extraction.spam_verdict?.spam_kind;
     if (spamKind && spamKind !== 'not_spam') continue;
     if (CLOSED_DISPOSITIONS.has(extraction.recommended_disposition)) continue;
@@ -92,7 +97,7 @@ function heldCandidates(calls, dateET, now = new Date()) {
 }
 
 // Pure. `calls` are call_log rows ({ id, twilio_call_sid, customer_id,
-// direction, created_at, from_phone, to_phone, processing_status,
+// direction, created_at, from_phone, to_phone, answered_by, processing_status,
 // v2_extraction_status, ai_extraction_enriched }); `bookedRows` are
 // scheduled_services rows ({ customer_id, status, sched_date ('YYYY-MM-DD'),
 // window_start, created_at, source_call_log_id, notes }); `triageRows` are
@@ -161,8 +166,10 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
     .where({ v2_extraction_status: 'valid' })
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
+    // Voice-agent sandbox test calls are ordinary inbound rows; they are never a promised visit.
+    .modify(whereNotSandboxCall)
     .whereRaw('ai_extraction_enriched::text LIKE ANY(?)', [dateTexts])
-    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone',
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'answered_by',
       'processing_status', 'v2_extraction_status', 'ai_extraction_enriched');
   const candidates = heldCandidates(calls, dateET, now);
   if (!candidates.length) return [];

@@ -102,8 +102,14 @@ describe('day-only exclusions', () => {
   it.each([
     ['a voicemail', { processing_status: 'voicemail' }],
     ['a spam row', { processing_status: 'spam' }],
+    // A voicemail that became a lead is 'processed': still a one-sided request, not an agreed visit.
+    ['a voicemail lead (answered by voicemail)', { processing_status: 'processed', answered_by: 'voicemail' }],
   ])('never holds %s', (_name, over) => {
     expect(run([call({ ...over, ai_extraction_enriched: dayOnly() })])).toEqual([]);
+  });
+
+  it('never holds a voicemail the extraction marks as one', () => {
+    expect(run([call({ ai_extraction_enriched: dayOnly({ meta: { is_voicemail: true } }) })])).toEqual([]);
   });
 
   it('never holds a spam verdict, but accepts not_spam', () => {
