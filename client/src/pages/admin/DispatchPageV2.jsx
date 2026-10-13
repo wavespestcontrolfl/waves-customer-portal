@@ -74,6 +74,7 @@ import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
+import HeldVisitsStrip, { heldVisitFormDefaults } from "./HeldVisitsStrip";
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
@@ -416,6 +417,23 @@ function fastCompleteOperatorOf(outlet) {
   return String(user?.id || "");
 }
 
+// The customer shape CreateAppointmentModal's defaultCustomer takes, from a
+// GET /admin/customers/:id record.
+function modalCustomerFrom(record) {
+  const c = record || {};
+  const address = c.address || {};
+  return {
+    id: c.id,
+    firstName: c.firstName || "",
+    lastName: c.lastName || "",
+    phone: c.phone || "",
+    address: address.line1 || "",
+    city: address.city || "",
+    zip: address.zip || "",
+    tier: c.tier || null,
+  };
+}
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -688,6 +706,11 @@ export default function DispatchPageV2({
   });
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
+  const [heldVisits, setHeldVisits] = useState([]);
+  // Only the newest Book it click opens the form, and only while its day is still on
+  // screen: a slower customer lookup from an earlier click, or from a day the operator
+  // has left, must not open it.
+  const bookHeldSeq = useRef(0);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
   // The visit the Edit / prepay modal last saved (fresh object per save):
   // the list view re-verifies that row on the refresh it triggers, unlike
@@ -794,6 +817,31 @@ export default function DispatchPageV2({
     fetchSchedule(date);
   }, [date, fetchSchedule]);
 
+  // "From calls, not on the calendar" strip (GATE_CALL_HELD_VISIT). Fail-soft:
+  // any error or an off gate leaves the list empty and the page unchanged.
+  // A new date, view or tab drops any pending Book it lookup with the old rows
+  // (a plain refresh of the same day does not).
+  useEffect(() => { bookHeldSeq.current += 1; }, [date, viewMode, activeTab]);
+  useEffect(() => {
+    if (viewMode !== "day" || activeTab !== "board") {
+      setHeldVisits([]);
+      return undefined;
+    }
+    let cancelled = false;
+    // Rows belong to the date that produced them: drop the last list before the
+    // new request, so a slow response never shows one day's rows under another.
+    setHeldVisits([]);
+    (async () => {
+      try {
+        const res = await adminFetch(`/admin/schedule/held-visits?date=${date}`);
+        if (!cancelled) setHeldVisits(Array.isArray(res?.heldVisits) ? res.heldVisits : []);
+      } catch {
+        if (!cancelled) setHeldVisits([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [date, viewMode, activeTab, scheduleRefreshKey]);
+
   // Auto-Dispatch audit links open the existing appointment detail sheet.
   // Inspecting a move must never enter the completion or new-booking flows.
   useEffect(() => {
@@ -830,20 +878,7 @@ export default function DispatchPageV2({
       try {
         const res = await adminFetch(`/admin/customers/${customerId}`);
         if (cancelled) return;
-        const c = res.customer || {};
-        const address = c.address || {};
-        setNewApptDefaults({
-          customer: {
-            id: c.id,
-            firstName: c.firstName || "",
-            lastName: c.lastName || "",
-            phone: c.phone || "",
-            address: address.line1 || "",
-            city: address.city || "",
-            zip: address.zip || "",
-            tier: c.tier || null,
-          },
-        });
+        setNewApptDefaults({ customer: modalCustomerFrom(res.customer) });
         setShowNewAppt(true);
       } catch (err) {
         console.error("Failed to preload schedule customer:", err);
@@ -859,6 +894,26 @@ export default function DispatchPageV2({
       cancelled = true;
     };
   }, [searchParams, setSearchParams]);
+
+  // Book it: open the New appointment modal on the held day and time. The
+  // customer is preloaded only when the call is linked to one; if that lookup
+  // fails the modal still opens and the person picks the customer.
+  const bookHeldVisit = useCallback(async (row) => {
+    const seq = ++bookHeldSeq.current;
+    let customer;
+    if (row.customer_id) {
+      try {
+        const res = await adminFetch(`/admin/customers/${row.customer_id}`);
+        if (res?.customer?.id) customer = modalCustomerFrom(res.customer);
+      } catch (err) {
+        console.error("Failed to preload held-visit customer:", err);
+      }
+    }
+    if (seq !== bookHeldSeq.current) return;
+    // What the form opens on is decided by the row alone (heldVisitFormDefaults).
+    setNewApptDefaults({ ...heldVisitFormDefaults(row), customer });
+    setShowNewAppt(true);
+  }, []);
 
   // Mobile only exposes Day + Week. Snap back if user loaded with 5day/month.
   useEffect(() => {
@@ -1585,6 +1640,8 @@ export default function DispatchPageV2({
           defaultDurationMinutes={newApptDefaults?.durationMinutes}
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
+          defaultInternalNotes={newApptDefaults?.internalNotes || ""}
+          requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           onClose={() => {
             setShowNewAppt(false);
             setNewApptDefaults(null);
@@ -1935,6 +1992,7 @@ export default function DispatchPageV2({
               </div>
             );
           })()}
+          <HeldVisitsStrip heldVisits={heldVisits} onBook={bookHeldVisit} />
           {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
               so dispatchers can drag jobs between tech lanes and create a
               slot pre-bound to a specific tech — the core same-day

@@ -21,6 +21,7 @@ const mockAppendExchange = jest.fn();
 const mockLatestThread = jest.fn();
 const mockGetThread = jest.fn();
 const mockListThreads = jest.fn();
+const mockIsThreadIdle = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
@@ -75,6 +76,7 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
 }));
 jest.mock('../services/intelligence-bar/threads', () => ({
   threadsEnabled: () => process.env.GATE_IB_THREADS === 'true',
+  isThreadIdle: (...args) => mockIsThreadIdle(...args),
   appendExchange: (...args) => mockAppendExchange(...args),
   latestThread: (...args) => mockLatestThread(...args),
   getThread: (...args) => mockGetThread(...args),
@@ -287,6 +289,217 @@ describe('threads gate ON', () => {
 
       const techRes = await getPath(baseUrl, '/threads/latest', 'tech');
       expect(techRes.status).toBe(403);
+    });
+  });
+
+  test('/threads/latest with an idle newest thread answers no thread (the server decides the auto-resume)', async () => {
+    mockLatestThread.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await getPath(baseUrl, '/threads/latest');
+      expect(status).toBe(200);
+      expect(body).toEqual({ thread: null });
+    });
+  });
+
+  test('/query with no thread_id starts a new thread and never resumes the latest one', async () => {
+    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
+    scriptModelTurns([[{ type: 'text', text: 'fresh' }]]);
+    await withServer(async (baseUrl) => {
+      // The latest thread is idle: the lookup would answer null, and /query
+      // must not look for a thread at all.
+      mockLatestThread.mockResolvedValue(null);
+      await postQuery(baseUrl, { prompt: 'a new ask', context: 'customers' });
+      expect(mockLatestThread).not.toHaveBeenCalled();
+      expect(mockGetThread).not.toHaveBeenCalled();
+      const arg = mockAppendExchange.mock.calls[0][0];
+      expect(arg.threadId).toBeNull();
+      expect(arg.expectedSeq).toBeNull();
+    });
+  });
+
+  describe('explicit thread_id on an idle thread (server-side idle limit)', () => {
+    afterEach(() => mockIsThreadIdle.mockReset());
+    const run = async (extra) => {
+      mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
+      scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+      let sent;
+      await withServer(async (baseUrl) => {
+        await postQuery(baseUrl, {
+          prompt: 'a later ask', context: 'customers', thread_id: THREAD_ID, thread_seq: 4,
+          conversationHistory: [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Synthetic old answer' }],
+          ...extra,
+        });
+        sent = mockAppendExchange.mock.calls[0][0];
+      });
+      return sent;
+    };
+
+    test('idle and not reopened: a new thread, no old history', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = await run({});
+      expect(mockIsThreadIdle).toHaveBeenCalledWith('admin-1', THREAD_ID);
+      expect(sent.threadId).toBeNull();
+      expect(sent.expectedSeq).toBeNull();
+      expect(sent.seedTurns).toEqual([]);
+      const modelInput = JSON.stringify(mockMessagesCreate.mock.calls[0][0].messages);
+      expect(modelInput).not.toContain('Synthetic old answer');
+    });
+
+    test('idle but reopened from History: it keeps appending to that thread', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = await run({ thread_reopened: true });
+      expect(mockIsThreadIdle).not.toHaveBeenCalled();
+      expect(sent.threadId).toBe(THREAD_ID);
+      expect(sent.expectedSeq).toBe(4);
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[0][0].messages)).toContain('Synthetic old answer');
+    });
+
+    test('inside the limit: unchanged', async () => {
+      mockIsThreadIdle.mockResolvedValue(false);
+      const sent = await run({});
+      expect(sent.threadId).toBe(THREAD_ID);
+      expect(sent.expectedSeq).toBe(4);
+    });
+
+    test('a failed idle lookup fails open and the request runs unchanged', async () => {
+      mockIsThreadIdle.mockRejectedValue(new Error('db down'));
+      const sent = await run({});
+      expect(sent.threadId).toBe(THREAD_ID);
+    });
+  });
+
+  describe('threadRolledOver: the server is the only authority', () => {
+    const history = [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Synthetic old answer' }];
+    const postRollover = async (extra = {}) => {
+      scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+      let result;
+      await withServer(async (baseUrl) => {
+        result = await postQuery(baseUrl, { prompt: 'a later ask', context: 'customers', thread_id: THREAD_ID, thread_seq: 4,
+          conversationHistory: history, ...extra });
+      });
+      return result;
+    };
+    afterEach(() => mockIsThreadIdle.mockReset());
+
+    test('a rolled-over reply with a new thread id carries the flag', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue({ threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', lastSeq: 2 });
+      const { status, body } = await postRollover();
+      expect(status).toBe(200);
+      expect(body.threadRolledOver).toBe(true);
+      expect(body.threadId).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    });
+
+    test('the flag is there even when the append fails and no thread id could be created', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue(null);
+      const { body } = await postRollover();
+      expect(body.threadRolledOver).toBe(true);
+      expect(body.threadId).toBeUndefined();
+    });
+
+    test('a normal reply never carries it', async () => {
+      mockIsThreadIdle.mockResolvedValue(false);
+      mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 6 });
+      const { body } = await postRollover();
+      expect(body).not.toHaveProperty('threadRolledOver');
+    });
+
+    test.each([['a string', 'x'], ['an object', { role: 'user', content: 'x' }], ['null', null], ['a bad turn', [{ role: 'system', content: 'x' }]]])(
+      'an idle thread with a malformed history (%s) is left to runQuery: its 400, no rollover, no model call, no flag', async (_label, bad) => {
+        mockIsThreadIdle.mockResolvedValue(true);
+        mockMessagesCreate.mockClear();
+        mockAppendExchange.mockClear();
+        const { status, body } = await postRollover({ conversationHistory: bad });
+        expect(status).toBe(400);
+        expect(body.error).toBe('Conversation history must contain user and assistant text turns');
+        expect(body).not.toHaveProperty('threadRolledOver');
+        expect(mockMessagesCreate).not.toHaveBeenCalled();
+        expect(mockAppendExchange).not.toHaveBeenCalled();
+      });
+
+    test('an idle thread with no history field still rolls over', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue({ threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', lastSeq: 2 });
+      scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+      let result;
+      await withServer(async (baseUrl) => {
+        result = await postQuery(baseUrl, { prompt: 'a later ask', context: 'customers', thread_id: THREAD_ID, thread_seq: 4 });
+      });
+      expect(result.status).toBe(200);
+      expect(result.body.threadRolledOver).toBe(true);
+    });
+
+    test('a reopened thread is never rolled over and its reply never carries it', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 6 });
+      const { body } = await postRollover({ thread_reopened: true });
+      expect(mockIsThreadIdle).not.toHaveBeenCalled();
+      expect(body).not.toHaveProperty('threadRolledOver');
+      expect(mockAppendExchange.mock.calls.at(-1)[0].threadId).toBe(THREAD_ID);
+    });
+
+    test('every JSON body of a rolled-over request is flagged, unless it already states the flag (a stored snapshot)', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = [];
+      const res = { json: (body) => { sent.push(body); return res; } };
+      await intelligenceRouter.startFreshWhenThreadIdle({ body: { thread_id: THREAD_ID, conversationHistory: history },
+        techRole: 'admin', technician: { id: 'admin-1' }, technicianId: 'admin-1' }, res, jest.fn());
+      res.json({ error: 'refused' });
+      res.json({ taskId: 't', threadRolledOver: undefined });
+      res.json({ taskId: 't', threadRolledOver: true });
+      res.json([1]);
+      expect(sent).toEqual([{ error: 'refused', threadRolledOver: true }, { taskId: 't', threadRolledOver: undefined },
+        { taskId: 't', threadRolledOver: true }, [1]]);
+    });
+
+    describe('request identity', () => {
+      const reqFor = (body) => ({ body: { ...body }, techRole: 'admin', technician: { id: 'admin-1' }, technicianId: 'admin-1' });
+      const runGuard = async (req) => {
+        const next = jest.fn();
+        await intelligenceRouter.startFreshWhenThreadIdle(req, { json: jest.fn() }, next);
+        expect(next).toHaveBeenCalledTimes(1);
+      };
+      const taskRequest = (body) => ({
+        prompt: body.prompt, context: 'customers', pageData: {}, selectedTarget: null, images: [],
+        conversationHistory: (body.conversationHistory || []).slice(-10),
+        thread_id: body.thread_id || null, thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+      });
+      const identityOf = (req) => {
+        const { request, identityRequest } = intelligenceRouter.taskRequestsFor(req, taskRequest(req.body));
+        return identityRequest || request;
+      };
+      const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
+
+      test('an idle rollover hashes what the client sent and stores the rolled-over request with the decision', async () => {
+        mockIsThreadIdle.mockResolvedValue(true);
+        const req = reqFor(sent);
+        await runGuard(req);
+        expect(req.body.thread_id).toBeUndefined();
+        expect(req.body.conversationHistory).toEqual([]);
+        const { request } = intelligenceRouter.taskRequestsFor(req, taskRequest(req.body));
+        expect(identityOf(req)).toEqual(taskRequest(sent));
+        expect(request).toMatchObject({ thread_id: null, thread_seq: null, conversationHistory: [], thread_rolled_over: true });
+      });
+
+      test('no rollover: the identity is the request itself and no decision is stored', async () => {
+        mockIsThreadIdle.mockResolvedValue(false);
+        const req = reqFor(sent);
+        await runGuard(req);
+        expect(req.ibThreadRollover).toBeUndefined();
+        expect(intelligenceRouter.taskRequestsFor(req, taskRequest(req.body))).toEqual({ request: taskRequest(sent) });
+      });
+
+      test('a retry of the same request hashes the same whether or not the thread is still idle', async () => {
+        const identities = [];
+        for (const idle of [false, true, true, false]) {
+          mockIsThreadIdle.mockResolvedValue(idle);
+          const req = reqFor(sent);
+          await runGuard(req);
+          identities.push(JSON.stringify(identityOf(req)));
+        }
+        expect(new Set(identities).size).toBe(1);
+      });
     });
   });
 

@@ -149,10 +149,16 @@ async function laneCallProcessing() {
     .orderByRaw('COALESCE(processing_heartbeat_at, processing_started_at, updated_at, created_at) ASC')
     .limit(SCAN_LIMIT)
     .select(columns);
-  // no_transcription retries (prompt, no age fence, never a stall candidate)
-  // scanned SEPARATELY: a backlog of old retry rows must never fill the live
-  // page ahead of the stalled calls it monitors.
-  const retryRows = await eligible(db('call_log').where('processing_status', 'no_transcription'))
+  // no_transcription (no creation fence, never a stall candidate) scanned
+  // SEPARATELY: a backlog of old retry rows must never fill the live page
+  // ahead of the stalled calls it monitors. Under the processor's attempt cap
+  // it is a scheduled retry; at the cap it is terminal (no sweep revisits it),
+  // windowed by the failure event like extraction_failed.
+  const retryRows = await eligible(db('call_log').where('processing_status', 'no_transcription')
+    .where(function retryOrRecentFailure() {
+      this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+        .orWhere('updated_at', '>', since(RECENT_DAYS));
+    }))
     .orderBy('updated_at', 'desc')
     .limit(SCAN_LIMIT)
     .select(columns);
@@ -182,9 +188,12 @@ async function laneCallProcessing() {
     let status = 'pending';
     let detail = ps === 'processing' ? 'transcribing / extracting' : 'waiting for the processor';
     const attempts = Number(r.extraction_attempts) || 0;
-    if (ps === 'no_transcription') {
-      // Known-failed retry: processAllPending re-runs it on the next tick.
-      detail = 'no transcript yet — retry scheduled';
+    if (ps === 'no_transcription' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
+      // Known-failed retry: processAllPending re-runs it (10-min spacing).
+      detail = `no transcript yet — retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
+    } else if (ps === 'no_transcription') {
+      status = 'failed';
+      detail = `no transcript after ${attempts} attempts — no automatic retry`;
     } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS && new Date(r.created_at) > since(RECENT_DAYS)) {
       detail = `extraction failed, retry scheduled (${attempts}/${CALL_EXTRACTION_MAX_ATTEMPTS})`;
     } else if (ps === 'extraction_failed' && attempts < CALL_EXTRACTION_MAX_ATTEMPTS) {
@@ -212,7 +221,8 @@ async function laneCallProcessing() {
   });
   // The extraction_failed scan feeds BOTH statuses (under-cap rows inside the
   // fence classify as pending retries), so a capped scan floors both counts.
-  return finish(items, { truncated: [...capped(failedRows, 'failed', 'pending'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending')] });
+  // The no_transcription scan feeds both too (at-cap rows classify as failed).
+  return finish(items, { truncated: [...capped(failedRows, 'failed', 'pending'), ...capped(live, 'parked', 'pending'), ...capped(retryRows, 'pending', 'failed')] });
 }
 
 async function laneContentParks() {

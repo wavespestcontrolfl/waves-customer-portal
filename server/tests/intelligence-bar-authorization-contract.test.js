@@ -245,6 +245,8 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
   expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
   expect(buildContract({ toolName: 'trigger_review_request', params: {}, displayParams: {} }).notifies_customer).toBe(true);
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+  // create_customer_link builds a link and sends nothing (the card request kind, the one that could email, is composer-only).
+  expect(buildContract({ toolName: 'create_customer_link', params: {}, displayParams: {}, preview: { preview: true } }).notifies_customer).toBe(false);
 });
 
 // Codex round-1 P1/P2 on the ib-cancel-appointment-live lane: cancel_appointment's

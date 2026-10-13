@@ -37,7 +37,7 @@ const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-ba
 const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
-const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
+const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool, sendEmailReplyProposalRefusal, replyViaSmsProposalRefusal } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
@@ -66,6 +66,7 @@ const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
+const { CUSTOMER_LINK_TOOLS, executeCustomerLinkTool } = require('../services/intelligence-bar/customer-link-tools');
 const { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, repriceVisitsLive } = require('../services/intelligence-bar/reprice-visits-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { INVOICE_ACTION_TOOLS, executeInvoiceActionTool, invoiceActionsLive } = require('../services/intelligence-bar/invoice-action-tools');
@@ -172,6 +173,7 @@ const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
 const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
+const CUSTOMER_LINK_TOOL_NAMES = new Set(CUSTOMER_LINK_TOOLS.map(t => t.name));
 const REPRICE_VISITS_TOOL_NAMES = new Set(REPRICE_VISITS_TOOLS.map(t => t.name));
 const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
 const INVOICE_ACTION_TOOL_NAMES = new Set(INVOICE_ACTION_TOOLS.map(t => t.name));
@@ -198,6 +200,9 @@ const INFRA_TOOLS = [
   // Resend a paid receipt: the Invoices page button as a carded write, offered
   // beside the invoice readers on every admin context (admin-only below).
   ...RECEIPT_RESEND_TOOLS,
+  // The composer's Insert Link kinds: a carded write a customer link is asked
+  // for from any page (admin-only below).
+  ...CUSTOMER_LINK_TOOLS,
   // Saved-card removal (with the Auto Pay-off step) and invoice address
   // correction: admin-only writes, both always behind the confirm card.
   ...BILLING_WRITE_TOOLS,
@@ -255,6 +260,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Resending a receipt contacts the customer — admin only, like the
   // requireAdmin send-receipt route it mirrors.
   ...RECEIPT_RESEND_TOOL_NAMES,
+  // Customer links mirror the requireAdmin /customer-link, /reschedule-link
+  // and /reservice-link routes — admin only.
+  ...CUSTOMER_LINK_TOOL_NAMES,
   // Repricing visits runs the requireAdmin visit edit — admin only.
   ...REPRICE_VISITS_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
@@ -612,6 +620,12 @@ async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
 
+// A close or colloquial service name books, and shows on the card, as the exact
+// catalog name the proposal resolved it to; any other name stays as given.
+function bookedServiceTypeParam(booking, params) {
+  return { service_type: booking.bookedServiceType || params.service_type };
+}
+
 function summarizeProposal(toolName, params, displayParams = params) {
   if (toolName === 'save_customer_estimate') return params.estimate_id ? 'Revise saved lawn estimate' : 'Save lawn estimate draft';
   // One level of plain-object params flattens into the summary — without it
@@ -952,6 +966,10 @@ const VERIFIED_VERSION_PARAMS = {
   // reprice_future_visits binds every listed visit's id, date, status, price
   // and row version (reprice-visits-tools.js plan version).
   reprice_future_visits: '_verified_reprice_version',
+  // create_customer_link binds the customer, kind and the phone (last ten)
+  // the card showed; a number changed since is refused at commit
+  // (customer-link-tools.js pinnedVersionRefusal).
+  create_customer_link: '_verified_link_version',
 };
 
 // The overlapping visits a booking card names, or [] when the lookup fails
@@ -1542,6 +1560,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // shows and what the executor stamps; an empty one leaves the params.
       if (booking.customerRequest) params.customer_request = booking.customerRequest;
       else delete params.customer_request;
+      // A close name books, and shows on the card, as the exact catalog name.
+      Object.assign(params, bookedServiceTypeParam(booking, params));
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
       params._booking_list_price = booking.listPrice;
@@ -1644,6 +1664,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Same recipient pin send_sms has (codex P1 on #3648): resolve the
       // human the message goes to NOW, show name + last4 on the card, and
       // let /confirm-action refuse if the resolved phone drifts.
+      if (toolUse.name === 'reply_via_sms') {
+        // No card for a text the send would refuse for a customer link in it
+        // (the read-only proposal-phase check, run on the recipient exactly as
+        // the send resolves it); the execution-time check stays.
+        const replyRefusal = await replyViaSmsProposalRefusal(params);
+        if (replyRefusal) return { failed: true, modelResult: replyRefusal };
+      }
       const recipient = toolUse.name === 'reply_via_sms'
         ? await resolveReplyViaSmsRecipient(params)
         : await resolveReviewRequestRecipient(params);
@@ -1703,6 +1730,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           phone_last4: String(pinPhone).replace(/\D/g, '').slice(-4) || null,
         },
       };
+    }
+    if (toolUse.name === 'send_email_reply') {
+      // No card for a reply the send would refuse for a portal link in its body
+      // (the read-only 'email' phase check); the execution-time check stays.
+      const emailRefusal = await sendEmailReplyProposalRefusal(params);
+      if (emailRefusal) return { failed: true, modelResult: emailRefusal };
     }
     if (toolUse.name === 'send_email_reply' && params.email_id) {
       const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'reply_to', 'subject', 'gmail_thread_id', 'customer_id');
@@ -3214,6 +3247,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (RECEIPT_RESEND_TOOL_NAMES.has(toolName)) {
     return executeReceiptResendTool(toolName, input, actionContext);
   }
+  if (CUSTOMER_LINK_TOOL_NAMES.has(toolName)) {
+    return executeCustomerLinkTool(toolName, input, actionContext);
+  }
   if (REPRICE_VISITS_TOOL_NAMES.has(toolName)) {
     return executeRepriceVisitsTool(toolName, input, actionContext);
   }
@@ -3323,6 +3359,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
+- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. Never say there is no link tool. Auto Pay setup links are the Customers page button; card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days
@@ -3336,6 +3373,14 @@ Use the request-time Eastern date provided on the current turn.`;
 
 
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
+
+// The shape /query accepts for conversationHistory: an array of user and
+// assistant text turns. runQuery answers 400 otherwise, and the idle rollover
+// never touches a body that fails it, so the request reaches runQuery unchanged.
+function isValidConversationHistory(history) {
+  return Array.isArray(history)
+    && history.every(turn => turn && ['user', 'assistant'].includes(turn.role) && typeof turn.content === 'string');
+}
 
 async function runQuery(req, res, next) {
   // A resumed task keeps its original start, so a late card is not ordered as the newest.
@@ -3360,8 +3405,7 @@ async function runQuery(req, res, next) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-    if (!Array.isArray(conversationHistory) || conversationHistory.some(turn =>
-      !turn || !['user', 'assistant'].includes(turn.role) || typeof turn.content !== 'string')) {
+    if (!isValidConversationHistory(conversationHistory)) {
       return res.status(400).json({ error: 'Conversation history must contain user and assistant text turns' });
     }
     // Role guards run on the REQUESTED context so a technician asking for a
@@ -3402,12 +3446,13 @@ async function runQuery(req, res, next) {
     const ownerDirectCommits = ownerDirect && platformEnabled;
     let taskContext = null;
     if (platformEnabled) {
+      const taskRequest = { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
+        conversationHistory: conversationHistory.slice(-10),
+        thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
+        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
-        request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
-          conversationHistory: conversationHistory.slice(-10),
-          thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
-          thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null },
+        ...taskRequestsFor(req, taskRequest),
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -4138,7 +4183,65 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
   }
 }
 
-router.post('/query', runQuery);
+// The server is the only authority on starting a new conversation. An explicit
+// thread_id whose thread is idle past IB_THREAD_IDLE_HOURS starts a NEW
+// conversation (no thread id, no client history, so the model never sees the old
+// customer) unless the client says the operator reopened it on purpose from
+// History or a restored saved task (thread_reopened: true). Every JSON reply to
+// that request then carries threadRolledOver: true (whether or not a new thread
+// id could be created), and never otherwise; the palette holds the thread it
+// has and obeys the flag. Direct /query only: a saved task resumed through
+// /tasks/:id/* keeps its own thread. Fails open (the request runs unchanged)
+// when the lookup throws.
+//
+// The rollover must not change the request's identity: a retry of the same
+// request key (lost response, failed run) is recognised by the hash of what the
+// client sent, so taskRequestsFor hands IbTasks.begin the original thread fields
+// to hash while the saved task keeps the rolled-over ones plus the decision
+// (thread_rolled_over), which the snapshot a retry gets back replays.
+function taskRequestsFor(req, taskRequest) {
+  const original = req.ibThreadRollover;
+  if (!original) return { request: taskRequest };
+  return {
+    request: { ...taskRequest, thread_rolled_over: true },
+    identityRequest: { ...taskRequest, conversationHistory: original.conversationHistory.slice(-10),
+      thread_id: original.thread_id, thread_seq: original.thread_seq },
+  };
+}
+
+// Marks every JSON object body of this response, unless the body already states
+// the flag itself (a stored task snapshot replays its own first decision).
+function flagRolledOverReplies(res) {
+  const json = res.json.bind(res);
+  res.json = (body) => json(body && typeof body === 'object' && !Array.isArray(body) && !('threadRolledOver' in body)
+    ? { ...body, threadRolledOver: true } : body);
+}
+
+async function startFreshWhenThreadIdle(req, res, next) {
+  try {
+    const body = req.body || {};
+    const eligible = [IbThreads.threadsEnabled(), req.techRole === 'admin', body.thread_reopened !== true,
+      UUID_RE.test(String(body.thread_id || '')),
+      // A malformed history is left for runQuery to refuse with its 400.
+      body.conversationHistory === undefined || isValidConversationHistory(body.conversationHistory)].every(Boolean);
+    if (eligible && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
+      req.ibThreadRollover = {
+        thread_id: body.thread_id,
+        thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+        conversationHistory: Array.isArray(body.conversationHistory) ? body.conversationHistory : [],
+      };
+      delete body.thread_id;
+      delete body.thread_seq;
+      body.conversationHistory = [];
+      flagRolledOverReplies(res);
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar] idle thread check failed (code=${err?.code || 'unknown'})`);
+  }
+  next();
+}
+
+router.post('/query', startFreshWhenThreadIdle, runQuery);
 
 // Operator-chosen knowledge gap: the client offers this after a knowledge
 // search came back empty, with the search text in an editable box. Nothing
@@ -5055,6 +5158,8 @@ function threadsGuard(req, res) {
 router.get('/threads/latest', async (req, res, next) => {
   try {
     if (!threadsGuard(req, res)) return;
+    // null = nothing to resume: no thread, or the newest is idle past the
+    // limit (the server decides: a new conversation starts).
     const thread = await IbThreads.latestThread(getAdminActorId(req));
     res.json({ thread: thread || null });
   } catch (err) {
@@ -5092,6 +5197,9 @@ module.exports = router;
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
+// Exposed for the idle-thread rollover identity test.
+module.exports.taskRequestsFor = taskRequestsFor;
+module.exports.startFreshWhenThreadIdle = startFreshWhenThreadIdle;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
 // Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
 // keeps that test tied to the route's own offered-tool list instead of a
