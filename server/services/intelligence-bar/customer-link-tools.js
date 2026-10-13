@@ -162,12 +162,19 @@ async function buildLink(input) {
   const answer = await require('../../routes/admin-communications')[spec.route]({
     phone: customer.phone, customerId: plan.customer_id, kind: plan.kind,
   });
-  const body = answer?.body || {};
-  if (answer?.status !== 200 || !body.url) {
+  // The handlers catch their own exceptions and answer 500, possibly after a
+  // side effect was recorded (a tracked short link, a referral code, an office
+  // move approval). That is an unknown outcome, never a definite "blocked":
+  // thrown here so the confirmed run's catch reports outcome_unknown.
+  if (!answer || answer.status >= 500) {
+    throw Object.assign(new Error('customer link handler failed'), { code: `handler_${answer?.status || 'no_answer'}` });
+  }
+  const body = answer.body || {};
+  if (answer.status !== 200 || !body.url) {
     return {
       error: body.error || 'Nothing to link for this customer',
       blocked: true,
-      code: body.code || `link_${answer?.status || 'unavailable'}`,
+      code: body.code || `link_${answer.status}`,
       kind: plan.kind,
       customer_id: plan.customer_id,
     };

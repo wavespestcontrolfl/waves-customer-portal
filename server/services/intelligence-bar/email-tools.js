@@ -504,14 +504,25 @@ async function emailReplyLinkRefusal(body) {
 
 // Proposal-time refusal for reply_via_sms, so no card is offered for a text a
 // customer link in it would make the send refuse (the execution-time check
-// stays). Resolves the recipient exactly as the send does (resolveReplyTarget)
-// and runs the read-only 'proposal' phase. An unresolvable recipient or a
-// missing message is not judged here: the pin step refuses that on its own.
+// stays). Resolves the recipient as the send does (resolveReplyTarget) and
+// runs the read-only 'proposal' phase. An unresolvable recipient or a missing
+// message is not judged here: the pin step refuses that on its own.
+// A proposal that names only a customer (no id, no email) is pinned by the
+// route through the live, uniqueness-enforcing resolver (comms-tools
+// resolveCustomer: archived rows excluded, an ambiguous name refused), and the
+// confirmed send then runs on that pinned id. The check judges the same row:
+// never the first of several name matches, never an archived one.
+async function proposalReplyTarget(params, sourceEmail) {
+  if (params.customer_id || params.email_id || !params.customer_name) return resolveReplyTarget(params, sourceEmail);
+  const customer = await require('./comms-tools').resolveCustomer({ customer_name: params.customer_name });
+  if (!customer || customer.error) return { phone: null };
+  return { phone: customer.phone, custId: customer.id, recipientSelected: false };
+}
 async function replyViaSmsProposalRefusal(params = {}) {
   if (!params.message) return null;
   try {
     const sourceEmail = params.email_id ? await db('emails').where('id', params.email_id).first() : null;
-    const target = await resolveReplyTarget(params, sourceEmail);
+    const target = await proposalReplyTarget(params, sourceEmail);
     if (target.error || !target.phone) return null;
     return await require('./comms-tools').customerLinkSendRefusal(params.message, target.phone, target.custId || null, { phase: 'proposal', recipientSelected: target.recipientSelected });
   } catch (err) {

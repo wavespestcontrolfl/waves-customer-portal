@@ -147,6 +147,19 @@ describe('create_customer_link', () => {
     expect(preview._version).toEqual({ customer_id: CUSTOMER_ID, kind: 'pay_balance', phone_last10: '9415550123' });
   });
 
+  test('confirmed: a handler 500 (or no answer) is an unknown outcome, never a definite refusal; a 4xx stays a refusal', async () => {
+    wireCustomer();
+    const run = () => executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'pay_balance', confirmed: true, _verified_link_version: LINK_PIN }, { isAdmin: true });
+    for (const answer of [{ status: 500, body: { error: 'Failed to build link' } }, { status: 503, body: {} }, undefined]) {
+      routeExports.customerLinkInsert.mockResolvedValue(answer);
+      const result = await run();
+      expect(result).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
+      expect(result.blocked).toBeUndefined();
+    }
+    routeExports.customerLinkInsert.mockResolvedValue({ status: 404, body: { error: 'No open balance' } });
+    expect(await run()).toMatchObject({ blocked: true, error: 'No open balance', code: 'link_404' });
+  });
+
   test('confirmed: runs the composer handler with the row\'s own phone and reports its body; nothing is sent', async () => {
     wireCustomer();
     routeExports.customerLinkInsert.mockResolvedValue({ status: 200, body: {
@@ -615,8 +628,22 @@ describe('send_email_reply carries the same guard', () => {
       wireReply({ email: { id: 'em-9', customer_id: null, from_address: 'fixture@example.com' }, byAddress: MINE, numberRows: [MINE, THEIRS] });
       expect(await replyViaSmsProposalRefusal({ email_id: 'em-9', message: BODY })).toMatchObject({ blocked: true, code: 'customer_link_recipient' });
       wireReply({ numberRows: [MINE, THEIRS], byAddress: MINE });
-      db.mockImplementationOnce(() => { const b = {}; b.where = () => b; b.first = async () => MINE; return b; });
+      // A name-only proposal is resolved as the route pins it: live rows only, and one match only.
+      const nameMatches = (rows) => db.mockImplementationOnce(() => {
+        const b = { whereNull: jest.fn(() => b), limit: jest.fn(async () => rows) };
+        b.where = () => b;
+        nameMatches.last = b;
+        return b;
+      });
+      nameMatches([MINE]);
       expect(await replyViaSmsProposalRefusal({ customer_name: 'Customer', message: BODY })).toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+      expect(nameMatches.last.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(nameMatches.last.limit).toHaveBeenCalledWith(2);
+      // Two live customers share the name, or none has it: not judged here (the pin step refuses), never the first row.
+      nameMatches([MINE, THEIRS]);
+      expect(await replyViaSmsProposalRefusal({ customer_name: 'Fixture', message: BODY })).toBeNull();
+      nameMatches([]);
+      expect(await replyViaSmsProposalRefusal({ customer_name: 'Nobody', message: BODY })).toBeNull();
       // The same address match on a one-account number passes.
       wireReply({ email: { id: 'em-9', customer_id: null, from_address: 'fixture@example.com' }, byAddress: MINE, numberRows: [MINE] });
       expect(await replyViaSmsProposalRefusal({ email_id: 'em-9', message: BODY })).toBeNull();
