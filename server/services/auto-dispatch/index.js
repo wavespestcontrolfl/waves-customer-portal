@@ -1462,11 +1462,11 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
-  await moveCheck.closeNotices(run.nowDate, { enabled: config.proofreaderEnabled === true });
+  const noticesClosed = await moveCheck.closeNotices(run.nowDate, { enabled: config.proofreaderEnabled === true });
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   await moveCheck.raiseNotices(run.proofreader);
-  runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus);
+  runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {

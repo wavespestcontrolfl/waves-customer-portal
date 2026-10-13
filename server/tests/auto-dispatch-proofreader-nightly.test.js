@@ -26,9 +26,20 @@ const RECORD = {
   unread: [], serviceTypes: ['Quarterly Pest Control'], tooLong: false,
 };
 
-const conn = () => {
-  const chain = { whereIn: () => chain, select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }] };
-  return () => chain;
+// Technician names, and the notification store as the "did a person mark the
+// notice done" read sees it (`doneNotice`: the row it finds, or an Error).
+let doneNotice = null;
+const conn = () => (table) => {
+  const chain = {
+    where: () => chain, whereIn: () => chain, whereRaw: () => chain, whereNotNull: () => chain, whereNot: () => chain,
+    select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }],
+    first: async () => {
+      if (table !== 'notifications') return null;
+      if (doneNotice instanceof Error) throw doneNotice;
+      return doneNotice;
+    },
+  };
+  return chain;
 };
 // A proofreader whose model answers `answer`.
 const proofreaderOf = (answer, record = RECORD) => ({
@@ -41,6 +52,7 @@ const check = (run, proofreader) => nightly.checkMove({ service: SERVICE, best: 
 
 beforeEach(() => {
   jest.clearAllMocks();
+  doneNotice = null;
   audit.ringsLeft.mockResolvedValue(10);
   notifications.notifyAdmin.mockResolvedValue({ id: 'n1' });
 });
@@ -69,7 +81,8 @@ describe('checkMove', () => {
     // The unit mover's own member read, by how many open members the stop has.
     const stopOf = (count) => (table) => {
       const chain = {
-        where: () => chain, whereIn: () => chain, whereNotIn: () => chain,
+        where: () => chain, whereIn: () => chain, whereNotIn: () => chain, whereRaw: () => chain, whereNotNull: () => chain, whereNot: () => chain,
+        first: async () => null,
         select: async () => {
           if (table === 'technicians') return [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }];
           if (count instanceof Error) throw count;
@@ -149,6 +162,27 @@ describe('checkMove', () => {
     await nightly.checkMove({ service: { ...SERVICE, window_start: '13:00' }, best: BEST, run }, { conn: conn(), proofreader });
     await nightly.checkMove({ service: { ...SERVICE, window_start: '13:00' }, best: BEST, run }, { conn: conn(), proofreader });
     expect([...run.proofreader.notices.keys()]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1', 'auto-dispatch-proofreader:s1:2026-10-20:13:00:t1']);
+  });
+
+  test('a notice a person marked done holds the visit: nobody is asked, the visit stays', async () => {
+    const run = runOf();
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    doneNotice = { id: 'n9' };
+    expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD', audit: { why: 'person_held' }, broke: false });
+    expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
+    expect(run.proofreader).toMatchObject({ calls: 0, personHeld: 1 });
+    // An unreadable store is never an allow, and the run reports it.
+    doneNotice = new Error('db down');
+    expect(await check(run, proofreader)).toMatchObject({ allowed: false, audit: { why: 'check_failed' }, broke: true });
+  });
+
+  test('an unsure answer on a record that changed while the model read raises no notice', async () => {
+    const run = runOf();
+    const proofreader = proofreaderOf({ verdict: 'unknown', why: 'model_unsure', entry_id: 'E1', quote: 'never come on Thursdays' });
+    const newer = { ...RECORD, entries: [...RECORD.entries, { id: 'E2', channel: 'text', from: 'customer', at: '2026-10-12T04:11:00-04:00', text: 'Any day is fine now.' }] };
+    proofreader.buildCustomerRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce(newer);
+    expect(await check(run, proofreader)).toMatchObject({ allowed: false, audit: { why: 'record_changed' } });
+    expect(run.proofreader.notices.size).toBe(0);
   });
 
   test('hold: the visit stays, no notice, and the quote never reaches the audit', async () => {
@@ -274,10 +308,11 @@ describe('raiseNotices', () => {
   // The run-end re-read of each visit: by default it is still as the check read it.
   let visitRow;
   beforeEach(() => { visitRow = (id) => ({ status: 'confirmed', scheduled_date: null, window_start: '09:00', technician_id: 't1', id }); });
-  const visits = () => () => {
+  const table = () => () => {
     let wanted = null;
     const chain = {
       where: (cond) => { wanted = cond.id; return chain; },
+      forUpdate: () => { locked.push(wanted); return chain; },
       first: async () => {
         const row = visitRow(wanted);
         if (row instanceof Error) throw row;
@@ -286,6 +321,10 @@ describe('raiseNotices', () => {
     };
     return chain;
   };
+  // The re-read and the write run in one transaction: the same reader stands for it.
+  const visits = () => { const reader = table(); const c = (name) => reader(name); c.transaction = async (work) => work(Object.assign((name) => reader(name), { isTrx: true })); return c; };
+  let locked = [];
+  beforeEach(() => { locked = []; });
   const DATES = { late: '2026-11-20', soon: '2026-10-18', mid: '2026-10-30' };
 
   const unsure = async (answer, service = SERVICE) => {
@@ -307,6 +346,9 @@ describe('raiseNotices', () => {
     });
     // Written once: a later run that is still unsure must not reopen a notice a person closed.
     expect(opts.refreshOnDedupe).toBeUndefined();
+    // The visit is read under a row lock, and the notice is written on that same transaction.
+    expect(locked).toEqual(['s1']);
+    expect(opts.trx.isTrx).toBe(true);
     expect(opts.detail).toContain('from Tuesday Oct 20, 09:00-11:00, technician Alex to Thursday Oct 22, 13:00-15:00, technician Sam.');
     expect(opts.detail).toContain('The check said: The note may be about another service.');
     expect(opts.detail).toContain('(text, customer, 2026-09-01T10:00:00-04:00): “never come on Thursdays”');
@@ -412,7 +454,11 @@ describe('raiseNotices', () => {
     const state = await unsure({ why: 'model_unsure' });
     notifications.notifyAdmin.mockRejectedValue(new Error('store down'));
     audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
-    await expect(nightly.closeNotices(new Date())).resolves.toBeUndefined();
+    // The run reads the answer: a failed close is not a green run.
+    await expect(nightly.closeNotices(new Date())).resolves.toBe(false);
+    expect(nightly.statusAfterNotices(null, 'completed', false)).toBe('completed_with_errors');
+    expect(nightly.statusAfterNotices(null, 'completed', true)).toBe('completed');
+    expect(nightly.statusAfterNotices(null, 'failed', false)).toBe('failed');
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
     // The run reads this count: a held visit nobody was told about is not a green run.
     expect(state.noticesFailed).toBe(1);

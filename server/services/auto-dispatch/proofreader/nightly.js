@@ -39,6 +39,7 @@ const RESOLVED_TITLE = 'Move check alert resolved';
 
 const REASON_CODE = {
   hold: 'PROOFREADER_HOLD', unknown: 'PROOFREADER_UNSURE', not_asked: 'PROOFREADER_NOT_ASKED', grouped: 'PROOFREADER_GROUPED_STOP',
+  person: 'PROOFREADER_PERSON_HELD',
 };
 
 // The "unknown" answers a person can settle by reading the record, with the
@@ -68,6 +69,7 @@ const textOrNull = (value) => (value == null || value === '' ? null : String(val
 // notice closed because the placement changed must not swallow an unsure
 // move on the new placement (Codex #6313 r5); on the same placement the key
 // repeats, so a notice a person marked done is not written again.
+const STALE = Symbol('staleNotice');
 const noticeKey = (id, date, placement) => `${KEY_PREFIX}${id}:${date}:${placement}`;
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 
@@ -82,7 +84,7 @@ const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
 // and one call can take two minutes (r7).
 function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, broke: 0, noticesFailed: 0, notices: new Map(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, personHeld: 0, broke: 0, noticesFailed: 0, notices: new Map(),
     deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
@@ -136,6 +138,7 @@ const DESCRIPTION = {
   unknown: 'The move proofreader could not clear this move; the visit stays',
   not_asked: 'The move proofreader had no calls or no time left this run; the next run asks',
   grouped: 'A stop of two or more services is not moved while the move proofreader is on',
+  person: 'A person marked the held-move notice done; the visit stays on this placement',
 };
 
 function stopped(kind, answer) {
@@ -193,18 +196,40 @@ function recordPrint(record) {
 // call or a note that landed meanwhile makes it "unknown", and the next run
 // reads the new words (Codex #6313 r4). No notice: nobody has judged them yet.
 async function recordStillAsRead(answer, record, { service, conn, proofreader }) {
-  if (answer.verdict !== 'allow') return answer;
+  // Also before a person is told: a message that settles the question while
+  // the model read makes the notice stale at once (r12). A hold stays a hold.
+  const matters = answer.verdict === 'allow' || (answer.verdict === 'unknown' && PERSON_SETTLES[answer.why]);
+  if (!matters) return answer;
+  const was = answer.verdict === 'allow' ? { model_verdict: 'allow' } : {};
   const again = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
   if (recordPrint(again) === recordPrint(record)) return answer;
   // The second read itself failed: a broken check, not new words (r11).
-  if (readFailed(again)) return { ...answer, verdict: 'unknown', why: 'check_failed', model_verdict: 'allow' };
-  return { ...answer, verdict: 'unknown', why: 'record_changed', model_verdict: 'allow' };
+  if (readFailed(again)) return { ...answer, verdict: 'unknown', why: 'check_failed', ...was };
+  return { ...answer, verdict: 'unknown', why: 'record_changed', ...was };
+}
+
+const keyFor = (service) => noticeKey(service.id, toDateStr(service.scheduled_date), `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
+
+// The notice tells a person: "If not, mark this done and the visit stays."
+// That decision is kept: while the visit is on the placement the notice is
+// about, a notice a person marked done holds every automatic move of it, and
+// nobody is asked (Codex #6313 r12: a later run could get an allow and make
+// the move the person refused). A notice the system closed (the visit left
+// the placement) carries the resolved title and decides nothing.
+async function personHeld(conn, service) {
+  const row = await conn('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [keyFor(service)])
+    .whereNotNull('done_at')
+    .whereNot('title', RESOLVED_TITLE)
+    .first('id');
+  return !!row;
 }
 
 function collectNotice(state, service, best, { answer, move, entry }) {
   if (!move || !PERSON_SETTLES[answer.why]) return;
   const date = toDateStr(service.scheduled_date);
-  const key = noticeKey(service.id, date, `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
+  const key = keyFor(service);
   if (!date || state.notices.has(key)) return;
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
@@ -214,12 +239,14 @@ function collectNotice(state, service, best, { answer, move, entry }) {
   });
 }
 
-// The stop for a grouped visit (see isGroupedStop), or for a stop that could
-// not be read (never asked, never allowed); null for a visit that is alone.
+// The stop for a visit nobody is asked about: a grouped visit (isGroupedStop),
+// one a person holds (personHeld), or one whose reads failed (never allowed).
+// Null = ask.
 async function groupedStop(conn, service) {
   try {
-    if (!(await isGroupedStop(conn, service))) return null;
-    return { kind: 'grouped', stop: stopped('grouped', { verdict: 'unknown', why: 'grouped_stop' }) };
+    if (await isGroupedStop(conn, service)) return { kind: 'grouped', stop: stopped('grouped', { verdict: 'unknown', why: 'grouped_stop' }) };
+    if (await personHeld(conn, service)) return { kind: 'personHeld', stop: stopped('person', { verdict: 'unknown', why: 'person_held' }) };
+    return null;
   } catch (err) {
     logger.warn(`[auto-dispatch] move proofreader could not read the stop of ${service.id}: ${err.message}`);
     return { kind: 'unsure', stop: stopped('unknown', { verdict: 'unknown', why: 'check_failed' }) };
@@ -237,7 +264,7 @@ async function checkMove({ service, best, run }, deps = {}) {
   const conn = deps.conn || require('../../../models/db');
   const grouped = await groupedStop(conn, service);
   if (grouped) {
-    state[grouped.kind === 'grouped' ? 'grouped' : 'unsure'] += 1;
+    state[grouped.kind] += 1;
     if (grouped.stop.broke) state.broke += 1;
     return grouped.stop;
   }
@@ -326,7 +353,7 @@ function whyFor(item, { shortDateET, redactedWords, whyWithQuote }) {
   return `${lead}: ${PERSON_SETTLES[item.why].replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase())}.`;
 }
 
-async function raiseOne(item, { raiseAdminAlert, names, audit }) {
+async function raiseOne(item, { raiseAdminAlert, names, audit, trx }) {
   return raiseAdminAlert('schedule_conflict', {
     area: 'Schedule',
     action: await audit.namedVisitAction(item.customer_id, [(who) => `check a held move of ${who}'s visit`, (who) => `check ${who}'s held move`], 'check a visit move auto-dispatch held'),
@@ -339,6 +366,7 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
   }, {
     bell: true,
     dedupeKey: item.key,
+    trx,
     detail: detailFor(item, names),
     metadata: {
       scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, windowStart: item.window_start, technicianId: item.technician_id,
@@ -364,18 +392,22 @@ async function closeResolved(audit, nowDate, enabled) {
       resolution: enabled ? 'The visit moved or is no longer open' : 'The move check is turned off',
       body: enabled ? 'This visit moved, was done or is no longer on that date.' : 'The move check is off; auto-dispatch no longer holds this move.',
     }, nowDate);
+    return true;
   } catch (err) {
     logger.error(`[auto-dispatch] move-check notice close failed: ${err.message}`);
+    return false;
   }
 }
 
-// The visit is still open on the placement the check read. A person can move
+// The visit is still open on the placement the check read. Read with a row
+// lock on the transaction that writes the notice (raiseNotices), so a move or
+// a cancel cannot land between this read and that write (r12). A person can move
 // or cancel it between the check and the run's end; that notice would be
 // stale at once and would spend a ring (Codex #6313 r1). Null = the visit
 // could not be read.
 async function stillAsChecked(item, conn) {
   try {
-    const row = await conn('scheduled_services').where({ id: item.id }).first('status', 'scheduled_date', 'window_start', 'technician_id');
+    const row = await conn('scheduled_services').where({ id: item.id }).forUpdate().first('status', 'scheduled_date', 'window_start', 'technician_id');
     return !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
       && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id;
   } catch (err) {
@@ -385,9 +417,10 @@ async function stillAsChecked(item, conn) {
 }
 
 // Run end, in every run: close the notices that no longer apply; all of them
-// when the check is off (config.proofreaderEnabled). Never throws.
+// when the check is off (config.proofreaderEnabled). Never throws; false = the
+// close failed and stale notices may stand (statusAfterNotices).
 async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
-  await closeResolved(require('../audit'), nowDate, enabled);
+  return closeResolved(require('../audit'), nowDate, enabled);
 }
 
 /**
@@ -407,14 +440,18 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
     for (const item of audit.withinRingBudget([...state.notices.values()], new Set(), Infinity, (row) => row.key)) {
       // Allowance spent: the rest wait for the next run, which asks again.
       if (left <= 0) break;
-      const asChecked = await stillAsChecked(item, conn);
-      // An unreadable visit (null) raises nothing, and the run reports it:
-      // the visit may still be held with nobody told (Codex #6313 r10).
-      if (asChecked === null) state.noticesFailed += 1;
-      if (!asChecked) continue;
       try {
-        // Only a new notice rings and spends a slot; a key that exists is left as it is.
-        const written = await raiseOne(item, { raiseAdminAlert, names, audit });
+        // The re-read and the write share one transaction and the visit's row lock.
+        const written = await conn.transaction(async (trx) => {
+          const asChecked = await stillAsChecked(item, trx);
+          // An unreadable visit (null) raises nothing, and the run reports it:
+          // the visit may still be held with nobody told (Codex #6313 r10).
+          if (asChecked === null) state.noticesFailed += 1;
+          if (!asChecked) return STALE;
+          // Only a new notice rings and spends a slot; a key that exists is left as it is.
+          return raiseOne(item, { raiseAdminAlert, names, audit, trx });
+        });
+        if (written === STALE) continue;
         // The store answers null when its own write failed (it does not throw).
         if (!written) state.noticesFailed += 1;
         if (audit.noticeRang(written)) { left -= 1; rang += 1; }
@@ -432,14 +469,16 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
   return rang;
 }
 
-// A held visit whose notice could not be written is not a green run.
-function statusAfterNotices(state, runStatus) {
-  return state && state.noticesFailed > 0 && runStatus === 'completed' ? 'completed_with_errors' : runStatus;
+// A held visit whose notice could not be written, or a close that failed
+// (stale notices stand; after a rollback, all of them), is not a green run.
+function statusAfterNotices(state, runStatus, closed = true) {
+  const failed = closed === false || (state && state.noticesFailed > 0);
+  return failed && runStatus === 'completed' ? 'completed_with_errors' : runStatus;
 }
 
 // For the run's log line.
 function tallyOf(state) {
-  return state ? `${state.calls}/${state.allowed}/${state.held}/${state.unsure}/${state.grouped}/${state.broke}` : 'off';
+  return state ? `${state.calls}/${state.allowed}/${state.held}/${state.unsure}/${state.grouped}/${state.personHeld}/${state.broke}` : 'off';
 }
 
 module.exports = {
