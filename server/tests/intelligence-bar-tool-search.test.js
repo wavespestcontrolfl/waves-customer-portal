@@ -240,3 +240,29 @@ describe('held discover results', () => {
     expect(ToolSearch.discoverResult(result, msgs(use('s1'), res('s1')), true)).toBe(result);
   });
 });
+
+// Pre-push audit: the step-limit note must not end a turn whose server search is unresolved.
+describe('withTurnEndingText', () => {
+  const pendingUse = { type: 'server_tool_use', id: 'srvtoolu_p1', name: 'tool_search_tool_bm25', input: { query: 'x' } };
+  const result = { type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' };
+  const call = { type: 'tool_use', id: 'toolu_1', name: 'a', input: {} };
+
+  test('adds the text after the client tool results', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] }, { role: 'user', content: [result] }];
+    const out = ToolSearch.withTurnEndingText(messages, 'NOTE');
+    expect(out[2].content).toEqual([result, { type: 'text', text: 'NOTE' }]);
+    expect(messages[2].content).toEqual([result]);
+  });
+
+  test('adds nothing while a server search of the turn is unresolved', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [pendingUse, call] }, { role: 'user', content: [result] }];
+    expect(ToolSearch.withTurnEndingText(messages, 'NOTE')).toBe(messages);
+  });
+
+  test('a string or assistant tail is left alone', () => {
+    const a = [{ role: 'user', content: 'q' }];
+    const b = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [call] }];
+    expect(ToolSearch.withTurnEndingText(a, 'NOTE')).toBe(a);
+    expect(ToolSearch.withTurnEndingText(b, 'NOTE')).toBe(b);
+  });
+});

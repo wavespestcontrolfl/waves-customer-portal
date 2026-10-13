@@ -117,9 +117,7 @@ const MAX_TOOL_ROUNDS = 12;
 // found and names what is left, in place of the generic "too many steps" line.
 const FINAL_ROUND_NOTE = '[Step limit reached. Do not call a tool. Answer now: say what you found, what you changed or proposed, and what is still left to do.]';
 function finalRoundMessages(messages) {
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== 'user' || !Array.isArray(last.content)) return messages;
-  return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text: FINAL_ROUND_NOTE }] }];
+  return ToolSearch.withTurnEndingText(messages, FINAL_ROUND_NOTE);
 }
 // What the gap collector needs beside a tool result: the round, and whether
 // this call proposed a card or committed an owner-direct write.

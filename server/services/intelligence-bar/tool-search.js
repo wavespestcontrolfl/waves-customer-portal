@@ -185,4 +185,14 @@ function discoverResult(result, messages, toolSearch) {
   return toolSearch && hasPendingServerSearch(messages) ? { ...result, note: `${result.note} ${HELD_NOTE}` } : result;
 }
 
-module.exports = { hasPendingServerSearch, holdDiscovered, releaseHeld, discoverResult, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };
+// Text added after client tool results ends the assistant turn. While a
+// server search of that turn is still unresolved, the API rejects that (400),
+// so the step-limit note is not added then; `tool_choice: none` still applies.
+function withTurnEndingText(messages, text) {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'user' || !Array.isArray(last.content) || hasPendingServerSearch(messages)) return messages;
+  return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text }] }];
+}
+
+module.exports = {
+  withTurnEndingText, hasPendingServerSearch, holdDiscovered, releaseHeld, discoverResult, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };
