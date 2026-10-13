@@ -117,7 +117,7 @@ describe('day-only exclusions', () => {
     expect(run([call({ ai_extraction_enriched: dayOnly({ spam_verdict: { spam_kind: 'not_spam' } }) })])).toHaveLength(1);
   });
 
-  it.each(['no_action_needed', 'spam_discarded', 'wrong_number_closed', 'vendor_logged'])('never holds disposition %s', (disposition) => {
+  it.each(['spam_discarded', 'wrong_number_closed', 'vendor_logged'])('never holds disposition %s', (disposition) => {
     expect(run([call({ ai_extraction_enriched: dayOnly({ recommended_disposition: disposition }) })])).toEqual([]);
   });
 
@@ -281,5 +281,24 @@ describe('a one-day request stored without a range end', () => {
     expect(run([oneDay(null)])).toHaveLength(1);
     expect(run([oneDay(undefined)])).toHaveLength(1);
     expect(run([oneDay('2026-10-16')])).toEqual([]);
+  });
+});
+
+describe('a no_action_needed disposition does not hide an open request', () => {
+  const noAction = (over = {}, sched = {}) => call({ ai_extraction_enriched: dayOnly({ recommended_disposition: 'no_action_needed', ...over }, sched) });
+
+  it('a requested visit the caller did not drop is still held', () => {
+    expect(run([noAction()])).toHaveLength(1);
+  });
+
+  it('a requested visit the caller dropped is not: declined price, or no appointment needed', () => {
+    expect(run([noAction({ service_request: { price: { caller_response: 'declined' } } })])).toEqual([]);
+    expect(run([noAction({ service_request: { urgency: 'no_appointment_needed' } })])).toEqual([]);
+  });
+
+  it('spam, wrong-number and vendor dispositions are never held', () => {
+    for (const d of ['spam_discarded', 'wrong_number_closed', 'vendor_logged']) {
+      expect(run([call({ ai_extraction_enriched: dayOnly({ recommended_disposition: d }) })])).toEqual([]);
+    }
   });
 });

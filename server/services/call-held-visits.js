@@ -15,7 +15,8 @@
  *               range is exactly the requested day, with no time ("time not set"). It is
  *               NOT a confirmed visit: the strip labels it "Day discussed on a call" and
  *               staff decide whether to book it (owner 2026-10-12, "day too").
- *               Never a voicemail, spam or a call that needed no action.
+ *               Never a voicemail, spam, or a call that ended with nothing to do
+ *               (the canonical callEndedWithNothingToDo rule).
  * One row per call; confirmed wins when a call qualifies as both.
  *
  * A held row clears when the office has acted:
@@ -47,12 +48,15 @@ const {
 } = require('./call-booking-miss-watchdog');
 const { etDateString } = require('../utils/datetime-et');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { callEndedWithNothingToDo } = require('./call-triage-flags');
 
 const LOOKBACK_DAYS = 30;
 const NOTES_MAX_CHARS = 200;
 const DAY_ONLY_STATUSES = new Set(['requested', 'offered', 'ambiguous']);
-// The call was handled or is not a visit request: never a day-only row.
-const CLOSED_DISPOSITIONS = new Set(['no_action_needed', 'spam_discarded', 'wrong_number_closed', 'vendor_logged']);
+// Not a visit request at all: never a day-only row. A 'no_action_needed' call is judged by the
+// canonical rule instead (callEndedWithNothingToDo): a requested visit the caller did not drop
+// is still open, whatever the disposition field says.
+const CLOSED_DISPOSITIONS = new Set(['spam_discarded', 'wrong_number_closed', 'vendor_logged']);
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseExtraction(raw) {
@@ -97,6 +101,7 @@ function isDayOnlyAsk(call, extraction, dateET, callDayET) {
     sched.requested_date_range_start === dateET && (sched.requested_date_range_end || dateET) === dateET,
     call.processing_status === 'processed',
     !CLOSED_DISPOSITIONS.has(extraction.recommended_disposition),
+    !callEndedWithNothingToDo(extraction),
     dateET >= callDayET,
   ].every(Boolean);
 }
