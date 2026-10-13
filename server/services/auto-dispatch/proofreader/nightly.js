@@ -412,9 +412,13 @@ const LOCK_NOT_AVAILABLE = '55P03';
 const preferencesPrint = (prefs) => JSON.stringify(prefs);
 
 // The run dropped this visit's move for a change during the check: a notice
-// collected for it describes a proposal nobody holds any more.
+// for it describes a proposal nobody holds any more. The one collected this
+// run is discarded, and an open one from an earlier night is closed at the
+// run's end (settleNotices; r23).
 function dropNotice(state, service) {
-  if (state) state.notices.delete(keyFor(service));
+  if (!state) return;
+  state.notices.delete(keyFor(service));
+  state.settled.add(keyFor(service));
 }
 
 // apply.js makeMemberGuard, under the unit mover's stop lock and before any
@@ -567,9 +571,10 @@ async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
  * held move for the shared allowance): raise this run's notices. Returns how
  * many writes rang. Never throws.
  */
-// Close the OPEN notice of each placement the check is now sure about (a
-// hold on a quoted statement, or an allow): nobody has to decide (Codex
-// #6313 r20, r21). A
+// Close the OPEN notice of each placement whose held proposal no longer
+// stands: the check is now sure about it (a hold on a quoted statement, or
+// an allow), or the run dropped the move for a change during the check.
+// Nobody has to decide (Codex #6313 r20, r21, r23). A
 // notice a person marked done is left alone: it still holds the visit
 // (personHeld). A failed write is counted for the run's status.
 async function settleNotices(state, conn) {
@@ -582,9 +587,9 @@ async function settleNotices(state, conn) {
       .whereNull('done_at')
       .whereIn(conn.raw("metadata->>'dedupeKey'"), [...state.settled])
       .update({
-        ...doneColumns({ by: 'auto-dispatch', resolution: 'The move check is sure about this move now', keepExisting: true, conn }),
+        ...doneColumns({ by: 'auto-dispatch', resolution: 'The held move no longer needs a decision', keepExisting: true, conn }),
         title: RESOLVED_TITLE,
-        body: 'The move check is sure now: nothing here needs a decision.',
+        body: 'The held move no longer stands: nothing here needs a decision.',
         detail: null,
       });
   } catch (err) {

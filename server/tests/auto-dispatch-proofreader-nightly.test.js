@@ -428,6 +428,8 @@ describe('the write of a checked move', () => {
     expect(run.proofreader.notices.size).toBe(1);
     nightly.dropNotice(run.proofreader, SERVICE);
     expect(run.proofreader.notices.size).toBe(0);
+    // An open notice from an earlier night is closed at the run's end too.
+    expect([...run.proofreader.settled]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1']);
     expect(() => nightly.dropNotice(null, SERVICE)).not.toThrow();
   });
 

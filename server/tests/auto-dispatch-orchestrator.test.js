@@ -34,6 +34,7 @@ jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }))
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
   safeErrorSummary: jest.requireActual('../services/notification-service').safeErrorSummary,
+  _private: { doneColumns: () => ({ done_at: 'now', done_by: 'auto-dispatch' }) },
 }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   // Real budget helpers and key shape; only the notification-store read is faked.
@@ -70,7 +71,7 @@ const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy'];
+    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy', 'update'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;
@@ -1679,6 +1680,8 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
   let checkMove;
   beforeEach(() => {
     checkMove = jest.spyOn(moveCheck, 'checkMove');
+    // The run's end closes stored notices the run settled: a raw column expression on the fake store.
+    db.raw = (sql) => sql;
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
   });
   afterEach(() => jest.restoreAllMocks());

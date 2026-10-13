@@ -879,8 +879,11 @@ function initScheduledJobs() {
           const failures = [];
           await flagUnplacedVisits(getAutoDispatchConfig()).catch((err) => failures.push(err));
           await maintainMissingGeoNotices().catch((err) => failures.push(err));
-          // No proofread move can run either: close every open move-check notice.
-          const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: false });
+          // Move-check notices get their upkeep on this path too. A manual
+          // apply run can still raise them with the cron off, so they close
+          // by the same rule as in a run: all of them only when the
+          // proofreader's own gate is off.
+          const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
           if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
           if (failures.length) throw failures[0];
           return;
