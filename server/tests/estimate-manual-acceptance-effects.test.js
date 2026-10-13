@@ -959,6 +959,14 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     await expect(markEstimateManuallyAccepted(base(mixed, fakeConverter(mixed), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/WaveGuard setup.*taxability/) });
   });
+  test('round 54: two same-price installations (Building A / Building B) stored in opposite orders pair by scope, so each tax flag lands on its own line', async () => {
+    const recurring = (detail, installation) => ({ service: 'termite_bait', label: 'Termite Bait Stations', monthly: 50, visitsPerYear: 4, detail, installation });
+    const mapped = (detail) => ({ service: 'termite_bait', name: 'Termite Bait Installation', price: 800, detail });
+    const raws = [recurring('Building A', { price: 800 }), recurring('Building B', { price: 800, taxable: false })];
+    const world = rawOnly(raws, { result: { oneTime: { items: [mapped('Building B'), mapped('Building A')] }, lineItems: raws } });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.includes[0], e.taxable])).toEqual([['Building B', undefined], ['Building A', true]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

@@ -188,10 +188,10 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       postCommit([]),
     ];
     const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    expect(labels(card(preview))).toContain('Visits: books none — book the first visit on the calendar after, and schedule every visit of Flea Package (all 3 visits)');
+    expect(labels(card(preview))).toContain('Visits: books none — book the first visit on the calendar after, and schedule the one-time work: Flea Package (all 3 visits)');
     realReply = async () => ({ status: 200, json: { success: true, alreadyAccepted: false, conversion: {}, warnings: [] } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT, { confirmed: true, technicianId: 'tech-owner', executionPins: { _verified_accept_plan: preview } });
-    expect(result.message).toMatch(/schedule every visit of Flea Package \(all 3 visits\)\.$/);
+    expect(result.message).toMatch(/schedule the one-time work: Flea Package \(all 3 visits\)\.$/);
   });
   test('round 52: a taxable line names both commercial property types in its tax instruction', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } }, customer: { property_type: 'business' } });
@@ -205,6 +205,20 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     const line = labels(card(preview)).find((l) => l.startsWith('One-time German Roach Cleanout'));
     expect(line).toMatch(/; taxable — charge sales tax when the property is commercial or business$/);
     expect(labels(card(preview)).some((l) => l.startsWith('Property type:'))).toBe(false);
+  });
+  test('round 54: every one-time job is named in the visits line (single-visit jobs too); the fee and the discount are not jobs', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 600, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }, { service: 'wasp', name: 'Wasp Nest Removal', price: 150 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }) },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'Wasp Nest Removal', amount: 150, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand' },
+      { kind: 'one_time_line', name: 'Discount applied to the one-time total', amount: -20, consequence: 'subtract_when_invoicing' },
+      postCommit([]),
+    ];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(labels(card(preview))).toContain('Visits: books none — book the first visit on the calendar after, and schedule the one-time work: German Roach Cleanout, Wasp Nest Removal');
   });
   test('round 44: with no persisted aggregate the headline one-time total is the sum of the itemized lines, never $0', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });

@@ -1220,13 +1220,19 @@ function rawRowsToWork(rawPool, taxabilityMap, out) {
 function installationMirror(pool, line, rounded) {
   const lineService = String(line.service || line.name || '').toLowerCase();
   const lineFamily = programFamilyForService(line.service || line.name);
-  return pool.find(({ item, amount, used }) => {
+  const matches = ({ item, amount, used }) => {
     if (used || !(amount > 0) || Math.round(amount * 100) / 100 !== rounded) return false;
     const itemService = String(item.service || item.name || '').toLowerCase();
     if (itemService === lineService || itemService === `${lineService}_installation`) return true;
     const label = String(item.label || item.name || item.service || '').toLowerCase();
     return /install/.test(label) && programFamilyForService(item.service || item.name) === lineFamily;
-  });
+  };
+  // Repeated same-price installations (Building A / Building B) pair by
+  // stated scope first, so rows persisted in the opposite order still meet
+  // their own mirror (codex #6113 r54).
+  const lineDetail = scopeIncludes(line)[0];
+  const sameDetail = (entry) => lineDetail !== undefined && scopeIncludes(entry.item)[0] === lineDetail;
+  return pool.find((entry) => matches(entry) && sameDetail(entry)) || pool.find(matches);
 }
 // The mapped installation copy already listed and its raw installation
 // mirror reconcile taxability like any twin (codex #6113 r51): contradictory

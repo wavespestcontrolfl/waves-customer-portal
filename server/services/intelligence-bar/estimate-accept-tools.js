@@ -525,12 +525,15 @@ function itemizedOneTimeTotal(effects) {
 // Every new recurring program needs its own first booking: scheduling one
 // never seeds another (codex #6113 r53).
 function visitsInstruction(preview) {
-  const packages = (preview.one_time_lines || []).filter((l) => Number(l.visits) > 1).map((l) => `${l.name} (all ${l.visits} visits)`);
+  // Every one-time job is named (none is booked by anyone else after this
+  // accept, codex #6113 r54); a package carries its visit count.
+  const jobs = (preview.one_time_lines || []).filter((l) => l.consequence === 'schedule_and_invoice_by_hand')
+    .map((l) => (Number(l.visits) > 1 ? `${l.name} (all ${l.visits} visits)` : l.name));
   const programs = (preview.services || []).map((s) => s.service);
   const first = programs.length > 1
     ? `book the first visit of each new service on the calendar after (${programs.join(', ')})`
     : 'book the first visit on the calendar after';
-  return packages.length ? `${first}, and schedule every visit of ${packages.join(', ')}` : first;
+  return jobs.length ? `${first}, and schedule the one-time work: ${jobs.join(', ')}` : first;
 }
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
