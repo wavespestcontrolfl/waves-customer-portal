@@ -178,6 +178,19 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     });
   });
 
+  test('round 44: with no persisted aggregate the headline one-time total is the sum of the itemized lines, never $0', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }) },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand' },
+      postCommit([]),
+    ];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(preview.estimate.one_time_total).toBe(449);
+    expect(labels(card(preview))).toContain('Accepts estimate addonquo for Lena Synthetic: $0.00 a month, $449.00 one-time');
+  });
   test('a one-time estimate does not promise a plan, a bill change or customer activation, and lists each one-time line', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
     dryEffects = () => [

@@ -510,6 +510,13 @@ const ONE_TIME_LINE_LABELS = {
 };
 // A taxable line names it: sales tax is charged on a commercial property.
 const taxNote = (l) => (l.taxable ? '; taxable — charge sales tax when the property is commercial' : '');
+// With no persisted aggregate, the headline's one-time total is the sum of
+// the reconciled one-time lines (the work the card tells staff to invoice;
+// fee and discount lines included), never $0 (codex #6113 r44).
+function itemizedOneTimeTotal(effects) {
+  const cents = effectsOfKind(effects, 'one_time_line').reduce((sum, l) => sum + Math.round(Number(l.amount || 0) * 100), 0);
+  return cents / 100;
+}
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
     kind: 'operational',
@@ -600,7 +607,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     // The same aggregate the effect collector validates against: the row's
     // onetime_total, else the engine's oneTime.total (a legacy row can carry
     // the charge only there), so the header and the lines agree.
-    estimate: { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: AcceptEffects.oneTimeAggregateTotal(estimate) ?? 0 },
+    estimate: { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: AcceptEffects.oneTimeAggregateTotal(estimate) ?? itemizedOneTimeTotal(effects) },
     converts,
     services: converts ? startedServices(estimateData, PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate })) : [],
     bill: converts ? billFromEffects(effects) : null,
