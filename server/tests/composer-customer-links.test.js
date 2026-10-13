@@ -3349,6 +3349,12 @@ describe('nestedOwnedLinkRuns', () => {
     ['with half-width ideographic stops', `https://evil.example/?next=portal\uFF61wavespestcontrol\uFF61com/receipt/${T}`],
     ['with a percent-encoded ideographic stop', `https://evil.example/?next=portal%E3%80%82wavespestcontrol%E3%80%82com/receipt/${T}`],
     ['with full-width letters', `https://evil.example/?next=\uFF50ortal.wavespestcontrol.com/receipt/${T}`],
+    // IDNA drops these: the host still opens the portal.
+    ['with a soft hyphen in the host', `https://evil.example/?next=port\u00ADal.wavespestcontrol.com/receipt/${T}`],
+    ['with a zero-width space in the host', `https://evil.example/?next=portal.waves\u200Bpestcontrol.com/receipt/${T}`],
+    ['with a zero-width joiner and a word joiner', `https://evil.example/?next=por\u200Dtal.wavespestcontrol\u2060.com/receipt/${T}`],
+    ['with a variation selector and a BOM', `https://evil.example/?next=portal\uFE0F.wavespestcontrol.c\uFEFFom/receipt/${T}`],
+    ['with a percent-encoded soft hyphen', `https://evil.example/?next=port%C2%ADal.wavespestcontrol.com/receipt/${T}`],
   ])('finds the owned link nested %s', (_label, text) => {
     expect(nestedOwnedLinkRuns(text).map((run) => run.replace(/\\/g, '/').toLowerCase())).toContain(OWNED.toLowerCase());
   });
