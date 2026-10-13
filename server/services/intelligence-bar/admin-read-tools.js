@@ -132,7 +132,7 @@ function findAdminReads(input) {
   const matches = ranked.slice(0, MAX_MATCHES).map(({ entry }) => ({
     endpoint: entry.endpoint, params: entry.params, label: entry.label, screen: entry.screens.join(', '),
     query_keys: [...(entry.query || [])],
-    ...(entry.paramKinds ? { text_params: Object.keys(entry.paramKinds) } : {}),
+    ...(hasTextParam(entry) ? { text_params: textParams(entry) } : {}),
   }));
   return {
     status: matches.length ? 'reads_found' : 'no_match',
@@ -150,6 +150,9 @@ function loopbackOrigin() {
   const port = Number(config.port);
   return Number.isInteger(port) && port > 0 && port < 65536 ? `http://${LOOPBACK_HOST}:${port}` : null;
 }
+
+const textParams = entry => Object.entries(entry.paramKinds || {}).filter(([, kind]) => kind === 'text').map(([name]) => name);
+const hasTextParam = entry => textParams(entry).length > 0;
 
 function undeclaredQueryKeys(entry, query) {
   if (query === undefined || query === null || typeof query !== 'object' || Array.isArray(query)) return null;
@@ -178,7 +181,7 @@ function buildRequestPath(endpoint, input) {
   const segments = rules.splitPath(filled.path);
   // A parameter value that spells a literal segment must not reach a route
   // the catalog does not cover.
-  if (rules.denyReason(filled.path, { encodedParams: Boolean(entry.paramKinds) }) || BLOCKED_ROUTES.some(route => rules.collidesWithRoute(route, segments, entry.endpoint))) {
+  if (rules.denyReason(filled.path, { encodedParams: hasTextParam(entry) }) || BLOCKED_ROUTES.some(route => rules.collidesWithRoute(route, segments, entry.endpoint))) {
     return { refusal: refusal('That parameter value points outside the reviewed admin read catalog.', 'invalid_input') };
   }
   const paramIndexes = rules.splitPath(entry.endpoint).flatMap((segment, index) => (rules.isParam(segment) ? [index] : []));

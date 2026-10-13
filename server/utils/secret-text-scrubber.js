@@ -5,7 +5,9 @@
  * cap. It is a net, not a guarantee: a secret in a shape it does not know, or
  * a password written as an ordinary word, passes.
  *
- *  A. Known secret formats, one named pattern each (SECRET_PATTERNS).
+ *  A. Known secret formats and credential-named identifier assignments
+ *     (AWS_SECRET_ACCESS_KEY=..., DB_PASSWORD: ...), one named pattern each
+ *     (SECRET_PATTERNS).
  *  B. Labelled secrets in prose: "password: hunter2", "PIN is 4821",
  *     "api key = abc", "OTP: 123456". The label stays, the value goes.
  *
@@ -15,6 +17,67 @@
  * is left alone.
  */
 const REMOVED = '[removed]';
+
+// ENVIRONMENT-STYLE ASSIGNMENTS. An identifier of letters, digits and "_" "."
+// "-" (AWS_SECRET_ACCESS_KEY, DB_PASSWORD, db.password, api-key) that has a
+// credential word as one of its separated parts, then "=" or ":", then a
+// value. "\b" cannot find "secret" inside AWS_SECRET_ACCESS_KEY because "_" is
+// a word character, and such a value has no distinctive prefix.
+//   Credential parts: password, passwd, pwd, passphrase, secret(s), token,
+//   apikey, auth, credential(s); and "key" right after api, access, secret,
+//   private, signing, encryption or cert. NOT included: pin, code (a gate,
+//   access, door or lockbox code is kept data), "keypad", "monkey" (a part
+//   must be the whole word), "tokens" (plural: a counter), "author".
+//   Counter rule: an identifier whose LAST part is a counter word (count, used,
+//   total, limit, max, min, size, length, num, number, ttl, seconds, ms, days,
+//   remaining, ...) with a plain number of up to 6 digits is a quantity, not a
+//   secret ("tokens_used=12", "page_token_count: 3"). A non-numeric value
+//   under such a name is still removed.
+const CREDENTIAL_PARTS = new Set(['password', 'passwd', 'pwd', 'passphrase', 'secret', 'secrets', 'token', 'apikey', 'auth', 'credential', 'credentials']);
+const KEY_PREFIXES = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'cert']);
+const COUNTER_PARTS = new Set(['count', 'counts', 'used', 'total', 'limit', 'max', 'min', 'size', 'length', 'len', 'num', 'number', 'ttl',
+  'seconds', 'secs', 'ms', 'days', 'hours', 'remaining', 'left', 'age', 'index']);
+
+function hasCredentialPart(identifier) {
+  const parts = identifier.toLowerCase().split(/[_.-]/).filter(Boolean);
+  return parts.some((part, index) => CREDENTIAL_PARTS.has(part) || (part === 'key' && index > 0 && KEY_PREFIXES.has(parts[index - 1])));
+}
+
+// The value after the separator: to the closing quote, else to whitespace.
+const VALUE_RE = /(?:(["'`])([^"'`\n]*)\1|(["'`]?)([^\s"'`,;]+))/y;
+const IDENT_SEP_RE = /(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[_.-][A-Za-z0-9]+)*)([ \t]*[:=][ \t]*)/g;
+
+// Returns { text, removed }. A non-credential identifier ("Pasted:") does not
+// swallow what follows it, so the next identifier is still examined.
+function scrubIdentifierAssignments(input) {
+  let out = '';
+  let cursor = 0;
+  let removed = 0;
+  IDENT_SEP_RE.lastIndex = 0;
+  let match;
+  while ((match = IDENT_SEP_RE.exec(input)) !== null) {
+    const identifier = match[1];
+    const valueStart = match.index + match[0].length;
+    if (!hasCredentialPart(identifier)) continue;
+    VALUE_RE.lastIndex = valueStart;
+    const found = VALUE_RE.exec(input);
+    if (!found) continue;
+    const quote = found[1] || '';
+    const open = found[3] || '';
+    const rawBare = found[4] || '';
+    const tail = quote ? '' : (rawBare.match(/[.!?:]+$/) || [''])[0];
+    const value = quote ? found[2] : (tail ? rawBare.slice(0, -tail.length) : rawBare);
+    const last = identifier.toLowerCase().split(/[_.-]/).pop();
+    const keep = !value || value.startsWith('[removed') || NOT_A_VALUE.has(value.toLowerCase())
+      || (COUNTER_PARTS.has(last) && /^\d{1,6}$/.test(value));
+    if (keep) continue;
+    out += input.slice(cursor, valueStart) + (quote ? `${quote}${REMOVED}${quote}` : `${open}${REMOVED}${tail}`);
+    cursor = valueStart + found[0].length;
+    removed += 1;
+    IDENT_SEP_RE.lastIndex = cursor;
+  }
+  return { text: out + input.slice(cursor), removed };
+}
 
 // Each pattern: a name (for tests and for the README), the regex, and what to
 // keep. Publishable keys (pk_live_, pk_test_) are public and are not listed.
@@ -35,6 +98,8 @@ const SECRET_PATTERNS = Object.freeze([
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { name: 'pem_private_key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
   { name: 'bearer_token', re: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{20,}/gi, keep: 1 },
+  // A credential-named identifier assigned a value (see the rules above).
+  { name: 'credential_identifier_assignment', scrub: scrubIdentifierAssignments },
 ]);
 
 // Words that name a credential. "access key" is a credential; "access code" is
@@ -59,7 +124,7 @@ function labelledReplacement(match, label, separator, quote, rawValue, offset, t
   const value = tail ? rawValue.slice(0, -tail.length) : rawValue;
   if (!value) return match;
   const lowered = value.toLowerCase();
-  if (value === REMOVED || NOT_A_VALUE.has(lowered)) return match;
+  if (value.startsWith('[removed') || NOT_A_VALUE.has(lowered)) return match;
   if (/^pin|passcode/i.test(label) && KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length))) return match;
   const viaIs = /\bis[ \t]*$/i.test(separator);
   if (viaIs && !quote && !/[\d!@#$%^&*_+=~/\\|-]/.test(value)) return match;
@@ -71,8 +136,14 @@ function scrubSecretText(input) {
   if (typeof input !== 'string' || input.length < 4) return { text: input, removed: 0 };
   let removed = 0;
   let text = input;
-  for (const { re, keep } of SECRET_PATTERNS) {
-    text = text.replace(re, (...args) => { removed += 1; return `${keep ? args[keep] : ''}${REMOVED}`; });
+  for (const { re, keep, scrub } of SECRET_PATTERNS) {
+    if (scrub) {
+      const scrubbed = scrub(text);
+      text = scrubbed.text;
+      removed += scrubbed.removed;
+    } else {
+      text = text.replace(re, (...args) => { removed += 1; return `${keep ? args[keep] : ''}${REMOVED}`; });
+    }
   }
   text = text.replace(LABELLED_RE, (...args) => {
     const replaced = labelledReplacement(...args);

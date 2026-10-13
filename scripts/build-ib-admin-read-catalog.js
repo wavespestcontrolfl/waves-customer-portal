@@ -23,7 +23,7 @@
  * Run: `npm run ib:read-catalog`. A test regenerates the catalog and compares
  * it byte for byte, so the catalog cannot drift from the reviewed list silently.
  * `--fingerprint <endpoint>...` prints the fingerprint to put in a new row;
- * `--report` prints counts and every endpoint left out, with the reason.
+ * `--report` prints counts and every endpoint left out, with the reason; `--check` prints the counts and the stale endpoints and fails when the file differs. Counts are never committed.
  */
 const fs = require('fs');
 const path = require('path');
@@ -967,12 +967,15 @@ function scopeParamProblem(row) {
   return typeof row.scopeParam === 'string' && KEY_NAME_RE.test(row.scopeParam) ? null : 'scopeParam must name the parameter that carries the id';
 }
 
+const PARAM_KINDS = new Set(['uuid', 'int', 'text']);
 function paramKindProblem(row, names) {
   const kinds = row.params === undefined ? {} : row.params;
   if (!kinds || typeof kinds !== 'object' || Array.isArray(kinds)) return 'params must be an object of parameter kinds';
-  const bad = Object.entries(kinds).find(([name, kind]) => kind !== 'text' || !names.includes(name));
-  if (bad) return `params.${bad[0]} must be "text" and name a parameter of the pattern`;
-  return row.scope !== 'broad' && kinds[row.scopeParam] === 'text' ? 'the scope parameter cannot be free text' : null;
+  const bad = Object.entries(kinds).find(([name, kind]) => !PARAM_KINDS.has(kind) || !names.includes(name));
+  if (bad) return `params.${bad[0]} must be "uuid", "int" or "text" and name a parameter of the pattern`;
+  const missing = names.find(name => !kinds[name]);
+  if (missing) return `params.${missing} is missing: declare every path parameter as "uuid", "int" or "text"`;
+  return row.scope !== 'broad' && names.includes(row.scopeParam) && kinds[row.scopeParam] !== 'uuid' ? 'the scope parameter must be "uuid"' : null;
 }
 
 function queryProblem(row, names) {
@@ -1215,9 +1218,9 @@ function labelFor(pattern, handlers) {
   return how ? `${where} (${how})` : where;
 }
 
-function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
+function buildCatalog({ census, reviewed = loadReviewed(), routes } = {}) {
   const source = census || JSON.parse(fs.readFileSync(CENSUS_FILE, 'utf8'));
-  const { table, opaqueMounts } = routeTable();
+  const { table, opaqueMounts } = routes || routeTable();
   const judged = new Map();
   const judgeOnce = (entry) => {
     if (!judged.has(entry)) judged.set(entry, judgeRoute(entry, reviewed, opaqueMounts));
@@ -1276,15 +1279,17 @@ function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
     output: {
       version: CATALOG_VERSION,
       source: 'docs/intelligence-bar-capabilities.json',
-      counts: {
-        census_get_endpoints: groups.size + skipped.partial_template.size,
-        excluded_by_rule: excluded.rule.length,
-        excluded_by_review: excluded.review.length,
-        unresolvable_template: excluded.unresolvable.length,
-        in_catalog: catalog.length,
-      },
       entries: catalog,
       blockedRoutes,
+    },
+    // Volatile numbers: printed by the CLI, never committed (they change with
+    // every PR that adds or removes any admin GET route).
+    counts: {
+      census_get_endpoints: groups.size + skipped.partial_template.size,
+      excluded_by_rule: excluded.rule.length,
+      excluded_by_review: excluded.review.length,
+      unresolvable_template: excluded.unresolvable.length,
+      in_catalog: catalog.length,
     },
     excluded,
     reviewAid,
@@ -1292,7 +1297,9 @@ function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
 }
 
 // Unreviewed GET routes that a parameter value could reach: same shape as a
-// catalog pattern, with a literal where the pattern takes a parameter.
+// catalog pattern, with a literal where the pattern takes a FREE-TEXT
+// parameter. A uuid or int parameter cannot spell a route segment, so it
+// reaches nothing, and the list depends on no unrelated route.
 function blockedFor(table, catalog, isAdmitted) {
   const blocked = new Set();
   for (const entry of table) {
@@ -1303,8 +1310,10 @@ function blockedFor(table, catalog, isAdmitted) {
       if (pattern.length !== segments.length) return false;
       let usesParam = false;
       for (let i = 0; i < segments.length; i++) {
-        if (rules.routeSegmentIsWild(segments[i]) || rules.isParam(pattern[i])) {
-          if (rules.isParam(pattern[i]) && !rules.routeSegmentIsWild(segments[i])) usesParam = true;
+        if (rules.routeSegmentIsWild(segments[i])) continue;
+        if (rules.isParam(pattern[i])) {
+          if (item.paramKinds?.[pattern[i].slice(1)] !== 'text') return false;
+          usesParam = true;
           continue;
         }
         if (segments[i].toLowerCase() !== pattern[i].toLowerCase()) return false;
@@ -1319,14 +1328,16 @@ function blockedFor(table, catalog, isAdmitted) {
 function serialize(output) {
   const { entries, blockedRoutes, ...head } = output;
   return `${JSON.stringify(head, null, 2).replace(/\n}$/, ',\n')}  "entries": [\n${entries.map(e => `    ${JSON.stringify(e)}`).join(',\n')}\n  ],\n`
-    + `  "blockedRoutes": [\n${blockedRoutes.map(r => `    ${JSON.stringify(r)}`).join(',\n')}\n  ]\n}\n`;
+    + (blockedRoutes.length
+      ? `  "blockedRoutes": [\n${blockedRoutes.map(r => `    ${JSON.stringify(r)}`).join(',\n')}\n  ]\n}\n`
+      : '  "blockedRoutes": []\n}\n');
 }
 
 function main() {
-  const { output, excluded, reviewAid } = buildCatalog();
+  const { output, counts, excluded, reviewAid } = buildCatalog();
   const text = serialize(output);
   if (process.argv.includes('--report')) {
-    console.log(JSON.stringify({ counts: output.counts, excluded, reviewAid }, null, 1));
+    console.log(JSON.stringify({ counts, excluded, reviewAid }, null, 1));
     return;
   }
   if (process.argv.includes('--fingerprint')) {
@@ -1353,12 +1364,15 @@ function main() {
   }
   if (process.argv.includes('--check')) {
     const current = fs.existsSync(OUT_FILE) ? fs.readFileSync(OUT_FILE, 'utf8') : '';
+    console.log(`counts: ${JSON.stringify(counts)}`);
+    const stale = excluded.review.filter(item => /^review is stale/.test(item.reason));
+    stale.forEach(item => console.log(`stale: ${item.endpoint} (${item.reason.replace(/^review is stale: /, '')})`));
     if (current !== text) { console.error('admin-read-catalog.json is stale. Run: npm run ib:read-catalog'); process.exitCode = 1; return; }
     console.log('admin-read-catalog.json is current.');
     return;
   }
   fs.writeFileSync(OUT_FILE, text);
-  console.log(`Wrote ${path.relative(ROOT, OUT_FILE)}: ${JSON.stringify(output.counts)}`);
+  console.log(`Wrote ${path.relative(ROOT, OUT_FILE)}: ${JSON.stringify(counts)}`);
 }
 
 if (require.main === module) main();

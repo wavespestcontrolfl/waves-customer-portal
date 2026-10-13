@@ -11,6 +11,9 @@
 
 // A path parameter value: no slash, no percent sign, no whitespace.
 const PARAM_VALUE_RE = /^[A-Za-z0-9_.-]{1,80}$/;
+// A reviewed row declares what each path parameter is: 'uuid' (a record id),
+// 'int' (a serial id) or 'text' (free text, below). An id cannot spell a route
+// segment, so only a text parameter can collide with a sibling route.
 // A reviewed row may mark a path parameter as free text (a service name such as
 // "General Pest Control (Quarterly)"). Text keeps the strict limits that matter
 // for a path: bounded length, no control characters, no separator or escape
@@ -96,7 +99,12 @@ function patternParams(pattern) {
 
 // Fill a catalog pattern. Returns { path } or { error }. Nothing here reads
 // the network; encodeURIComponent is belt and braces over PARAM_VALUE_RE.
+const UUID_PARAM_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INT_PARAM_RE = /^[0-9]{1,10}$/;
+
 function validParamValue(text, kind) {
+  if (kind === 'uuid') return UUID_PARAM_RE.test(text);
+  if (kind === 'int') return INT_PARAM_RE.test(text);
   if (kind === 'text') {
     return text.trim().length > 0 && text.length <= TEXT_PARAM_MAX && !TEXT_PARAM_FORBIDDEN_RE.test(text) && !/^\.+$/.test(text);
   }

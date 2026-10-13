@@ -23,6 +23,7 @@ const FORMATS = {
   jwt: ['ey' + 'Jhbgci0i.' + 'eyJ' + 'zdWIiOjEy.' + b64(20)],
   pem_private_key: ['-----BEGIN ' + 'PRIVATE KEY-----\n' + b64(30) + '\n-----END ' + 'PRIVATE KEY-----', '-----BEGIN RSA ' + 'PRIVATE KEY-----\n' + b64(30)],
   bearer_token: ['Bearer ' + x(24, 'a')],
+  credential_identifier_assignment: ['AWS_SECRET' + '_ACCESS_KEY=' + x(40, 'q')],
 };
 
 describe('known secret formats', () => {
@@ -126,5 +127,62 @@ describe('the walk over a response', () => {
     const state = newState();
     expect(redactSecrets({ instructions: 'Gate code: 4821, side door' }, state).instructions).toBe('Gate code: 4821, side door');
     expect(state.fields).toBe(0);
+  });
+});
+
+describe('credential-named identifiers (environment-style assignments)', () => {
+  const V = x(24, 'q'); // a synthetic value with no distinctive prefix
+  test.each([
+    ['AWS_SECRET' + '_ACCESS_KEY=' + x(40, 'q'), 'AWS_SECRET' + '_ACCESS_KEY=[removed]'],
+    ['DB_PASS' + 'WORD=' + V, 'DB_PASS' + 'WORD=[removed]'],
+    ['STRIPE_WEBHOOK_' + 'SECRET: ' + V, 'STRIPE_WEBHOOK_' + 'SECRET: [removed]'],
+    ['export API_' + 'TOKEN="' + V + '"', 'export API_' + 'TOKEN="[removed]"'],
+    ["export API_" + "TOKEN='" + V + " with space'", "export API_" + "TOKEN='[removed]'"],
+    ['db.pass' + 'word = ' + V, 'db.pass' + 'word = [removed]'],
+    ['api-' + 'key: ' + V, 'api-' + 'key: [removed]'],
+    ['MY_PRIVATE_' + 'KEY=' + V, 'MY_PRIVATE_' + 'KEY=[removed]'],
+    ['SIGNING_' + 'KEY: ' + V + '.', 'SIGNING_' + 'KEY: [removed].'],
+    ['encryption_' + 'key=' + V, 'encryption_' + 'key=[removed]'],
+    ['CERT_' + 'KEY=' + V, 'CERT_' + 'KEY=[removed]'],
+    ['client_' + 'secret=' + V + ' next', 'client_' + 'secret=[removed] next'],
+    ['SMTP_PWD:' + V, 'SMTP_PWD:[removed]'],
+    ['GIT_' + 'PASSPHRASE = "' + V + '"', 'GIT_' + 'PASSPHRASE = "[removed]"'],
+    ['AUTH_' + 'HEADER=' + V, 'AUTH_' + 'HEADER=[removed]'],
+    ['SERVICE_CREDENTIALS=' + V, 'SERVICE_CREDENTIALS=[removed]'],
+    ['page_' + 'token_hint=' + V, 'page_' + 'token_hint=[removed]'],
+  ])('%s', (input, expected) => {
+    const { text, removed } = scrubSecretText(`Pasted: ${input}`);
+    expect(text).toBe(`Pasted: ${expected}`);
+    expect(removed).toBe(1);
+  });
+
+  test('several assignments in one note, one per line', () => {
+    const note = ['DB_PASS' + 'WORD=' + V, 'DB_HOST=db.internal.example', 'API_' + 'TOKEN: ' + V].join('\n');
+    expect(scrubSecretText(note).text).toBe(['DB_PASS' + 'WORD=[removed]', 'DB_HOST=db.internal.example', 'API_' + 'TOKEN: [removed]'].join('\n'));
+  });
+
+  test.each([
+    'gate_code=1234', 'access_code: 55', 'door_code=7788', 'lockbox_code: 0912', 'GATE_CODE=1234', 'KEYPAD=front', 'KEYPAD: 4411',
+    'monkey=banana', 'turkey: sandwich', 'author=Pat', 'authority=county', 'tokens_used=12', 'tokens: 40', 'page_token_count: 3',
+    'token_count=7', 'secret_ttl=3600', 'password_length=12', 'auth_max=5', 'key=value', 'sort_key: name', 'primary_key=id',
+    'pin: none', 'password=required', 'api_key: n/a', 'DB_HOST=localhost', 'order=desc', 'status: open', 'note=see PIN above',
+  ])('kept: %s', (text) => {
+    expect(scrubSecretText(text)).toEqual({ text, removed: 0 });
+  });
+
+  test('a counter-named identifier with a non-numeric value is still removed; a counter with a long number is not a counter', () => {
+    expect(scrubSecretText('token_count=' + V).text).toBe('token_count=[removed]');
+    expect(scrubSecretText('secret_total=1234567').text).toBe('secret_total=[removed]');
+  });
+
+  test('prose and code that merely mention credential words are left alone', () => {
+    for (const text of ['The token of appreciation', 'Reset the password and try again', 'Set auth to the new value', 'secret garden', 'key: value pairs']) {
+      expect(scrubSecretText(text)).toEqual({ text, removed: 0 });
+    }
+  });
+
+  test('a value already removed is not removed twice', () => {
+    expect(scrubSecretText('DB_PASS' + 'WORD=[removed]')).toEqual({ text: 'DB_PASS' + 'WORD=[removed]', removed: 0 });
+    expect(scrubSecretText('password: ' + V)).toEqual({ text: 'password: [removed]', removed: 1 });
   });
 });

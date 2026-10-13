@@ -5,9 +5,37 @@
  * refused in a customer task, as before. Synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
+// The scope behavior is tested against a fixture catalog, so a reviewed
+// endpoint that goes stale and leaves the committed catalog cannot break it.
+// The last describe checks the committed catalog's own scope fields.
+jest.mock('../services/intelligence-bar/admin-read-catalog.json', () => {
+  const entry = (endpoint, scope, scopeParam, extra = {}) => {
+    const params = (endpoint.match(/:[A-Za-z]+/g) || []).map(name => name.slice(1));
+    return { endpoint, params, screens: [], handlers: [], label: endpoint, scope, ...(scopeParam ? { scopeParam } : {}),
+      paramKinds: Object.fromEntries(params.map(name => [name, name === 'id' && scope === 'broad' ? 'int' : 'uuid'])), query: [], ...extra };
+  };
+  return {
+    version: 1,
+    entries: [
+      entry('/admin/customers/:id/credits', 'customer', 'id'),
+      entry('/admin/customers/:id/autopay-state', 'customer', 'id'),
+      entry('/admin/neighborhood-access/customers/:customerId/properties', 'customer', 'customerId'),
+      entry('/admin/invoices/service-records/:customerId', 'customer', 'customerId'),
+      entry('/admin/schedule/next-visit', 'customer', 'customerId', { query: ['customerId'] }),
+      entry('/admin/invoices/:id/credit-context', 'invoice', 'id'),
+      entry('/admin/invoices/:id/receipt-address', 'invoice', 'id'),
+      entry('/admin/invoices/:id/attachments', 'invoice', 'id'),
+      entry('/admin/payers', 'broad'),
+      entry('/admin/payers/:id', 'broad'),
+      entry('/admin/invoices/customers/search', 'broad'),
+      entry('/admin/discounts', 'broad'),
+    ],
+    blockedRoutes: [],
+  };
+});
 const db = require('../models/db');
 const Context = require('../services/intelligence-bar/task-context');
-const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
+const catalog = jest.requireActual('../services/intelligence-bar/admin-read-catalog.json');
 const reviewed = require('../services/intelligence-bar/admin-read-reviewed.json');
 
 const A = '10000000-0000-4000-8000-00000000000a';
@@ -129,7 +157,9 @@ describe('the reviewed rows', () => {
       }
     }
   });
-  test('the next-visit read, which takes the customer from the query string, is customer-scoped', () => {
-    expect(catalog.entries.find(entry => entry.endpoint === '/admin/schedule/next-visit')).toMatchObject({ scope: 'customer', scopeParam: 'customerId' });
+  test('a scope id carried in the query string is a declared query key of its entry', () => {
+    for (const entry of catalog.entries.filter(item => item.scope !== 'broad' && !item.params.includes(item.scopeParam))) {
+      expect({ endpoint: entry.endpoint, declared: entry.query.includes(entry.scopeParam) }).toEqual({ endpoint: entry.endpoint, declared: true });
+    }
   });
 });

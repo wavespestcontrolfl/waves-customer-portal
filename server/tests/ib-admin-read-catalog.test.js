@@ -7,7 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  buildCatalog, serialize, routerRoutes, judgeRoute, validateReviewedRow, endpointFingerprint, checkReview, resetCaches, loadReviewed, OUT_FILE, REVIEWED_FILE, CENSUS_FILE,
+  buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, validateReviewedRow, endpointFingerprint, checkReview, resetCaches, loadReviewed, OUT_FILE, REVIEWED_FILE, CENSUS_FILE,
 } = require('../../scripts/build-ib-admin-read-catalog');
 const rules = require('../utils/admin-read-rules');
 
@@ -28,7 +28,7 @@ function catalogDriftMessage(excluded) {
     return 'The Intelligence Bar read list (server/services/intelligence-bar/admin-read-catalog.json) is out of date. Run `npm run ib:read-catalog` and commit the result (server/services/intelligence-bar/README.md).';
   }
   return `A reviewed Intelligence Bar read went stale because its code changed: ${stale.map(item => `${item.endpoint} (${item.reason.replace(/^review is stale: /, '')})`).join('; ')}. `
-    + 'Run `npm run ib:read-catalog` and commit the result; the endpoint leaves the bar\'s read list until someone re-reviews it (server/services/intelligence-bar/README.md).';
+    + 'Run `npm run ib:read-catalog` and commit the result: CI then passes, and the endpoint leaves the bar\'s read list until someone re-reviews it (server/services/intelligence-bar/README.md).';
 }
 
 test('regenerating the catalog gives the committed file byte for byte', () => {
@@ -38,13 +38,14 @@ test('regenerating the catalog gives the committed file byte for byte', () => {
 
 test('the drift message names the stale endpoints, the reason and the one command', () => {
   const full = loadReviewed();
-  const key = 'GET /admin/csr/overview';
+  const victim = committed.entries[0].endpoint;
+  const key = `GET ${normalize(victim)}`;
   const stale = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), hash: '0'.repeat(32) });
   const { output, excluded } = buildCatalog({ reviewed: { exclude: full.exclude, reviewed: stale } });
   expect(serialize(output)).not.toBe(fs.readFileSync(OUT_FILE, 'utf8'));
   const message = catalogDriftMessage(excluded);
-  expect(message).toBe('A reviewed Intelligence Bar read went stale because its code changed: /admin/csr/overview (the handler chain changed). '
-    + 'Run `npm run ib:read-catalog` and commit the result; the endpoint leaves the bar\'s read list until someone re-reviews it (server/services/intelligence-bar/README.md).');
+  expect(message).toBe(`A reviewed Intelligence Bar read went stale because its code changed: ${victim} (the handler chain changed). `
+    + 'Run `npm run ib:read-catalog` and commit the result: CI then passes, and the endpoint leaves the bar\'s read list until someone re-reviews it (server/services/intelligence-bar/README.md).');
 });
 
 test('the runtime reads the committed catalog only: a stale row cannot throw there', () => {
@@ -125,46 +126,51 @@ test('every reviewed row says what was read and carries the fingerprint it was r
 
 describe('the scope of a reviewed row', () => {
   const base = { reviewed: 'fixture review, read end to end', signals: [], unresolved: [], hash: '0'.repeat(32) };
+  // Every path parameter must declare a kind; the fixtures default to uuid.
+  const kindsFor = endpoint => Object.fromEntries((endpoint.match(/:[A-Za-z]+/g) || []).map(name => [name.slice(1), 'uuid']));
+  const validate = fixture => validateReviewedRow({ ...fixture, params: fixture.params === undefined ? kindsFor(fixture.endpoint) : fixture.params });
   const row = extra => ({ endpoint: '/admin/customers/:id/credits', ...base, ...extra });
   test('a pattern with a customer id parameter must be customer-scoped to that parameter', () => {
-    expect(() => validateReviewedRow(row({ scope: 'customer', scopeParam: 'id' }))).not.toThrow();
-    expect(() => validateReviewedRow(row({ scope: 'broad' }))).toThrow(/carries a customer id/);
-    expect(() => validateReviewedRow(row({ scope: 'invoice', scopeParam: 'id' }))).toThrow(/carries a customer id/);
-    expect(() => validateReviewedRow(row({ scope: 'customer', scopeParam: 'other' }))).toThrow(/carries a customer id/);
-    expect(() => validateReviewedRow(row({}))).toThrow(/scope must be one of/);
-    expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'id' }), endpoint: '/admin/invoices/service-records/:customerId' })).toThrow(/carries a customer id/);
-    expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'customerId' }), endpoint: '/admin/invoices/service-records/:customerId' })).not.toThrow();
+    expect(() => validate(row({ scope: 'customer', scopeParam: 'id' }))).not.toThrow();
+    expect(() => validate(row({ scope: 'broad' }))).toThrow(/carries a customer id/);
+    expect(() => validate(row({ scope: 'invoice', scopeParam: 'id' }))).toThrow(/carries a customer id/);
+    expect(() => validate(row({ scope: 'customer', scopeParam: 'other' }))).toThrow(/carries a customer id/);
+    expect(() => validate(row({}))).toThrow(/scope must be one of/);
+    expect(() => validate({ ...row({ scope: 'customer', scopeParam: 'id' }), endpoint: '/admin/invoices/service-records/:customerId' })).toThrow(/carries a customer id/);
+    expect(() => validate({ ...row({ scope: 'customer', scopeParam: 'customerId' }), endpoint: '/admin/invoices/service-records/:customerId' })).not.toThrow();
   });
   test('a pattern with an invoice id parameter must be invoice-scoped', () => {
     const invoice = extra => ({ ...row(extra), endpoint: '/admin/invoices/:id/credit-context' });
-    expect(() => validateReviewedRow(invoice({ scope: 'invoice', scopeParam: 'id' }))).not.toThrow();
-    expect(() => validateReviewedRow(invoice({ scope: 'broad' }))).toThrow(/carries an invoice id/);
-    expect(() => validateReviewedRow(invoice({ scope: 'customer', scopeParam: 'id' }))).toThrow(/carries an invoice id/);
+    expect(() => validate(invoice({ scope: 'invoice', scopeParam: 'id' }))).not.toThrow();
+    expect(() => validate(invoice({ scope: 'broad' }))).toThrow(/carries an invoice id/);
+    expect(() => validate(invoice({ scope: 'customer', scopeParam: 'id' }))).toThrow(/carries an invoice id/);
   });
   test('a broad row names no scope parameter; any other row must name one', () => {
     const plain = extra => ({ ...row(extra), endpoint: '/admin/payers' });
-    expect(() => validateReviewedRow(plain({ scope: 'broad' }))).not.toThrow();
-    expect(() => validateReviewedRow(plain({ scope: 'broad', scopeParam: 'id' }))).toThrow(/no scopeParam/);
-    expect(() => validateReviewedRow(plain({ scope: 'customer' }))).toThrow(/scopeParam must name/);
-    expect(() => validateReviewedRow(plain({ scope: 'customer', scopeParam: 'customerId', query: ['customerId'] }))).not.toThrow();
+    expect(() => validate(plain({ scope: 'broad' }))).not.toThrow();
+    expect(() => validate(plain({ scope: 'broad', scopeParam: 'id' }))).toThrow(/no scopeParam/);
+    expect(() => validate(plain({ scope: 'customer' }))).toThrow(/scopeParam must name/);
+    expect(() => validate(plain({ scope: 'customer', scopeParam: 'customerId', query: ['customerId'] }))).not.toThrow();
   });
-  test('a param kind is "text" and names a parameter of the pattern', () => {
+  test('a param kind is uuid, int or text, names a parameter of the pattern, and every path parameter has one', () => {
     const named = extra => ({ ...row(extra), endpoint: '/admin/job-forms/templates/by-service/:serviceType', scope: 'broad' });
-    expect(() => validateReviewedRow(named({ params: { serviceType: 'text' } }))).not.toThrow();
-    expect(() => validateReviewedRow(named({ params: { serviceType: 'free' } }))).toThrow(/must be "text"/);
-    expect(() => validateReviewedRow(named({ params: { other: 'text' } }))).toThrow(/must be "text"/);
-    expect(() => validateReviewedRow(named({ params: ['serviceType'] }))).toThrow(/object of parameter kinds/);
-    expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'text' } }) })).toThrow(/cannot be free text/);
+    expect(() => validate(named({ params: { serviceType: 'text' } }))).not.toThrow();
+    expect(() => validate(named({ params: { serviceType: 'free' } }))).toThrow(/must be "uuid", "int" or "text"/);
+    expect(() => validate(named({ params: { serviceType: 'text', other: 'text' } }))).toThrow(/must be "uuid", "int" or "text"/);
+    expect(() => validate(named({ params: {} }))).toThrow(/params.serviceType is missing/);
+    expect(() => validate(named({ params: { serviceType: 'int' } }))).not.toThrow();
+    expect(() => validate(named({ params: ['serviceType'] }))).toThrow(/object of parameter kinds/);
+    expect(() => validate({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'text' } }) })).toThrow(/scope parameter must be "uuid"/);
+    expect(() => validate({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'int' } }) })).toThrow(/scope parameter must be "uuid"/);
   });
   test('a freeText list names response fields', () => {
     const plain = extra => ({ ...row(extra), endpoint: '/admin/payers', scope: 'broad' });
-    expect(() => validateReviewedRow(plain({ freeText: ['notes'] }))).not.toThrow();
-    expect(() => validateReviewedRow(plain({ freeText: 'notes' }))).toThrow(/freeText must be a list/);
-    expect(() => validateReviewedRow(plain({ freeText: ['no tes'] }))).toThrow(/freeText must be a list/);
-    const withFreeText = committed.entries.filter(entry => entry.endpoint === '/admin/payers');
-    expect(withFreeText).toHaveLength(1);
+    expect(() => validate(plain({ freeText: ['notes'] }))).not.toThrow();
+    expect(() => validate(plain({ freeText: 'notes' }))).toThrow(/freeText must be a list/);
+    expect(() => validate(plain({ freeText: ['no tes'] }))).toThrow(/freeText must be a list/);
     const rows = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed;
-    expect(rows.find(r => r.endpoint === '/admin/payers').freeText).toEqual(['notes']);
+    expect(rows.filter(r => r.freeText).length).toBeGreaterThan(5);
+    for (const r of rows.filter(item => item.freeText)) expect(r.freeText.every(key => /^[A-Za-z][A-Za-z0-9_]*$/.test(key))).toBe(true);
   });
   test('the build fails when a handler that reads a customer id from the query is reviewed as broad', () => {
     const full = loadReviewed();
@@ -174,26 +180,27 @@ describe('the scope of a reviewed row', () => {
   });
   test('a query list is a list of distinct key names, and a scope id read from the query must be in it', () => {
     const plain = extra => ({ ...row(extra), endpoint: '/admin/payers', scope: 'broad' });
-    expect(() => validateReviewedRow(plain({ query: ['days', 'search'] }))).not.toThrow();
-    expect(() => validateReviewedRow(plain({ query: 'days' }))).toThrow(/list of distinct key names/);
-    expect(() => validateReviewedRow(plain({ query: ['days', 'days'] }))).toThrow(/list of distinct key names/);
-    expect(() => validateReviewedRow(plain({ query: ['a b'] }))).toThrow(/list of distinct key names/);
+    expect(() => validate(plain({ query: ['days', 'search'] }))).not.toThrow();
+    expect(() => validate(plain({ query: 'days' }))).toThrow(/list of distinct key names/);
+    expect(() => validate(plain({ query: ['days', 'days'] }))).toThrow(/list of distinct key names/);
+    expect(() => validate(plain({ query: ['a b'] }))).toThrow(/list of distinct key names/);
     const nextVisit = extra => ({ ...row(extra), endpoint: '/admin/schedule/next-visit', scope: 'customer', scopeParam: 'customerId' });
-    expect(() => validateReviewedRow(nextVisit({}))).toThrow(/query list must include it/);
-    expect(() => validateReviewedRow(nextVisit({ query: ['customerId'] }))).not.toThrow();
+    expect(() => validate(nextVisit({}))).toThrow(/query list must include it/);
+    expect(() => validate(nextVisit({ query: ['customerId'] }))).not.toThrow();
   });
   test('the build fails when a row lists a query key the handler chain does not read', () => {
     const full = loadReviewed();
-    const key = 'GET /admin/csr/overview';
-    const bad = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), query: ['days', 'email'] });
-    expect(() => buildCatalog({ reviewed: { exclude: full.exclude, reviewed: bad } })).toThrow(/query key\(s\) email not read by the handler chain/);
-    const ok = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), query: ['days'] });
-    expect(buildCatalog({ reviewed: { exclude: full.exclude, reviewed: ok } }).output.entries.find(entry => entry.endpoint === '/admin/csr/overview').query).toEqual(['days']);
+    const victim = committed.entries.find(entry => entry.query.length) || committed.entries[0];
+    const key = `GET ${normalize(victim.endpoint)}`;
+    const row = full.reviewed.get(key);
+    const bad = new Map(full.reviewed).set(key, { ...row, query: [...(row.query || []), 'zzunseenkey'] });
+    expect(() => buildCatalog({ reviewed: { exclude: full.exclude, reviewed: bad } })).toThrow(/query key\(s\) zzunseenkey not read by the handler chain/);
+    const ok = new Map(full.reviewed).set(key, { ...row });
+    expect(buildCatalog({ reviewed: { exclude: full.exclude, reviewed: ok } }).output.entries.find(entry => entry.endpoint === victim.endpoint).query).toEqual(victim.query);
   });
   test('a row with no query list forwards no query at all', () => {
-    expect(committed.entries.find(entry => entry.endpoint === '/admin/payers/ar-aging').query).toEqual([]);
-    expect(committed.entries.find(entry => entry.endpoint === '/admin/payers').query).toEqual(['includeInactive', 'search']);
-    for (const entry of committed.entries) expect(Array.isArray(entry.query)).toBe(true);
+    const rows = new Map(JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed.map(row => [row.endpoint, row]));
+    for (const entry of committed.entries) expect({ endpoint: entry.endpoint, query: entry.query }).toEqual({ endpoint: entry.endpoint, query: rows.get(entry.endpoint).query || [] });
   });
   test('the build fails when a row does not use the catalog pattern', () => {
     const full = loadReviewed();
@@ -203,13 +210,55 @@ describe('the scope of a reviewed row', () => {
   });
 });
 
-test('the committed catalog is exactly the reviewed list minus what the scan or a changed chain drops', () => {
-  const reviewed = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed.map(row => normalize(row.endpoint));
-  const inCatalog = committed.entries.map(entry => normalize(entry.endpoint));
-  // Nothing is in the catalog without a reviewed row.
-  expect(inCatalog.filter(endpoint => !reviewed.includes(endpoint))).toEqual([]);
-  // Every reviewed row is in the catalog today (none is stale or scan-blocked).
-  expect(reviewed.filter(endpoint => !inCatalog.includes(endpoint))).toEqual([]);
+// The catalog's accounting against the reviewed rows: nothing is in the catalog
+// without a row, and a row may be absent only when the generator reports it
+// (stale or scan-failed) with a reason.
+function catalogAccounting(entries, rows, excluded) {
+  const reviewedKeys = rows.map(row => normalize(row.endpoint));
+  const inCatalog = entries.map(entry => normalize(entry.endpoint));
+  const reported = new Map(excluded.review.concat(excluded.rule).map(item => [normalize(item.endpoint), item.reason]));
+  return {
+    notReviewed: inCatalog.filter(endpoint => !reviewedKeys.includes(endpoint)),
+    missingWithoutReason: reviewedKeys.filter(endpoint => !inCatalog.includes(endpoint) && !reported.get(endpoint)),
+  };
+}
+
+test('the committed catalog is a subset of the reviewed rows, and every other row is reported by the generator with a reason', () => {
+  const rows = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed;
+  const { excluded } = buildCatalog();
+  expect(catalogAccounting(committed.entries, rows, excluded)).toEqual({ notReviewed: [], missingWithoutReason: [] });
+});
+
+// The other-lane story, end to end: a PR edits a function a reviewed read
+// follows. The byte-for-byte test fails with the plain message; running
+// `npm run ib:read-catalog` and committing makes every check pass again with
+// that endpoint out of the read list.
+test('after a followed function changes, regenerating makes the suite green with the endpoint absent', () => {
+  const full = loadReviewed();
+  const victim = committed.entries[0].endpoint;
+  const key = `GET ${normalize(victim)}`;
+  const staleRows = new Map(full.reviewed).set(key, { ...full.reviewed.get(key), hash: '0'.repeat(32) });
+  const staleReviewed = { exclude: full.exclude, reviewed: staleRows };
+
+  // 1. The lane's PR leaves the committed file as it was: the byte test fails, in plain words.
+  const first = buildCatalog({ reviewed: staleReviewed });
+  expect(serialize(first.output)).not.toBe(fs.readFileSync(OUT_FILE, 'utf8'));
+  expect(catalogDriftMessage(first.excluded)).toContain(`${victim} (the handler chain changed)`);
+
+  // 2. `npm run ib:read-catalog`: the file is regenerated, the endpoint is out of the list.
+  const regenerated = first.output;
+  expect(regenerated.entries.map(entry => entry.endpoint)).not.toContain(victim);
+  expect(regenerated.entries).toHaveLength(committed.entries.length - 1);
+
+  // 3. With that file committed: the byte test passes (regeneration is stable) ...
+  const again = buildCatalog({ reviewed: staleReviewed });
+  expect(serialize(again.output)).toBe(serialize(regenerated));
+  // ... the accounting passes (the absent row is reported with its reason) ...
+  const rows = [...staleRows.values()];
+  expect(catalogAccounting(regenerated.entries, rows, again.excluded)).toEqual({ notReviewed: [], missingWithoutReason: [] });
+  expect(again.excluded.review.find(item => normalize(item.endpoint) === normalize(victim)).reason).toMatch(/^review is stale/);
+  // ... and what the bar can read no longer includes it, whatever the tool tests assume.
+  expect(regenerated.entries.every(entry => typeof entry.scope === 'string' && Array.isArray(entry.query))).toBe(true);
 });
 
 test('an endpoint with a clean scan and no reviewed row is not in the catalog; with a matching row it is', () => {
@@ -240,11 +289,35 @@ test('a reviewed row whose unresolved list or signals no longer match drops the 
   }
 });
 
-test('the counts in the file add up and the blocked routes are admin paths', () => {
-  const { counts } = committed;
-  expect(counts.in_catalog).toBe(committed.entries.length);
-  expect(counts.census_get_endpoints).toBeGreaterThanOrEqual(counts.in_catalog + counts.excluded_by_rule + counts.excluded_by_review);
+test('the committed file holds nothing that changes with unrelated routes: no counts, only version, source, entries, blockedRoutes', () => {
+  expect(Object.keys(committed)).toEqual(['version', 'source', 'entries', 'blockedRoutes']);
+  expect(JSON.stringify(committed)).not.toMatch(/census_get_endpoints|excluded_by|in_catalog|unresolvable_template/);
   for (const route of committed.blockedRoutes) expect(route).toMatch(/^\/admin\//);
+});
+
+test('the counts are printed by the generator, not committed', () => {
+  const { counts, output } = buildCatalog();
+  expect(counts).toMatchObject({ in_catalog: output.entries.length });
+  expect(counts.census_get_endpoints).toBeGreaterThanOrEqual(counts.in_catalog + counts.excluded_by_rule);
+  expect(Object.keys(output)).toEqual(['version', 'source', 'entries', 'blockedRoutes']);
+});
+
+test('an unrelated GET route that no reviewed row covers leaves the generated file byte-identical', () => {
+  const base = serialize(buildCatalog().output);
+  const real = routeTable();
+  // A copy of a real, unreviewed route under a new path, and a census action that calls it.
+  const donor = real.table.find(entry => /^\/admin\/[a-z-]+\/[a-z-]+$/.test(entry.full) && !committed.entries.some(item => item.endpoint === entry.full));
+  const clone = { ...donor, full: '/admin/zz-unrelated-fixture/list' };
+  const action = JSON.parse(JSON.stringify(census.actions.find(a => a.operation.method === 'GET' && a.operation.resolution === 'literal_or_template')));
+  action.operation.endpoint = '/admin/zz-unrelated-fixture/list';
+  const withExtra = buildCatalog({ census: { ...census, actions: [...census.actions, action] }, routes: { table: [...real.table, clone], opaqueMounts: real.opaqueMounts } });
+  expect(withExtra.counts.census_get_endpoints).toBe(buildCatalog().counts.census_get_endpoints + 1);
+  expect(serialize(withExtra.output)).toBe(base);
+  // Also a census action for a route the backend does not have, and an unrelated route removed from the table.
+  const ghost = JSON.parse(JSON.stringify(action));
+  ghost.operation.endpoint = '/admin/zz-ghost/none';
+  const fewer = real.table.filter(entry => entry !== donor);
+  expect(serialize(buildCatalog({ census: { ...census, actions: [...census.actions, ghost] }, routes: { table: fewer, opaqueMounts: real.opaqueMounts } }).output)).toBe(base);
 });
 
 test('the endpoints that returned signed links or ran writes through a service are not in the catalog', () => {
