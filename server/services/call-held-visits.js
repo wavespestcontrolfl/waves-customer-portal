@@ -108,7 +108,8 @@ function isDayOnlyAsk(call, extraction, dateET, callDayET) {
   const spamKind = extraction.spam_verdict?.spam_kind;
   return [
     DAY_ONLY_STATUSES.has(sched.status),
-    sched.requested_date_range_start === dateET && sched.requested_date_range_end === dateET,
+    // A missing range end is a one-day request (the stored shape triage-auto-resolve reads the same way).
+    sched.requested_date_range_start === dateET && (sched.requested_date_range_end || dateET) === dateET,
     call.processing_status === 'processed',
     // A voicemail lead is 'processed' too, but a one-sided message is not a visit discussed
     // with staff on the line.
@@ -252,7 +253,10 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
   // Every number on the stated street line is a candidate house number ("Unit 4, 100 Example
   // Dr" is unit-first); the pure function decides the exact property match.
   const numberTokens = [...new Set(candidates.flatMap((c) => String(c.extraction?.property?.service_address?.street_line_1 || '').match(/\d+/g) || []))];
-  const houseNumbers = numberTokens.flatMap((n) => [`${n} %`, `% ${n} %`]);
+  // A superset of the exact matcher on purpose: the number at the start of the line or of a
+  // word, with any suffix ("1250A Main", "12-14 Main"). The rows are already narrowed to the
+  // promised day and to visits created after the call.
+  const houseNumbers = numberTokens.flatMap((n) => [`${n}%`, `% ${n}%`]);
   const digits = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
   // The visit's own service address when it has one, else the customer's: all four parts from
   // the same source.
@@ -275,7 +279,7 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
             if (phoneForms.length) {
               this.whereRaw(`${digits('cu.phone')} = ANY(?)`, [phoneForms]).orWhereRaw(`${digits('cu.secondary_phone')} = ANY(?)`, [phoneForms]);
             }
-            // The patterns are digits and spaces only ("12 %", "% 12 %"), so letter case cannot
+            // The patterns are digits and spaces only ("12%", "% 12%"), so letter case cannot
             // drop a row here; the pure matcher normalizes case.
             if (houseNumbers.length) this.orWhereRaw(`${visitAddress} LIKE ANY(?)`, [houseNumbers]);
           });

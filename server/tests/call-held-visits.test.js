@@ -303,3 +303,12 @@ describe('legacy rows and letter case', () => {
     expect(run([call({ ai_extraction_enriched: dayOnly() })], [visit({ customer_id: 'cust-new', visit_address: '12 TEST LANE', visit_city: 'BRADENTON', visit_zip: '34205' })])).toEqual([]);
   });
 });
+
+describe('a one-day request stored without a range end', () => {
+  it('is a day-only ask for that day; a longer range is not', () => {
+    const oneDay = (end) => call({ ai_extraction_enriched: dayOnly({}, { requested_date_range_end: end }) });
+    expect(run([oneDay(null)])).toHaveLength(1);
+    expect(run([oneDay(undefined)])).toHaveLength(1);
+    expect(run([oneDay('2026-10-16')])).toEqual([]);
+  });
+});
