@@ -134,6 +134,8 @@ describe('checkMove', () => {
       allowed: true, recordPrint: expect.any(String), audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
     });
     expect(run.proofreader).toMatchObject({ calls: 1, allowed: 1, held: 0, unsure: 0 });
+    // An open notice from an earlier unsure night is obsolete now, moved or not.
+    expect([...run.proofreader.settled]).toEqual(['auto-dispatch-proofreader:s1:2026-10-20:09:00:t1']);
     expect(run.proofreader.notices.size).toBe(0);
   });
 
@@ -391,6 +393,13 @@ describe('the write of a checked move', () => {
       // A record that cannot be read is a failure the run reports, never "superseded".
       build.mockResolvedValue({ ...RECORD, unread: [{ channel: 'text', reason: 'read_failed' }] });
       expect(superseded(await guard(trxOf(), config).catch((e) => e))).toBeNull();
+    });
+
+    test('the visit belongs to another customer since the check (a merge): superseded before anything is read', async () => {
+      const trx = trxOf();
+      const err = await nightly.assertStillApproved(trx, SERVICE, approved(), refuse, { ...SERVICE, customer_id: 'c2' }).catch((e) => e);
+      expect(superseded(err)).toMatchObject({ reason_description: 'The visit changed customers while the move was checked' });
+      expect(trx.calls).toEqual([]);
     });
 
     test('a move that was not proofread reads nothing', async () => {

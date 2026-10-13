@@ -316,6 +316,10 @@ async function checkMove({ service, best, run }, deps = {}) {
   }
   if (answer.verdict === 'allow') {
     state.allowed += 1;
+    // The check is sure: an open notice from an earlier unsure night is
+    // obsolete whether the move then lands (its placement changes) or not (a
+    // taken slot, changed preferences): r21.
+    state.settled.add(keyFor(service));
     return { allowed: true, audit: auditOf(answer), recordPrint: asked.recordPrint };
   }
   if (answer.verdict === 'hold') {
@@ -366,9 +370,14 @@ function changedDuringCheck(err, description) {
 //   3. The customer record is the one the model was shown.
 // A difference refuses the move as superseded. A read that fails throws an
 // ordinary error: the move fails closed and the run reports it.
-async function assertStillApproved(trx, service, config, refuse) {
+async function assertStillApproved(trx, service, config, refuse, row = service) {
   if (config.proofread !== true) return;
   const superseded = (why, description) => changedDuringCheck(refuse(service.id, why), description);
+  // A customer merge (or its undo) can hand the visit to another customer
+  // while the model reads: everything below was read for the old one (r21).
+  if (String(row.customer_id ?? '') !== String(service.customer_id ?? '')) {
+    throw superseded('belongs to another customer since the move was checked', 'The visit changed customers while the move was checked');
+  }
   try {
     await trx.raw('SELECT id FROM customers WHERE id = ? FOR UPDATE NOWAIT', [service.customer_id]);
   } catch (err) {
@@ -554,8 +563,9 @@ async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
  * held move for the shared allowance): raise this run's notices. Returns how
  * many writes rang. Never throws.
  */
-// Close the OPEN notice of each placement the check now holds with a quoted
-// statement: the visit stays and nobody has to decide (Codex #6313 r20). A
+// Close the OPEN notice of each placement the check is now sure about (a
+// hold on a quoted statement, or an allow): nobody has to decide (Codex
+// #6313 r20, r21). A
 // notice a person marked done is left alone: it still holds the visit
 // (personHeld). A failed write is counted for the run's status.
 async function settleNotices(state, conn) {
@@ -568,9 +578,9 @@ async function settleNotices(state, conn) {
       .whereNull('done_at')
       .whereIn(conn.raw("metadata->>'dedupeKey'"), [...state.settled])
       .update({
-        ...doneColumns({ by: 'auto-dispatch', resolution: 'The move check now holds this move on a statement in the record', keepExisting: true, conn }),
+        ...doneColumns({ by: 'auto-dispatch', resolution: 'The move check is sure about this move now', keepExisting: true, conn }),
         title: RESOLVED_TITLE,
-        body: 'The move check is sure now: the visit stays where it is.',
+        body: 'The move check is sure now: nothing here needs a decision.',
         detail: null,
       });
   } catch (err) {

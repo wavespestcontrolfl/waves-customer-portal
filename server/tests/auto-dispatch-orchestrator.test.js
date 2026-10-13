@@ -1752,6 +1752,19 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
+  test('a check that broke AND changed preferences: superseded, and the run still ends completed_with_errors', async () => {
+    await applyMode(async () => {
+      const preferences = require('../services/auto-dispatch/preferences');
+      const before = await preferences.getCustomerSchedulingPreferences();
+      checkMove.mockImplementation(async () => {
+        preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
+        return { ...stop('PROOFREADER_UNSURE', 'unknown'), broke: true };
+      });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
+    });
+  });
+
   test('preferences changed under an unsure answer: superseded, and the queued notice is discarded', async () => {
     await applyMode(async () => {
       const preferences = require('../services/auto-dispatch/preferences');

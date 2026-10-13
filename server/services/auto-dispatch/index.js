@@ -1243,6 +1243,8 @@ async function applyPlannedMove(pm, run, attempt) {
   // whatever the verdict. Changed: the visit stays, no person is told about a
   // proposal scored on the old ones, and the next run scores it on the new
   // ones. (The write reads them once more on its own transaction: apply.js.)
+  // The check itself did not work: never a green run, whatever follows.
+  if (checked && checked.broke) run.guardReadDegraded = true;
   if (checked && await preferencesChanged(pm)) {
     moveCheck.dropNotice(run.proofreader, pm.service);
     noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
@@ -1251,8 +1253,6 @@ async function applyPlannedMove(pm, run, attempt) {
     });
   }
   if (checked && !checked.allowed) {
-    // The check itself did not work: never a green run (the visit stays).
-    if (checked.broke) run.guardReadDegraded = true;
     noteUnmoved(run, pm.service, checked.reason_code);
     return audit.logDecision(runId, {
       action: 'no_change', service: pm.service, reason_code: checked.reason_code, reason_description: checked.reason_description, ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
