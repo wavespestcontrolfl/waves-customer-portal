@@ -9,7 +9,7 @@
  * The record is passed as JSON data. Words inside it are evidence, never
  * instructions.
  */
-const PROMPT_VERSION = 'move-proofreader-v1';
+const PROMPT_VERSION = 'move-proofreader-v2';
 
 const VERDICTS = ['allow', 'hold', 'unknown'];
 
@@ -32,7 +32,7 @@ const SYSTEM_PROMPT = [
   'A dispatch program wants to move one recurring service visit to another day or time, to shorten the technician\'s drive. It has already applied the company\'s fixed rules. Your one job: decide whether something written in the customer record makes this move wrong.',
   '',
   'You get JSON with two parts:',
-  '- move: the service, the slot the visit has now (from) and the slot the program wants (to). All dates and times are US Eastern time.',
+  '- move: the service, the slot the visit has now (from) and the slot the program wants (to). All dates and times are US Eastern time. When the stop holds more than one service, move.other_services lists each other service that moves with it, with the arrival window it has now and the one it would get on the new date: judge a statement about one of those services against that service\'s own windows.',
   '- record: every stored text, email, call transcript and note for this customer, oldest first. Each entry has an id, a channel, who wrote it (customer, staff, system = an automatic company message, both = a call transcript with both speakers) and the time it was written (null = an undated note on file).',
   '',
   'Answer "hold" only when all three are true:',
@@ -78,11 +78,17 @@ function slotFacts({ date, windowStart, technician }) {
   };
 }
 
+const windowOf = (start) => arrivalWindowRange(hhmm(start)) || 'no time set';
+
 /**
  * The move as the model reads it. `from` / `to`: { date 'YYYY-MM-DD',
  * windowStart 'HH:MM', windowEnd 'HH:MM', technician (a first name) }.
+ * `otherServices` (a grouped stop only): the members that move with the
+ * visit, each { service, fromStart, toStart }. Their arrival times differ
+ * from the visit's own, so a statement about one of them is judged on its
+ * own windows (Codex #6313).
  */
-function moveFacts({ serviceType, from, to }) {
+function moveFacts({ serviceType, from, to, otherServices = [] }) {
   const a = slotFacts(from);
   const b = slotFacts(to);
   return {
@@ -90,6 +96,11 @@ function moveFacts({ serviceType, from, to }) {
     from: a,
     to: b,
     change: changeOf(a, b),
+    ...(otherServices.length ? {
+      other_services: otherServices.map((row) => ({
+        service: row.service || 'service', from_arrival_window: windowOf(row.fromStart), to_arrival_window: windowOf(row.toStart),
+      })),
+    } : {}),
   };
 }
 

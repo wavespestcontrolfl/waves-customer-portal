@@ -64,6 +64,45 @@ describe('checkMove', () => {
     });
   });
 
+  describe('a grouped stop', () => {
+    // technicians, the stop's members and the visit row, by table.
+    const grouped = (members) => (table) => {
+      const chain = {
+        where: () => chain, whereIn: () => chain, whereNotIn: () => chain,
+        select: async () => (table === 'technicians' ? [{ id: 't1', name: 'Alex Rivera' }] : members),
+        first: async () => ({ window_start: '09:00' }),
+      };
+      return chain;
+    };
+    const MEMBERS = [
+      { id: 's1', service_type: 'Quarterly Pest Control', status: 'confirmed', technician_id: 't1', scheduled_date: '2026-10-20', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
+      { id: 's2', service_type: 'Lawn Care', status: 'confirmed', technician_id: 't1', scheduled_date: '2026-10-20', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 },
+    ];
+    const service = { ...SERVICE, visit_id: 'v1' };
+    const best = { ...BEST, technician_id: 't1' };
+
+    test('the model gets each other member with the window it has and the one it would get', async () => {
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, { ...RECORD, serviceTypes: ['Quarterly Pest Control', 'Lawn Care'] });
+      await nightly.checkMove({ service, best, run: runOf() }, { conn: grouped(MEMBERS), proofreader });
+      const { move } = proofreader.proofreadMove.mock.calls[0][0];
+      expect(move.service).toBe('Quarterly Pest Control + Lawn Care');
+      expect(move.other_services).toEqual([{ service: 'Lawn Care', from_arrival_window: '10:00-12:00', to_arrival_window: '14:00-16:00' }]);
+    });
+
+    test('a stop whose member plan cannot be made is never an allow, and no model is asked', async () => {
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+      const got = await nightly.checkMove({ service: { ...service, id: 'not-a-member' }, best, run: runOf() }, { conn: grouped(MEMBERS), proofreader });
+      expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { why: 'check_failed' } });
+      expect(proofreader.proofreadMove).not.toHaveBeenCalled();
+    });
+
+    test('a visit that is alone at its stop has no other services', async () => {
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+      await nightly.checkMove({ service, best, run: runOf() }, { conn: grouped([MEMBERS[0]]), proofreader });
+      expect(proofreader.proofreadMove.mock.calls[0][0].move.other_services).toBeUndefined();
+    });
+  });
+
   test('allow: the move may go ahead, and the audit keeps ids and codes only', async () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks', reason: 'Nothing limits the day.' }));

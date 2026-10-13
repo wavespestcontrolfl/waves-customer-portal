@@ -76,13 +76,39 @@ async function technicianNames(conn, ids) {
   return new Map(rows.map((row) => [String(row.id), firstName(row.name)]));
 }
 
+// A grouped stop moves whole, and the unit mover gives each member its own
+// start (visit-groups.js predictMemberWindows, the mover's own planning). The
+// members that move with the visit, each with the start it has and the one
+// it would get. A stop whose plan cannot be made throws: the caller then
+// never allows the move.
+async function otherServicesOf(conn, service, best) {
+  if (!service.visit_id) return [];
+  const { predictMemberWindows } = require('../../visit-groups');
+  const { TERMINAL_ROW_STATUSES } = require('../../visit-context/statuses');
+  const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('id', 'service_type', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+  if (members.length < 2) return [];
+  const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
+  const predicted = predictMemberWindows({
+    members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,
+    requestedStart: best.start_time, requestedEnd: best.end_time, newDateStr: best.date,
+  });
+  if (!predicted.ok) throw new Error(`grouped stop cannot be planned (${predicted.code})`);
+  return members
+    .map((member, i) => ({ member, target: predicted.targets[i] }))
+    .filter(({ target }) => !target.isPrimary)
+    .map(({ member, target }) => ({ service: member.service_type, fromStart: member.window_start, toStart: target.start || member.window_start }));
+}
+
 // The planned move as prompt.js moveFacts reads it. A grouped stop moves
-// whole, so it names every member's service.
+// whole, so it names every member's service and each other member's windows.
 async function plannedMove(conn, service, best, record) {
   const names = await technicianNames(conn, [service.technician_id, best.technician_id]);
   const tech = (id) => (id ? names.get(String(id)) || null : null);
   const services = record.serviceTypes || [];
   return {
+    otherServices: await otherServicesOf(conn, service, best),
     serviceType: services.length > 1 ? services.join(' + ') : (services[0] || service.service_type),
     from: {
       date: toDateStr(service.scheduled_date), windowStart: service.window_start, windowEnd: service.window_end, technician: tech(service.technician_id),
