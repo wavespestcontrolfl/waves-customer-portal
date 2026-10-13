@@ -320,3 +320,24 @@ it('preserves a consumed missing-appointment message during background refresh',
   await act(async () => lateRefresh({}, { background: true }));
   expect(screen.getByText(/That appointment is no longer on this date/)).toBeInTheDocument();
 });
+
+it('shows a held visit above the stops and Book it opens the new-appointment modal on its day, time and customer', async () => {
+  const held = {
+    call_log_id: 'call-held', kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM',
+    caller_name: 'Pat Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' },
+    service: 'General Pest Control', call_at: '2026-10-12T14:30:00.000Z', customer_id: 'cust-1', notes: null,
+  };
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [held] };
+    if (url === '/admin/customers/cust-1') return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Sample', phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' } } };
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  expect(await screen.findByText('Promised on a call, not booked')).toBeInTheDocument();
+  expect(adminFetch).toHaveBeenCalledWith('/admin/schedule/held-visits?date=2026-10-14');
+  fireEvent.click(screen.getByRole('button', { name: 'Book it' }));
+  await screen.findByRole('dialog');
+  expect(appointmentModalState.props).toMatchObject({
+    defaultDate: '2026-10-14', defaultWindowStart: '11:00', defaultCustomer: expect.objectContaining({ id: 'cust-1', firstName: 'Pat', lastName: 'Sample' }),
+  });
+});
