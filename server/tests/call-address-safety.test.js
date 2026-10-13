@@ -93,6 +93,13 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(av.status).not.toBe('out_of_service_area');
   });
 
+  // #6297 r15: with a ZIP after it, a state-shaped unit value is still a unit.
+  test.each(['100 Main St Unit GA 34236', '100 Main St Apt CT 34236', '100 Main St, Suite NE, 34236'])('a unit code before a ZIP is not an explicit state: %s', async line => {
+    const av = await validateAddress({ addressLines: [line], administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');
+    expect(av.status).not.toBe('out_of_service_area');
+  });
+
   test.each(['123 Main Street, Lincoln NE', '123 Main Street Lincoln NE'])('a state in a locality tail remains explicit: %s', async raw_text => {
     const lines = buildAddressLines({ street_line_1: '123 Main Street', city: 'Lincoln', state: 'FL', raw_text });
     expect(lines).toEqual(['123 Main Street', 'Lincoln NE']);

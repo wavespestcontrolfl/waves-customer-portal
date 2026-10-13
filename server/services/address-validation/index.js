@@ -168,6 +168,7 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
   // with a house number ("100 Main St Apt CT") carries a state only when the
   // parse also found a locality or ZIP — otherwise the state-shaped token
   // is a unit value or a street suffix, not Connecticut (codex r11 P1).
+  const UNIT_DESIGNATOR_WORDS = 'apt|apartment|unit|ste|suite|bldg|building|floor|lot|spc|space|rm|room';
   const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
   const geographyState = (line) => {
     const parsed = parseRawAddress(line);
@@ -176,6 +177,9 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     // state CT — a unit designator is not a locality either.
     const locality = parsed.city && !UNIT_WORD.test(parsed.city) ? parsed.city : '';
     if (/^\d/.test(String(line).trim()) && !locality && !parsed.zip) return '';
+    // "100 Main St Unit GA 34236": a state-shaped token right after a unit
+    // designator is the unit's identifier, with or without a ZIP after it.
+    if (new RegExp(`(?:^|[\\s,])(?:#|${UNIT_DESIGNATOR_WORDS})\\.?\\s*#?\\s*${parsed.state}(?![A-Za-z])`, 'i').test(String(line))) return '';
     return parsed.state;
   };
   const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]

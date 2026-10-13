@@ -118,6 +118,7 @@ describe('check_address result', () => {
       google_inferred: false,
       unconfirmed: false,
       missing: [],
+      service_area_lookup_failed: false,
       state_hint_used: 'FL',
       note: expect.any(String),
     });
@@ -244,6 +245,14 @@ describe('check_address served south-Hillsborough towns', () => {
     const out = await run({ address: '100 Example Way, Ruskin, GA 33570' });
     expect(out.status).toBe('out_of_service_area');
     expect(out.in_service_area).toBe(false);
+  });
+
+  test('a failed county lookup on a confirmed premise is a provider gap, not an address defect', async () => {
+    validateAddress.mockResolvedValue(google({ status: 'confirm_needed', county: null, inServiceArea: null }));
+    const out = await run({ address: '100 Example Way, Sarasota, FL 34236' });
+    expect(out.service_area_lookup_failed).toBe(true);
+    expect(out.note).toMatch(/county lookup/);
+    expect(out.note).not.toMatch(/what is missing/);
   });
 
   test('another Hillsborough city stays outside the service area', async () => {

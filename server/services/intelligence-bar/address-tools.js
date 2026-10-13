@@ -24,6 +24,7 @@
 
 const { validateAddress, STATUSES } = require('../address-validation');
 const { servedSouthHillsborough } = require('../service-area');
+const { isCountyGap } = require('../property-lookup/address-status');
 const { normalizeState } = require('../../utils/address-normalizer');
 
 const CHECK_ADDRESS_TOOL_NAME = 'check_address';
@@ -126,13 +127,20 @@ function servedHillsborough(result, state) {
   return { ...result, status, inServiceArea: true };
 }
 
+// Google confirmed a complete premise and only the separate county lookup
+// failed (shared rule: property-lookup/address-status.js isCountyGap). That is
+// a provider gap, not an address defect.
+const COUNTY_GAP_NOTE = 'Google matched this address, but the county lookup that decides the service area failed just now. The address itself is not in doubt: read Google\'s normalized address back to the operator next to their own words before saving, and say the service area could not be checked. Google does not check a unit, apartment, suite, building, floor or lot: carry any unit over exactly as the operator said it.';
+
 function shape(providerResult, given, state) {
   const result = servedHillsborough(providerResult, state);
+  const countyGap = isCountyGap(result);
   const n = result.normalized;
   const hintUsed = !state;
   return {
     status: result.status,
-    verdict: VERDICTS[result.status] || 'Google returned a result this tool does not recognize.',
+    verdict: countyGap ? 'Google matched the address; the service-area lookup is unavailable.' : (VERDICTS[result.status] || 'Google returned a result this tool does not recognize.'),
+    service_area_lookup_failed: countyGap,
     as_given: given,
     normalized: n ? { address_line1: n.street_line_1, city: n.city, state: n.state, zip: n.postal_code } : null,
     county: result.county || null,
@@ -142,7 +150,7 @@ function shape(providerResult, given, state) {
     unconfirmed: Boolean(result.hasUnconfirmed),
     missing: Array.isArray(result.missingComponents) ? result.missingComponents : [],
     state_hint_used: hintUsed ? DEFAULT_STATE : null,
-    note: noteFor(result.status, result, hintUsed),
+    note: countyGap ? COUNTY_GAP_NOTE : noteFor(result.status, result, hintUsed),
   };
 }
 
