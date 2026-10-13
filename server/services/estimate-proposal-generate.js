@@ -738,10 +738,13 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
 // aliases: two mirrors whose nets disagree are the SAME charge with two
 // accepted prices, which must fail the draft, not become two lines or a
 // silent first-wins (codex #6113 r27).
+// The gross in cents, whatever its persisted representation (100 and
+// "100.00" are one row, codex #6113 r41).
+const grossCentsKey = (value) => { const n = num(value); return n == null ? '' : String(roundCents(n)); };
 const oneTimeIdentity = (item) => [
   String(item.service || '').toLowerCase(),
   String(item.name || item.label || '').toLowerCase(),
-  String(item.price ?? item.amount ?? item.total ?? ''),
+  grossCentsKey(item.price ?? item.amount ?? item.total),
 ].join('|');
 // manualFinalOneTime is NOT part of the identity: it is the operator-accepted
 // net on one mirror of the same row, and the collapse's net reconciliation
@@ -749,7 +752,7 @@ const oneTimeIdentity = (item) => [
 // The gross a raw row states, whichever legacy alias carries it: one engine
 // run persists `price` in one shape and `oneTimePrice` in the other, and the
 // two copies must be one identity (codex #6113 r35).
-const rawGrossKey = (line) => String(num(line.price ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime ?? line.total) ?? '');
+const rawGrossKey = (line) => grossCentsKey(line.price ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime ?? line.total);
 const rawIdentity = (line) => [
   String(line.service || line.name || '').toLowerCase(),
   rawGrossKey(line),

@@ -823,6 +823,12 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/German Roach Cleanout.*taxability/) });
   });
+  test('round 41: mirrors whose gross differs only in representation (100 vs "100.00") are one row, not two lines', async () => {
+    const world = feeWorld(solo, { items: [{ ...roach, price: 100 }], specItems: [{ ...roach, price: '100.00' }] });
+    expect(await lineNames(world)).toEqual([['German Roach Cleanout', 100]]);
+    const raw = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: '150.00', billingCadence: 'one_time' }], { engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, billingCadence: 'one_time' }] } });
+    expect(await lineNames(raw)).toEqual([['Wasp Nest Removal', 150]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
