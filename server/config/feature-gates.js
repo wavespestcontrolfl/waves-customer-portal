@@ -2208,6 +2208,12 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Dispatch "Promised on a call, not booked" strip (owner 2026-10-12): a call
+  // where staff agreed a visit with the caller and nothing is on the calendar
+  // shows as a display-only HELD row on that day, with a Book it button.
+  // Reads call_log, scheduled_services, triage_items; writes nothing.
+  // Off -> the route returns an empty list and the strip never renders.
+  callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
