@@ -85,8 +85,9 @@ max_tokens for field speed.
   boundary is unconditional (`GATE_IB_UI_CONFIRM` is retired and ignored);
   the emergency stop is `IB_WRITES_DISABLED=true`. Write tools never execute
   from the model loop: the call returns a preview, the route persists a
-  pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload
-  hash, single-use), and the client renders a Confirm/Cancel card
+  pending action (`ib_pending_actions` — actor-bound, payload hash,
+  single-use; card life 10 min, or 60 min for the pinned internal-edit
+  allowlist `LONG_TTL_TOOL_NAMES` in `pending-actions.js`), and the client renders a Confirm/Cancel card
   (`PendingActionsCard`). Only the operator's click commits, via
   `/confirm-action` — never a model tool, and the pending id is never
   model-visible. The gated tool list lives in
