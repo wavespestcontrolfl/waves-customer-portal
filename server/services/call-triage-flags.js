@@ -985,8 +985,9 @@ function callEndedWithNothingToDo(extraction) {
 //   - the speaker greets another NAME and then gives this one ("Hey Morgan, it's Riley"; a filler
 //     word such as "there" is not a name), or
 //   - someone introduces themselves by it as Waves ("this is Riley with Waves"), or
-//   - someone greets this name ("Hey Riley") and nobody on the call introduces themselves by it
-//     ("this is Riley", "my name is Riley"): a caller who says their own name keeps it.
+//   - someone greets this name ("Hey Riley").
+// In every case a caller who gives the name as their OWN somewhere else on the call ("my name is
+// Riley") keeps it.
 // The caller applies one more guard: a linked customer with this first name keeps it. Pure.
 const STAFF_ROLE_LABELS = new Set(['office manager', 'waves', 'unknown']);
 const GREETING_FILLER_WORDS = 'there|guys|everyone|everybody|all|you|folks|again|buddy|bud|man|sir|maam|yes|yeah|so|um|uh|good|well|and|this|it';
@@ -996,16 +997,21 @@ function staffNameSavedAsCaller({ firstName, lastName, staffName, transcript = '
   const staff = String(staffName || '').trim().toLowerCase();
   if (staff !== first || STAFF_ROLE_LABELS.has(staff)) return false;
   const text = String(transcript || '');
-  const selfAfterGreeting = new RegExp(`\\b(?:hey|hi|hello)[,\\s]+(?!(?:${first}|${GREETING_FILLER_WORDS})\\b)[a-z]+[,.!\\s]+(?:it'?s|it is|this is)\\s+${first}\\b`, 'i');
-  if (selfAfterGreeting.test(text)) return true;
-  // A Waves-qualified introduction ("this is Riley with Waves", "Waves Pest Control, this is
-  // Riley") is the staff member speaking: it is staff evidence, never a caller naming themselves.
+  // Lines where the STAFF member gives the name: after greeting another name ("Hey Morgan, it's
+  // Riley"), or as Waves ("this is Riley with Waves", "Waves Pest Control, this is Riley").
   const intro = `(?:this is|it'?s|it is|i'?m|i am)\\s+${first}\\b`;
-  const staffIntro = new RegExp(`\\bwaves\\b[^.?!\\n]{0,40}?${intro}|${intro}[,\\s]+(?:here\\s+)?(?:with|from|at)\\s+waves\\b`, 'ig');
-  if (staffIntro.test(text)) return true;
-  const greeted = new RegExp(`\\b(?:hey|hi|hello|thanks|thank you|bye)[,\\s]+${first}\\b`, 'i');
+  const staffSpoke = new RegExp([
+    `\\b(?:hey|hi|hello)[,\\s]+(?!(?:${first}|${GREETING_FILLER_WORDS})\\b)[a-z]+[,.!\\s]+(?:it'?s|it is|this is)\\s+${first}\\b`,
+    `\\bwaves\\b[^.?!\\n]{0,40}?${intro}`,
+    `${intro}[,\\s]+(?:here\\s+)?(?:with|from|at)\\s+waves\\b`,
+  ].join('|'), 'ig');
+  // A caller who ALSO gives the name as their own, anywhere else on the call, keeps it: two
+  // people can share a first name.
+  const rest = text.replace(staffSpoke, ' ');
   const selfNamed = new RegExp(`\\b(?:my name is|my name's|this is|it'?s|it is|i'?m|i am)\\s+${first}\\b`, 'i');
-  return greeted.test(text) && !selfNamed.test(text);
+  if (selfNamed.test(rest)) return false;
+  if (rest !== text) return true;
+  return new RegExp(`\\b(?:hey|hi|hello|thanks|thank you|bye)[,\\s]+${first}\\b`, 'i').test(text);
 }
 
 function noActionCallCards(extraction, { canonicalStreet } = {}) {

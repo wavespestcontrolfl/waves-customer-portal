@@ -44,6 +44,11 @@ describe('staffNameSavedAsCaller', () => {
     expect(staffNameSavedAsCaller({ ...base, transcript: 'Caller: Waves Pest Control, this is Riley.\nAgent: Hi, I need a quote.' })).toBe(true);
   });
 
+  test('a caller who shares the staff name and says so keeps it, whatever the staff member said', () => {
+    expect(staffNameSavedAsCaller({ ...base, transcript: 'Agent: Waves Pest Control, this is Riley.\nCaller: Hi, my name is Riley. I need a quote.' })).toBe(false);
+    expect(staffNameSavedAsCaller({ ...base, transcript: "Agent: Hey Morgan, it's Riley.\nCaller: Sorry, this is Riley, Morgan's son." })).toBe(false);
+  });
+
   test('a filler word after the greeting is not another name', () => {
     // An unlinked caller who shares the staff first name and says "Hi there, it is Riley".
     expect(staffNameSavedAsCaller({ ...base, transcript: 'Agent: Waves Pest Control.\nCaller: Hi there, it is Riley.' })).toBe(false);
