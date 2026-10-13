@@ -192,6 +192,19 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT, { confirmed: true, technicianId: 'tech-owner', executionPins: { _verified_accept_plan: preview } });
     expect(result.message).toMatch(/schedule every visit of Flea Package \(all 3 visits\)\.$/);
   });
+  test('round 52: a taxable line names both commercial property types in its tax instruction', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } }, customer: { property_type: 'business' } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze', property_type: 'business' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze', property_type: 'business' }) },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
+      postCommit([]),
+    ];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    const line = labels(card(preview)).find((l) => l.startsWith('One-time German Roach Cleanout'));
+    expect(line).toMatch(/; taxable — charge sales tax when the property is commercial or business$/);
+    expect(labels(card(preview)).some((l) => l.startsWith('Property type:'))).toBe(false);
+  });
   test('round 44: with no persisted aggregate the headline one-time total is the sum of the itemized lines, never $0', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
     dryEffects = () => [

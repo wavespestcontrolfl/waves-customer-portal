@@ -436,7 +436,9 @@ function pooledDiscountLine(estimate, lines) {
 function oneTimeAggregateCandidates(estimate) {
   const data = parseData(estimate.estimate_data);
   const out = [];
-  for (const value of [estimate.onetime_total, ...oneTimeContainers(data).map((c) => c.oneTime?.total)]) {
+  // Every container the item extractor reads has its aggregate read too:
+  // the snake-case one_time.total beside one_time.items (codex #6113 r52).
+  for (const value of [estimate.onetime_total, ...oneTimeContainers(data).flatMap((c) => [c.oneTime?.total, c.one_time?.total])]) {
     if (value == null || value === '') continue;
     const n = Number(value);
     if (Number.isFinite(n)) out.push(n > 0 ? round2(n) : 0);

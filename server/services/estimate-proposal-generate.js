@@ -189,7 +189,11 @@ const FAMILY_RESPONSIBILITIES = {
 // gross field (price / total / installation) is an unpriced row, not comped.
 const MAPPED_NET_ALIASES = ['manualFinalOneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
 const RAW_NET_ALIASES = ['manualFinalOneTime', 'oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
-const firstApplicableAlias = (row, aliases) => aliases.find((k) => row[k] !== null && row[k] !== undefined && row[k] !== '');
+// The first alias holding a NUMBER: a blank or non-numeric placeholder
+// ('', 'n/a') never counts as a stated net, matching the amount resolvers
+// (codex #6113 r52).
+const holdsNumber = (v) => v !== null && v !== undefined && v !== '' && typeof v !== 'boolean' && Number.isFinite(Number(v));
+const firstApplicableAlias = (row, aliases) => aliases.find((k) => holdsNumber(row[k]));
 // Every finite zero in the first applicable alias is comped, a numeric string
 // ("0.00") included: the amount resolvers accept strings (codex #6113 r38).
 function zeroInFirstAlias(row, aliases) {

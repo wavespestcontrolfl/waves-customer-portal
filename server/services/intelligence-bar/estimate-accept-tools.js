@@ -509,7 +509,9 @@ const ONE_TIME_LINE_LABELS = {
   subtract_when_invoicing: (l) => `${l.name}: ${money(-l.amount)} off — the one-time service lines on this card are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`,
 };
 // A taxable line names it: sales tax is charged on a commercial property.
-const taxNote = (l) => (l.taxable ? '; taxable — charge sales tax when the property is commercial' : '');
+// Both stored commercial property types (tax-calculator: 'commercial' and
+// 'business') charge tax (codex #6113 r52).
+const taxNote = (l) => (l.taxable ? '; taxable — charge sales tax when the property is commercial or business' : '');
 // With no persisted aggregate, the headline's one-time total is the sum of
 // the reconciled one-time lines (the work the card tells staff to invoice;
 // fee and discount lines included), never $0 (codex #6113 r44).
