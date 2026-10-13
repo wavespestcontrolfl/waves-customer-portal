@@ -35,17 +35,28 @@
  * Defense in depth behind the catalog generator, which keeps routes that
  * select or build such values out of the catalog.
  */
-const { isCredentialField } = require('./credential-fields');
+const { isCredentialField, isCredentialName } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
 const REDACTED_FIELD = '[removed]';
 
+// Query keys that mark a credential in a LINK. The general rule is the shared
+// credential-name test (credential-fields.js: token, secret, password, session,
+// nonce, otp, signature, bearer, ... in any spelling, so `auth_token`,
+// `session_id` and `passcode` hit) so a link and a JSON field are judged by one
+// definition. Only two kinds of key stay listed here: storage-signature names
+// that are not credential words, and link-only names that are credentials as a
+// QUERY key but would over-remove as a field name (`sid`, `ticket`, `pwd`,
+// `key`, `auth`, and the squashed spellings `sessionid`, `authtoken`). `code`
+// is deliberately NOT a credential key: it is too common (`?code=` on a
+// public page, a promo code), so a link whose only parameter is `code` is
+// judged by the private-link rules like any other.
 const SIGNED_KEYS = new Set([
   'x-amz-signature', 'x-amz-credential', 'x-amz-security-token', 'x-amz-algorithm', 'x-goog-signature', 'x-goog-credential',
-  'signature', 'sig', 'token', 'access_token', 'accesstoken', 'id_token', 'key', 'apikey', 'api_key', 'secret', 'auth', 'jwt',
   'awsaccesskeyid', 'key-pair-id',
+  'key', 'auth', 'sid', 'ticket', 'pwd', 'sessionid', 'authtoken', 'accesstoken', 'idtoken', 'apikey', 'bearer',
 ]);
 const STORAGE_HOST_RE = /(^|\.)(amazonaws\.com|r2\.cloudflarestorage\.com|r2\.dev|storage\.googleapis\.com|storage\.cloud\.google\.com|blob\.core\.windows\.net|digitaloceanspaces\.com|backblazeb2\.com|wasabisys\.com)$/i;
 const URL_IN_TEXT_RE = /https?:\/\/[^\s"'<>\\]+/gi;
@@ -112,8 +123,13 @@ const PUBLIC_TOKEN_ROUTES = new Set(PUBLIC_TOKEN_ROUTE_SEGMENTS);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_DEPTH = 40;
 
+function isCredentialQueryKey(key) {
+  const squashed = key.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  return SIGNED_KEYS.has(key.toLowerCase()) || SIGNED_KEYS.has(squashed) || isCredentialName(key);
+}
+
 function carriesCredential(search) {
-  for (const key of new URLSearchParams(search).keys()) if (SIGNED_KEYS.has(key.toLowerCase())) return true;
+  for (const key of new URLSearchParams(search).keys()) if (isCredentialQueryKey(key)) return true;
   return false;
 }
 
@@ -249,7 +265,32 @@ function redactString(text, state) {
 }
 
 function newState() {
-  return { links: 0, privateLinks: 0, fields: 0 };
+  return { links: 0, privateLinks: 0, fields: 0, notes: 0 };
+}
+
+// OPERATOR NOTES. A free-text field typed by staff or customers about a record
+// (notes, admin_notes, reason, instructions ...) is where a password, a
+// session link or a card number gets pasted, and a best-effort scrubber cannot
+// win that. A reviewed row declares such a field as kind "note"; its value is
+// not read through the general read at all: it is replaced by a marker that
+// carries only its length. Matched by key name at any depth in the response.
+function withheldMarker(length) {
+  return `[note withheld: ${length} characters]`;
+}
+
+function withholdNotes(value, noteKeys, state, depth = 0) {
+  if (!noteKeys || !noteKeys.size || !value || typeof value !== 'object') return value;
+  if (depth > MAX_DEPTH) return value;
+  if (Array.isArray(value)) return value.map(item => withholdNotes(item, noteKeys, state, depth + 1));
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    const present = item !== null && item !== undefined && item !== '' && (typeof item !== 'object' || Object.keys(item).length > 0);
+    if (noteKeys.has(key) && present && typeof item !== 'number' && typeof item !== 'boolean') {
+      state.notes += 1;
+      out[key] = withheldMarker(typeof item === 'string' ? item.length : JSON.stringify(item).length);
+    } else out[key] = withholdNotes(item, noteKeys, state, depth + 1);
+  }
+  return out;
 }
 
 // Credentials pasted into free text (best effort; see secret-text-scrubber.js).
@@ -276,5 +317,5 @@ function redactSecrets(value, state, depth = 0) {
 }
 
 module.exports = {
-  REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
+  withholdNotes, REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
 };

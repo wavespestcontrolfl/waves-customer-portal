@@ -7,7 +7,11 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockDb = jest.fn();
-jest.mock('../models/db', () => (...args) => mockDb(...args));
+jest.mock('../models/db', () => {
+  const db = (...args) => mockDb(...args);
+  db.raw = (sql, bindings) => ({ sql, bindings });
+  return db;
+});
 
 const IbThreads = require('../services/intelligence-bar/threads');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
@@ -18,28 +22,23 @@ const OTHER_THREAD = '10000000-0000-4000-8000-0000000000a2';
 const FOREIGN_THREAD = '10000000-0000-4000-8000-0000000000a3';
 const MARKER = IbThreads.UNTRUSTED_READ_MARKER;
 
-// A small fake db with real where-filtering for the two thread tables.
+// A small fake db: ONE query on ib_threads (primary key + actor) whose first()
+// evaluates the EXISTS marker check over that thread's turns.
 function fakeDb({ threads, turns, failOn = null }) {
   return (table) => {
     if (failOn === table) throw new Error('connection reset');
-    if (table === 'ib_threads') {
-      return { where: cond => ({ first: async () => threads.find(t => Object.entries(cond).every(([k, v]) => t[k] === v)) }) };
-    }
-    let rows = [...turns];
-    const api = {
-      where(column, op, value) {
-        if (op === undefined) return api;
-        if (value === undefined) rows = rows.filter(r => r[column] === op);
-        else if (op === 'like') {
-          const needle = value.replace(/^%|%$/g, '');
-          rows = rows.filter(r => String(r[column]).includes(needle));
-        }
-        return api;
-      },
-      andWhere(...args) { return api.where(...args); },
-      first: async () => rows[0],
+    if (table !== 'ib_threads') throw new Error(`unexpected table ${table}`);
+    return {
+      where: cond => ({
+        first: async (raw) => {
+          if (failOn === 'ib_thread_turns') throw new Error('connection reset');
+          const thread = threads.find(t => Object.entries(cond).every(([k, v]) => t[k] === v));
+          if (!thread) return undefined;
+          const needle = raw.bindings[0].replace(/^%|%$/g, '');
+          return { marked: turns.some(t => t.thread_id === thread.id && String(t.content).includes(needle)) };
+        },
+      }),
     };
-    return api;
   };
 }
 
@@ -118,27 +117,51 @@ describe('loadRequestTaint (once per request)', () => {
       expect((await load({ conversationHistory: [] })).untrustedRead).toBe(false);
       expect((await load({ conversationHistory: undefined })).untrustedRead).toBe(false);
     });
-    test('with the threads gate off there is no record: a follow-up is tainted, a first message is not, a thread id counts as a follow-up', async () => {
+    test('with the threads gate off and no thread id there is no record: a follow-up is tainted, a first message is not', async () => {
       process.env.GATE_IB_THREADS = 'false';
       expect((await load({ conversationHistory: plainHistory })).untrustedRead).toBe(true);
-      expect((await load({ threadId: OTHER_THREAD })).untrustedRead).toBe(true);
       expect((await load({})).untrustedRead).toBe(false);
       expect(mockDb).not.toHaveBeenCalled();
+    });
+    test('a saved thread record is consulted even with the threads gate off', async () => {
+      process.env.GATE_IB_THREADS = 'false';
+      expect((await load({ threadId: THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
+      expect((await load({ threadId: OTHER_THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(false);
     });
     test('a failed thread append after a read leaves the next turn a follow-up with no thread: tainted', async () => {
       // Request 1 read data and its append returned null, so the client holds history and no thread id.
       expect((await load({ threadId: undefined, conversationHistory: plainHistory })).untrustedRead).toBe(true);
     });
-    test('the general read off (its gate, or the platform gate it needs): today\'s owner-direct behavior, never tainted', async () => {
+    test('the general read off (its gate, or the platform gate it needs): no record + history is NOT tainted, owner-direct as before', async () => {
       for (const off of ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM']) {
         process.env[off] = 'false';
         expect((await load({ conversationHistory: plainHistory })).untrustedRead).toBe(false);
-        expect((await load({ threadId: THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(false);
+        expect((await load({})).untrustedRead).toBe(false);
         process.env[off] = 'true';
       }
       expect(mockDb).not.toHaveBeenCalled();
     });
-    test('a login without full access is never tainted by this rule', async () => {
+    test('the saved marker stays authoritative after the general read is turned off', async () => {
+      for (const off of ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM']) {
+        process.env[off] = 'false';
+        // marked thread: tainted. unmarked thread: not. unreadable thread: tainted.
+        expect((await load({ threadId: THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
+        expect((await load({ threadId: OTHER_THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(false);
+        expect((await load({ threadId: FOREIGN_THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
+        mockDb.mockImplementation(fakeDb({ ...seed, failOn: 'ib_threads' }));
+        expect((await load({ threadId: OTHER_THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
+        mockDb.mockImplementation(fakeDb(seed));
+        process.env[off] = 'true';
+      }
+    });
+    test('a login without full access still reads the thread record', async () => {
+      expect((await load({ fullAccess: false, threadId: THREAD, conversationHistory: plainHistory })).untrustedRead).toBe(true);
+    });
+    test('one thread query per request', async () => {
+      await load({ threadId: OTHER_THREAD, conversationHistory: plainHistory });
+      expect(mockDb).toHaveBeenCalledTimes(1);
+    });
+    test('a login without full access is not tainted by the no-record rule', async () => {
       expect((await load({ fullAccess: false, conversationHistory: plainHistory })).untrustedRead).toBe(false);
     });
   });

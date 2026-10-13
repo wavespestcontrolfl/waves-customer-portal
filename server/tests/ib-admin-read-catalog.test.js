@@ -116,7 +116,7 @@ test('every reviewed row says what was read and carries the fingerprint it was r
     expect(row.hash).toMatch(/^[0-9a-f]{32}$/);
     expect(['broad', 'customer', 'invoice']).toContain(row.scope);
     expect(() => validateReviewedRow(row)).not.toThrow();
-    if (row.freeText !== undefined) expect(row.freeText.length).toBeGreaterThan(0);
+    if (row.freeText !== undefined) expect(Object.keys(row.freeText).length).toBeGreaterThan(0);
   }
   for (const row of file.exclude) {
     expect(row.route).toMatch(/^GET \/admin\//);
@@ -163,14 +163,29 @@ describe('the scope of a reviewed row', () => {
     expect(() => validate({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'text' } }) })).toThrow(/scope parameter must be "uuid"/);
     expect(() => validate({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'int' } }) })).toThrow(/scope parameter must be "uuid"/);
   });
-  test('a freeText list names response fields', () => {
+  test('freeText maps response fields to a kind: note or content', () => {
     const plain = extra => ({ ...row(extra), endpoint: '/admin/payers', scope: 'broad' });
-    expect(() => validate(plain({ freeText: ['notes'] }))).not.toThrow();
-    expect(() => validate(plain({ freeText: 'notes' }))).toThrow(/freeText must be a list/);
-    expect(() => validate(plain({ freeText: ['no tes'] }))).toThrow(/freeText must be a list/);
+    expect(() => validate(plain({ freeText: { notes: 'note', description: 'content' } }))).not.toThrow();
+    for (const bad of [['notes'], 'notes', {}, { notes: 'text' }, { 'no tes': 'note' }, { notes: 1 }]) {
+      expect(() => validate(plain({ freeText: bad }))).toThrow(/freeText must map/);
+    }
     const rows = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed;
     expect(rows.filter(r => r.freeText).length).toBeGreaterThan(5);
-    for (const r of rows.filter(item => item.freeText)) expect(r.freeText.every(key => /^[A-Za-z][A-Za-z0-9_]*$/.test(key))).toBe(true);
+    for (const r of rows.filter(item => item.freeText)) {
+      for (const [key, kind] of Object.entries(r.freeText)) {
+        expect(key).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+        expect(['note', 'content']).toContain(kind);
+      }
+    }
+  });
+  test('the committed catalog carries each reviewed row\'s freeText kinds', () => {
+    const rows = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed;
+    const committed = require('../services/intelligence-bar/admin-read-catalog.json').entries;
+    for (const entry of committed) {
+      const reviewedRow = rows.find(r => r.endpoint === entry.endpoint);
+      expect(entry.freeText).toEqual(reviewedRow.freeText);
+    }
+    expect(committed.some(entry => Object.values(entry.freeText || {}).includes('note'))).toBe(true);
   });
   test('the build fails when a handler that reads a customer id from the query is reviewed as broad', () => {
     const full = loadReviewed();

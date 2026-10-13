@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { isCredentialName } = require('./credential-fields');
 
 const REDACTED = '[REDACTED]';
 
@@ -18,7 +19,10 @@ function isSensitiveQueryKey(key) {
   // the /outbound-admin-prompt URL (services/call-bridge.js); Twilio's
   // callback lands in the request log with them (codex #4072 r2 P1).
   if (['customernumber', 'leadname'].includes(normalized)) return true;
-  return ['auth', 'jwt', 'code', 'key', 'nonce', 'otp', 'session', 'sessionid', 'ticket'].includes(normalized)
+  // `code` and `key` stay here (a request log is stricter than an answer); the
+  // credential words come from the one shared name test (credential-fields.js).
+  return ['auth', 'jwt', 'code', 'key', 'nonce', 'otp', 'session', 'sessionid', 'ticket', 'sid'].includes(normalized)
+    || isCredentialName(key)
     || normalized.includes('token')
     || normalized.includes('authorization')
     || normalized.includes('apikey')

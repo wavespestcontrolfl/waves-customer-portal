@@ -982,3 +982,73 @@ describe('the general read needs the platform gate', () => {
     expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ status: 200 });
   });
 });
+
+// Codex round 8: operator notes are withheld, not scrubbed.
+describe('operator notes are withheld', () => {
+  const NOTE_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('note'));
+  const CONTENT_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
+  const noteKey = NOTE_ENTRY && Object.keys(NOTE_ENTRY.freeText).find(key => NOTE_ENTRY.freeText[key] === 'note');
+  const contentKey = CONTENT_ENTRY && Object.keys(CONTENT_ENTRY.freeText).find(key => CONTENT_ENTRY.freeText[key] === 'content');
+  const sessionLink = 'https://portal.example.test/pay/home' + '?session=' + 'abc' + '123';
+  const wordSecret = 'portal pass' + 'word is swords' + 'fish';
+
+  test('a note with a session link and one with a password sentence show only their length', async () => {
+    const first = `Pay here ${sessionLink}`;
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, [{ id: 1, [noteKey]: first }, { id: 2, [noteKey]: wordSecret }]));
+    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    const text = JSON.stringify(result);
+    expect(result.data[0][noteKey]).toBe(`[note withheld: ${first.length} characters]`);
+    expect(result.data[1][noteKey]).toBe(`[note withheld: ${wordSecret.length} characters]`);
+    for (const piece of ['abc' + '123', 'swords' + 'fish', 'session=']) expect(text).not.toContain(piece);
+    expect(result.notes_withheld).toBe(2);
+    expect(result.note).toContain('Free-text notes are not read through this tool, because people paste passwords and links into them. Tell the operator the note exists and its length; they can read it on the record.');
+  });
+
+  test('a note key nested at any depth is withheld, and empty notes are not counted', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, { payer: { id: 1, history: [{ deep: { [noteKey]: wordSecret } }], [noteKey]: '' }, other: { [noteKey]: null } }));
+    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    expect(result.data.payer.history[0].deep[noteKey]).toBe(`[note withheld: ${wordSecret.length} characters]`);
+    expect(result.data.payer[noteKey]).toBe('');
+    expect(result.data.other[noteKey]).toBeNull();
+    expect(result.notes_withheld).toBe(1);
+    expect(JSON.stringify(result)).not.toContain('swords' + 'fish');
+  });
+
+  test('a note kept as JSON is withheld whole, with the length of its JSON', async () => {
+    const value = { reason: wordSecret, tries: 2 };
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, { [noteKey]: value }));
+    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    expect(result.data[noteKey]).toBe(`[note withheld: ${JSON.stringify(value).length} characters]`);
+  });
+
+  test('an answer with no notes has no notes_withheld and no note line', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, [{ id: 1 }]));
+    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    expect(result).not.toHaveProperty('notes_withheld');
+    expect(result.note).not.toMatch(/Free-text notes/);
+  });
+
+  test('a content field is returned, with links and secrets still removed', async () => {
+    const text = `Say hello. See ${sessionLink} and the ${wordSecret}. Dose: 2 oz per gallon.`;
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, [{ id: 1, [contentKey]: text }]));
+    const result = await read({ endpoint: CONTENT_ENTRY.endpoint });
+    const out = result.data[0][contentKey];
+    expect(out).toContain('Say hello.');
+    expect(out).toContain('Dose: 2 oz per gallon.');
+    expect(out).not.toContain('swords' + 'fish');
+    expect(out).not.toContain('abc' + '123');
+    expect(result).not.toHaveProperty('notes_withheld');
+  });
+});
+
+describe('session-style query keys carry a credential', () => {
+  const { redactString, newState } = require('../utils/signed-link-redaction');
+  test.each(['session', 'session_id', 'sessionid', 'sid', 'nonce', 'otp', 'auth_token', 'authtoken', 'bearer', 'ticket', 'passcode', 'password', 'pwd'])('?%s= makes a signed link', key => {
+    const link = `https://portal.example.test/home?${key}=ab12`;
+    expect(redactString(link, newState())).toBe('[signed link removed]');
+  });
+  test('code is not a credential key', () => {
+    const link = 'https://www.example.test/offer?code=SPRING';
+    expect(redactString(link, newState())).toBe(link);
+  });
+});

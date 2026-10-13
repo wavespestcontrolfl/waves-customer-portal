@@ -116,7 +116,8 @@ const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|pa
 const NOT_A_VALUE = new Set(['none', 'n/a', 'na', 'unknown', 'required', 'needed', 'reset', 'changed', 'set', 'updated', 'sent',
   'expired', 'pending', 'yes', 'no', 'tbd', 'blank', 'empty', 'invalid', 'incorrect', 'wrong', 'missing', 'on', 'off', 'the', 'a', 'an',
   'not', 'same', 'saved', 'stored', 'given', 'provided', 'correct', 'valid', 'active', 'old', 'new', 'forgotten', 'lost', 'confirmed',
-  'verified', 'enabled', 'disabled']);
+  'verified', 'enabled', 'disabled', 'rejected', 'accepted', 'locked', 'unlocked', 'current', 'default', 'unset', 'shared', 'rotated',
+  'changing', 'unknown', 'unavailable', 'optional', 'mandatory', 'sensitive', 'private', 'secure', 'secret']);
 
 function labelledReplacement(match, label, separator, quote, rawValue, offset, text) {
   // Sentence punctuation after the value is not part of it.
@@ -127,7 +128,10 @@ function labelledReplacement(match, label, separator, quote, rawValue, offset, t
   if (value.startsWith('[removed') || NOT_A_VALUE.has(lowered)) return match;
   if (/^pin|passcode/i.test(label) && KEPT_BEFORE_RE.test(text.slice(Math.max(0, offset - 20), offset + label.length))) return match;
   const viaIs = /\bis[ \t]*$/i.test(separator);
-  if (viaIs && !quote && !/[\d!@#$%^&*_+=~/\\|-]/.test(value)) return match;
+  // After " is " a plain word is a value only when it is one token of 6+ characters
+  // ("portal password is swordfish"); a short word ("pin is blue") or a status
+  // word (NOT_A_VALUE) reads as prose. A digit or symbol always counts.
+  if (viaIs && !quote && !/[\d!@#$%^&*_+=~/\\|-]/.test(value) && value.length < 6) return match;
   return `${label}${separator}${quote}${REMOVED}${tail}`;
 }
 

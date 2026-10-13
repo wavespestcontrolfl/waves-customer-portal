@@ -978,13 +978,27 @@ function paramKindProblem(row, names) {
   return row.scope !== 'broad' && names.includes(row.scopeParam) && kinds[row.scopeParam] !== 'uuid' ? 'the scope parameter must be "uuid"' : null;
 }
 
+// freeText: { field: 'note' | 'content' }. A "note" is free text typed by staff
+// or customers about a record (a person may paste a password, a link or a card
+// number): its value is withheld at run time. "content" is business-authored
+// reference text that is the point of the read: returned, and still passed
+// through link redaction and the secret scrubber. Declaring every free-text
+// field a response returns is a review duty; it cannot be proven mechanically.
+const FREE_TEXT_KINDS = new Set(['note', 'content']);
+function validFreeText(map) {
+  return Boolean(map) && typeof map === 'object' && !Array.isArray(map) && Object.keys(map).length > 0
+    && Object.entries(map).every(([key, kind]) => KEY_NAME_RE.test(key) && FREE_TEXT_KINDS.has(kind));
+}
+
+const freeTextOf = row => (row.freeText ? { freeText: row.freeText } : {});
+
 function queryProblem(row, names) {
   if (row.query !== undefined && (!Array.isArray(row.query) || row.query.some(key => typeof key !== 'string' || !KEY_NAME_RE.test(key)) || new Set(row.query).size !== row.query.length)) {
     return 'query must be a list of distinct key names';
   }
   // An id carried in the query string can only be sent when the row lets that key through.
-  if (row.freeText !== undefined && (!Array.isArray(row.freeText) || row.freeText.some(key => typeof key !== 'string' || !KEY_NAME_RE.test(key)))) {
-    return 'freeText must be a list of response field names';
+  if (row.freeText !== undefined && !validFreeText(row.freeText)) {
+    return 'freeText must map response field names to "note" or "content"';
   }
   if (row.scope !== 'broad' && !names.includes(row.scopeParam) && !(row.query || []).includes(row.scopeParam)) {
     return `the scope parameter ${row.scopeParam} is read from the query string, so the row's query list must include it`;
@@ -1262,6 +1276,7 @@ function buildCatalog({ census, reviewed = loadReviewed(), routes } = {}) {
       ...(row.scope === 'broad' ? {} : { scopeParam: row.scopeParam }),
       ...(row.params && Object.keys(row.params).length ? { paramKinds: row.params } : {}),
       query: [...(row.query || [])],
+      ...freeTextOf(row),
     });
   }
   const unique = new Map();

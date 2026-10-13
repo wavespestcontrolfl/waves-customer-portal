@@ -271,10 +271,14 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
  * error) so the caller can fail closed.
  */
 async function hasUntrustedRead(actorId, threadId) {
-  const thread = await db('ib_threads').where({ id: threadId, admin_actor_id: actorId }).first('id');
-  if (!thread) throw new Error('thread not readable');
-  const marked = await db('ib_thread_turns').where('thread_id', threadId).andWhere('content', 'like', `%${UNTRUSTED_READ_MARKER}%`).first('id');
-  return Boolean(marked);
+  // ONE query: the thread's primary key plus an EXISTS over that thread's own
+  // turns (the thread_id index). Cost: one indexed lookup and a scan of one
+  // thread's rows per owner-direct request that carries a thread id.
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${UNTRUSTED_READ_MARKER}%`]));
+  if (!row) throw new Error('thread not readable');
+  return row.marked === true;
 }
 
 async function listThreads(actorId, limit = 20) {

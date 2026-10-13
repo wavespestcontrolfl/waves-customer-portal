@@ -186,3 +186,24 @@ describe('credential-named identifiers (environment-style assignments)', () => {
     expect(scrubSecretText('password: ' + V)).toEqual({ text: 'password: [removed]', removed: 1 });
   });
 });
+
+// Codex round 8: a plain word after " is " is a value when it is one token of 6+ characters.
+describe('labelled secrets after " is " with a plain word', () => {
+  const secretWord = word => scrubSecretText(word).text;
+  test.each([
+    ['portal pass' + 'word is swords' + 'fish', 'swords' + 'fish'],
+    ['API tok' + 'en is correcthorse' + 'battery', 'correcthorse' + 'battery'],
+    ['the pass' + 'word is Hunter' + 'two', 'Hunter' + 'two'],
+  ])('%s is removed', (input, value) => {
+    const out = secretWord(input);
+    expect(out).not.toContain(value);
+    expect(out).toContain('[removed]');
+  });
+  test.each([
+    'password is required', 'the token is expired', 'pin is wrong', 'password is invalid', 'password is missing',
+    'the passcode is the same', 'password is on file', 'password is set', 'password is changed', 'password is updated',
+    'password is unknown', 'password is none', 'password is n/a', 'the token is needed', 'pin is blue', 'password is reset',
+  ])('"%s" is kept', phrase => {
+    expect(secretWord(phrase)).toBe(phrase);
+  });
+});

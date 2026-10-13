@@ -28,7 +28,7 @@ const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
 const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../../utils/redact-request-url');
-const { newState, redactSecrets, redactString } = require('../../utils/signed-link-redaction');
+const { newState, redactSecrets, redactString, withholdNotes } = require('../../utils/signed-link-redaction');
 const catalog = require('./admin-read-catalog.json');
 
 const LOOPBACK_HOST = '127.0.0.1';
@@ -311,9 +311,13 @@ async function shapeResponse(response, entry, authorization) {
 
 // The answer: credentials removed first (signed links, private links, credential
 // fields), then cut to the cap.
+const NOTES_WITHHELD_NOTE = 'Free-text notes are not read through this tool, because people paste passwords and links into them. Tell the operator the note exists and its length; they can read it on the record.';
+
 function answerFrom(parsed, status, entry) {
   const state = newState();
-  const clean = redactSecrets(parsed, state);
+  // Operator notes first: their values are never read, so nothing in them can leak.
+  const noteKeys = new Set(Object.entries(entry.freeText || {}).filter(([, kind]) => kind === 'note').map(([key]) => key));
+  const clean = redactSecrets(withholdNotes(parsed, noteKeys, state), state);
   const fitted = fitToCap(clean);
   const removed = [
     state.links ? `${state.links} signed file link(s)` : null,
@@ -322,6 +326,7 @@ function answerFrom(parsed, status, entry) {
   ].filter(Boolean);
   const notes = [
     UNTRUSTED_NOTE,
+    state.notes ? NOTES_WITHHELD_NOTE : null,
     removed.length ? `Removed ${removed.join(', ')} (shown as "[signed link removed]", "[private link removed]" or "[removed]"); the bar never holds a credential or a link that carries one.` : null,
     fitted.truncated
       ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). Narrow with "query" filters (a date range, status, id or limit) to see the rest.${paginationHint(clean)}`
@@ -332,6 +337,7 @@ function answerFrom(parsed, status, entry) {
     ...(fitted.total_items !== undefined ? { total_items: fitted.total_items } : {}),
     ...(state.links + state.privateLinks ? { signed_links_removed: state.links + state.privateLinks } : {}),
     ...(state.fields ? { credential_fields_removed: state.fields } : {}),
+    ...(state.notes ? { notes_withheld: state.notes } : {}),
     note: notes.length ? notes.join(' ') : null,
   };
 }

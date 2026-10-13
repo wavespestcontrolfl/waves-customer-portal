@@ -29,7 +29,30 @@ link or credential signal, or middleware that does any of that. The model passes
 catalog pattern and parameter values, never a URL; the server sends a loopback GET
 with the operator's own bearer token (set on the action context by the route, never
 model input, logged or stored), so every router middleware applies as on the screen,
-and credentials in the answer are removed (`signed-link-redaction.js`). This is a
+and credentials in the answer are removed (`signed-link-redaction.js`).
+
+**Free text (owner rulings, Codex round 8).** A best-effort scrubber cannot win against
+a secret pasted into a free-text field, so the rule depends on who wrote the text.
+Each reviewed row lists every free-text field its response returns, as `freeText:
+{ field: kind }`, and the generator copies the map into the catalog entry (the generator fails on
+any other kind). **`note`** is text staff or customers typed about a record (notes,
+admin_notes, reason, instructions, details): its value is NOT read. The answer shows
+`"[note withheld: <N> characters]"`, counts it in `notes_withheld`, and tells the model to say the
+note exists and how long it is; the operator reads it on the record. The match is by key name at any depth in
+that endpoint's response, before the answer is cut to size. **`content`** is business-authored reference text
+that is the point of the read (protocol scripts, product label and mixing text, offer copy, job-form templates, message
+templates): it is returned, and still passes link redaction and the secret scrubber. The reviewer owns one duty
+that no tool can prove: when a response has a free-text field, the row must declare it. An undeclared
+field is only scrubbed. Credential query keys in a link (`session`, `sid`, `nonce`, `otp`, `auth_token`,
+`ticket`, `passcode`, `password`, `pwd`, `bearer`, ...) come from the same name list as the credential
+fields (`utils/credential-fields.js`); `code` is left out on purpose because it is too common.
+
+**Read taint.** After a general read, owner-direct edits need cards for the rest of the thread. The
+server's thread record is authoritative: whenever owner-direct is on and the request has a thread id, one
+indexed lookup (`threads.hasUntrustedRead`: the thread row plus an EXISTS over its turns) decides, whether or
+not the general read is still on, so turning the feature off does not clear a taint. A thread that
+cannot be read counts as tainted. Only the rule for a follow-up with no record to consult (no thread id) needs the
+general read to be live for the login. This is a
 short list of reads, not an arbitrary executor: an endpoint outside it is refused, and
 writes are unchanged (they still need their own registered tool, `write-gates.js`
 entry and confirmation). A catalog read is not coverage evidence: do not mark census
