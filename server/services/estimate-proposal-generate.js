@@ -797,16 +797,9 @@ function mirrorNetWinner(keptRow, mirrorRow, net) {
 // reported in `conflicted` (by label). Filling a per-identity quota across the flattened
 // sources instead kept the first source's single copy plus one engine row
 // and silently lost the second legitimate repeat (codex #6113 r30).
-function collapseMirroredRows(sources, { identity, amount, label, net, compatible = () => true, merge = (kept) => kept }) {
-  const seen = new Set();
-  const tagged = [];
-  sources.forEach((list, sourceIndex) => {
-    for (const row of list) {
-      if (seen.has(row)) continue;
-      seen.add(row);
-      tagged.push({ row, sourceIndex, key: identity(row) });
-    }
-  });
+// For each identity, the source (index) holding the most copies; the first
+// such source on a tie.
+function fullestSourceByKey(tagged) {
   const countsByKey = new Map();
   for (const { key, sourceIndex } of tagged) {
     const counts = countsByKey.get(key) || new Map();
@@ -821,6 +814,19 @@ function collapseMirroredRows(sources, { identity, amount, label, net, compatibl
     }
     fullestSource.set(key, best.sourceIndex);
   }
+  return fullestSource;
+}
+function collapseMirroredRows(sources, { identity, amount, label, net, compatible = () => true, merge = (kept) => kept }) {
+  const seen = new Set();
+  const tagged = [];
+  sources.forEach((list, sourceIndex) => {
+    for (const row of list) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      tagged.push({ row, sourceIndex, key: identity(row) });
+    }
+  });
+  const fullestSource = fullestSourceByKey(tagged);
   // A mirror matches a kept clone on the resolved amount with a COMPATIBLE
   // scope (a scope only one side states is no contradiction, codex #6113
   // r42); a mirror that differs only in its net is reconciled the way a
