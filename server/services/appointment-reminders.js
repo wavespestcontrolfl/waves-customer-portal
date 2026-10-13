@@ -39,7 +39,7 @@ const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { buildAppointmentLink } = require('./appointment-link');
-const { closeCoveredReminderTiers, loadDayRows, earliestArrivalMs, renderedDayToken } = require('./one-text-per-day');
+const { closeCoveredReminderTiers, loadDayRows, earliestArrivalMs, renderedDayToken, bouncedDay, reopenCoveredTiers } = require('./one-text-per-day');
 // Canonical service_type normalization — the estimate-backed label recovery
 // compares stored fall-through values against this exact transform; reusing
 // the writer's implementation keeps the two from drifting.
@@ -519,6 +519,128 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
     logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
   }
   return false;
+}
+
+// ---- Bounced confirmation / 72h / 24h text: the email version -----------------------------------
+
+function bounceReminderRow(customerId, scheduledServiceId) {
+  return scheduledServiceId
+    ? db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).first().catch(() => null)
+    : db('appointment_reminders')
+      .where({ customer_id: customerId, cancelled: false })
+      .where('appointment_time', '>=', db.raw("now() - interval '1 hour'"))
+      .orderBy('appointment_time', 'asc')
+      .first()
+      .catch(() => null);
+}
+
+// Grouped stop (GH codex r5 P1): the bounced text was the visit's ONE reminder, sent by the claim
+// owner on behalf of every member — rebuilding from the owner's row alone would email the owner's
+// time and service. Rebuild the grouped copy from the CURRENT visit (earliest sendable member,
+// merged member label, every held member's disclosure) into `copy`, piece by piece, so a failed
+// read keeps whatever was rebuilt before it. Best-effort: a dissolved visit leaves the per-row
+// copy. Returns true when the grouped visit MOVED since the text (the bounced notice is stale).
+async function applyGroupedBounceCopy(copy, { audit, kind, reminderRow, scheduledServiceId }) {
+  const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+  const visit = svc?.visit_id
+    ? await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date')
+    : null;
+  if (!visit) return false;
+  // The OCCURRENCE the bounced text represented is its own rendered slot (audit metadata), never the
+  // visit's current date (pre-push codex r8 P1): a late bounce after a unit move would otherwise
+  // email the NEW date's copy under the new date's key and dedupe away the correctly timed reminder
+  // for that occurrence. Moved since the text ⇒ the bounced notice is stale; the re-armed rows own
+  // the new date. Every grouped send stamps rendered_slot_ms, so a missing stamp means an ungrouped
+  // send — per-row copy.
+  const slotMs = Number(audit.metadata?.rendered_slot_ms);
+  const textedDate = Number.isFinite(slotMs) ? etDateString(new Date(slotMs)) : null;
+  const visitDate = visit.scheduled_date instanceof Date
+    ? visit.scheduled_date.toISOString().slice(0, 10)
+    : String(visit.scheduled_date || '').slice(0, 10);
+  if (textedDate && textedDate !== visitDate) {
+    logger.info(`[appt-remind] skipping ${kind} email fallback for ${scheduledServiceId} — grouped visit ${visit.id} moved from ${textedDate} to ${visitDate} since the text; the re-armed reminders own the new date`);
+    return true;
+  }
+  if (!textedDate) return false;
+  const grouped = await visitReminderCopyInputs(visit.id, reminderRow);
+  copy.apptTime = grouped.apptTime;
+  copy.cardHoldNote = grouped.holdNote;
+  copy.serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: visit.id });
+  // Same visit-scoped key the direct email leg used, so a 'both'-channel bounce recovery dedupes
+  // against the email that already went out (GH codex r7 P1).
+  copy.emailIdempotencyKey = visitReminderEmailKey(kind, require('./visit-groups').dedupeKeyFor(visit, `reminder_${kind}`));
+  return false;
+}
+
+// The single-visit copy of a bounced notice: the row's own time and label, rebuilt grouped when the
+// text was a visit's. Null = stale (the grouped visit moved since the text): send nothing.
+async function bounceEmailCopy({ audit, kind, reminderRow, scheduledServiceId }) {
+  const copy = { apptTime: null, serviceLabel: 'service', cardHoldNote: null, emailIdempotencyKey: null };
+  if (!reminderRow) return copy;
+  copy.apptTime = new Date(reminderRow.appointment_time);
+  copy.serviceLabel = smsServiceLabelStored(reminderRow.service_type);
+  if (!(kind === '72h' || kind === '24h') || !scheduledServiceId) return copy;
+  try {
+    if (await applyGroupedBounceCopy(copy, { audit, kind, reminderRow, scheduledServiceId })) return null;
+  } catch (visitErr) {
+    logger.warn(`[appt-remind] grouped copy rebuild failed for ${scheduledServiceId} — emailing the per-row copy: ${visitErr.message}`);
+  }
+  return copy;
+}
+
+// GATE_ONE_TEXT_PER_CUSTOMER_DAY: the email for a bounced MERGED day reminder, naming the members
+// still nameable (the same label, earliest arrival and card-hold note as the text, from the members
+// themselves) and carrying their token to the same day validator as any merged send. True = sent;
+// false = not sent (held, refused or failed); null = no merged email could be built.
+async function emailBouncedDay({ named, audit, kind, customerId, scheduledServiceId }) {
+  const label = await dayMergedLabel(named);
+  const earliest = earliestArrivalMs(named);
+  const base = label === null || earliest === null ? null : await reminderCopyFromMembers(named);
+  if (!base) return null;
+  return deliverAppointmentEmailFallback({
+    kind, customerId, scheduledServiceId, apptTime: new Date(earliest), serviceLabel: label,
+    cardHoldNote: base.holdNote, requestedChannel: audit.metadata?.requestedChannel,
+    renderedDay: renderedDayToken(named),
+  });
+}
+
+// A bounced merged day reminder had closed its siblings on provider ACCEPT. Recover from what the
+// text itself carried (the rendered-day token on its audit row), so the customer ends up told
+// about EVERY service it named: one email for the members still nameable, and the tier armed
+// again on every sibling that text closed and the email did not cover (a held member, a failed
+// email, a day that changed or cannot be read), so each sends its own reminder. A cancelled or
+// moved sibling is not named and not re-armed. Returns true when the sender's email was handled
+// here; false lets the ordinary single-visit email for the sender go.
+async function recoverMergedDayBounce({ audit, kind, customerId, scheduledServiceId }) {
+  const token = audit.metadata?.rendered_day_members;
+  if (!Array.isArray(token) || !scheduledServiceId || !(kind === '72h' || kind === '24h')) return false;
+  let sent = null;
+  let day = { covered: [], named: null };
+  try {
+    day = await bouncedDay({ senderId: scheduledServiceId, token, tier: kind, since: audit.created_at });
+    if (day.named) sent = await emailBouncedDay({ named: day.named, audit, kind, customerId, scheduledServiceId });
+  } catch (err) {
+    logger.error(`[appt-remind] merged ${kind} bounce recovery for ${scheduledServiceId} failed (siblings re-armed): ${err.message}`);
+  }
+  const informed = sent === true ? new Set(day.named.map((m) => String(m.scheduled_service_id))) : new Set();
+  await reopenCoveredTiers(day.covered.filter((m) => !informed.has(m.id)), kind);
+  return sent === true;
+}
+
+// confirmation / 72h / 24h: reconstruct the appointment details of a bounced text and email them.
+async function emailUndeliveredNotice({ audit, kind, customerId, scheduledServiceId }) {
+  const reminderRow = await bounceReminderRow(customerId, scheduledServiceId);
+  // If the appointment was cancelled (a cancellation callback can arrive after
+  // handleCancellation flips the row), don't email stale appointment details —
+  // the cancellation notice owns the customer message.
+  if (reminderRow?.cancelled) {
+    logger.info(`[appt-remind] Skipping email fallback for cancelled appointment ${scheduledServiceId || customerId}`);
+    return;
+  }
+  if (await recoverMergedDayBounce({ audit, kind, customerId, scheduledServiceId })) return;
+  const copy = await bounceEmailCopy({ audit, kind, reminderRow, scheduledServiceId });
+  if (!copy) return;
+  await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, ...copy, requestedChannel: audit.metadata?.requestedChannel });
 }
 
 // Deliver an appointment notice honoring the customer's channel preference
@@ -4143,79 +4265,7 @@ const AppointmentReminders = {
       }
 
       // confirmation / 72h / 24h: reconstruct the appointment details and email it.
-      let apptTime = null;
-      let serviceLabel = 'service';
-      const reminderRow = scheduledServiceId
-        ? await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).first().catch(() => null)
-        : await db('appointment_reminders')
-          .where({ customer_id: customerId, cancelled: false })
-          .where('appointment_time', '>=', db.raw("now() - interval '1 hour'"))
-          .orderBy('appointment_time', 'asc')
-          .first()
-          .catch(() => null);
-      // If the appointment was cancelled (a cancellation callback can arrive after
-      // handleCancellation flips the row), don't email stale appointment details —
-      // the cancellation notice owns the customer message.
-      if (reminderRow?.cancelled) {
-        logger.info(`[appt-remind] Skipping email fallback for cancelled appointment ${scheduledServiceId || customerId}`);
-        return;
-      }
-      let cardHoldNote = null;
-      let emailIdempotencyKey = null;
-      if (reminderRow) {
-        apptTime = new Date(reminderRow.appointment_time);
-        serviceLabel = smsServiceLabelStored(reminderRow.service_type);
-        // Grouped stop (GH codex r5 P1): the bounced text was the visit's
-        // ONE reminder, sent by the claim owner on behalf of every member
-        // — rebuilding from the owner's row alone would email the owner's
-        // time and service. Rebuild the grouped copy from the CURRENT
-        // visit (earliest sendable member, merged member label, every
-        // held member's disclosure). Best-effort: a dissolved visit falls
-        // through to the per-row copy above; a failed read keeps whatever
-        // was rebuilt before it (each piece beats the owner's own).
-        if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
-          try {
-            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
-            const visit = svc?.visit_id
-              ? await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date')
-              : null;
-            if (visit) {
-              // The OCCURRENCE the bounced text represented is its own
-              // rendered slot (audit metadata), never the visit's current
-              // date (pre-push codex r8 P1): a late bounce after a unit
-              // move would otherwise email the NEW date's copy under the
-              // new date's key and dedupe away the correctly timed
-              // reminder for that occurrence. Moved since the text ⇒ the
-              // bounced notice is stale; the re-armed rows own the new
-              // date. Every grouped send stamps rendered_slot_ms, so a
-              // missing stamp means an ungrouped send — per-row copy.
-              const slotMs = Number(audit.metadata?.rendered_slot_ms);
-              const textedDate = Number.isFinite(slotMs) ? etDateString(new Date(slotMs)) : null;
-              const visitDate = visit.scheduled_date instanceof Date
-                ? visit.scheduled_date.toISOString().slice(0, 10)
-                : String(visit.scheduled_date || '').slice(0, 10);
-              if (textedDate && textedDate !== visitDate) {
-                logger.info(`[appt-remind] skipping ${kind} email fallback for ${scheduledServiceId} — grouped visit ${visit.id} moved from ${textedDate} to ${visitDate} since the text; the re-armed reminders own the new date`);
-                return;
-              }
-              if (textedDate) {
-                const copy = await visitReminderCopyInputs(visit.id, reminderRow);
-                apptTime = copy.apptTime;
-                cardHoldNote = copy.holdNote;
-                serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: visit.id });
-                // Same visit-scoped key the direct email leg used, so a
-                // 'both'-channel bounce recovery dedupes against the email
-                // that already went out (GH codex r7 P1).
-                emailIdempotencyKey = visitReminderEmailKey(kind, require('./visit-groups').dedupeKeyFor(visit, `reminder_${kind}`));
-              }
-            }
-          } catch (visitErr) {
-            logger.warn(`[appt-remind] grouped copy rebuild failed for ${scheduledServiceId} — emailing the per-row copy: ${visitErr.message}`);
-          }
-        }
-      }
-
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel });
+      await emailUndeliveredNotice({ audit, kind, customerId, scheduledServiceId });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }

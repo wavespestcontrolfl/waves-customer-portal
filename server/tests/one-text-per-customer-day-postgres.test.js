@@ -60,7 +60,7 @@ jest.mock('../services/tech-status', () => ({
 // Email legs: stub mode (default) replaces the five senders. Real-email mode runs the REAL appointment-email
 // senders (recipient resolution, sendTemplate and its moveHoldLive guard) and stubs only the provider call
 // (EmailTemplateLibrary.sendTemplate, below), so nothing can reach a real mailbox.
-const mockEmail = { real: false };
+const mockEmail = { real: false, failProvider: false };
 jest.mock('../services/appointment-email', () => {
   const actual = jest.requireActual('../services/appointment-email');
   const names = ['sendAppointmentConfirmationEmail', 'sendAppointmentReminderEmail', 'sendAppointmentNoShowEmail', 'sendTechArrivedEmail', 'sendTechEnRouteEmail'];
@@ -73,6 +73,7 @@ jest.mock('../services/email-template-library', () => ({
   ...jest.requireActual('../services/email-template-library'),
   sendTemplate: jest.fn(async (opts) => {
     if (typeof opts.onQueued === 'function' && (await opts.onQueued()) === false) return { aborted: true };
+    if (mockEmail.failProvider) throw new Error('synthetic provider failure');
     return { sent: true, message: { provider_message_id: 'stub-email' } };
   }),
 }));
@@ -140,6 +141,7 @@ postgres('one text per customer, address and day', () => {
   afterEach(() => {
     mockDb.failDayRead = false;
     mockEmail.real = false;
+    mockEmail.failProvider = false;
     jest.useRealTimers();
     delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
     gates.visitGroups = false;
@@ -773,7 +775,7 @@ postgres('one text per customer, address and day', () => {
       mockBoundary.before = null;
     });
 
-    const armedPair = (date) => fixture({ date, specs: [
+    const armedPair = (date, armed72 = false) => fixture({ date, armed72, specs: [
       { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
       { start: '10:00', end: '11:00', name: 'Lawn Care' },
     ] });
@@ -882,22 +884,131 @@ postgres('one text per customer, address and day', () => {
       expect((await reminderOf(added.id)).reminder_24h_sent).toBe(true);
     });
 
-    test('bounced text: the email for a merged text that bounced is an ordinary single-visit email (own label, own time, no token)', async () => {
-      gateOn();
-      const f = await armedPair(nextDate());
-      await runReminders(f.date);
-      expect(providerCalls(f.phone)).toHaveLength(1);
-      guard.mockClear();
-      EmailTemplateLibrary.sendTemplate.mockClear();
-      freezeNow(dayBefore(f.date));
-      await AppointmentReminders.handleUndeliveredSms({ sid: lastSid, status: 'undelivered', errorCode: '30003', to: f.phone });
-      jest.useRealTimers();
-      const emails = emailsFor(f.customerId);
-      expect(emails).toHaveLength(1);
-      expect(emails[0].payload.service_type).toMatch(/Pest Control/);
-      expect(emails[0].payload.service_type).not.toMatch(/Lawn Care/);
-      expect(guard.mock.calls.length).toBeGreaterThanOrEqual(1);
-      expect(guard.mock.calls.every((c) => c[2] === undefined)).toBe(true);
+    // A merged reminder closes its siblings when the provider ACCEPTS the text. If that text then bounces, the
+    // customer must still end up told about EVERY service it named: one email for the members still nameable
+    // (validated by the same day validator through the token); every sibling that text closed and the email did
+    // not cover is armed again to send its own reminder.
+    describe('a merged text that was accepted and then bounced', () => {
+      const bounce = async (date, f) => {
+        guard.mockClear();
+        EmailTemplateLibrary.sendTemplate.mockClear();
+        freezeNow(dayBefore(date));
+        try {
+          await AppointmentReminders.handleUndeliveredSms({ sid: lastSid, status: 'undelivered', errorCode: '30003', to: f.phone });
+        } finally {
+          jest.useRealTimers();
+        }
+        return emailsFor(f.customerId);
+      };
+      const threeServices = (date, armed72 = false) => fixture({ date, armed72, specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+        { start: '11:00', end: '12:00', name: 'Mosquito Control' },
+      ] });
+      const sentFlag = async (id, tier) => (await reminderOf(id))[`reminder_${tier}_sent`];
+      const lastAudit = () => mockPg('messaging_audit_log').where({ provider_message_id: lastSid }).first('metadata', 'purpose');
+
+      test.each(['24h', '72h'])('%s: all named services end up covered by ONE delivered email (merged label, token validated), siblings stay closed', async (tier) => {
+        gateOn();
+        const f = await armedPair(nextDate(), tier === '72h');
+        await runReminders(f.date, tier === '72h' ? threeDaysBefore(f.date) : dayBefore(f.date));
+        expect(providerCalls(f.phone)).toHaveLength(1);
+        expect(Array.isArray((await lastAudit()).metadata.rendered_day_members)).toBe(true); // what links the bounce to the text
+        expect(await sentFlag(f.rows[1].id, tier)).toBe(true); // closed on provider accept
+        const emails = await bounce(f.date, f);
+        expect(emails).toHaveLength(1);
+        expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+        expect(emails[0].payload.service_type).toMatch(/Lawn Care/);
+        expect(tokenCalls(f.rows[0].id).length).toBeGreaterThanOrEqual(2);
+        expect(plainCalls(f.rows[0].id)).toHaveLength(0);
+        expect(await sentFlag(f.rows[1].id, tier)).toBe(true); // informed by the email: not re-armed, no second message
+        expect(providerCalls(f.phone)).toHaveLength(1);
+        // a later scan sends nothing more for either service
+        await runReminders(f.date, tier === '72h' ? threeDaysBefore(f.date) : dayBefore(f.date));
+        expect(providerCalls(f.phone)).toHaveLength(1);
+      });
+
+      test('a sibling cancelled before the bounce is not named and nothing is re-armed for it', async () => {
+        gateOn();
+        const f = await armedPair(nextDate());
+        await runReminders(f.date);
+        await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
+        const emails = await bounce(f.date, f);
+        expect(emails).toHaveLength(1);
+        expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+        expect(emails[0].payload.service_type).not.toMatch(/Lawn Care/);
+        expect(await sentFlag(f.rows[1].id, '24h')).toBe(true); // not re-armed
+      });
+
+      test('three services, one cancelled before the bounce: the email names the two still live; the cancelled one is not re-armed', async () => {
+        gateOn();
+        const f = await threeServices(nextDate());
+        await runReminders(f.date);
+        expect(providerCalls(f.phone)).toHaveLength(1);
+        await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
+        const emails = await bounce(f.date, f);
+        expect(emails).toHaveLength(1);
+        expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+        expect(emails[0].payload.service_type).toMatch(/Mosquito/);
+        expect(emails[0].payload.service_type).not.toMatch(/Lawn Care/);
+        expect(await sentFlag(f.rows[1].id, '24h')).toBe(true);
+        expect(await sentFlag(f.rows[2].id, '24h')).toBe(true);
+      });
+
+      test('the bounce email also fails: every sibling that text closed is armed again and sends its own reminder', async () => {
+        gateOn();
+        const f = await threeServices(nextDate());
+        await runReminders(f.date);
+        expect(providerCalls(f.phone)).toHaveLength(1);
+        mockEmail.failProvider = true;
+        const emails = await bounce(f.date, f);
+        mockEmail.failProvider = false;
+        expect(emails.length).toBeGreaterThanOrEqual(1); // attempted, none delivered
+        expect(await sentFlag(f.rows[1].id, '24h')).toBe(false);
+        expect(await sentFlag(f.rows[2].id, '24h')).toBe(false);
+        expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.reopened')).toHaveLength(1);
+        await runReminders(f.date); // the next scan: the re-armed services text again
+        expect(providerCalls(f.phone)).toHaveLength(2);
+        expect(providerCalls(f.phone)[1][1]).toMatch(/Lawn Care/);
+      });
+
+      test('a day that cannot be read at the bounce: the sender gets its single-visit email and the siblings are armed again', async () => {
+        gateOn();
+        const f = await armedPair(nextDate());
+        await runReminders(f.date);
+        mockDb.failDayRead = true;
+        const failing = { mockRestore: () => { mockDb.failDayRead = false; } };
+        let emails;
+        try {
+          emails = await bounce(f.date, f);
+        } finally {
+          failing.mockRestore();
+        }
+        expect(emails).toHaveLength(1);
+        expect(emails[0].payload.service_type).not.toMatch(/Lawn Care/);
+        expect(await sentFlag(f.rows[1].id, '24h')).toBe(false);
+      });
+
+      test('a sibling whose service is no longer live (reminder row untouched) is not re-armed by the bounce', async () => {
+        gateOn();
+        const f = await armedPair(nextDate());
+        await runReminders(f.date);
+        await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'skipped' });
+        await mockPg('appointment_reminders').where({ scheduled_service_id: f.rows[1].id }).update({ cancelled: false });
+        await bounce(f.date, f);
+        expect(await sentFlag(f.rows[1].id, '24h')).toBe(true);
+      });
+
+      test('a sibling moved to another time since the text is not re-armed by the bounce (the move owns it)', async () => {
+        gateOn();
+        const f = await armedPair(nextDate());
+        await runReminders(f.date);
+        const moved = parseETDateTime(`${f.date}T15:00:00`);
+        await mockPg('appointment_reminders').where({ scheduled_service_id: f.rows[1].id }).update({ appointment_time: moved });
+        await bounce(f.date, f);
+        const row = await reminderOf(f.rows[1].id);
+        expect(row.reminder_24h_sent).toBe(true);
+      });
     });
 
     test('deferred replay: a queued copy carries the token and replays only while the day validator accepts it', async () => {

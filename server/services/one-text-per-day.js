@@ -31,6 +31,9 @@
  *    read its day sends the sender's own single-visit reminder and closes nothing. A live send
  *    that cannot validate its merged day is held and re-rendered on the next scan. A queued copy
  *    that cannot validate its day is retried (bounded); only a day proven changed is dropped.
+ *  - A text that closed its siblings and then bounced (the provider ACCEPTED it, delivery failed)
+ *    leaves the customer told about every service it named anyway: the fallback email names the
+ *    still-valid day, or the siblings that text closed are armed again to send their own.
  *  - Every named member is covered, and only named members are covered: a merged text names only
  *    members that have a live reminder row, and closure covers exactly those named.
  *
@@ -283,6 +286,93 @@ async function closeCoveredReminderTiers(row, tier, delivered = true, snapshot =
   }
 }
 
+// ---- A merged reminder whose accepted text later bounces ---------------------
+
+// Siblings (token members other than the sender) that THIS text closed: each has a "covered"
+// audit row for this tier and this sender, written when the text's delivery closed it, no earlier
+// than the bounced text's own audit row. Unreadable: every sibling (reopening is guarded below).
+async function coveredBySender(senderId, siblings, tier, since) {
+  if (!siblings.length) return [];
+  try {
+    const query = db('audit_log')
+      .where({ action: 'reminder.one_text_per_day.covered' })
+      .whereIn('resource_id', siblings.map((m) => m.id))
+      .whereRaw("metadata->>'tier' = ?", [tier])
+      .whereRaw("metadata->>'covered_by_scheduled_service_id' = ?", [String(senderId)]);
+    if (since) query.where('created_at', '>=', since);
+    const ids = new Set((await query.select('resource_id')).map((r) => String(r.resource_id)));
+    return siblings.filter((m) => ids.has(m.id));
+  } catch {
+    return siblings;
+  }
+}
+
+// The members of a bounced merged text that can still be named in one email: read from the
+// token the text carried (its audit row) and today's day, never from today's schedule alone.
+// Null unless the gate is on, the day is readable, the sender is still a member and at least
+// one more member is, and the live day is EXACTLY those members (the day validator then
+// accepts a token built from them).
+async function bouncedNamedMembers(senderId, token) {
+  try {
+    if (!oneTextPerCustomerDayLive()) return null;
+    const wanted = new Set(token.map(String));
+    const rows = await loadDayRows(db, senderId);
+    const named = rows.filter((m) => wanted.has(`${m.scheduled_service_id}@${memberArrivalMs(m)}`));
+    const sender = named.some((m) => String(m.scheduled_service_id) === String(senderId));
+    return sender && named.length >= 2 && named.length === rows.length ? named : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a bounced merged reminder owes the customer. `token` is the rendered-day token stored on
+ * the text's audit row (`id@arrival-ms` per member the text named). Returns
+ *   { covered }  the siblings this text closed, each { id, ms } (to be reopened unless informed)
+ *   { named }    the members still nameable in one email now (rows from loadDayRows), or null
+ */
+async function bouncedDay({ senderId, token, tier, since }) {
+  const siblings = token.map((t) => String(t).split('@'))
+    .map(([id, ms]) => ({ id, ms: Number(ms) }))
+    .filter((m) => m.id !== String(senderId) && Number.isFinite(m.ms));
+  return {
+    covered: await coveredBySender(senderId, siblings, tier, since),
+    named: await bouncedNamedMembers(senderId, token),
+  };
+}
+
+// Arm the tier again on members whose reminder was closed by a text that did not reach the
+// customer, so each sends its own reminder. Only a row that is still live, still on the time
+// the text quoted for it, and still closed is touched; a cancelled or moved service is not.
+async function reopenCoveredTiers(members, tier) {
+  const columns = REMINDER_TIER_COLUMNS[tier];
+  if (!columns || !members.length) return 0;
+  const [flag, flagAt] = columns[columns.length - 1];
+  let reopened = 0;
+  for (const m of members) {
+    try {
+      const n = await db('appointment_reminders')
+        .where({ scheduled_service_id: m.id, cancelled: false, [flag]: true })
+        .where('appointment_time', new Date(m.ms))
+        .whereIn('scheduled_service_id', db('scheduled_services').whereIn('status', SENDABLE_STATUSES).select('id'))
+        .update({ [flag]: false, [flagAt]: null });
+      if (n > 0) {
+        reopened += n;
+        await auditLog.recordAuditEvent({
+          actor_type: 'system',
+          action: 'reminder.one_text_per_day.reopened',
+          resource_type: 'scheduled_service',
+          resource_id: m.id,
+          metadata: { tier, reason: 'merged_text_not_delivered' },
+        });
+      }
+    } catch (err) {
+      logger.error(`[one-text-per-day] ${tier} reminder for ${m.id} could not be re-armed after a bounced merged text: ${err.message}`);
+    }
+  }
+  return reopened;
+}
+
 // ---- Tracker texts (en route, arrived) -------------------------------------
 
 async function stampTrackGuard(kind, fence) {
@@ -416,5 +506,7 @@ module.exports = {
   dayArrivalCandidates,
   recheckMergedDay,
   closeCoveredReminderTiers,
+  bouncedDay,
+  reopenCoveredTiers,
   sendTrackTextOnce,
 };
