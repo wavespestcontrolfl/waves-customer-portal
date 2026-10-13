@@ -606,7 +606,7 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     expect(PEST_WRITER_ADAPTER).toContain('With no EXPECTATIONS lines there is no recorded outcome');
     expect(PEST_WRITER_ADAPTER).not.toContain('what the recorded work is for');
     // A sweep is described with the recorded places only: no fixed list to copy.
-    expect(PEST_WRITER_ADAPTER).toContain('only the places the record names');
+    expect(PEST_WRITER_ADAPTER).toContain('add none');
     expect(PEST_WRITER_ADAPTER).not.toMatch(/window frames|door frames/);
     // A zero rating with no checked place is left out, in both places that speak of it.
     const zero = PROMPT_REWRITES.filter(([from]) => /a 0 means no visible activity|A recorded zero means/.test(from));
@@ -649,5 +649,127 @@ describe('pest writer adapter, rejection detail and repair note', () => {
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'malformed_shape', detail })).not.toContain('tripped');
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: 'banned:gone,cleared' })).toContain('("gone", "cleared")');
     expect(rejectedDraftRepairNote({ draft: 'D', rejection: null })).toBe('');
+  });
+});
+
+// Owner 2026-10-12 ("do whatever you recommend", page KaGtESkh): the writer
+// knows what each treatment is for.
+describe('product facts for the pest writer', () => {
+  const { buildWriterRecords } = require('../services/service-report/report-writer-records');
+  const { buildWhatToExpect } = require('../services/service-report/pest-report-expectations');
+  const { findReportProductCopyEntry, REPORT_PRODUCT_COPY } = require('../config/report-product-copy');
+  const { PEST_WRITER_ADAPTER, writerRulesRejection: screen } = require('../services/service-report/report-writer-rules');
+  const app = (name, role, method, area, targets) => ({
+    name, role, method, methodLabel: method.replace(/_/g, ' '), applicationArea: area, targets,
+  });
+  const facts = (applications, line = 'pest') => buildWriterRecords({
+    serviceYmd: '2026-10-12', line, serviceKind: 'recurring', applications,
+  });
+  const block = (records) => records.sections.find((section) => section.startsWith('PRODUCT FACTS')) || null;
+
+  test('the reviewed main-pest lists', () => {
+    const pests = (name) => findReportProductCopyEntry({ name }).mainPests;
+    expect(pests('Taurus SC')).toEqual(['ants']);
+    expect(pests('Atticus Talak')).toEqual(['spiders', 'crawling insects']);
+    expect(pests('Alpine WSG')).toEqual(['ants', 'roaches']);
+    expect(pests('Gentrol IGR')).toEqual(['roaches']);
+    expect(pests('Advion Evolution Cockroach Gel Bait')).toEqual(['roaches']);
+    // Only the five reviewed products carry a list.
+    expect(REPORT_PRODUCT_COPY.filter((entry) => entry.mainPests)).toHaveLength(5);
+  });
+
+  test('an ant visit: main pests and the floored label count, by job, never a name', () => {
+    const text = block(facts([
+      app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', ['ants']),
+      app('Atticus Talak 7.9 F', 'insect-control application', 'perimeter_spray', 'Outside', ['ants']),
+      app('LESCO 90/10 Nonionic Surfactant', 'adjuvant', 'perimeter_spray', 'Outside', []),
+    ]));
+    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants.');
+    expect(text).toContain('mainly used for spiders and crawling insects; tagged today for ants.');
+    expect(text).not.toMatch(/taurus|talak|lesco|adjuvant/i);
+    // The label count stays on the card (Codex r7).
+    expect(text).not.toMatch(/labeled for|\d/);
+    expect(OWNER_RULES).not.toContain('labeled for');
+  });
+
+  test('a roach visit: each entry carries its own tags; the label duration stays on the card, never with the writer', () => {
+    const records = facts([
+      app('Alpine WSG', 'insect-control application', 'crack_and_crevice', 'Kitchen', ['roaches']),
+      app('Gentrol IGR', 'insect growth regulator', 'crack_and_crevice', 'Kitchen', ['roaches']),
+      app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', ['ants']),
+    ]);
+    const text = block(records);
+    // Alpine in the kitchen is tagged for roaches only: never the reason for ants found outside (Codex r3).
+    expect(text).toContain('- insect-control application, crack and crevice, Kitchen: mainly used for ants and roaches; tagged today for roaches.');
+    expect(text).toContain('- insect growth regulator, crack and crevice, Kitchen: mainly used for roaches; tagged today for roaches.');
+    expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants.');
+    expect(PEST_WRITER_ADAPTER).toContain("use that entry's own tags");
+    // The duration: on the card, not with the writer, and its words are no allowance (Codex r1 to r3).
+    expect(records.sections.join('\n')).not.toMatch(/4 months|LABEL DURATION/);
+    expect(JSON.stringify(records.allowedPhrases)).not.toContain('4 months');
+    expect(screen('WHAT TO EXPECT\nThe growth regulator keeps working for up to 4 months.', records)).toBe('timeframe');
+    expect(OWNER_RULES).not.toContain('LABEL DURATION');
+  });
+
+  test('an untagged application says so', () => {
+    expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', [])])))
+      .toContain('mainly used for ants; not tagged today (its reason is not recorded here).');
+    // No tag is not proof of routine coverage (Codex r8).
+    expect(PEST_WRITER_ADAPTER).toContain('An entry that is not tagged has no recorded reason');
+    expect(PEST_WRITER_ADAPTER).not.toContain('routine coverage');
+  });
+
+  test('no reviewed product, or a lawn visit: no block', () => {
+    expect(block(facts([app('Demand CS', 'insect-control application', 'perimeter_spray', 'Outside', ['ants'])]))).toBeNull();
+    expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', ['ants'])], 'lawn'))).toBeNull();
+  });
+
+  test('Alpine on a roach job states no timeframe; on ants, or beside another non-repellent, it keeps the line', () => {
+    const line = (products, plain) => buildWhatToExpect({ products, plain }).lines[0];
+    const alpine = (targets) => ({ name: 'Alpine WSG', method: 'crack_and_crevice', applicationArea: 'Kitchen', targets });
+    for (const plain of [true, false]) {
+      expect(line([alpine(['roaches'])], plain)).not.toMatch(/few days|couple of weeks/);
+      expect(line([alpine(['roaches'])], plain)).toMatch(/carry it back to their harborage\.$/);
+      expect(line([alpine(['ants'])], plain)).toContain('then declines over the next couple of weeks.');
+      // Legacy target keys are ant tags too (Codex r12).
+      expect(line([alpine(['ghost_ant'])], plain)).toContain('couple of weeks');
+      expect(line([alpine(['ants_general'])], plain)).toContain('couple of weeks');
+      expect(line([alpine(['german_roach'])], plain)).not.toMatch(/couple of weeks/);
+      // Untagged Alpine fails closed (Codex r7).
+      expect(line([alpine([])], plain)).not.toMatch(/few days|couple of weeks/);
+      expect(line([alpine(undefined)], plain)).not.toMatch(/few days|couple of weeks/);
+      expect(line([alpine(['ants', 'roaches'])], plain)).toContain('couple of weeks');
+      expect(line([alpine(['roaches']), { name: 'Taurus SC', method: 'spot_treatment', applicationArea: 'Garage', targets: ['roaches'] }], plain)).toContain('couple of weeks');
+    }
+  });
+
+  test('Alpine on a roach job gives no reach-out date: no line states a window (Codex r1)', () => {
+    const records = (applications) => buildWriterRecords({ serviceYmd: '2026-10-12', line: 'pest', serviceKind: 're_service', applications });
+    const alpine = (targets) => app('Alpine WSG', 'insect-control application', 'crack_and_crevice', 'Kitchen', targets);
+    expect(records([alpine(['roaches'])]).allowedDates).toEqual([]);
+    expect(records([alpine(['roaches'])]).sections.join('\n')).not.toContain('REACH-OUT DATE');
+    expect(records([alpine([])]).allowedDates).toEqual([]);
+    expect(records([alpine(['ants'])]).allowedDates).toHaveLength(2);
+    // The roach gel beside it still states its own window.
+    expect(records([alpine(['roaches']), app('Advion Evolution Cockroach Gel Bait', 'bait application', 'bait_placement', 'Kitchen', ['roaches'])]).allowedDates).toHaveLength(2);
+  });
+
+  test('no new word screen: the owner phrase screen is as on main (Codex r6 to r11)', () => {
+    // A "protected" verdict screen was tried for six rounds; every form either
+    // missed a wording or refused a placement. The adapter asks for facts instead.
+    expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
+    expect(screen('WHAT WE FOUND\nRecurring ant activity was noted during this visit.')).toBeNull();
+    expect(PEST_WRITER_ADAPTER).toContain('Reassure with recorded facts:');
+    expect(PEST_WRITER_ADAPTER).not.toMatch(/protected|all set|part of a plan/);
+  });
+
+  test('the customer card still gets the Gentrol duration', () => {
+    const card = buildWhatToExpect({ products: [{ name: 'Gentrol IGR', targets: ['roaches'] }] }).lines[0];
+    expect(card).toContain('Its label gives up to 4 months of continuous protection.');
+  });
+
+  test('the adapter tells the writer how to use the facts, reassure, and name a sweep', () => {
+    expect(PEST_WRITER_ADAPTER).toContain('PRODUCT FACTS are how you know what each treatment is for');
+    expect(PEST_WRITER_ADAPTER).toContain('when the TECHNICIAN NOTE names the places swept, name only those places');
   });
 });
