@@ -113,6 +113,22 @@ describe('checkMove', () => {
     expect(run.proofreader.notices.size).toBe(0);
   });
 
+  test('an allow stands only when the record read again after the answer is the one the model saw', async () => {
+    const run = runOf();
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    const newer = { ...RECORD, entries: [...RECORD.entries, { id: 'E2', channel: 'text', from: 'customer', at: '2026-10-12T04:11:00-04:00', text: 'Not Thursday please.' }] };
+    proofreader.buildCustomerRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce(newer);
+    const got = await check(run, proofreader);
+    expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { verdict: 'unknown', why: 'record_changed' } });
+    // Nobody has judged the new words yet: the next run asks, and no notice is raised now.
+    expect(run.proofreader.notices.size).toBe(0);
+    // The same record on the second read: the allow stands (two reads, one model call).
+    const same = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    expect(await check(runOf(), same)).toMatchObject({ allowed: true });
+    expect(same.buildCustomerRecord).toHaveBeenCalledTimes(2);
+    expect(same.proofreadMove).toHaveBeenCalledTimes(1);
+  });
+
   test('hold: the visit stays, no notice, and the quote never reaches the audit', async () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'hold', why: 'quoted_statement', entry_id: 'E1', quote: 'never come on Thursdays', reason: 'Thursday breaks it.' }));

@@ -20,8 +20,8 @@
  * later run that is still unsure about the same visit writes nothing, a
  * notice a person marked done included. It is raised for an "unknown" a
  * person can settle from the record (the model was unsure, or part of the
- * record could not be read). A failed model call raises nothing: the next
- * run asks again. The lane shares the auto-dispatch ring allowance of 24
+ * record could not be read). A failed model call, or a record that changed
+ * while the model read it, raises nothing: the next run asks again. The lane shares the auto-dispatch ring allowance of 24
  * hours (audit.ringsLeft), soonest date first. A notice is for the placement
  * the visit had at the check (date, arrival time, technician): it is not
  * raised when the visit left that placement before the run's end, and it
@@ -160,7 +160,7 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     // record or a stop that cannot be read, or a record too long to send,
     // asks nobody (Codex #6313 r2).
     if (!record.tooLong) state.calls += 1;
-    const answer = await proofreader.proofreadMove({ move, record });
+    const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
     const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
     return { answer, move, entry: entry || null, stop: planned.stop };
   } catch (err) {
@@ -168,6 +168,24 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
     return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null, stop: null };
   }
+}
+
+// What the model was shown, as one comparable value.
+function recordPrint(record) {
+  const hash = require('crypto').createHash('sha256');
+  for (const row of record.entries) hash.update(`${row.channel}|${row.from}|${row.at}|${row.text}\n`);
+  return `${record.entries.length}:${record.unread.length}:${hash.digest('hex')}`;
+}
+
+// A model call takes up to two minutes. An allow stands only when the record
+// read again after the answer is the record the model was shown: a text, a
+// call or a note that landed meanwhile makes it "unknown", and the next run
+// reads the new words (Codex #6313 r4). No notice: nobody has judged them yet.
+async function recordStillAsRead(answer, record, { service, conn, proofreader }) {
+  if (answer.verdict !== 'allow') return answer;
+  const again = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
+  if (recordPrint(again) === recordPrint(record)) return answer;
+  return { ...answer, verdict: 'unknown', why: 'record_changed', model_verdict: 'allow' };
 }
 
 function collectNotice(state, service, { answer, move, entry, stop }) {
