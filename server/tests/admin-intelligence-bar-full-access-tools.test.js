@@ -160,20 +160,25 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
   const discoverResult = requests => JSON.parse(requests[1].messages[requests[1].messages.length - 1].content
     .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc').content);
 
-  test('discover_capabilities on the search path still reports an owner-workflow action, and adds no tool', async () => {
+  test('discover_capabilities on the search path still reports an owner-workflow action, which never becomes a tool', async () => {
     const { requests } = await ask('owner', 'dashboard', discoverTurns('request instant payout', 'banking'));
     const payout = discoverResult(requests).capabilities.find(c => c.id === 'request_instant_payout');
     expect(payout).toMatchObject({ approval: 'confirmed_endpoint', availability: 'requires_existing_owner_workflow' });
-    expect(requests[1].tools).toEqual(requests[0].tools);
+    // The workflow action itself never becomes a tool; other tools the same
+    // search found are loaded in place, so the names do not change.
+    expect(names(requests[1].tools)).toEqual(names(requests[0].tools));
+    expect(names(requests[1].tools)).not.toContain('request_instant_payout');
   });
 
-  test('discover_capabilities returning an already-deferred tool leaves one deferred definition and the same tools', async () => {
+  test('discover_capabilities finding a deferred tool loads its schema: one definition, no longer deferred', async () => {
     const { requests } = await ask('owner', 'dashboard', discoverTurns('review stats'));
     expect(discoverResult(requests).capabilities.map(c => c.id)).toContain('get_review_stats');
     const copies = requests[1].tools.filter(t => t.name === 'get_review_stats');
     expect(copies).toHaveLength(1);
-    expect(copies[0].defer_loading).toBe(true);
-    expect(requests[1].tools).toEqual(requests[0].tools);
+    expect(copies[0].defer_loading).toBeUndefined();
+    expect(copies[0].input_schema).toBeDefined();
+    expect(requests[0].tools.find(t => t.name === 'get_review_stats').defer_loading).toBe(true);
+    expect(names(requests[1].tools)).toEqual(names(requests[0].tools));
     expect(new Set(names(requests[1].tools)).size).toBe(requests[1].tools.length);
   });
 

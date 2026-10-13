@@ -150,16 +150,16 @@ describe('stripServerSearchBlocks', () => {
 });
 
 describe('mergeDiscoveredTools', () => {
-  test('only names not yet present are appended; a deferred tool gets no second copy', () => {
-    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
+  test('a found deferred tool is loaded in place; a new one is appended; names stay unique', () => {
+    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }, { name: 'd', defer_loading: true }];
     const out = ToolSearch.mergeDiscoveredTools(tools, [{ name: 'b' }, { name: 'c' }, { name: 'c' }]);
-    expect(out).toEqual([{ name: 'a' }, { name: 'b', defer_loading: true }, { name: 'c' }]);
-    expect(tools).toEqual([{ name: 'a' }, { name: 'b', defer_loading: true }]);
+    expect(out).toEqual([{ name: 'a' }, { name: 'b' }, { name: 'd', defer_loading: true }, { name: 'c' }]);
+    expect(tools).toEqual([{ name: 'a' }, { name: 'b', defer_loading: true }, { name: 'd', defer_loading: true }]);
   });
 
-  test('nothing new: the same array comes back', () => {
+  test('nothing to load: the same array comes back', () => {
     const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
-    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'b' }])).toBe(tools);
+    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'a' }])).toBe(tools);
     expect(ToolSearch.mergeDiscoveredTools(tools, [])).toBe(tools);
   });
 });

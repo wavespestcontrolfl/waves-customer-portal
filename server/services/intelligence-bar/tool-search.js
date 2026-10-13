@@ -54,17 +54,25 @@ function finishesTurn(response, toolUses) {
 }
 
 // discover_capabilities stays eager on the search path (the route to actions
-// that are not callable tools, such as owner-workflow ones). When it returns a
-// tool that is already in `tools` (a deferred definition), that tool must NOT
-// get a second, non-deferred copy: a tool name may appear once. Only names not
-// yet present are appended.
+// that are not callable tools, such as owner-workflow ones). A tool it finds
+// must be callable on the next round, so its schema has to be loaded: a
+// deferred definition stays hidden from the model until a search references
+// it. A found tool that is deferred is therefore REPLACED in place by its
+// loaded definition; a found tool that is not in `tools` yet is appended. A
+// tool name appears once either way.
 function mergeDiscoveredTools(tools, definitions) {
+  const found = new Map(definitions.map(definition => [definition.name, definition]));
   const present = new Set(tools.map(tool => tool.name));
-  const added = [];
-  for (const definition of definitions) {
-    if (!present.has(definition.name)) { present.add(definition.name); added.push(definition); }
+  let changed = false;
+  const merged = tools.map((tool) => {
+    if (tool.defer_loading !== true || !found.has(tool.name)) return tool;
+    changed = true;
+    return found.get(tool.name);
+  });
+  for (const [name, definition] of found) {
+    if (!present.has(name)) { merged.push(definition); changed = true; }
   }
-  return added.length ? [...tools, ...added] : tools;
+  return changed ? merged : tools;
 }
 
 // The messages after a round: the assistant content unchanged, then the
