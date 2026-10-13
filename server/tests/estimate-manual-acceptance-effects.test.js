@@ -875,6 +875,16 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     expect(await lineNames(feeWorld(solo, { membershipFee: 99, items: [roach, waived] }))).toEqual([['German Roach Cleanout', 350]]);
     expect(await lineNames(feeWorld(solo, { membershipFee: 99, items: [roach], specItems: [waived] }))).toEqual([['German Roach Cleanout', 350]]);
   });
+  test('round 46: a blank higher alias (manualFinalOneTime "") never hides the accepted net below it', async () => {
+    const row = { service: 'wasp', name: 'Wasp Nest Removal', manualFinalOneTime: '', priceAfterDiscount: 80, price: 100 };
+    expect(await lineNames(feeWorld(solo, { items: [row] }))).toEqual([['Wasp Nest Removal', 80]]);
+    expect(await lineNames(rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', manualFinalOneTime: '', priceAfterDiscount: 80, price: 100, billingCadence: 'one_time' }]))).toEqual([['Wasp Nest Removal', 80]]);
+  });
+  test('round 46: an explicit setup row under one_time.items or oneTimeItems (no cached fee) is the fee line', async () => {
+    const setupRow = { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 };
+    expect(await lineNames(feeWorld(solo, { items: [roach] }, { one_time: { items: [setupRow] } }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 99]]);
+    expect(await lineNames(feeWorld(solo, { items: [roach] }, { oneTimeItems: [setupRow] }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 99]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

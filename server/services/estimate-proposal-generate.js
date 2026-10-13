@@ -764,11 +764,19 @@ const rawIdentity = (line) => [
 // and totalAfterDiscount are the same sold-net aliases the area add-on
 // limits read (SOLD_AMOUNT_FIELDS), so a row persisted gross with that net
 // drafts the net (codex #6113 r21 / r26).
-const mappedResolvedAmount = (item) => num(item.manualFinalOneTime
-  ?? item.priceAfterDiscount ?? item.amountAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
-  ?? item.installation?.price);
-const rawResolvedAmount = (line) => num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime
-  ?? line.priceAfterDiscount ?? line.amountAfterDiscount ?? line.totalAfterDiscount ?? line.price ?? line.total ?? line.installation?.price);
+// The first alias that holds a finite number: a blank placeholder in a
+// higher alias (`manualFinalOneTime: ''`) never hides the accepted net
+// below it (codex #6113 r46).
+function firstFiniteAlias(row, aliases, fallback) {
+  for (const key of aliases) {
+    const n = row[key] === '' ? null : num(row[key]);
+    if (n != null && Number.isFinite(n)) return n;
+  }
+  const f = num(fallback);
+  return f != null && Number.isFinite(f) ? f : null;
+}
+const mappedResolvedAmount = (item) => firstFiniteAlias(item, [...MAPPED_NET_ALIASES, 'price', 'amount', 'total'], item.installation?.price);
+const rawResolvedAmount = (line) => firstFiniteAlias(line, [...RAW_NET_ALIASES, 'price', 'total'], line.installation?.price);
 // Raw engine rows carry their customer-facing copy under label /
 // display.name (priceGermanRoach emits `label`, priceFlea nests
 // display.name) — falling back straight to the internal service key
@@ -1355,6 +1363,8 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
 }
 
 module.exports = {
+  mappedSubContainers,
+  rawRowContainers,
   explicitZeroNet,
   explicitZeroNetRaw,
   rawRowHasRecurringEvidence,

@@ -253,10 +253,14 @@ function membershipFeeLine(data, { applies, explicitFee }) {
 // items alike), as its distinct sold amounts ascending; the row is never
 // work, so it is read here and kept out of the extractor (codex #6113 r45).
 function explicitSetupFees(data) {
-  const rows = oneTimeContainers(data).flatMap((c) => [
-    ...(Array.isArray(c.oneTime?.items) ? c.oneTime.items : []), ...(Array.isArray(c.oneTime?.specItems) ? c.oneTime.specItems : []),
-    ...(Array.isArray(c.specItems) ? c.specItems : []), ...(Array.isArray(c.lineItems) ? c.lineItems : []),
-  ]).filter(isSetupFeeRow);
+  // The extractor's own container readers: every mapped shape it reads
+  // (oneTime.items / specItems, nested results, result.specItems,
+  // one_time.items, oneTimeItems) and every raw lineItems list, so a setup
+  // row it skips as non-work is never one this misses (codex #6113 r46).
+  const { mappedSubContainers, rawRowContainers } = require('./estimate-proposal-generate');
+  const containers = rawRowContainers(data);
+  const docs = [data, ...containers.filter((c) => c !== data).map((c) => ({ result: c }))];
+  const rows = [...docs.flatMap(mappedSubContainers).flat(), ...containers.flatMap((c) => (Array.isArray(c.lineItems) ? c.lineItems : []))].filter(isSetupFeeRow);
   const amounts = rows.map((r) => (r.billingCadence || r.oneTimePrice != null ? rawLineAmount(r) : lineAmount(r))).filter((n) => n != null);
   return [...new Set(amounts.map(cents))].sort((a, b) => a - b).map((c) => c / 100);
 }
