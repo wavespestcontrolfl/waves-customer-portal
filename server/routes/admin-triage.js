@@ -249,6 +249,27 @@ function lineNotHeldError() {
   return err;
 }
 
+// True when this call once held `key` (a hold row, or a card binding for it) and holds it no longer.
+async function lineReleasedMeanwhile(trx, callLogId, key) {
+  const Holds = require('../services/disclaimed-number-holds');
+  const entry = (await Holds.callLineRows(trx, callLogId)).find((row) => row.key === key);
+  if (entry) return !entry.active;
+  const bound = await trx.raw(
+    `SELECT 1 FROM triage_items t, jsonb_array_elements(COALESCE(t.payload->'hold_bindings', '[]'::jsonb)) b
+      WHERE t.call_log_id = ? AND t.reason_code = 'text_number_differs' AND b->>'line_e164' = ? LIMIT 1`,
+    [callLogId, key],
+  );
+  return (bound?.rows || []).length > 0;
+}
+
+// The named line is already released: no lock, no propagation; the card still resolves.
+function alreadyReleasedResult(key) {
+  return {
+    cleared: { visits: 0, numbers: 0, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER },
+    lines: [], blocked: [], alreadyReleased: [key],
+  };
+}
+
 // The office verified the LINE, not one call: a shared office or relay number holds one row per call that
 // said it cannot get texts, and the send boundary blocks on any of them. Lift every no-text hold on each
 // released line (never a plain disclaimed-number hold: its own card releases it) and the visit-level holds
@@ -263,7 +284,14 @@ async function releaseNoTextLines(trx, callLogId, assignedTo, lineE164) {
   let lines = [...bound];
   if (lineE164 != null) {
     const key = Holds.holdPhoneKey(lineE164);
-    if (!key || !bound.has(key)) throw lineNotHeldError();
+    if (!key) throw lineNotHeldError();
+    if (!bound.has(key)) {
+      // A line this call held and that is no longer active was released meanwhile (say by another call's release of
+      // the shared line, which commits while this transition waits): the named release is already done, so the
+      // card resolves normally. A line the call never held, or an ownership-only hold it still has, is a 409.
+      if (await lineReleasedMeanwhile(trx, callLogId, key)) return alreadyReleasedResult(key);
+      throw lineNotHeldError();
+    }
     lines = [key];
   }
   // Lock order step 2: no hold row is read-for-update or written before the phone locks, so two releases
@@ -295,13 +323,18 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
   let cleared;
   let lines = null;
   let blockedLines = [];
+  let alreadyReleased = null;
   if (release) {
-    ({ cleared, lines, blocked: blockedLines } = await releaseNoTextLines(trx, item.call_log_id, assignedTo, lineE164));
+    ({ cleared, lines, blocked: blockedLines, alreadyReleased } = await releaseNoTextLines(trx, item.call_log_id, assignedTo, lineE164));
   } else {
     cleared = await clearCallbackNumberHold(trx, item.call_log_id, { clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER });
   }
   const reply = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
   if (lines) reply.lines_released = lines;
+  if (alreadyReleased) {
+    reply.release = 'ok';
+    reply.already_released = alreadyReleased;
+  }
   if (blockedLines.length) {
     // Another call on the same line has an open "not my number" card: that call's hold stays, so the line
     // stays blocked. Never report "texts will resume" over it.
@@ -906,6 +939,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // items — inside the same locked transaction (the interleaved-count
     // race is what the advisory lock exists to remove).
     if (item.call_log_id) {
+      // Lock the call_log row FIRST, in its own statement: the count below then takes a fresh snapshot, so it sees a
+      // sibling resolution (a cross-call release closes cards without this call lock) that committed while we waited.
+      await trx.raw('SELECT id FROM call_log WHERE id = ? FOR UPDATE', [item.call_log_id]);
       const stillOpen = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         .whereIn('status', OPEN_STATES)

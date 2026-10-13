@@ -141,8 +141,14 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   call <id>`) unless it is still bound to another active line of that call, and `call_log.review_status` follows. Both writes pick
   their rows with `FOR UPDATE SKIP LOCKED`: a transition locks its own card row first and the line lock after, so waiting
   here on a card row a sibling's transition holds would deadlock against it. A locked card is being transitioned by its
-  owner right now; that owner's release then finds its hold already cleared (`lines_released: []`) and resolves its own
-  card normally. A later
+  owner right now; that owner's release then finds its hold already cleared and resolves its own card normally. If that
+  release names the line (`line_e164`, the panel), a line this call held and no longer holds is treated as already
+  released: no lock, no propagation, reply `release: 'ok'`, `lines_released: []`, `already_released: [line]`, and the
+  card resolves. Only a line the call never held (or still holds as ownership-only) is a 409 `NO_TEXT_LINE_NOT_HELD`.
+  `call_log.review_status` for the sibling is recomputed by locking the `call_log` row first and running the UPDATE as a
+  new statement (`recomputeCallReviewStatus`): under READ COMMITTED a single UPDATE with a subquery counts cards from the
+  snapshot taken before it waited for the row lock, so two concurrent resolutions could both write `open`; the same lock
+  is taken by the transition's own review-status sync. A later
   ownership-only re-arm of that call is then neither listed nor cleared by that card. **Access:** `GET /held-lines` and a
   resolve that names a line (`line_e164`) are admin-only (403 for technicians); the inbox-card release with no line
   keeps its existing reach. The panel shows

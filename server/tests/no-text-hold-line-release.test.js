@@ -167,12 +167,14 @@ describe('clearNoTextHoldsForPhone', () => {
     });
     await Holds.clearNoTextHoldsForPhone({ phoneE164: '+19415551234', exceptCallLogId: 'call-a', clearedBy: 'tech-1', reason: 'verified_same_number', conn: { raw } });
     const sqls = raw.mock.calls.map((c) => c[0]);
-    expect(sqls).toHaveLength(4);
+    expect(sqls).toHaveLength(5);
     expect(sqls[1]).toContain("jsonb_build_object('hold_bindings'"); // bind first
     expect(sqls[1]).toContain("t.payload->'hold_bindings' IS NULL");
     expect(sqls[2]).toContain("SET status = 'resolved'"); // then close
     expect(sqls[2]).toContain('NOT EXISTS'); // unless still bound to another active line of the call
-    expect(sqls[3]).toContain('UPDATE call_log c');
+    expect(sqls[3]).toContain('FROM call_log WHERE id IN'); // lock the call_log rows first ...
+    expect(sqls[3]).toContain('FOR UPDATE');
+    expect(sqls[4]).toContain('UPDATE call_log c'); // ... then recompute as a NEW statement (fresh snapshot)
     // a card whose row another transaction holds is skipped, never waited on (deadlock with that owner's own release)
     expect(sqls[1]).toContain('FOR UPDATE OF t SKIP LOCKED');
     expect(sqls[2]).toContain('FOR UPDATE SKIP LOCKED');

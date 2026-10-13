@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
 import HeldLinesPanel, { HeldLinesChip, groupHeldLines, heldLineItem, useHeldLines } from './HeldLinesPanel';
@@ -15,12 +15,12 @@ const line = { hold_id: 'h1', phone_e164: '+19415550100', held_at: '2026-10-01T1
   card_updated_at: '2026-10-02T10:00:00.000Z', blocked_by_ownership_card: false };
 
 // The page's wiring in miniature: the chip, the panel, and the callbacks the page passes.
-function Harness({ onRelease = () => {}, onError = () => {}, actioning = null }) {
+function Harness({ onRelease = () => {}, onError = () => {}, actioning = null, isAdmin = true }) {
   const held = useHeldLines({ onError });
   return (
     <>
-      <HeldLinesChip held={held} />
-      <HeldLinesPanel held={held} triageMode actioning={actioning} onRelease={onRelease} />
+      <HeldLinesChip held={held} isAdmin={isAdmin} />
+      <HeldLinesPanel held={held} isAdmin={isAdmin} triageMode actioning={actioning} onRelease={onRelease} />
     </>
   );
 }
@@ -54,12 +54,34 @@ describe('useHeldLines + HeldLinesPanel', () => {
 
   it('shows nothing when closed or outside triage mode, and the empty state when no line is held', async () => {
     adminFetch.mockResolvedValue({ lines: [] });
-    const { rerender } = render(<HeldLinesPanel held={{ open: true, lines: [], loading: false }} triageMode={false} onRelease={() => {}} />);
+    const { rerender } = render(<HeldLinesPanel held={{ open: true, lines: [], loading: false }} isAdmin triageMode={false} onRelease={() => {}} />);
     expect(screen.queryByText('Held lines')).toBeNull();
-    rerender(<HeldLinesPanel held={{ open: false, lines: [], loading: false }} triageMode onRelease={() => {}} />);
+    rerender(<HeldLinesPanel held={{ open: false, lines: [], loading: false }} isAdmin triageMode onRelease={() => {}} />);
     expect(screen.queryByText('Held lines')).toBeNull();
-    rerender(<HeldLinesPanel held={{ open: true, lines: [], loading: false }} triageMode onRelease={() => {}} />);
+    rerender(<HeldLinesPanel held={{ open: true, lines: [], loading: false }} isAdmin triageMode onRelease={() => {}} />);
     expect(screen.getByText('No held lines.')).toBeInTheDocument();
+  });
+
+  it('a non-admin gets neither the chip nor the panel, even with the panel state open', async () => {
+    adminFetch.mockResolvedValue({ lines: [line] });
+    const { rerender } = render(<Harness isAdmin={false} />);
+    expect(screen.queryByRole('button', { name: /held lines/i })).toBeNull();
+    rerender(<HeldLinesPanel held={{ open: true, lines: [line], loading: false }} isAdmin={false} triageMode onRelease={() => {}} />);
+    expect(screen.queryByText('Held lines')).toBeNull();
+    expect(adminFetch).not.toHaveBeenCalled();
+  });
+
+  it('refresh() reloads only while the panel is open', async () => {
+    adminFetch.mockResolvedValue({ lines: [line] });
+    let held;
+    function Probe() { held = useHeldLines({ onError: () => {} }); return <HeldLinesChip held={held} isAdmin />; }
+    render(<Probe />);
+    act(() => held.refresh());
+    expect(adminFetch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /held lines/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(1));
+    act(() => held.refresh());
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
   });
 
   it('the row button hands the page a pseudo card that names the line', async () => {

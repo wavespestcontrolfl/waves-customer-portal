@@ -890,10 +890,19 @@ describe('line_e164: release the selected line, across calls', () => {
     expect(out.json.code).toBe('NO_TEXT_LINE_NOT_HELD');
     expect(active(fx.tables)).toEqual(['c1x', 'c1y', 'c2x', 'c3y']);
     expect(fx.events).toEqual([]);
-    // a line the call held but someone already released is not "held" either
-    fx.tables.disclaimed_number_holds.find((h) => h.id === 'c1x').cleared_at = new Date();
-    expect((await release({ line_e164: X })).json.code).toBe('NO_TEXT_LINE_NOT_HELD');
     expect((await release({ line_e164: 'not a number' })).status).toBe(409);
+  });
+
+  test('a line this call held and that was released meanwhile is already released: 200, no lock, no propagation, the card resolves (r10)', async () => {
+    const fx = multiLine({ triage_items: [text(CARD_ID, CALL_ID, { status: 'open' }), text('card-2', 'call-2'), text('card-3', 'call-3')] });
+    fx.tables.disclaimed_number_holds.find((h) => h.id === 'c1x').cleared_at = new Date(); // another call's release cleared it
+    const before = active(fx.tables);
+    const out = await release({ line_e164: X });
+    expect(out.status).toBe(200);
+    expect(out.json.callback_number).toMatchObject({ release: 'ok', lines_released: [], already_released: [X] });
+    expect(fx.events.filter((e) => e.startsWith('lock:') || e.startsWith('clear:'))).toEqual([]);
+    expect(active(fx.tables)).toEqual(before); // nothing else cleared
+    expect(fx.tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('resolved');
   });
 
   test('an open card with a line this call does not hold is refused the same way', async () => {

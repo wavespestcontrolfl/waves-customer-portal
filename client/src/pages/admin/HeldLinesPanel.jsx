@@ -72,10 +72,15 @@ export function useHeldLines({ onError }) {
     if (!open) reload();
   };
 
-  return { open, lines, loading, toggle, reload };
+  // Reloads only while the panel is open: callers that change a card or a hold just call this.
+  const refresh = () => { if (open) reload(); };
+
+  return { open, lines, loading, toggle, reload, refresh };
 }
 
-export function HeldLinesChip({ held }) {
+// Admin only: the route lists held numbers with names and is closed to technicians, so they are not offered it.
+export function HeldLinesChip({ held, isAdmin }) {
+  if (!isAdmin) return null;
   return (
     <button
       type="button"
@@ -118,9 +123,9 @@ function HeldLineRow({ group, actioning, onRelease }) {
   );
 }
 
-// Shows only while open, and only in the page's triage mode (the auto-routed mode has no holds to show).
-export default function HeldLinesPanel({ held, triageMode, actioning, onRelease }) {
-  if (!held.open || !triageMode) return null;
+// Shows only for an admin, only while open, and only in the page's triage mode (the auto-routed mode has no holds to show).
+export default function HeldLinesPanel({ held, isAdmin, triageMode, actioning, onRelease }) {
+  if (!isAdmin || !held.open || !triageMode) return null;
   const groups = groupHeldLines(held.lines);
   let body;
   if (held.loading && held.lines === null) body = <div className="p-6 text-center text-ink-tertiary text-14">Loading…</div>;

@@ -871,7 +871,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
       .then(() => {
         setActioning(null);
         setDismissFor(null);
-        if (held.open && item.reason_code === "text_number_differs") held.reload();
+        if (item.reason_code === "text_number_differs") held.refresh();
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -937,7 +937,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setActioning(null);
         if (onDone) onDone(res);
         // The open Held lines panel shows this card's state and the line's hold: refresh it too.
-        if (held.open && item.reason_code === "text_number_differs") held.reload();
+        if (item.reason_code === "text_number_differs") held.refresh();
         setItems((prev) => prev.filter((i) => i.id !== item.id));
         setCounts((prev) => {
           const c = { ...prev };
@@ -979,14 +979,14 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setActioning(null);
         // Reload first: load() clears the error banner, so the deferred message must be set after it.
         load(mode, status, autoOnly);
-        if (held.open) held.reload();
+        held.refresh();
         reportDeferred(res);
       })
       .catch((err) => {
         setActioning(null);
         if (err?.status === 409) {
           load(mode, status, autoOnly);
-          if (held.open) held.reload();
+          held.refresh();
           // NO_TEXT_LINE_NOT_HELD: someone released that line first; the server's own sentence says so.
           setError(err.code === "NO_TEXT_LINE_NOT_HELD" && err.message ? err.message : "This card changed since it loaded — review the refreshed card first.");
           return;
@@ -1153,7 +1153,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
               </span>
             </button>
           ))}
-          {isAdmin && <HeldLinesChip held={held} />}
+          <HeldLinesChip held={held} isAdmin={isAdmin} />
           {(status === "resolved" || status === "dismissed") && (
             <button
               type="button"
@@ -1178,7 +1178,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
         </div>
       )}
 
-      {isAdmin && <HeldLinesPanel held={held} triageMode={isTriage} actioning={actioning} onRelease={setLineCanTextFor} />}
+      <HeldLinesPanel held={held} isAdmin={isAdmin} triageMode={isTriage} actioning={actioning} onRelease={setLineCanTextFor} />
 
       {!isTriage && (
         <p className="text-12 text-ink-tertiary -mb-1">

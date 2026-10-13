@@ -464,12 +464,54 @@ postgres('sibling settle skips a card another transaction holds (no deadlock)', 
     // B's own release finds the hold already cleared and resolves its card normally
     const res = await fetch(`${baseUrl}/admin/triage/${b.cardId}/resolve`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ expected_updated_at: new Date(cardB.updated_at).toISOString(), line_can_get_texts: true }),
+      body: JSON.stringify({ expected_updated_at: new Date(cardB.updated_at).toISOString(), line_can_get_texts: true, line_e164: X }),
     });
     const out = await res.json();
     expect({ status: res.status, error: out.error }).toEqual({ status: 200, error: undefined });
     expect(out.callback_number.lines_released).toEqual([]);
+    expect(out.callback_number).toMatchObject({ release: 'ok', already_released: [X] }); // idempotent: the panel's named-line retry, not a 409
     expect((await connA('triage_items').where({ id: b.cardId }).first()).status).toBe('resolved');
+  });
+
+  test('a named line this call never held is still a 409 NO_TEXT_LINE_NOT_HELD, and an ownership-only active hold it still has is too', async () => {
+    const b = await seedCall();
+    const stranger = '+19415550999';
+    const put = (line) => fetch(`${baseUrl}/admin/triage/${b.cardId}/resolve`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expected_updated_at: '2030-02-01T10:00:01.000Z', line_can_get_texts: true, line_e164: line }),
+    });
+    const res = await put(stranger);
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('NO_TEXT_LINE_NOT_HELD');
+    // an active ownership-only hold of this call on another line (no bound card) is not this card's to release
+    await connA('disclaimed_number_holds').insert({ phone_e164: stranger, source_call_log_id: b.callId, held_at: new Date('2030-02-01T12:00:00Z') });
+    expect((await put(stranger)).status).toBe(409);
+    expect((await connA('triage_items').where({ id: b.cardId }).first()).status).toBe('open');
+  });
+
+  test('two connections resolve two cards of one call at once: review_status ends resolved (lock the call_log row, then recompute in a new statement)', async () => {
+    const callId = randomUUID();
+    await connA('call_log').insert({ id: callId, review_status: 'open' });
+    const mk = async (reason) => {
+      const id = randomUUID();
+      await connA('triage_items').insert({ id, call_log_id: callId, reason_code: reason, status: 'open', payload: JSON.stringify({}) });
+      return id;
+    };
+    const c1 = await mk('text_number_differs');
+    const c2 = await mk('callback_number_needed');
+    const t1 = await connA.transaction();
+    const t2 = await connB.transaction();
+    await t1('triage_items').where({ id: c1 }).update({ status: 'resolved' });
+    await t2('triage_items').where({ id: c2 }).update({ status: 'resolved' });
+    await Holds.recomputeCallReviewStatus(t1, [callId]); // t1 counts c2 as open (t2 has not committed) and holds the call_log lock
+    let t2Done = false;
+    const second = Holds.recomputeCallReviewStatus(t2, [callId]).then(() => { t2Done = true; });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(t2Done).toBe(false); // t2 waits on the call_log row, not on a stale snapshot
+    await t1.commit();
+    await second; // runs its UPDATE after the lock, with a fresh snapshot: sees c1 resolved too
+    await t2.commit();
+    expect((await connA('call_log').where({ id: callId }).first()).review_status).toBe('resolved');
   });
 
   test('an unlocked sibling card is bound-then-closed as before', async () => {

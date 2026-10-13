@@ -383,6 +383,31 @@ async function clearNoTextHoldsForPhone({ phoneE164, exceptCallLogId = null, cle
 }
 
 /**
+ * Recompute call_log.review_status from the call's cards, safely against a concurrent card write on the same call
+ * (#6292 r10). Two resolutions of different cards on one call each count the OTHER card as still open if they count
+ * before the other commits, and both write 'open'. A single UPDATE with a correlated subquery does not fix that
+ * under READ COMMITTED: the subquery uses the snapshot taken when the statement STARTED, so a statement that then
+ * waits on the call_log row lock still counts the committed-meanwhile card as open. So: lock the call_log rows first
+ * (sorted ids, one statement), then run the UPDATE as a NEW statement. Its snapshot is taken after the lock was
+ * granted, so it sees whatever the previous holder committed, and the last writer always writes the committed truth.
+ * Lock order: line lock (if any) -> call_log row; nothing takes a line lock while holding a call_log row.
+ */
+async function recomputeCallReviewStatus(conn, callLogIds) {
+  const ids = [...new Set(callLogIds || [])].filter(Boolean).sort();
+  if (!ids.length) return;
+  const marks = ids.map(() => '?').join(', ');
+  await conn.raw(`SELECT id FROM call_log WHERE id IN (${marks}) ORDER BY id FOR UPDATE`, ids);
+  await conn.raw(
+    `UPDATE call_log c
+        SET review_status = CASE WHEN EXISTS (SELECT 1 FROM triage_items o WHERE o.call_log_id = c.id AND o.status IN ('open', 'in_progress'))
+                                 THEN 'open' ELSE 'resolved' END,
+            updated_at = now()
+      WHERE c.id IN (${marks})`,
+    ids,
+  );
+}
+
+/**
  * The calls whose hold on `lineKey` a cross-call release just cleared (#6292 r8): their text_number_differs card
  * for that line is settled in the same transaction, under the line lock the caller holds.
  *   1. BIND first: a card with no hold_bindings (a legacy card) gets { line_e164, held_at } of the hold being
@@ -431,16 +456,7 @@ async function settleSiblingTextCards(conn, { callLogIds, lineKey, releasedFromC
       RETURNING u.call_log_id`,
     [note, clearedBy ? String(clearedBy).slice(0, 100) : null, ...callLogIds, lineKey],
   );
-  const closedCalls = [...new Set((closed?.rows || []).map((r) => r.call_log_id).filter(Boolean))];
-  if (!closedCalls.length) return;
-  await conn.raw(
-    `UPDATE call_log c
-        SET review_status = CASE WHEN EXISTS (SELECT 1 FROM triage_items o WHERE o.call_log_id = c.id AND o.status IN ('open', 'in_progress'))
-                                 THEN 'open' ELSE 'resolved' END,
-            updated_at = now()
-      WHERE c.id IN (${closedCalls.map(() => '?').join(', ')})`,
-    closedCalls,
-  );
+  await recomputeCallReviewStatus(conn, [...new Set((closed?.rows || []).map((r) => r.call_log_id).filter(Boolean))]);
 }
 
 /**
@@ -637,6 +653,7 @@ module.exports = {
   linesBlockedByOwnershipCard,
   lineOwnershipBlockSql,
   stampOpenNoTextCards,
+  recomputeCallReviewStatus,
   boundCardsForActiveHolds,
   refreshedCardPayload,
   holdPhoneKeySql,
