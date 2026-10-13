@@ -246,6 +246,11 @@ const AUTOPAY_REASON_WORDS = {
   saved_method_available: SAVED_CARD_REFUSAL,
   no_customer: 'A valid customer_id is required',
 };
+// The service reuses the customer's unexpired setup link as it is (it never
+// extends the expiry): one that is about to lapse would reach the customer
+// already dead, so the card is not offered for it.
+const EXISTING_LINK_MIN_LIFE_MS = 24 * 60 * 60 * 1000;
+const etWhen = (date) => `${new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date)} ET`;
 const AUTOPAY_UNCERTAIN = 'The Auto Pay setup send outcome is unknown — the provider did not answer. Check the customer\'s messages before trying again.';
 const AUTOPAY_UNCERTAIN_REASONS = ['send_outcome_uncertain', 'request_failed'];
 
@@ -267,6 +272,19 @@ function autopayRecipient(customer, delivery) {
   return { masked: maskPhone(customer.phone), pin: { phone_last10: digits }, expected: { phoneLast10: digits } };
 }
 
+// What the send would do with the link row (the service's own dedup read): a
+// refusal for a row mid-completion or one about to lapse, else the expiry of
+// the existing link it would re-send (null = a new one).
+async function autopayLinkPlan(autopay, customerId) {
+  const reuse = await autopay.setupLinkReuse(customerId);
+  if (reuse.state === 'completing') return { refusal: autopayRefusal('completion_in_progress') };
+  const existingExpiry = reuse.state === 'reuse' ? reuse.expiresAt : null;
+  if (existingExpiry && existingExpiry.getTime() - Date.now() < EXISTING_LINK_MIN_LIFE_MS) {
+    return { refusal: { error: `The customer's existing Auto Pay setup link expires ${etWhen(existingExpiry)}, too soon to re-send. Once it expires, send again and a fresh 30-day link is created.`, blocked: true, code: 'existing_link_expiring' } };
+  }
+  return { existingExpiry };
+}
+
 // The preview: the service's own read-only answers, in order — eligibility,
 // the saved card (the bar never enrolls one), then the channel preflight.
 async function autopayPlan(input) {
@@ -282,7 +300,11 @@ async function autopayPlan(input) {
   if (delivery === 'sms' && !fullUsNumber(customer.phone)) return autopayRefusal('no_customer_phone');
   const preflight = await autopay.autopayDeliveryPreflight({ customerId: id, customer, delivery, trigger: 'admin' });
   if (!preflight.ok) return autopayRefusal(preflight.reason);
+  const link = await autopayLinkPlan(autopay, id);
+  if (link.refusal) return link.refusal;
+  const { existingExpiry } = link;
   const recipient = autopayRecipient(customer, delivery);
+  const verb = delivery === 'email' ? 'emails' : 'texts';
   return {
     preview: true,
     customer_id: id,
@@ -290,10 +312,14 @@ async function autopayPlan(input) {
     delivery,
     recipient: recipient.masked,
     reaches: `${delivery === 'email' ? 'email to' : 'text to'} ${recipient.masked}`,
-    does: `creates a 30-day Auto Pay setup link and ${delivery === 'email' ? 'emails' : 'texts'} it to ${recipient.masked}. Nothing is charged; the customer saves a payment method on the page. The link is not shown here.`,
+    link: existingExpiry ? 'existing' : 'new',
+    does: `${existingExpiry
+      ? `re-sends the customer's existing Auto Pay setup link, which expires ${etWhen(existingExpiry)}, by ${delivery === 'email' ? 'email' : 'text'} to ${recipient.masked}`
+      : `creates a new Auto Pay setup link, valid 30 days, and ${verb} it to ${recipient.masked}`}. Nothing is charged; the customer saves a payment method on the page. The link is not shown here.`,
     // The authorization contract reads this: the customer is contacted.
     notifies_customer: true,
-    _version: { customer_id: id, delivery, ...recipient.pin },
+    // The expiry of the link that would be re-sent (null = a new one): a change between card and confirm refuses.
+    _version: { customer_id: id, delivery, ...recipient.pin, link_expires_at: existingExpiry ? existingExpiry.toISOString() : null },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this, to exactly this recipient.',
   };
 }

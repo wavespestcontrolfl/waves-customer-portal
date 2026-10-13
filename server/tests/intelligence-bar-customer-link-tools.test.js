@@ -23,6 +23,7 @@ jest.mock('../routes/admin-communications', () => ({
 jest.mock('../services/autopay-setup-link', () => ({
   setupLinkIneligibility: jest.fn(),
   findSavedMethodForAutoSecure: jest.fn(),
+  setupLinkReuse: jest.fn(),
   autopayDeliveryPreflight: jest.fn(),
   requestAutopaySetupLink: jest.fn(),
 }));
@@ -223,8 +224,8 @@ describe('create_customer_link', () => {
 
 describe('send_autopay_setup_link', () => {
   const AP_CUSTOMER = { id: CUSTOMER_ID, first_name: 'Customer', last_name: 'Fixture', phone: '+19415550123', email: 'Fixture@Example.com ', billing_mode: 'per_application' };
-  const SMS_PIN = { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123' };
-  const EMAIL_PIN = { customer_id: CUSTOMER_ID, delivery: 'email', email: 'fixture@example.com' };
+  const SMS_PIN = { customer_id: CUSTOMER_ID, delivery: 'sms', phone_last10: '9415550123', link_expires_at: null };
+  const EMAIL_PIN = { customer_id: CUSTOMER_ID, delivery: 'email', email: 'fixture@example.com', link_expires_at: null };
   const BEARER = 'https://portal.wavespestcontrol.com/secure/AbCdEfGhIjKlMnOpQrSt';
   const run = (input, ctx = { isAdmin: true }) => executeCustomerLinkTool('send_autopay_setup_link', { customer_id: CUSTOMER_ID, ...input }, ctx);
 
@@ -232,6 +233,7 @@ describe('send_autopay_setup_link', () => {
     autopay.setupLinkIneligibility.mockResolvedValue({ reason: null, customer: AP_CUSTOMER });
     autopay.findSavedMethodForAutoSecure.mockResolvedValue(null);
     autopay.autopayDeliveryPreflight.mockResolvedValue({ ok: true });
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'new', expiresAt: null });
     autopay.requestAutopaySetupLink.mockResolvedValue({ requested: true, action: 'sent', reason: 'sent', channel: 'sms', secureUrl: BEARER, expiresAt: '2026-11-12T00:00:00Z' });
   });
 
@@ -303,13 +305,53 @@ describe('send_autopay_setup_link', () => {
     expect(autopay.autopayDeliveryPreflight).not.toHaveBeenCalled();
   });
 
+  test('preview: an unexpired existing setup link is RE-SENT as it is — the card says so, with its expiry in ET, and pins it', async () => {
+    const expires = new Date(Date.now() + 9 * 24 * 3600 * 1000);
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: expires });
+    const sms = await run({});
+    expect(sms).toMatchObject({ preview: true, link: 'existing', _version: { ...SMS_PIN, link_expires_at: expires.toISOString() } });
+    expect(sms.does).toMatch(/^re-sends the customer's existing Auto Pay setup link, which expires [A-Z][a-z]+ \d{1,2} at \d{1,2}:\d{2} [AP]M ET, by text to \*\*\*0123/);
+    const email = await run({ delivery: 'email' });
+    expect(email.does).toMatch(/by email to f•••@example\.com/);
+    expect(email._version.link_expires_at).toBe(expires.toISOString());
+  });
+
+  test('preview: an existing link that expires within 24 hours is refused — it would reach the customer nearly dead — and a link mid-completion is held', async () => {
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: new Date(Date.now() + 3 * 3600 * 1000) });
+    const soon = await run({});
+    expect(soon).toMatchObject({ blocked: true, code: 'existing_link_expiring' });
+    expect(soon.error).toMatch(/^The customer's existing Auto Pay setup link expires .* ET, too soon to re-send\. Once it expires, send again and a fresh 30-day link is created\.$/);
+    // Just over 24 hours is fine.
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: new Date(Date.now() + 25 * 3600 * 1000) });
+    expect((await run({})).preview).toBe(true);
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'completing', expiresAt: null });
+    expect(await run({})).toMatchObject({ blocked: true, code: 'completion_in_progress' });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
+  test('confirmed: the link the card described is pinned — an expiry that changed (new link now, a different one, a lapsed one) refuses before the service', async () => {
+    const expires = new Date(Date.now() + 9 * 24 * 3600 * 1000);
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: expires });
+    const card = await run({});
+    expect(await run({ confirmed: true, _verified_autopay_version: card._version })).toMatchObject({ success: true });
+    autopay.requestAutopaySetupLink.mockClear();
+    // The existing link lapsed after the card: a new one would be minted — not what the card said.
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'new', expiresAt: null });
+    expect(await run({ confirmed: true, _verified_autopay_version: card._version })).toMatchObject({ preview_changed: true });
+    // ...and the other way round: a card for a new link, an existing one appeared.
+    autopay.setupLinkReuse.mockResolvedValue({ state: 'reuse', expiresAt: expires });
+    expect(await run({ confirmed: true, _verified_autopay_version: SMS_PIN })).toMatchObject({ preview_changed: true });
+    expect(autopay.requestAutopaySetupLink).not.toHaveBeenCalled();
+  });
+
   test('preview: the clean card for a text (the default) and for an email — masked recipient, pin, notifies the customer, no link', async () => {
     const sms = await run({});
     expect(sms).toMatchObject({
       preview: true, delivery: 'sms', customer_name: 'Customer Fixture', recipient: '***0123', reaches: 'text to ***0123', notifies_customer: true,
       _version: SMS_PIN,
     });
-    expect(sms.does).toMatch(/creates a 30-day Auto Pay setup link and texts it to \*\*\*0123/);
+    expect(sms).toMatchObject({ link: 'new' });
+    expect(sms.does).toMatch(/creates a new Auto Pay setup link, valid 30 days, and texts it to \*\*\*0123/);
     const email = await run({ delivery: 'email' });
     expect(email).toMatchObject({
       preview: true, delivery: 'email', recipient: 'f•••@example.com', reaches: 'email to f•••@example.com', notifies_customer: true,

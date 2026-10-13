@@ -90,6 +90,8 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
+  // The real shared reader of a send's certainty (a pure function).
+  classifyDeliveryCertainty: (...a) => jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty(...a),
   normalizeRecipient: (phone) => (String(phone || '').replace(/\D/g, '').length === 10 ? `+1${String(phone).replace(/\D/g, '')}` : phone),
 }));
 const mockSendTemplate = jest.fn(async () => ({ sent: true }));
@@ -102,13 +104,20 @@ jest.mock('../services/email-template-library', () => ({
 // base row only); the real consent / suppression / send-window validators
 // run against the db mock above. Only the cached line type is stubbed.
 const mockGetSmsTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/preflight-check');
-jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: (...a) => mockGetSmsTemplate(...a) }));
+jest.mock('../routes/admin-sms-templates', () => ({
+  getTemplate: (...a) => mockGetSmsTemplate(...a),
+  REQUIRED_TEMPLATE_PLACEHOLDERS: { autopay_setup_link: ['secure_link'] },
+}));
+const mockActiveVariants = jest.fn(async () => []);
+jest.mock('../services/sms-template-variants', () => ({ activeVariants: (...a) => mockActiveVariants(...a) }));
 const mockReadCachedLineType = jest.fn(async () => ({ state: 'miss' }));
 jest.mock('../services/messaging/validators/line-type', () => {
   const actual = jest.requireActual('../services/messaging/validators/line-type');
   return { ...actual, readCachedLineType: (...a) => mockReadCachedLineType(...a) };
 });
-const mockRenderTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/tok');
+// Renders like the real template: the link variable lands in the body.
+const renderWithLink = async (vars) => `Hi ${vars.first_name}! Set up Auto Pay: ${vars.secure_link}`;
+const mockRenderTemplate = jest.fn(renderWithLink);
 jest.mock('../services/appointment-card-request', () => ({ renderTemplate: (...a) => mockRenderTemplate(...a) }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
 
@@ -117,6 +126,7 @@ const {
   requestAutopaySetupLink,
   autopayDeliveryPreflight,
   findSavedMethodForAutoSecure,
+  setupLinkReuse,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,
@@ -155,7 +165,8 @@ beforeEach(() => {
   mockGetSmsTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/preflight-check');
   mockReadCachedLineType.mockResolvedValue({ state: 'miss' });
   gates.proactiveLineTypeLookup = false;
-  mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/tok');
+  mockRenderTemplate.mockImplementation(renderWithLink);
+  mockActiveVariants.mockResolvedValue([]);
   mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-1', method_type: 'card' });
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
   mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
@@ -340,7 +351,7 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
   it('sms: renders the autopay_setup_link template and sends through the card_request purpose, operator-initiated', async () => {
     const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', trigger: 'admin' });
     expect(r.action).toBe('sent');
-    expect(mockRenderTemplate).toHaveBeenCalledWith(expect.objectContaining({ first_name: 'Pat', secure_link: r.secureUrl }), 'autopay_setup_link');
+    expect(mockRenderTemplate).toHaveBeenCalledWith(expect.objectContaining({ first_name: 'Pat', secure_link: r.secureUrl }), 'autopay_setup_link', { requiredVars: ['secure_link'] });
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415551234',
       channel: 'sms',
@@ -519,7 +530,7 @@ describe('autopayDeliveryPreflight — read-only "could this channel deliver" (r
       'autopay_setup_link',
       expect.objectContaining({ first_name: 'Pat', secure_link: 'https://portal.test/secure/preflight-check' }),
       {},
-      { audit: false, noVariants: true },
+      { audit: false, requiredVars: ['secure_link'], noVariants: true },
     );
     expect(rowWrites()).toEqual([]);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
@@ -771,6 +782,145 @@ describe('autopayDeliveryPreflight — read-only "could this channel deliver" (r
       mockFindConsentedChargeableCard.mockClear();
       expect(await findSavedMethodForAutoSecure('cust-1')).toBeNull();
       expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    });
+  });
+
+  // The pin at the PROVIDER boundary: the senders' own last-check hooks (the ones the receipt resend uses).
+  describe('requestAutopaySetupLink({ expectedRecipient }) at the provider boundary', () => {
+    const PIN_SMS = { phoneLast10: '9415551234' };
+    const PIN_EMAIL = { email: 'pat@example.com' };
+
+    it('sms: the pipeline gets a preProviderCheck that re-reads the contact; it passes while the pin holds and vetoes (recipient_changed) when it does not', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      const { preProviderCheck } = mockSendCustomerMessage.mock.calls[0][0];
+      expect(typeof preProviderCheck).toBe('function');
+      expect(await preProviderCheck({ channel: 'sms' })).toEqual({ ok: true });
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: '+19415550000' }) };
+      expect(await preProviderCheck({ channel: 'sms' })).toEqual({ ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed' });
+      mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
+      expect((await preProviderCheck({ channel: 'sms' })).ok).toBe(false);
+    });
+
+    it('sms: a pipeline veto at that boundary reports recipient_changed, nothing is stamped sent', async () => {
+      mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECIPIENT_CHANGED', reason: 'recipient_changed' });
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      expect(r).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
+      expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+    });
+
+    it('email: the library gets a withProviderHandoff whose boundary check re-reads the contact (passes while the pin holds, refuses with providerBoundaryBlocked when it does not)', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL });
+      const { withProviderHandoff } = mockSendTemplate.mock.calls[0][0];
+      expect(typeof withProviderHandoff).toBe('function');
+      let boundary;
+      const dispatch = jest.fn(async (_db, check) => { boundary = check; });
+      expect(await withProviderHandoff(dispatch)).toEqual({ ok: true });
+      expect(dispatch).toHaveBeenCalledWith(undefined, expect.any(Function));
+      await expect(boundary()).resolves.toBeUndefined();
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, email: 'moved@example.com' }) };
+      await expect(boundary()).rejects.toMatchObject({ providerBoundaryBlocked: true });
+      mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
+      await expect(boundary()).rejects.toMatchObject({ providerBoundaryBlocked: true });
+    });
+
+    it('email: the library\'s boundary veto (or a boundary check that could not run) is recipient_changed — a definite not-sent', async () => {
+      for (const flag of [{ boundaryBlocked: true }, { boundaryCheckFailed: true }]) {
+        mockSendTemplate.mockResolvedValue({ sent: false, aborted: true, reason: 'provider_boundary_blocked', ...flag });
+        expect(await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL })).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
+      }
+    });
+
+    it('no pin: neither sender is given a boundary hook (zero change for existing callers)', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(mockSendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('preProviderCheck');
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+      expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('withProviderHandoff');
+    });
+  });
+
+  describe('an ambiguous SMS outcome is unknown, not "not sent"', () => {
+    it('deliveryOutcome uncertain (any provider reason), or no outcome stated, is send_outcome_uncertain — link kept, nothing stamped sent', async () => {
+      for (const result of [
+        { sent: false, deliveryOutcome: 'uncertain', reason: 'Twilio request timed out' },
+        { sent: false, reason: 'weird provider text' },
+      ]) {
+        mockDbTouches = [];
+        mockSendCustomerMessage.mockResolvedValue(result);
+        const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+        expect(r).toMatchObject({ action: 'skipped', reason: 'send_outcome_uncertain', secureUrl: expect.stringMatching(/\/secure\//) });
+        expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+      }
+    });
+
+    it('a definite not-sent (blocked, or deliveryOutcome not_sent) keeps its own reason', async () => {
+      for (const result of [
+        { sent: false, blocked: true, reason: 'Recipient is suppressed' },
+        { sent: false, deliveryOutcome: 'not_sent', reason: 'send_window' },
+      ]) {
+        mockSendCustomerMessage.mockResolvedValue(result);
+        expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' })).reason).toBe(result.reason);
+      }
+    });
+  });
+
+  describe('the text must carry the link', () => {
+    it('the send asks for the editor\'s required placeholders, and a rendered body without the URL is not sent (template_inactive, link kept)', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(mockRenderTemplate).toHaveBeenCalledWith(expect.any(Object), 'autopay_setup_link', { requiredVars: ['secure_link'] });
+
+      mockSendCustomerMessage.mockClear();
+      mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay with your saved card.');
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(r).toMatchObject({ action: 'skipped', reason: 'template_inactive', secureUrl: expect.stringMatching(/\/secure\//) });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('preflight: every active variant must carry the link, not only the base (a bad variant = template_inactive)', async () => {
+      mockActiveVariants.mockResolvedValue([{ id: 'v1', weight: 50, body: 'Hi {first_name}: {secure_link}' }, { id: 'v2', weight: 50, body: 'Hi {first_name}, no link here' }]);
+      mockGetSmsTemplate.mockImplementation(async (_key, _vars, _ctx, opts) => (opts?.templateBody && !opts.templateBody.includes('{secure_link}') ? null : 'rendered'));
+      expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: false, reason: 'template_inactive' });
+      expect(mockGetSmsTemplate).toHaveBeenCalledWith('autopay_setup_link', expect.any(Object), {}, expect.objectContaining({ audit: false, requiredVars: ['secure_link'], templateBody: 'Hi {first_name}, no link here' }));
+      // Zero-weight variants are never selected and are not judged; all-good variants pass.
+      mockActiveVariants.mockResolvedValue([{ id: 'v1', weight: 50, body: 'Hi {first_name}: {secure_link}' }, { id: 'v2', weight: 0, body: 'dead variant' }]);
+      expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    });
+
+    it('preflight: an unreadable variant list fails closed with a retryable reason', async () => {
+      mockActiveVariants.mockRejectedValue(new Error('db blip'));
+      expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: false, reason: 'sms_delivery_check_uncertain' });
+    });
+  });
+
+  describe('setupLinkReuse — what a send would do with the link row (the mint\'s own dedup read)', () => {
+    it('no live row, an expired pending row, or a stale expired claim: a NEW 30-day link', async () => {
+      expect(await setupLinkReuse('cust-1')).toEqual({ state: 'new', expiresAt: null });
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, expires_at: PAST }) };
+      expect(await setupLinkReuse('cust-1')).toEqual({ state: 'new', expiresAt: null });
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST, updated_at: new Date(Date.now() - 24 * 3600 * 1000) }) };
+      expect(await setupLinkReuse('cust-1')).toEqual({ state: 'new', expiresAt: null });
+    });
+
+    it('an unexpired pending row is REUSED as it is, with its own expiry (never extended)', async () => {
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
+      const reuse = await setupLinkReuse('cust-1');
+      expect(reuse.state).toBe('reuse');
+      expect(reuse.expiresAt.getTime()).toBe(FUTURE.getTime());
+      // The send really does reuse it without a new insert (the shared read).
+      const sent = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(sent.expiresAt).toEqual(FUTURE);
+      expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'insert')).toBe(false);
+    });
+
+    it('a row mid-completion is held (live claim, even past expiry): state completing', async () => {
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', updated_at: new Date() }) };
+      expect((await setupLinkReuse('cust-1')).state).toBe('completing');
+      mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', expires_at: PAST, updated_at: new Date() }) };
+      expect((await setupLinkReuse('cust-1')).state).toBe('completing');
+    });
+
+    it('reads nothing else and writes nothing', async () => {
+      await setupLinkReuse('cust-1');
+      expect(touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => ['insert', 'update'].includes(c[0]))).toEqual([]);
     });
   });
 
