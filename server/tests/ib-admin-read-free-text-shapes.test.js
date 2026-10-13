@@ -144,8 +144,13 @@ beforeEach(() => {
 });
 
 describe('every reviewed free-text key is a key its endpoint returns', () => {
-  test('each reviewed row with freeText has a verified response fixture', () => {
-    expect(declared.map(entry => entry.endpoint).sort()).toEqual(Object.keys(SHAPES).sort());
+  // Every ADMITTED free-text endpoint needs a fixture. A fixture may stay for an
+  // endpoint the generator has dropped as stale (the documented "regenerate and
+  // commit" repair must leave CI green), but it must still name a reviewed row.
+  test('each admitted endpoint with freeText has a verified response fixture', () => {
+    const reviewedRows = new Set(require('../services/intelligence-bar/admin-read-reviewed.json').reviewed.map(row => row.endpoint));
+    for (const entry of declared) expect(Object.keys(SHAPES)).toContain(entry.endpoint);
+    for (const endpoint of Object.keys(SHAPES)) expect(reviewedRows.has(endpoint)).toBe(true);
   });
 
   test.each(declared.map(entry => [entry.endpoint, entry]))('%s: declared note keys are exactly the withheld keys, content keys are all returned', (endpoint, entry) => {
