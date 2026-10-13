@@ -246,6 +246,23 @@ function fitToCap(data) {
   return { data: { top_level_keys: keys }, truncated: true };
 }
 
+// What the circuit breaker needs to know (services/intelligence-bar/outcomes.js):
+// an endpoint that answers 4xx declined this ask, which is a refusal and must
+// carry a code that passes the refusal shape and holds no fault word. A 404 is
+// the known refusal code `record_unavailable`. A 408 or 429, a 5xx, a timeout,
+// a non-JSON body and a transport error stay faults: no code, or a code with a
+// fault word in it.
+function rejectionCode(status) {
+  if (status === 404) return 'record_unavailable';
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) return 'endpoint_rejected';
+  return null;
+}
+
+function rejected(status, entry, error) {
+  const code = rejectionCode(status);
+  return { status, endpoint: entry.endpoint, error, ...(code ? { code } : {}) };
+}
+
 function errorText(parsed, status) {
   const message = parsed && typeof parsed === 'object' ? (parsed.error || parsed.message) : null;
   return typeof message === 'string' && message.trim() ? redactString(message.trim().slice(0, 300), newState()) : `The admin endpoint answered HTTP ${status}`;
@@ -263,13 +280,13 @@ async function shapeResponse(response, entry, authorization) {
   const length = Number(response.headers?.get?.('content-length') || 0);
   if (status >= 300 && status < 400) return { status, endpoint: entry.endpoint, note: 'The endpoint redirected; redirects are not followed. This is not a JSON data read.' };
   if (!type.includes('application/json')) {
-    if (status >= 400) return { status, endpoint: entry.endpoint, error: `The admin endpoint answered HTTP ${status}` };
+    if (status >= 400) return rejected(status, entry, `The admin endpoint answered HTTP ${status}`);
     return { status, endpoint: entry.endpoint, note: 'not a JSON data read' };
   }
-  if (length > MAX_BODY_BYTES) return { status, endpoint: entry.endpoint, error: 'The response is too large to read. Narrow it with query filters.' };
+  if (length > MAX_BODY_BYTES) return { status, endpoint: entry.endpoint, error: 'The response is too large to read. Narrow it with query filters.', code: 'response_too_large' };
   let parsed;
   try { parsed = JSON.parse(scrubToken(await response.text(), authorization)); } catch { parsed = undefined; }
-  if (status < 200 || status >= 300) return { status, endpoint: entry.endpoint, error: errorText(parsed, status) };
+  if (status < 200 || status >= 300) return rejected(status, entry, errorText(parsed, status));
   if (parsed === undefined) return { status, endpoint: entry.endpoint, error: 'The admin endpoint did not return readable JSON' };
   return answerFrom(parsed, status, entry);
 }
@@ -302,7 +319,7 @@ function answerFrom(parsed, status, entry) {
 
 async function fetchAdminRead(entry, path, search, authorization) {
   const origin = loopbackOrigin();
-  if (!origin) return refusal('The admin read could not find this server', 'read_failed');
+  if (!origin) return refusal('The admin read could not find this server', 'read_connection_failed');
   try {
     const response = await fetch(`${origin}/api${path}${search}`, {
       method: 'GET',
@@ -316,7 +333,7 @@ async function fetchAdminRead(entry, path, search, authorization) {
     logger.warn(`[admin-read] ${entry.endpoint} ${timedOut ? 'timed out' : 'failed'}`);
     return timedOut
       ? refusal('The admin endpoint did not answer within 10 seconds', 'read_timeout')
-      : refusal('The admin endpoint could not be reached', 'read_failed');
+      : refusal('The admin endpoint could not be reached', 'read_connection_failed');
   }
 }
 

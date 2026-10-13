@@ -46,9 +46,43 @@ function parseFile(file) {
   if (!parsed.has(file)) {
     const source = fs.readFileSync(file, 'utf8');
     const ast = parser.parse(source, { sourceType: 'unambiguous', plugins: ['jsx'], errorRecovery: true });
-    parsed.set(file, { source, ast, file, ...topLevel(ast, file), nestedRequires: nestedRequireBindings(ast, file) });
+    parsed.set(file, { source, ast, file, ...topLevel(ast, file), nestedRequires: nestedRequireBindings(ast, file), constantDecls: constantDeclarators(ast, source) });
   }
   return parsed.get(file);
+}
+
+// Module-scope declarations that are not functions (`const LIMIT = 5`, a table,
+// an SQL fragment, an imported binding), by every name they bind. A handler
+// can change behavior through one, so the review fingerprint covers the ones a
+// followed function references.
+function patternNames(id, out = []) {
+  if (!id) return out;
+  if (id.type === 'Identifier') out.push(id.name);
+  else if (id.type === 'ObjectPattern') id.properties.forEach(p => patternNames(p.type === 'RestElement' ? p.argument : p.value, out));
+  else if (id.type === 'ArrayPattern') id.elements.forEach(e => patternNames(e, out));
+  else if (id.type === 'AssignmentPattern') patternNames(id.left, out);
+  return out;
+}
+
+function constantDeclarators(ast, source) {
+  const out = new Map();
+  for (const stmt of ast.program.body) {
+    if (stmt.type !== 'VariableDeclaration') continue;
+    for (const decl of stmt.declarations) {
+      if (!decl.init || isFunction(decl.init)) continue;
+      const entry = { decl, text: source.slice(decl.start, decl.end) };
+      patternNames(decl.id).forEach(name => out.set(name, entry));
+    }
+  }
+  return out;
+}
+
+function referencedNames(node) {
+  const names = new Set();
+  walk(node, (child, parent) => {
+    if (child.type === 'Identifier' && !isPropertyName(child, parent)) names.add(child.name);
+  });
+  return names;
 }
 
 function walk(node, visit, parent = null) {
@@ -486,6 +520,8 @@ const touchedFiles = new Set();
 // (the handler, its middleware, every callee and named callback). A reviewed
 // row stores a hash of these, so any edit to the chain drops the row.
 const followedSources = new Set();
+// The module-scope constants those functions reference, transitively.
+const followedConstants = new Set();
 
 // Where each signal was first seen (review aid for --explain).
 const origins = new Map();
@@ -529,12 +565,39 @@ function nestedFunctionNames(fn) {
   return names;
 }
 
+// Adds the text of every module-scope constant `name` stands for: the
+// declaration in this file, or, for an imported binding, the constant in the
+// repo file it comes from when the resolver can follow it (an imported
+// function is followed as a function; anything else contributes the import
+// statement's own text). A constant that mentions other constants brings them.
+function includeConstant(info, name, visited) {
+  const key = `${info.file}\n${name}`;
+  const entry = info.constantDecls.get(name);
+  if (visited.has(key) || !entry) return;
+  visited.add(key);
+  const target = info.requires.get(name);
+  if (target?.file) {
+    const member = target.member || 'default';
+    const source = parseFile(target.file);
+    if (source.constantDecls.has(member)) { includeConstant(source, member, visited); return; }
+    if (exportedFunction(target.file, member)) return;
+  }
+  followedConstants.add(`${path.relative(ROOT, info.file)}\n${entry.text}`);
+  for (const other of referencedNames(entry.decl.init)) includeConstant(info, other, visited);
+}
+
+function collectConstants(fn, info) {
+  const visited = new Set();
+  for (const name of referencedNames(fn)) includeConstant(info, name, visited);
+}
+
 function analyze(fn, info, depth, seen = new Set()) {
   const signals = new Set();
   if (!fn || seen.has(fn)) return signals;
   seen.add(fn);
   touchedFiles.add(path.relative(ROOT, info.file));
   followedSources.add(`${path.relative(ROOT, info.file)}\n${info.source.slice(fn.start, fn.end)}`);
+  collectConstants(fn, info);
   const ctx = { info, depth, seen, signals, sawResponse: false, nested: nestedFunctionNames(fn) };
   walk(fn.body || fn, (node, parent) => visitNode(node, parent, ctx));
   if (!ctx.sawResponse && depth === 0) flag(signals, 'no_json_response', info, fn);
@@ -897,6 +960,9 @@ function queryProblem(row, names) {
     return 'query must be a list of distinct key names';
   }
   // An id carried in the query string can only be sent when the row lets that key through.
+  if (row.freeText !== undefined && (!Array.isArray(row.freeText) || row.freeText.some(key => typeof key !== 'string' || !KEY_NAME_RE.test(key)))) {
+    return 'freeText must be a list of response field names';
+  }
   if (row.scope !== 'broad' && !names.includes(row.scopeParam) && !(row.query || []).includes(row.scopeParam)) {
     return `the scope parameter ${row.scopeParam} is read from the query string, so the row's query list must include it`;
   }
@@ -1008,7 +1074,7 @@ function followedQueryKeys() {
 }
 
 function chainHash() {
-  return crypto.createHash('sha256').update([...followedSources].sort().join('\n=====\n')).digest('hex').slice(0, 32);
+  return crypto.createHash('sha256').update([...followedSources, ...followedConstants].sort().join('\n=====\n')).digest('hex').slice(0, 32);
 }
 
 function judgeRoute(entry, reviewed, opaqueMounts) {
@@ -1022,6 +1088,7 @@ function judgeRoute(entry, reviewed, opaqueMounts) {
   unresolvedCalls.clear();
   touchedFiles.clear();
   followedSources.clear();
+  followedConstants.clear();
   const { functions, handlerFound } = routeFunctions(entry.route);
   if (!functions.length || !handlerFound) return { safe: false, kind: 'review', reason: 'handler_not_found' };
   const middleware = middlewareFunctions(entry);
@@ -1031,7 +1098,7 @@ function judgeRoute(entry, reviewed, opaqueMounts) {
   [...functions, ...middleware].forEach((item) => {
     analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
   });
-  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), hash: chainHash(), queryCustomer: readsCustomerFromQuery(), queryKeys: followedQueryKeys() };
+  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), constants: [...followedConstants].sort(), hash: chainHash(), queryCustomer: readsCustomerFromQuery(), queryKeys: followedQueryKeys() };
   const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal));
   if (hard.length) return { safe: false, kind: 'review', reason: `scan: ${hard.join(', ')}`, ...scan };
   return { safe: true, ...scan };
@@ -1249,7 +1316,7 @@ function main() {
       const normalized = `/${rules.splitPath(endpoint).map(seg => (rules.isParam(seg) ? ':param' : seg)).join('/')}`;
       const verdicts = matchRoutes(rules.splitPath(normalized), table).map(match => judgeRoute(match, reviewed, opaqueMounts));
       const hard = verdicts.filter(v => !v.safe).map(v => v.reason);
-      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, queryKeys: [...new Set(verdicts.flatMap(v => v.queryKeys || []))].sort(), ...endpointFingerprint(verdicts) }));
+      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, queryKeys: [...new Set(verdicts.flatMap(v => v.queryKeys || []))].sort(), constants: [...new Set(verdicts.flatMap(v => v.constants || []))], ...endpointFingerprint(verdicts) }));
     }
     return;
   }

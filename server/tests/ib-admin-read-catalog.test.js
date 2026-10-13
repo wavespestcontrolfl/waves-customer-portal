@@ -81,6 +81,7 @@ test('every reviewed row says what was read and carries the fingerprint it was r
     expect(row.hash).toMatch(/^[0-9a-f]{32}$/);
     expect(['broad', 'customer', 'invoice']).toContain(row.scope);
     expect(() => validateReviewedRow(row)).not.toThrow();
+    if (row.freeText !== undefined) expect(row.freeText.length).toBeGreaterThan(0);
   }
   for (const row of file.exclude) {
     expect(row.route).toMatch(/^GET \/admin\//);
@@ -120,6 +121,16 @@ describe('the scope of a reviewed row', () => {
     expect(() => validateReviewedRow(named({ params: { other: 'text' } }))).toThrow(/must be "text"/);
     expect(() => validateReviewedRow(named({ params: ['serviceType'] }))).toThrow(/object of parameter kinds/);
     expect(() => validateReviewedRow({ ...row({ scope: 'customer', scopeParam: 'id', params: { id: 'text' } }) })).toThrow(/cannot be free text/);
+  });
+  test('a freeText list names response fields', () => {
+    const plain = extra => ({ ...row(extra), endpoint: '/admin/payers', scope: 'broad' });
+    expect(() => validateReviewedRow(plain({ freeText: ['notes'] }))).not.toThrow();
+    expect(() => validateReviewedRow(plain({ freeText: 'notes' }))).toThrow(/freeText must be a list/);
+    expect(() => validateReviewedRow(plain({ freeText: ['no tes'] }))).toThrow(/freeText must be a list/);
+    const withFreeText = committed.entries.filter(entry => entry.endpoint === '/admin/payers');
+    expect(withFreeText).toHaveLength(1);
+    const rows = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8')).reviewed;
+    expect(rows.find(r => r.endpoint === '/admin/payers').freeText).toEqual(['notes']);
   });
   test('the build fails when a handler that reads a customer id from the query is reviewed as broad', () => {
     const full = loadReviewed();
@@ -387,6 +398,65 @@ module.exports = router;
     expect(after.hash).not.toBe(before.hash);
     expect(checkReview(endpointFingerprint([after]), row)).toMatch(/handler chain changed/);
     writeFixtures();
+  });
+
+  describe('module-scope constants in the fingerprint', () => {
+    const write = (name, text) => fs.writeFileSync(path.join(FIXTURE_DIR, name), text);
+    const router = `const express = require('express');
+const db = require('./fx-db');
+const { WINDOW } = require('./fx-consts');
+const router = express.Router();
+router.get('/windowed', async (req, res) => { const { days } = req.query; res.json(await db('things').where('d', '<', WINDOW + Number(days || 0)).first()); });
+module.exports = router;
+`;
+    const consts = ({ base = 5, other = 1 } = {}) => `const BASE = ${base};\nconst WINDOW = BASE * 2;\nconst UNUSED = ${other};\nmodule.exports = { WINDOW, UNUSED };\n`;
+    const hashFor = () => {
+      resetCaches();
+      return judgeIn('fx-router-consts.js', '/windowed');
+    };
+    beforeEach(() => { write('fx-router-consts.js', router); write('fx-consts.js', consts()); });
+    afterAll(() => writeFixtures());
+
+    test('a constant a followed function references is in the hash; an unrelated constant change leaves the row alone', () => {
+      const before = hashFor();
+      expect(before).toMatchObject({ safe: true, signals: [], unresolved: [] });
+      expect(before.constants.join('\n')).toContain('WINDOW = BASE * 2');
+      const row = rowFor(before);
+      write('fx-consts.js', consts({ other: 99 }));
+      const unrelated = hashFor();
+      expect(unrelated.hash).toBe(before.hash);
+      expect(checkReview(endpointFingerprint([unrelated]), row)).toBeNull();
+    });
+
+    test('an edit to the constant the handler names directly makes the review stale', () => {
+      const before = hashFor();
+      const row = rowFor(before);
+      write('fx-consts.js', consts().replace('BASE * 2', 'BASE * 3'));
+      expect(checkReview(endpointFingerprint([hashFor()]), row)).toMatch(/handler chain changed/);
+    });
+
+    test('a constant that the referenced constant uses (transitive) makes the review stale', () => {
+      const before = hashFor();
+      const row = rowFor(before);
+      write('fx-consts.js', consts({ base: 6 }));
+      const after = hashFor();
+      expect(after.constants.join('\n')).toContain('BASE = 6');
+      expect(checkReview(endpointFingerprint([after]), row)).toMatch(/handler chain changed/);
+    });
+
+    test('an unreferenced constant in the same file stays out of the hash', () => {
+      const before = hashFor();
+      expect(before.constants.join('\n')).not.toContain('UNUSED');
+    });
+
+    test('a constant in the route file itself counts, and so does an import the resolver cannot follow', () => {
+      write('fx-router-consts.js', router.replace("const router = express.Router();", "const LOCAL_CAP = 10;\nconst router = express.Router();").replace('WINDOW + Number', 'WINDOW + LOCAL_CAP + Number'));
+      const before = hashFor();
+      const row = rowFor(before);
+      expect(before.constants.join('\n')).toContain('LOCAL_CAP = 10');
+      write('fx-router-consts.js', router.replace("const router = express.Router();", "const LOCAL_CAP = 11;\nconst router = express.Router();").replace('WINDOW + Number', 'WINDOW + LOCAL_CAP + Number'));
+      expect(checkReview(endpointFingerprint([hashFor()]), row)).toMatch(/handler chain changed/);
+    });
   });
 
   test('router.use middleware that runs DDL excludes every route declared after it, not the ones before', () => {

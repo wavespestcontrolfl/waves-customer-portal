@@ -24,7 +24,10 @@
  *     /portal/<token>) and a bare query string that carries a credential
  *     (?token=...). Readable text stays: dates (10/12/2026), fractions,
  *     and/or, and file-like paths made of words.
- *  3. Credential fields: the VALUE under any object key that names a
+ *  3. Credentials pasted into free text: known secret formats and labelled
+ *     secrets ("password: x", "PIN is 4821") in any string value, best effort
+ *     (secret-text-scrubber.js); counted with the credential fields.
+ *  4. Credential fields: the VALUE under any object key that names a
  *     credential (token, secret, password, pin, signature, hash, session, ...;
  *     see credential-fields.js) at any depth  ->  "[removed]". Gate and access
  *     codes are operational data and are kept.
@@ -33,6 +36,7 @@
  * select or build such values out of the catalog.
  */
 const { isCredentialField } = require('./credential-fields');
+const { scrubSecretText } = require('./secret-text-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
 const REDACTED_PRIVATE_LINK = '[private link removed]';
@@ -238,9 +242,16 @@ function newState() {
   return { links: 0, privateLinks: 0, fields: 0 };
 }
 
+// Credentials pasted into free text (best effort; see secret-text-scrubber.js).
+function scrubFreeText(text, state) {
+  const { text: clean, removed } = scrubSecretText(text);
+  state.fields += removed;
+  return clean;
+}
+
 // A copy of `value` with credentials removed. `state` counts what was removed.
 function redactSecrets(value, state, depth = 0) {
-  if (typeof value === 'string') return redactString(value, state);
+  if (typeof value === 'string') return scrubFreeText(redactString(value, state), state);
   if (!value || typeof value !== 'object') return value;
   if (depth > MAX_DEPTH) { state.fields += 1; return '[too deeply nested]'; }
   if (Array.isArray(value)) return value.map(item => redactSecrets(item, state, depth + 1));

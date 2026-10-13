@@ -1,5 +1,5 @@
 {
-  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params marks a path parameter as free text ({\"serviceType\": \"text\"}). query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain.",
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params marks a path parameter as free text ({\"serviceType\": \"text\"}). query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the text of every module-scope constant (and the import statement of every imported binding the resolver cannot follow to a constant) that a followed function references, transitively. freeText lists the response fields that hold unrestricted text a person typed (notes, descriptions, instructions); the runtime scrubber removes pasted credentials from every string, best effort, and this list only tells a reviewer where to look. No behavior depends on it.",
   "exclude": [],
   "reviewed": [
     {
@@ -8,7 +8,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "a57bb67d90dd94cbb5742696cc062c2b"
+      "hash": "869ea091c62d1696b3ac805fddd52f9a"
     },
     {
       "endpoint": "/admin/communications/ai-auto-reply-status",
@@ -16,15 +16,18 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "c4b7f0c3c92b3c1195581444beac2af6"
+      "hash": "a8fa6893717eb523829bc9004766c049"
     },
     {
       "endpoint": "/admin/communications/blocked-numbers",
       "reviewed": "Handler: blocked_numbers select mapped to number, type, reason, auto flag, time; read end to end.",
       "scope": "broad",
+      "freeText": [
+        "reason"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "985989fb0d179a5938c5eca3e6d18b10"
+      "hash": "6bf3dfd7c9419b27a7b802fccd127503"
     },
     {
       "endpoint": "/admin/csr/overview",
@@ -35,33 +38,43 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "7059057e1ae6a2d3743aa5b85f1703f8"
+      "hash": "7dfc91dcd31ebaf55f05d88afd4751e1"
     },
     {
       "endpoint": "/admin/customers/:id/autopay-state",
       "reviewed": "Handler + isPaused (autopay-eligibility.js): customers explicit autopay columns (payment method is an internal uuid) and the last 20 autopay_log rows (details is JSON that passes through run-time key redaction); read end to end.",
       "scope": "customer",
       "scopeParam": "id",
+      "freeText": [
+        "autopay_pause_reason",
+        "details"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "ab2cf0e7941c1dfe1354594af0b1fba2"
+      "hash": "de4ec4c6c7c927607100eb28ea67c7db"
     },
     {
       "endpoint": "/admin/customers/:id/credits",
       "reviewed": "Handler + CustomerCredit.getBalance / getLedger (customer-credit.js): customers.account_credits and customer_credit_ledger select, limit 100; read end to end.",
       "scope": "customer",
       "scopeParam": "id",
+      "freeText": [
+        "note"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "e71e12a96e3fff0e01fdeb59722d5a5c"
+      "hash": "6326825368d33876d8097e45a1334987"
     },
     {
       "endpoint": "/admin/discounts",
       "reviewed": "Handler + attachDiscountCatalogClassification (discount-catalog-classifier.js): discounts table select (includes promo_code values, the owner own marketing codes), in-memory classification; read end to end.",
       "scope": "broad",
+      "freeText": [
+        "description"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "12251870847f65db542b70090446b234"
+      "hash": "e859c9f451edd7a036193d33a127289b"
     },
     {
       "endpoint": "/admin/discounts/stacking",
@@ -77,15 +90,20 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "ef251df869f4ec60318799f6c67276f5"
+      "hash": "2a12517c72fac6cffbc7eea6a5693a77"
     },
     {
       "endpoint": "/admin/dispatch/products/catalog",
       "reviewed": "Handler + stripCatalogOwnerPricing: select from products_catalog where active (product, label and price columns; no credential column); read end to end.",
       "scope": "broad",
+      "freeText": [
+        "compatibility_notes",
+        "mixing_instructions",
+        "ppe_text"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "78333c11e3258fe367df197c367e0597"
+      "hash": "f88497ea5ae17d07f02c66165b81c9d3"
     },
     {
       "endpoint": "/admin/dispatch/technicians",
@@ -96,7 +114,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "86e399cc7bc039f9f255e1ad5dd70e05"
+      "hash": "e3f97df488640e7ebef40531a06c2c0e"
     },
     {
       "endpoint": "/admin/estimates/source-performance",
@@ -107,7 +125,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "fd6c0553d4bb0714581a780c8d99b287"
+      "hash": "40d92cbf833395e712ce08ff22f2d366"
     },
     {
       "endpoint": "/admin/invoices/:id/attachments",
@@ -116,7 +134,7 @@
       "scopeParam": "id",
       "signals": [],
       "unresolved": [],
-      "hash": "3bd84c7fe0e1b3ad82c56eb89ae58514"
+      "hash": "c9f791f77acf5682c5f58fd4a20afdb9"
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
@@ -125,7 +143,7 @@
       "scopeParam": "id",
       "signals": [],
       "unresolved": [],
-      "hash": "7883200c0cac79e04a63fb6301a154fb"
+      "hash": "0cd17df1fb64f4fcf06f714f55c92fba"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",
@@ -134,7 +152,7 @@
       "scopeParam": "id",
       "signals": [],
       "unresolved": [],
-      "hash": "d32e6b8d06fe1c4a41b441616e8f1bef"
+      "hash": "6e7857a365828efae0350d206f5e6f5e"
     },
     {
       "endpoint": "/admin/invoices/customers/search",
@@ -145,7 +163,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "79f3307ba54b89383e1a6ca2bbce2bd4"
+      "hash": "808debc151928b0e09a241522f58add8"
     },
     {
       "endpoint": "/admin/invoices/service-records/:customerId",
@@ -154,7 +172,7 @@
       "scopeParam": "customerId",
       "signals": [],
       "unresolved": [],
-      "hash": "cd9c1d103b9b4bf5265f024ff8bc6c43"
+      "hash": "8c6de1bd25f97a2b99ae66ae0c41b24f"
     },
     {
       "endpoint": "/admin/invoices/stats",
@@ -162,7 +180,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "8282cce130d8f87628b9c313b435a17e"
+      "hash": "76364d2ef8fa67c04d68c4a92b4f7d81"
     },
     {
       "endpoint": "/admin/job-forms/templates/by-service/:serviceType",
@@ -171,18 +189,25 @@
       "params": {
         "serviceType": "text"
       },
+      "freeText": [
+        "description",
+        "sections"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "0db1d4a7e424579cfba2467f08ce1fb5"
+      "hash": "221af5cdec979b70c219d9f873ac8b98"
     },
     {
       "endpoint": "/admin/neighborhood-access/customers/:customerId/properties",
       "reviewed": "Handler + propertyViews: customer_properties, neighborhoods and neighborhood_access reads mapped to label, address, gate label, access type, code, instructions, status. Gate and access codes are kept by owner decision (owner login); read end to end.",
       "scope": "customer",
       "scopeParam": "customerId",
+      "freeText": [
+        "instructions"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "a33bbf80c882566c197d6663dc4a371f"
+      "hash": "26163b3683764014113114856e82f8e2"
     },
     {
       "endpoint": "/admin/payers",
@@ -192,17 +217,23 @@
         "includeInactive",
         "search"
       ],
+      "freeText": [
+        "notes"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "1c83180897e6746be6a1044adc2c9ebf"
+      "hash": "540cc69b1344a9c1c68abfa6e2362e40"
     },
     {
       "endpoint": "/admin/payers/:id",
       "reviewed": "Handler + PayerService.getPayer (payer.js): single payers row by integer id; read end to end.",
       "scope": "broad",
+      "freeText": [
+        "notes"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "f02d41df77a9102a248b95a3bed6409d"
+      "hash": "f4a3f880b8ca4b28d3c76f6942355dde"
     },
     {
       "endpoint": "/admin/payers/ar-aging",
@@ -210,7 +241,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "7e74aa7dc2d8d072bf1a19fe2e2f7dad"
+      "hash": "3ecc948085c2316b3dea79c2e4280e29"
     },
     {
       "endpoint": "/admin/pricing-config/discount-rules",
@@ -218,7 +249,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "a16f87e98f37d48925132a24dde6f4b4"
+      "hash": "5e57ce7ce2c7a16d84755913c70e237f"
     },
     {
       "endpoint": "/admin/pricing-config/lawn-brackets",
@@ -226,23 +257,32 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "4e41d21def4b123bad4f730400019df3"
+      "hash": "846c25670494989f4a0d530f07396c65"
     },
     {
       "endpoint": "/admin/pricing/offers",
       "reviewed": "Handler: select from offer_packages (pricing offer text and prices); read end to end.",
       "scope": "broad",
+      "freeText": [
+        "description",
+        "guarantee_text",
+        "scarcity_text",
+        "urgency_text"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "4a53c249acf3afc492b6900b48533283"
+      "hash": "fe2b2b2a68347493bca1a1822f5c9ab0"
     },
     {
       "endpoint": "/admin/pricing/upsell-rules",
       "reviewed": "Handler: select from upsell_rules; read end to end.",
       "scope": "broad",
+      "freeText": [
+        "message_template"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "4f141549122f7c0f51b5944f203d4a46"
+      "hash": "9b7e5c2eed99d3bcb23ca0ee8d0b8be5"
     },
     {
       "endpoint": "/admin/protocols/equipment",
@@ -252,9 +292,12 @@
         "service_line",
         "service_type"
       ],
+      "freeText": [
+        "notes"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "413f84c37e7a9ded11e69776b19e53ee"
+      "hash": "9adf0c5e553e03e9e07be962e217d45e"
     },
     {
       "endpoint": "/admin/protocols/scripts",
@@ -264,9 +307,13 @@
         "scenario",
         "service_line"
       ],
+      "freeText": [
+        "script",
+        "tone_notes"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "dfe04999871ed06c088ed70b42fcce67"
+      "hash": "c813d3a9baaf9670d177a04067af63d1"
     },
     {
       "endpoint": "/admin/protocols/seasonal-index",
@@ -278,7 +325,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "6d884e1c319c1fc79b629e7a068f87e9"
+      "hash": "c5af7288d4d3647b38c5d4b0e1123ad3"
     },
     {
       "endpoint": "/admin/referrals/payouts",
@@ -287,17 +334,23 @@
       "query": [
         "status"
       ],
+      "freeText": [
+        "admin_notes"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "b15b142a314fc94095016f217f3921bb"
+      "hash": "2867707178acb6d4f1dff44f69801c70"
     },
     {
       "endpoint": "/admin/revenue/settings",
       "reviewed": "Handler: latest company_financials row (cost and margin settings; technicians get a field subset); read end to end.",
       "scope": "broad",
+      "freeText": [
+        "notes"
+      ],
       "signals": [],
       "unresolved": [],
-      "hash": "faac4621c49d70f3cb087216955245b3"
+      "hash": "51f964f1f76c68b2c7936c5b2923b153"
     },
     {
       "endpoint": "/admin/route-scorecard/status",
@@ -313,7 +366,7 @@
       "scope": "broad",
       "signals": [],
       "unresolved": [],
-      "hash": "d7c2c785d0bde3cf9f7a8d618a8663d6"
+      "hash": "fb121c837b766e78c7a78f915abe78f0"
     },
     {
       "endpoint": "/admin/schedule/next-visit",
@@ -325,7 +378,7 @@
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "453d11b9564dbda427244c26991c1a6f"
+      "hash": "a165979ff5cc1d93bac3f943c0c2d5d1"
     }
   ]
 }

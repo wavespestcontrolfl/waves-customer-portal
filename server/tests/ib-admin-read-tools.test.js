@@ -283,7 +283,7 @@ describe('the answer', () => {
 
   test('404 and 500 return the message string only', async () => {
     global.fetch.mockResolvedValueOnce(jsonResponse(404, { error: 'Customer not found', stack: 'secret stack', extra: { a: 1 } }));
-    expect(await read({ endpoint: NO_PARAM.endpoint })).toEqual({ status: 404, endpoint: NO_PARAM.endpoint, error: 'Customer not found' });
+    expect(await read({ endpoint: NO_PARAM.endpoint })).toEqual({ status: 404, endpoint: NO_PARAM.endpoint, error: 'Customer not found', code: 'record_unavailable' });
     global.fetch.mockResolvedValueOnce(jsonResponse(500, { message: 'Server error', trace: 'x' }));
     expect(await read({ endpoint: NO_PARAM.endpoint })).toEqual({ status: 500, endpoint: NO_PARAM.endpoint, error: 'Server error' });
     global.fetch.mockResolvedValueOnce(jsonResponse(502, 'Bad gateway', { 'content-type': 'text/plain' }));
@@ -296,7 +296,7 @@ describe('the answer', () => {
     global.fetch.mockRejectedValueOnce(Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' }));
     expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ code: 'read_timeout' });
     global.fetch.mockRejectedValueOnce(new TypeError('fetch failed'));
-    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ code: 'read_failed', error: 'The admin endpoint could not be reached' });
+    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ code: 'read_connection_failed', error: 'The admin endpoint could not be reached' });
   });
 
   test('unreadable JSON returns an error, not a body', async () => {
@@ -802,5 +802,78 @@ describe('declared query keys', () => {
   });
   test('the id a customer-scoped read carries in the query is a declared key', () => {
     expect(catalog.entries.find(entry => entry.endpoint === '/admin/schedule/next-visit').query).toEqual(['customerId']);
+  });
+});
+
+// Codex round on #6312: a reviewed endpoint that answers 4xx declined the ask;
+// it must not count as an infrastructure fault in the shared circuit breaker.
+describe('endpoint rejections and the circuit breaker', () => {
+  const { isPolicyRefusal, recordToolOutcome } = require('../services/intelligence-bar/outcomes');
+  const breaker = () => ({ recordFailure: jest.fn(), recordSuccess: jest.fn() });
+  const answer = async (response) => {
+    global.fetch.mockResolvedValueOnce(response);
+    return read({ endpoint: NO_PARAM.endpoint });
+  };
+
+  test.each([
+    [400, 'customerId required', 'endpoint_rejected'],
+    [401, 'Admin authentication required', 'endpoint_rejected'],
+    [403, 'Admin access required', 'endpoint_rejected'],
+    [404, 'Customer not found', 'record_unavailable'],
+    [409, 'Conflict', 'endpoint_rejected'],
+    [422, 'Validation failed', 'endpoint_rejected'],
+  ])('HTTP %i is a refusal: it neither fails nor resets the breaker', async (status, text, code) => {
+    const result = await answer(jsonResponse(status, { error: text }));
+    expect(result).toMatchObject({ status, error: text, code });
+    expect(isPolicyRefusal(result)).toBe(true);
+    const b = breaker();
+    expect(recordToolOutcome(b, result)).toBe('refusal');
+    expect(b.recordFailure).not.toHaveBeenCalled();
+    expect(b.recordSuccess).not.toHaveBeenCalled();
+  });
+
+  test('a non-JSON 4xx is a refusal too', async () => {
+    const result = await answer(jsonResponse(403, 'Forbidden', { 'content-type': 'text/plain' }));
+    expect(result).toMatchObject({ status: 403, code: 'endpoint_rejected' });
+    expect(isPolicyRefusal(result)).toBe(true);
+  });
+
+  test.each([
+    ['a 500', () => jsonResponse(500, { error: 'boom' })],
+    ['a 502 page', () => jsonResponse(502, 'Bad gateway', { 'content-type': 'text/plain' })],
+    ['a 429', () => jsonResponse(429, { error: 'slow down' })],
+    ['a 408', () => jsonResponse(408, { error: 'request timeout' })],
+    ['unreadable JSON', () => jsonResponse(200, '{not json')],
+  ])('%s stays a fault and counts against the breaker', async (_label, make) => {
+    const result = await answer(make());
+    expect(result.code).toBeUndefined();
+    expect(isPolicyRefusal(result)).toBe(false);
+    const b = breaker();
+    expect(recordToolOutcome(b, result)).toBe('failure');
+    expect(b.recordFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test('a timeout and a transport error stay faults', async () => {
+    global.fetch.mockRejectedValueOnce(Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' }));
+    const timeout = await read({ endpoint: NO_PARAM.endpoint });
+    global.fetch.mockRejectedValueOnce(new TypeError('fetch failed'));
+    const transport = await read({ endpoint: NO_PARAM.endpoint });
+    for (const result of [timeout, transport]) {
+      expect(isPolicyRefusal(result)).toBe(false);
+      const b = breaker();
+      expect(recordToolOutcome(b, result)).toBe('failure');
+    }
+  });
+
+  test('a too-large answer is a refusal (narrow the query), not a fault', async () => {
+    const result = await answer({ status: 200, headers: { get: key => ({ 'content-type': 'application/json', 'content-length': '99999999' }[String(key).toLowerCase()] ?? null) }, text: async () => '{}' });
+    expect(result).toMatchObject({ code: 'response_too_large' });
+    expect(isPolicyRefusal(result)).toBe(true);
+  });
+
+  test('a good answer is a success', async () => {
+    const b = breaker();
+    expect(recordToolOutcome(b, await answer(jsonResponse(200, { ok: true })))).toBe('success');
+    expect(b.recordSuccess).toHaveBeenCalledTimes(1);
   });
 });
