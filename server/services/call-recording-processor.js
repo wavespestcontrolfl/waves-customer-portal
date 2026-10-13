@@ -11450,6 +11450,9 @@ const CallRecordingProcessor = {
     // threw before the decision point arms the pair there instead of refreshing a card that
     // does not exist (codex r7 P1).
     let noTextDecisionLanded = false;
+    // The held_at of the hold this pass armed (full-precision text): the arming every card write in this pass is
+    // bound to. null until the decision point arms; then the card binds the line's current active hold instead.
+    let armingHeldAt = null;
     // cardExtraction: on a no-text hold, the VALID extraction the release card is built from. The
     // card insert runs INSIDE armDisclaimedNumberHold's transaction (afterArm), under the per-call
     // triage lock and the processing-claim fence, so the hold and its only release card commit or
@@ -11471,9 +11474,10 @@ const CallRecordingProcessor = {
         const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
           phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
           procToken, procGeneration, noTextHold: noTextHoldArming,
-          afterArm: item ? async (trx) => writeTextNumberCard(trx, item, { refresh: false }) : null,
+          afterArm: item ? async (trx, arming) => writeTextNumberCard(trx, item, { refresh: false, heldAt: arming?.heldAt }) : null,
         });
         if (armed?.claimLost) return false;
+        armingHeldAt = armed?.heldAt ?? armingHeldAt;
         callbackNumberHoldArmed = true;
         if (item) noTextDecisionLanded = true;
         return true;
@@ -11514,7 +11518,7 @@ const CallRecordingProcessor = {
     };
     // The card write itself. The caller holds the per-call triage lock and has verified the
     // processing claim (armDisclaimedNumberHold's transaction, or fileTextNumberCard's own).
-    const writeTextNumberCard = async (trx, item, { refresh = false } = {}) => {
+    const writeTextNumberCard = async (trx, item, { refresh = false, heldAt = null } = {}) => {
       // A callback_number_needed card filed by an earlier pass (before this call was known to be a
       // no-text line) keeps its old payload; mark it, or its Resolve could release the hold we arm now.
       await trx('triage_items')
@@ -11526,13 +11530,15 @@ const CallRecordingProcessor = {
         await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
           .whereIn('status', ['open', 'in_progress'])
-          .update({ payload: item.payload, updated_at: new Date() });
+          .update({ payload: require('./disclaimed-number-holds').refreshedCardPayload(trx, item.payload), updated_at: new Date() });
       } else {
         await trx('triage_items').insert(item)
           .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
       }
       // The call-level aggregate follows the card in the same locked transaction: the tech follow-up
       // and voicemail branches return before the pass's usual review-status write (codex r14 P2).
+      // Durable card-to-hold binding: the open card carries the arming (held_at) of the hold it releases.
+      await require('./disclaimed-number-holds').stampOpenNoTextCards(trx, call.id, { phone: contactPhone, heldAt: heldAt || armingHeldAt });
       await syncCallReviewStatus(trx, call.id);
     };
     const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {

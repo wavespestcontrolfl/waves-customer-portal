@@ -149,7 +149,7 @@ describe('recordDisclaimedNumberHold', () => {
     const fake = makeFakeDb({});
     wire(fake);
     const res = await Holds.recordDisclaimedNumberHold({ phone: '(941) 555-1234', customerId: 'cust-1', callLogId: 'call-1' });
-    expect(res).toEqual({ recorded: true, phoneE164: HELD });
+    expect(res).toEqual({ recorded: true, phoneE164: HELD, heldAt: null });
     const [sql, bindings] = fake.conn.raw.mock.calls[0];
     expect(bindings).toEqual([HELD, 'cust-1', 'call-1']);
     expect(sql).toMatch(/ON CONFLICT \(phone_e164, source_call_log_id\) DO UPDATE/);
@@ -191,12 +191,15 @@ describe('armDisclaimedNumberHold / ensureDisclaimedNumberHold (round 7)', () =>
   test('arm: takes the per-call triage lock FIRST, then the re-arming upsert, in one transaction', async () => {
     const { conn, calls } = recordingConn();
     const res = await Holds.armDisclaimedNumberHold({ phone: '(941) 555-1234', customerId: null, callLogId: 'call-1', conn });
-    expect(res).toEqual({ recorded: true, phoneE164: HELD });
+    expect(res).toEqual({ recorded: true, phoneE164: HELD, heldAt: null });
     expect(conn.transaction).toHaveBeenCalledTimes(1);
-    expect(calls.map((c) => c.on)).toEqual(['trx', 'trx']);
+    expect(calls.map((c) => c.on)).toEqual(['trx', 'trx', 'trx']);
     expect(calls[0].sql).toMatch(/pg_advisory_xact_lock/);
     expect(calls[0].bindings).toEqual(['triage-call-review', 'call-1']);
-    expect(calls[1].sql).toMatch(/cleared_at = NULL/);
+    // then the line's no-text lock (the one a release takes), then the upsert
+    expect(calls[1].sql).toMatch(/pg_advisory_xact_lock\(hashtext/);
+    expect(calls[1].bindings).toEqual(['no_text_line:+19415551234']);
+    expect(calls[2].sql).toMatch(/cleared_at = NULL/);
   });
 
   test('ensure: never re-arms — the upsert only fills customer_id; a cleared row comes back active:false', async () => {
@@ -237,11 +240,12 @@ describe('armDisclaimedNumberHold / ensureDisclaimedNumberHold (round 7)', () =>
   test('arm with a processing claim: triage lock → claim row FOR UPDATE (token + generation) → upsert', async () => {
     const { conn, calls } = fencedConn({ owned: true });
     const res = await Holds.armDisclaimedNumberHold({ phone: HELD, callLogId: 'call-1', procToken: 'tok-A', procGeneration: 7, conn });
-    expect(res).toEqual({ recorded: true, phoneE164: HELD });
+    expect(res).toEqual({ recorded: true, phoneE164: HELD, heldAt: null });
     expect(calls[0].sql).toMatch(/pg_advisory_xact_lock/);
-    expect(calls[1]).toMatchObject({ op: 'forUpdate', table: 'call_log' });
-    expect(calls[1].wheres).toEqual([{ id: 'call-1' }, { processing_token: 'tok-A' }, { processing_generation: 7 }]);
-    expect(calls[2].sql).toMatch(/INSERT INTO disclaimed_number_holds/);
+    expect(calls[1].bindings).toEqual([`no_text_line:${HELD}`]); // the line lock, before the claim row and the upsert
+    expect(calls[2]).toMatchObject({ op: 'forUpdate', table: 'call_log' });
+    expect(calls[2].wheres).toEqual([{ id: 'call-1' }, { processing_token: 'tok-A' }, { processing_generation: 7 }]);
+    expect(calls[3].sql).toMatch(/INSERT INTO disclaimed_number_holds/);
   });
 
   test('arm after losing the claim: claimLost, nothing written', async () => {

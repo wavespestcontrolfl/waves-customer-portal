@@ -36,6 +36,15 @@
  * fired (about five cards in all). A basis that finds more than MAX_OWN_CANDIDATES accounts
  * suggests nothing: a common first name is not evidence.
  *
+ * A phone number the caller gave for another person (2026-10-12 call audit; same suggest-only
+ * card, basis contact_phone_on_account). A caller on an unknown number asked for service for
+ * the homeowner and gave the homeowner's number; that number was the phone on an existing
+ * account, and the call became a new lead. When the family rule suggests nothing, the card
+ * lists the active accounts whose OWN phone (phone or secondary_phone, never a service-contact
+ * slot: an agent's number sits in many accounts' slots) is a number the caller gave for someone
+ * else. More than MAX_OWN_CANDIDATES accounts suggests nothing. This basis is tried before the
+ * caller's-own-account bases: a spoken number is stronger evidence than a first name.
+ *
  * No card: the caller is not a family member, no full name was named, a voicemail
  * (a one-sided transcription never names an account), an outbound call, a call that
  * is already linked or was unlinked on purpose, a number some live account already
@@ -48,6 +57,7 @@ const { whereLiveCustomer } = require('./customer-stages');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -136,6 +146,7 @@ const OWN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', 'comp
 const OWN_ACCOUNT_REASONS = {
   caller_full_name: 'An account carries this caller\'s exact name under another phone number. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
   caller_first_name_recent_visit: 'An account with this caller\'s first name has a visit on the calendar close to this call. Confirm it is the same household, then link the call.',
+  contact_phone_on_account: 'The caller gave a phone number for another person, and an account carries that number. Confirm the caller is calling for this account, then link the call. A lead or customer record may exist under the caller: merge it on the Duplicates page.',
   caller_first_name_city_recent: 'The caller gave a first name only. An account created in the last two weeks has that first name in the same city. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
 };
 
@@ -254,9 +265,70 @@ async function matchCallerOwnAccounts({ call, extracted, v2CanonicalExtraction, 
   return null;
 }
 
-// What the card suggests for this call: the family rule first, else the caller's own account.
+// The numbers the caller gave for OTHER people: [{ phone, forms }], one per distinct number.
+// - The second people are the canonical contact plus the entries AFTER the mirror slot: a mirror
+//   that conflicts with the canonical contact is the identity canonicalV2Secondary rejected.
+// - `forms` are the complete digit strings that identify the number (phoneMatchDigits): a NANP
+//   number in both stored forms, an international number as its full digits only, so it can never
+//   match a US account on its last ten digits.
+// - Only the line the call arrived on is the caller's own. The spoken callback number is not
+//   excluded: a known model slip copies the other person's number into it.
+// Pure.
+function contactPhones({ call, v2CanonicalExtraction }) {
+  const callerKey = phoneIdentityKey(call && call.from_phone);
+  const list = Array.isArray(v2CanonicalExtraction?.secondary_contacts) ? v2CanonicalExtraction.secondary_contacts : [];
+  const contacts = [canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(list.slice(1))].filter(Boolean);
+  const byKey = new Map();
+  for (const contact of contacts) {
+    const forms = phoneMatchDigits(contact.phone);
+    const key = phoneIdentityKey(contact.phone);
+    if (!forms.length || !key || key === callerKey || byKey.has(key)) continue;
+    byKey.set(key, { phone: String(contact.phone).trim(), forms });
+  }
+  return [...byKey.values()];
+}
+
+const phoneDigitsSql = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
+
+// Active, not soft-deleted customers whose own phone or secondary phone is one of the digit forms.
+function findCustomersByOwnPhone(conn, forms, limit) {
+  const marks = forms.map(() => '?').join(', ');
+  return conn('customers')
+    .where('active', true)
+    .whereNull('deleted_at')
+    .whereRaw(`(${phoneDigitsSql('phone')} IN (${marks}) OR ${phoneDigitsSql('secondary_phone')} IN (${marks}))`, [...forms, ...forms])
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').limit(limit)
+    .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip', 'phone', 'secondary_phone');
+}
+
+/**
+ * The account a number the caller gave for another person belongs to (see the module comment):
+ * { basis, candidates, more_accounts, contact_phones } or null. Each candidate carries the spoken
+ * number that matched it (matched_phone), so staff can check the evidence. Read-only.
+ */
+async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtraction, statedAddress, isOutbound = false, conn = db }) {
+  if (isOutbound || extracted.is_voicemail) return null;
+  const phones = contactPhones({ call, v2CanonicalExtraction });
+  if (!phones.length) return null;
+  const own = createdCustomerId(call);
+  const found = (await findCustomersByOwnPhone(conn, phones.flatMap((p) => p.forms), MAX_OWN_CANDIDATES + 2))
+    .filter((r) => String(r.id) !== own && String(r.id) !== String(call.customer_id || ''));
+  if (!found.length || found.length > MAX_OWN_CANDIDATES) return null;
+  const digits = (v) => String(v || '').replace(/\D/g, '');
+  const matchedPhone = (row) => (phones.find((p) => p.forms.includes(digits(row.phone)) || p.forms.includes(digits(row.secondary_phone))) || {}).phone || null;
+  const candidates = found.map((m) => ({ ...ownCandidate(m), address_matches: statedAddressCorroborates(statedAddress, m), matched_phone: matchedPhone(m) }));
+  return {
+    basis: 'contact_phone_on_account',
+    more_accounts: false,
+    contact_phones: [...new Set(candidates.map((c) => c.matched_phone).filter(Boolean))],
+    candidates,
+  };
+}
+
+// What the card suggests for this call: the family rule first, then a number the caller gave for
+// another person, else the caller's own account.
 async function matchSuggestedAccounts(args) {
-  return (await matchFamilyAccounts(args)) || matchCallerOwnAccounts(args);
+  return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args)) || matchCallerOwnAccounts(args);
 }
 
 /**
@@ -272,7 +344,14 @@ async function suggestFamilyAccounts({ phones = [], ...args }) {
   // The customer THIS call created for the caller (an earlier pass) carries the caller's own number; it
   // must not hide the suggestion on a reprocess of the same call.
   const knownElsewhere = own ? (table) => (args.conn || db)(table).whereNot('id', own) : (args.conn || db);
+  // A spoken number that IS this basis's evidence is not "the caller's number an account already
+  // knows" (the model can copy it into the caller's callback slot). The line the call arrived on
+  // is always checked.
+  const evidence = new Set((match.contact_phones || []).map(phoneIdentityKey));
+  const arrivedOn = phoneIdentityKey(args.call.from_phone);
   for (const phone of phones) {
+    const key = phoneIdentityKey(phone);
+    if (evidence.has(key) && key !== arrivedOn) continue;
     if (await findKnownCallerCustomer(knownElsewhere, phone, ['id'])) return null;
   }
   return match;
@@ -293,6 +372,8 @@ function cardPayload({ suggestion, extracted, call, phone }) {
     account_holder_name: suggestion.holder ? displayName(suggestion.holder) : null,
     // Set only for a suggestion of the caller's OWN account (matchCallerOwnAccounts).
     match_basis: suggestion.basis || null,
+    // Set only for contact_phone_on_account: the spoken number(s) an account carries.
+    matched_contact_phones: suggestion.contact_phones || null,
     caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
     caller_phone: call.from_phone || null,
     caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
@@ -385,6 +466,8 @@ module.exports = {
   RETIRE_RULE,
   matchFamilyAccounts,
   matchCallerOwnAccounts,
+  matchContactPhoneAccounts,
+  contactPhones,
   RECENT_DAYS,
   MAX_OWN_CANDIDATES,
   OWN_ACCOUNT_REASONS,
