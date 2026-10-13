@@ -875,6 +875,21 @@ describe('autopayDeliveryPreflight — read-only "could this channel deliver" (r
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    it('the real renderer sends the link without https:// — that text carries the link and is sent (pre-push codex P1)', async () => {
+      // What getTemplate returns in production: stripSmsUrlScheme applied to the rendered body.
+      const { stripSmsUrlScheme } = jest.requireActual('../services/messaging/sms-link-policy');
+      mockRenderTemplate.mockImplementation(async (vars) => stripSmsUrlScheme(`Hi ${vars.first_name}! Set up Auto Pay: ${vars.secure_link}`));
+      mockSendCustomerMessage.mockClear();
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      expect(r).toMatchObject({ action: 'sent', channel: 'sms' });
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).not.toMatch(/https:\/\//);
+      expect(sentBody).toMatch(/\/secure\//);
+      // A full-scheme body (an older renderer, a test double) carries it too.
+      mockRenderTemplate.mockImplementation(async (vars) => `Hi! ${vars.secure_link}`);
+      expect(await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' })).toMatchObject({ action: 'sent' });
+    });
+
     it('preflight: every active variant must carry the link, not only the base (a bad variant = template_inactive)', async () => {
       mockActiveVariants.mockResolvedValue([{ id: 'v1', weight: 50, body: 'Hi {first_name}: {secure_link}' }, { id: 'v2', weight: 50, body: 'Hi {first_name}, no link here' }]);
       mockGetSmsTemplate.mockImplementation(async (_key, _vars, _ctx, opts) => (opts?.templateBody && !opts.templateBody.includes('{secure_link}') ? null : 'rendered'));

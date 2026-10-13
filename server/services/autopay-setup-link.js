@@ -37,6 +37,7 @@ const { isRetiredSetupIntent, isStripeResourceMissing, followReplacementChain } 
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const KIND = 'customer';
 const PURPOSE = 'autopay_setup_link';
@@ -450,8 +451,10 @@ async function smsLineTypeReason(phone) {
 }
 
 // The rendered text must carry the link (a body saved before the editor's
-// required-placeholder rule, or a variant, might not).
-const carriesLink = (body, url) => !!body && body.includes(url);
+// required-placeholder rule, or a variant, might not). The SMS renderer sends
+// links WITHOUT their https:// (sms-link-policy stripSmsUrlScheme), so the
+// link is looked for in that form: it is a substring of the full form too.
+const carriesLink = (body, url) => !!body && body.includes(stripSmsUrlScheme(url));
 
 // The skip for a text the pipeline did not report as sent. A send the provider
 // may have accepted (deliveryOutcome 'uncertain', or no outcome stated) is
