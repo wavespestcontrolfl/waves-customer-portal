@@ -2051,7 +2051,7 @@ function visitSummariesForRows(rows, {
 //      between the first hold read and those queries, with the row still
 //      showing the pre-move slot.
 // Fail closed on any read error.
-async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
+async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null, renderedDay) {
   if (!scheduledServiceId) return false;
   const logger = require('./logger');
   try {
@@ -2074,11 +2074,13 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
         return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
       };
       const arrivalStart = await require('./reservation-arrival').arrivalStartForService(db, live);
-      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a customer-day reminder quotes the day's earliest live
-      // arrival, which can be an earlier sibling's. One-text-per-day owns that value ([] when off).
+      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a MERGED customer-day reminder quotes the day's earliest live
+      // arrival, which can be an earlier sibling's. Only that send passes `renderedDay` (the member ids
+      // its text named); every other caller (confirmation, reschedule, rain-out, calls) gets [] and keeps
+      // the plain rule. One-text-per-day owns the value.
       const candidates = [
         toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null),
-        ...(await require('./one-text-per-day').dayArrivalCandidates(scheduledServiceId)),
+        ...(await require('./one-text-per-day').dayArrivalCandidates(scheduledServiceId, renderedDay)),
       ];
       if (live.visit_id) {
         const stopStart = await liveStopStartHHMM(db, live.visit_id);

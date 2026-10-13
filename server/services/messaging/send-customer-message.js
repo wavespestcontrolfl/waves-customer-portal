@@ -102,7 +102,7 @@ async function appointmentMoveHeld(input) {
   // implementation with the appointment-email path, codex r47): live hold,
   // rendered-slot ABA comparison, and a hold RE-READ after the slot/visit
   // awaits. Fail closed inside the helper.
-  return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
+  return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null, input.renderedDayMembers);
 }
 
 // Street-level address hold (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling

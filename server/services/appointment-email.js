@@ -276,13 +276,13 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
 // (customer/recipients/property/template), so the hold is re-read here at
 // the actual provider handoff, per recipient. Fail closed — a held notice
 // defers (the callers leave their rows unmarked and retry), never lost.
-async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
+async function moveHoldLive(scheduledServiceId, renderedSlotMs = null, renderedDay) {
   // Delegates to THE shared guard (visit-groups.appointmentSendHeld) —
   // one implementation with the SMS canonical path (codex r47).
-  return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs);
+  return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs, renderedDay);
 }
 
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null, renderedDay }) {
   // Street-level address hold (owner ruling 2026-10-01): no email about a visit that is a live
   // unconfirmed hold until the office confirms. Same predicate as the SMS send step; fails closed.
   const holdVisitId = scheduledServiceId || moveHoldServiceId;
@@ -346,7 +346,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     // the payload above was rendered from a slot a unit move may have just
     // vacated. Held ⇒ stop the whole fan-out (the hold covers the visit,
     // not one recipient) and defer.
-    if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) {
+    if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs, renderedDay)) {
       logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the provider handoff — grouped move in progress`);
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
       return { ok: false, held: true, reason: 'move_hold' };
@@ -373,7 +373,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // during the library's own awaits still holds the send; the predicate fails closed.
         onQueued: async () => {
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
-          if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs, renderedDay)) { abortedBy = 'move_hold'; return false; }
           return true;
         },
       });
@@ -474,7 +474,7 @@ async function technicianFirstName(scheduledServiceId) {
 }
 
 // kind: '72h' | '24h'
-async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null } = {}) {
+async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null, renderedDay } = {}) {
   const apptTime = toDate(appointmentTime);
   const techName = await technicianFirstName(scheduledServiceId);
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
@@ -540,6 +540,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     metadata: { scheduled_service_id: scheduledServiceId || null },
     moveHoldServiceId: scheduledServiceId || null,
     renderedSlotMs: apptTime ? apptTime.getTime() : null,
+    renderedDay,
   });
 }
 

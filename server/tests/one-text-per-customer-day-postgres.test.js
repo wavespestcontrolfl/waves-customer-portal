@@ -285,6 +285,32 @@ postgres('one text per customer, address and day', () => {
       expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.covered')).toHaveLength(0);
     });
 
+    test('gate on, email channel: the one reminder email carries the rendered day token and names every service; gate off sends no token', async () => {
+      const AppointmentEmail = require('../services/appointment-email');
+      for (const on of [true, false]) {
+        if (on) gateOn(); else delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
+        AppointmentEmail.sendAppointmentReminderEmail.mockClear();
+        const f = await fixture({ date: nextDate(), specs: [
+          { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+          { start: '10:00', end: '11:00', name: 'Lawn Care' },
+        ] });
+        await mockPg('notification_prefs').insert({ customer_id: f.customerId, service_reminder_24h_channel: 'email' });
+        await runReminders(f.date);
+        const mine = AppointmentEmail.sendAppointmentReminderEmail.mock.calls.map((c) => c[0]).filter((a) => a.customerId === f.customerId);
+        expect(textsTo(f.phone)).toHaveLength(0);
+        if (on) {
+          expect(mine).toHaveLength(1);
+          expect([...mine[0].renderedDay].sort()).toEqual(f.rows.map((r) => r.id).sort());
+          expect(mine[0].serviceLabel).toMatch(/Pest Control/);
+          expect(mine[0].serviceLabel).toMatch(/Lawn Care/);
+          expect(mine[0].appointmentTime.getTime()).toBe(parseETDateTime(`${f.date}T09:00:00`).getTime());
+        } else {
+          expect(mine).toHaveLength(2);
+          expect(mine.every((a) => a.renderedDay === undefined)).toBe(true);
+        }
+      }
+    });
+
     test('gate on: two different saved addresses stay TWO reminders', async () => {
       gateOn();
       const f = await fixture({ date: nextDate(), specs: [
@@ -478,25 +504,60 @@ postgres('one text per customer, address and day', () => {
       expect(calls[1][1]).toMatch(/Mosquito/);
     });
 
-    test('the validator accepts exactly the earliest live arrival and nothing stale; gate off keeps today\'s rule', async () => {
+    test('the validator accepts the earliest arrival only for the merged reminder that named the day, and nothing stale', async () => {
       const f = await pair(nextDate());
-      const later = f.rows[0];
+      const [later, earlier] = f.rows;
+      const both = [later.id, earlier.id];
       const ms = (hhmm) => parseETDateTime(`${f.date}T${hhmm}:00`).getTime();
-      // gate off: only the row's own arrival
+      // gate off: today's rule, with or without a token
       await expect(appointmentSendHeld(later.id, ms('09:00'))).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('09:00'), both)).resolves.toBe(true);
       await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
       gateOn();
-      await expect(appointmentSendHeld(later.id, ms('09:00'))).resolves.toBe(false);
-      await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
-      await expect(appointmentSendHeld(later.id, ms('08:00'))).resolves.toBe(true);
-      // the earlier sibling moves to 08:00: the quoted 09:00 is stale and held
-      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ window_start: '08:00', window_end: '09:00' });
+      // no token (any other caller): a sibling's time is held exactly as before
       await expect(appointmentSendHeld(later.id, ms('09:00'))).resolves.toBe(true);
-      await expect(appointmentSendHeld(later.id, ms('08:00'))).resolves.toBe(false);
-      // the earlier sibling is cancelled: only the row's own arrival is left
-      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
-      await expect(appointmentSendHeld(later.id, ms('08:00'))).resolves.toBe(true);
       await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
+      // the merged reminder, named by its rendered members: accepted
+      await expect(appointmentSendHeld(later.id, ms('09:00'), both)).resolves.toBe(false);
+      await expect(appointmentSendHeld(later.id, ms('08:00'), both)).resolves.toBe(true);
+      // a token that is not this day's members is not a merged reminder for this day
+      await expect(appointmentSendHeld(later.id, ms('09:00'), [later.id])).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('09:00'), [earlier.id, randomUUID()])).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('09:00'), [...both, randomUUID()])).resolves.toBe(true);
+      // the earlier sibling moves to 08:00: the quoted 09:00 is stale
+      await mockPg('scheduled_services').where({ id: earlier.id }).update({ window_start: '08:00', window_end: '09:00' });
+      await expect(appointmentSendHeld(later.id, ms('09:00'), both)).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('08:00'), both)).resolves.toBe(false);
+      // the earlier sibling is cancelled: the day is no longer the rendered one
+      await mockPg('scheduled_services').where({ id: earlier.id }).update({ status: 'cancelled' });
+      await expect(appointmentSendHeld(later.id, ms('08:00'), both)).resolves.toBe(true);
+      await expect(appointmentSendHeld(later.id, ms('10:00'))).resolves.toBe(false);
+    });
+
+    test('gate on: a confirmation or reschedule notice quoting an obsolete sibling time is HELD at the real boundary; its own time is sent', async () => {
+      gateOn();
+      // 09:00 and 10:00 services; the 09:00 one then moved to 10:00-ish, so 09:00 is only the sibling's time now
+      const f = await pair(nextDate());
+      const moved = f.rows[0]; // started 10:00
+      const sibling = f.rows[1]; // stays 09:00
+      freezeNow(dayBefore(f.date));
+      const ms = (hhmm) => parseETDateTime(`${f.date}T${hhmm}:00`).getTime();
+      const send = (extra, renderedSlotMs) => sendCustomerMessage({
+        to: f.phone, body: 'Synthetic notice', channel: 'sms', audience: 'customer', customerId: f.customerId,
+        identityTrustLevel: 'phone_matches_customer', appointmentId: moved.id, renderedSlotMs, ...extra,
+      });
+      const confirmation = { purpose: 'appointment_confirmation' };
+      const reschedule = { purpose: 'appointment', enforceMoveHold: true, conversationalContext: true };
+      expect(sibling.window_start).toBeTruthy();
+      for (const extra of [confirmation, reschedule]) {
+        TwilioService.sendSMS.mockClear();
+        const stale = await send(extra, ms('09:00'));
+        expect(stale.code).toBe('MOVE_HOLD');
+        expect(providerCalls(f.phone)).toHaveLength(0);
+        const own = await send(extra, ms('10:00'));
+        expect(own.code).not.toBe('MOVE_HOLD');
+      }
+      jest.useRealTimers();
     });
   });
 
@@ -532,6 +593,50 @@ postgres('one text per customer, address and day', () => {
       const untouched = await reminderOf(later.id);
       expect(untouched.reminder_24h_sent).toBe(false);
       expect((await reminderOf(f.rows[0].id)).reminder_24h_sent).toBe(false); // the moved sender is re-armed for its new day
+    });
+
+    test('a member whose label cannot be resolved drops the day coverage: own label, own arrival, nothing else closed', async () => {
+      gateOn();
+      const f = await fixture({ date: nextDate(), specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+      ] });
+      // the add-on lookup (part of every member's label) is down for the whole run
+      const real = mockPg;
+      mockPg = new Proxy(real, {
+        apply: (target, thisArg, args) => {
+          if (args[0] === 'scheduled_service_addons') throw new Error('add-on lookup down');
+          return target(...args);
+        },
+        get: (target, key) => (typeof target[key] === 'function' ? target[key].bind(target) : target[key]),
+      });
+      try {
+        await runReminders(f.date);
+      } finally {
+        mockPg = real;
+      }
+      const sent = textsTo(f.phone);
+      // no day text was possible: each service sent its own reminder, with its own label and its own arrival
+      expect(sent).toHaveLength(2);
+      expect(sent[0].body).toMatch(/Pest Control/);
+      expect(sent[0].body).not.toMatch(/Lawn Care/);
+      expect(sent[0].body).toMatch(/between 9:00 AM and 11:00 AM/);
+      expect(sent[1].body).toMatch(/Lawn Care/);
+      expect(sent[1].body).not.toMatch(/Pest Control/);
+      expect(sent[1].body).toMatch(/between 10:00 AM and 12:00 PM/);
+      expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.covered')).toHaveLength(0);
+    });
+
+    test('a member with no usable service name drops the day coverage too', async () => {
+      gateOn();
+      const f = await fixture({ date: nextDate(), specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+      ] });
+      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ service_type: '' });
+      await runReminders(f.date);
+      expect(textsTo(f.phone)).toHaveLength(2);
+      expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.covered')).toHaveLength(0);
     });
 
     test('a service added while the send was in flight stays armed and sends its own reminder', async () => {

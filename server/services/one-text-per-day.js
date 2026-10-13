@@ -119,15 +119,23 @@ function earliestArrivalMs(rows) {
 
 /**
  * Extra arrival instants the send-time slot validator accepts for a reminder
- * about `serviceId`: the earliest live arrival of its customer-day when the
- * text quotes it. [] with the gate off, one service, or any error (then only
- * the validator's own candidates apply, so a stale slot is still held).
+ * about `serviceId`: the earliest live arrival of its customer-day, but ONLY for
+ * the merged day reminder that rendered it. That send passes `renderedDay`, the
+ * ids of the members its text named. Any other caller passes nothing and gets [],
+ * so a confirmation or reschedule notice quoting a sibling's time is held as
+ * before. The live day must still be exactly the rendered members (a service
+ * added, cancelled or dropped since means the text is stale: held, re-rendered on
+ * the next scan). [] with the gate off or on any error.
  */
-async function dayArrivalCandidates(serviceId) {
+async function dayArrivalCandidates(serviceId, renderedDay) {
   try {
-    if (!oneTextPerCustomerDayLive()) return [];
+    if (!Array.isArray(renderedDay) || !oneTextPerCustomerDayLive()) return [];
+    const rendered = renderedDay.map(String).sort();
+    if (rendered.length < 2 || !rendered.includes(String(serviceId))) return [];
     const rows = await loadDayRows(db, serviceId);
-    const earliest = rows.length > 1 ? earliestArrivalMs(rows) : null;
+    const live = rows.map((m) => String(m.scheduled_service_id)).sort();
+    const earliest = live.length === rendered.length && live.every((id, i) => id === rendered[i])
+      ? earliestArrivalMs(rows) : null;
     return earliest === null ? [] : [earliest];
   } catch {
     return [];

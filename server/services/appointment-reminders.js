@@ -425,7 +425,7 @@ async function callbackNumberHoldConfirmedForVisit(idsOrScheduledServiceId) {
 // `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
 // claim owner sends under — see visitReminderEmailKey. Null keeps the
 // per-service key.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms', renderedDay }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // App backups, including the terminal quiet-hour email, share one
@@ -458,7 +458,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined, renderedDay });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -539,7 +539,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, renderedDay }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -562,7 +562,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return false;
   }
   const ch = apptChannel(channel, { preserveAppChoice: kind === '72h' || kind === '24h' });
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey, renderedDay };
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
@@ -1435,31 +1435,66 @@ async function dayReminderRows(row) {
   }
 }
 
-// The rows one reminder send read for its customer-day, kept per sending row so
-// the text's copy, its service label and the closure after delivery all use the
-// SAME snapshot (null = the rule does not apply to this send). A later read
-// could name a service the text never mentioned, or a moved sender's new day.
+// What ONE reminder send read for its customer-day, kept per sending row so the
+// text's copy, its service label and the closure after delivery all use the SAME
+// snapshot: { rows, label } (null = the rule does not apply to this send).
+// INVARIANT: every visit closed after a delivery was NAMED in the delivered text.
+// The label is merged from every snapshot member up front, strictly: if any
+// member's label cannot be resolved (add-on or estimate-name read failed, empty
+// name) the whole day coverage is dropped for this send, the sender keeps its own
+// label AND its own arrival time, and nothing else is closed. A later read could
+// name a service the text never mentioned, or a moved sender's new day.
 const daySnapshots = new WeakMap();
 
 function daySnapshotOf(row) {
-  return (row && daySnapshots.get(row)) || null;
+  const day = row ? daySnapshots.get(row) : null;
+  return day ? day.rows : null;
+}
+
+// The ids of the snapshot's members: the send boundary's token for "this is a merged
+// day reminder" (undefined for every other send).
+function daySnapshotIds(row) {
+  const rows = daySnapshotOf(row);
+  return rows ? rows.map((m) => m.scheduled_service_id) : undefined;
+}
+
+// The send-boundary input for a merged day reminder ({} for every other send).
+function dayRenderGuardInput(metaExtra) {
+  return Array.isArray(metaExtra.rendered_day_members) ? { renderedDayMembers: metaExtra.rendered_day_members } : {};
+}
+
+// The merged label of every member, or null when any member cannot be named.
+async function dayMergedLabel(rows) {
+  try {
+    const labels = [];
+    for (const m of rows) {
+      const name = await memberReminderLabel(db, { scheduled_service_id: m.scheduled_service_id, label: m.service_type }, true);
+      labels.push(String(name || '').trim());
+    }
+    if (labels.some((l) => !l || l.toLowerCase() === 'service')) return null;
+    return joinMergedLabelParts(labels, null);
+  } catch {
+    return null;
+  }
 }
 
 // Copy inputs for the ONE reminder of that day: the earliest arrival (the same
 // value the send-time slot validator accepts, via one-text-per-day) and every
-// service's card-hold disclosure. Null when the rule does not apply. Records
-// the snapshot it was built from.
+// service's card-hold disclosure. Null when the rule does not apply or any
+// part of it could not be built. Records the snapshot it was built from.
 async function dayReminderCopy(row) {
   const rows = await dayReminderRows(row);
   let copy = null;
+  let label = null;
   try {
     const earliest = rows ? earliestArrivalMs(rows) : null;
-    const base = earliest === null ? null : await reminderCopyFromMembers(rows);
+    label = earliest === null ? null : await dayMergedLabel(rows);
+    const base = label === null ? null : await reminderCopyFromMembers(rows);
     copy = base ? { ...base, apptTime: new Date(earliest) } : null;
   } catch {
     copy = null;
   }
-  if (row && typeof row === 'object') daySnapshots.set(row, copy ? rows : null);
+  if (row && typeof row === 'object') daySnapshots.set(row, copy ? { rows, label } : null);
   return copy;
 }
 
@@ -1489,9 +1524,10 @@ async function liveReminderServiceLabel(row, { visitId = null } = {}) {
     // A strict merge: a partially-failed merge (add-on or estimate-name read
     // down) must not replace a complete persisted label — throw to the stored
     // fallback below instead (codex #3430 r1 P2).
-    const dayRows = daySnapshots.has(row) ? daySnapshots.get(row) : await dayReminderRows(row);
-    const live = dayRows
-      ? await mergeReminderLabels(db, dayRows.map((m) => ({ scheduled_service_id: m.scheduled_service_id, label: m.service_type })), null, true)
+    // The customer-day label was merged (strictly) with the snapshot in dayReminderCopy.
+    const day = daySnapshots.get(row);
+    const live = day
+      ? day.label
       : await buildMergedServiceLabel(db, {
         customerId: row.customer_id,
         apptTime: row.appointment_time,
@@ -1713,6 +1749,9 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // ABA guard input (codex r39): the slot this body was rendered against,
     // verified live at both canonical move-hold checkpoints.
     ...(Number.isFinite(metaExtra.rendered_slot_ms) ? { renderedSlotMs: metaExtra.rendered_slot_ms } : {}),
+    // A merged customer-day reminder names its rendered members (daySnapshotIds): the only send
+    // the slot guard lets quote a sibling's arrival. Absent for every other send.
+    ...dayRenderGuardInput(metaExtra),
     ...(windowUnknown ? { promisedWindowUnknown: true } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
@@ -3553,6 +3592,7 @@ const AppointmentReminders = {
               apptTime: apptShown72,
               cardHoldNote: shownHoldNote(copy72, dayCopy72),
               emailIdempotencyKey: ownsVisit72 ? visitReminderEmailKey('72h', claim72.dedupeKey) : null,
+              renderedDay: daySnapshotIds(r),
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsOutcome: smsOutcome72,
@@ -3581,7 +3621,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptShown72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptShown72 ? apptShown72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined, templateKey: 'reminder_72h' }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptShown72 ? apptShown72.getTime() : undefined, rendered_day_members: daySnapshotIds(r), notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined, templateKey: 'reminder_72h' }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
@@ -3767,6 +3807,7 @@ const AppointmentReminders = {
                     serviceLabel: nightLabel,
                     cardHoldNote: shownHoldNote(nightCopy, nightDay),
                     emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
+                    renderedDay: daySnapshotIds(r),
                   });
                 }) ?? { held: true };
                 // A move or preference hold at the email handoff is a
@@ -3866,6 +3907,7 @@ const AppointmentReminders = {
               apptTime: apptShown24,
               cardHoldNote: shownHoldNote(copy24, dayCopy24),
               emailIdempotencyKey: ownsVisit24 ? visitReminderEmailKey('24h', claim24.dedupeKey) : null,
+              renderedDay: daySnapshotIds(r),
               serviceLabel,
               rescheduleUrl: reschedule.url,
               // callback_number_needed hold (P1-C + owner ruling
@@ -3897,7 +3939,7 @@ const AppointmentReminders = {
                 // confirmation twin): the row that rendered, v2 or base.
                 if (ladder.templateKey) reminder24Meta.templateKey = ladder.templateKey;
                 return rendered24;
-              }, 'appointment_reminder', 'appointment_reminder_24h', Object.assign(reminder24Meta, { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptShown24 ? apptShown24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }), { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', Object.assign(reminder24Meta, { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptShown24 ? apptShown24.getTime() : undefined, rendered_day_members: daySnapshotIds(r), notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }), { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
