@@ -5,6 +5,7 @@ jest.mock('../models/db', () => require('knex')({ client: 'pg' }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),
   requireTechOrAdmin: (req, res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
 }));
 
 const db = require('../models/db');
