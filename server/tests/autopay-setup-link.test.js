@@ -116,6 +116,7 @@ const gates = require('../config/feature-gates').gates;
 const {
   requestAutopaySetupLink,
   autopayDeliveryPreflight,
+  findSavedMethodForAutoSecure,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,
@@ -685,6 +686,95 @@ describe('autopayDeliveryPreflight — read-only "could this channel deliver" (r
       expect(r.action).toBe('auto_secured');
     });
 
+  });
+
+  describe('requestAutopaySetupLink({ allowAutoSecure })', () => {
+    it('false + a consented saved card: skip(saved_method_available) — nothing enrolled, minted, sent or locked', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+      mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true, allowAutoSecure: false });
+      expect(r).toEqual({ requested: false, action: 'skipped', reason: 'saved_method_available' });
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      expect(touches('customers').some((c) => c.calls.some((x) => x[0] === 'forUpdate'))).toBe(false);
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('false + no saved card sends as usual; default (omitted or true) still auto-secures', async () => {
+      const sent = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', allowAutoSecure: false });
+      expect(sent.action).toBe('sent');
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-7', stripe_payment_method_id: 'pm_7' });
+      mockTableHandlers.payment_method_consents = { first: () => ({ created_at: new Date('2026-08-15T10:00:00Z') }) };
+      for (const opts of [{}, { allowAutoSecure: true }]) {
+        expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', ...opts })).action).toBe('auto_secured');
+      }
+    });
+  });
+
+  describe('requestAutopaySetupLink({ expectedRecipient })', () => {
+    it('sms: a number that differs from the row read here is refused BEFORE the mint — no row touched, nothing sent', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: '9415550000' } });
+      expect(r).toEqual({ requested: false, action: 'skipped', reason: 'recipient_changed' });
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('email: an address that differs is refused before the mint; a matching one (case and spacing ignored) sends to the address just read', async () => {
+      const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: { email: 'someone.else@example.com' } });
+      expect(r.reason).toBe('recipient_changed');
+      expect(touches('appointment_card_requests')).toHaveLength(0);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      const ok = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: { email: `  ${CUSTOMER.email.toUpperCase()} ` } });
+      expect(ok.action).toBe('sent');
+      expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: CUSTOMER.email }));
+    });
+
+    it('sms: a number that matches is sent to; one that changes between the first read and the send is refused at the provider boundary', async () => {
+      const ok = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: CUSTOMER.phone.replace(/\D/g, '').slice(-10) } });
+      expect(ok.action).toBe('sent');
+      expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: CUSTOMER.phone }));
+
+      mockSendCustomerMessage.mockClear();
+      let reads = 0;
+      mockTableHandlers.customers = { first: () => { reads += 1; return reads === 1 ? CUSTOMER : { ...CUSTOMER, phone: '+19415550000' }; } };
+      const moved = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: CUSTOMER.phone.replace(/\D/g, '').slice(-10) } });
+      expect(moved.reason).toBe('recipient_changed');
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    it('email: an address that changes between the first read and the send is refused before the template is sent', async () => {
+      let reads = 0;
+      mockTableHandlers.customers = { first: () => { reads += 1; return reads === 1 ? CUSTOMER : { ...CUSTOMER, email: 'moved@example.com' }; } };
+      const moved = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: { email: CUSTOMER.email } });
+      expect(moved.reason).toBe('recipient_changed');
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+    });
+
+    it('an unreadable re-read, a customer gone at the send, and inline delivery: unreadable and gone refuse; inline ignores the pin', async () => {
+      let reads = 0;
+      mockTableHandlers.customers = { first: () => { reads += 1; if (reads === 1) return CUSTOMER; throw new Error('db blip'); } };
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: { phoneLast10: CUSTOMER.phone.replace(/\D/g, '').slice(-10) } })).reason).toBe('recipient_changed');
+      mockTableHandlers.customers = { first: () => CUSTOMER };
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'inline', expectedRecipient: { phoneLast10: '0000000000' } })).action).toBe('link_created');
+    });
+
+    it('absent pin: unchanged (a changed contact is not looked for)', async () => {
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' })).action).toBe('sent');
+    });
+  });
+
+  describe('findSavedMethodForAutoSecure (the read the preview shares)', () => {
+    it('returns the consented card, null after an opt-out, and reads nothing it should not', async () => {
+      mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-1' });
+      expect(await findSavedMethodForAutoSecure('cust-1')).toEqual({ id: 'pm-1' });
+      mockTableHandlers.autopay_log = { first: () => ({ event_type: 'autopay_disabled' }) };
+      mockFindConsentedChargeableCard.mockClear();
+      expect(await findSavedMethodForAutoSecure('cust-1')).toBeNull();
+      expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('requestAutopaySetupLink (mint-first default)', () => {
     it('default (omitted or false): a failing channel still MINTS the row and the skip carries the link for copy/paste', async () => {
       mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: null }) };
       for (const opts of [{}, { requireDeliverable: false }]) {

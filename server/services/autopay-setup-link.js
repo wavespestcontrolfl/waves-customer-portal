@@ -291,13 +291,41 @@ function setupLinkEmailPayload(customer, secureUrl, expiresAt) {
   };
 }
 
+// `expectedRecipient` (opt-in; { phoneLast10 } for sms, { email } for email):
+// the contact the caller's confirm card showed. The service compares it with
+// the customer row IT reads — before anything is minted, and again on a fresh
+// read immediately before the provider call — and a difference is
+// skip('recipient_changed') with nothing sent. An absent pin changes nothing.
+const pinPhone = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+const pinEmail = (value) => String(value || '').trim().toLowerCase();
+function recipientMatchesPin(expected, delivery, row) {
+  if (!expected) return true;
+  if (delivery === 'email') return !!row && pinEmail(row.email) === pinEmail(expected.email) && pinEmail(row.email) !== '';
+  return !!row && pinPhone(row.phone) === String(expected.phoneLast10 || '') && pinPhone(row.phone).length === 10;
+}
+// The row to send to, read fresh: null when the pin no longer holds (or the
+// read fails, which is not a match). Without a pin it is the row already held.
+async function recipientAtSend({ expectedRecipient, delivery, customerId, customer }) {
+  if (!expectedRecipient) return customer;
+  let fresh = null;
+  try {
+    fresh = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] recipient re-read failed for customer ${customerId}: ${err.message}`);
+  }
+  return recipientMatchesPin(expectedRecipient, delivery, fresh) ? fresh : null;
+}
+
 // Email delivery: the template library owns the audit row, suppressions, and
 // provider retry; an inactive/missing template throws there and is surfaced
 // as a dark lever (same shape as the SMS template lever). Never throws.
-async function emailSetupLink({ customer, customerId, request, secureUrl, trigger }) {
-  const to = String(customer.email || '').trim();
+async function emailSetupLink({ customer, customerId, request, secureUrl, trigger, expectedRecipient }) {
   const precheck = await emailPrecheckReason(customer, customerId);
   if (precheck) return skip(precheck);
+  // The provider-boundary pin: the address mailed is the one just re-read.
+  const target = await recipientAtSend({ expectedRecipient, delivery: 'email', customerId, customer });
+  if (!target) return skip('recipient_changed');
+  const to = String(target.email || '').trim();
 
   const EmailTemplateLibrary = require('./email-template-library');
   let result;
@@ -459,6 +487,24 @@ async function undeliverableSkip({ requireDeliverable, customerId, customer, del
   return preflight.ok ? null : skip(preflight.reason);
 }
 
+// Read-only: the consented, chargeable saved card the auto-secure step would
+// enroll, or null. An OPT-OUT is sacred: a customer whose latest Auto Pay
+// toggle is a disable is never re-enrolled from an old consent by an office
+// click — they get a fresh link and a fresh checkbox instead
+// (findConsentedChargeableCard already returns null after an opt-out; the
+// explicit check here makes the contract visible — pre-push Codex P0). Shared
+// by requestAutopaySetupLink and the Intelligence Bar's preview so both read
+// the card the same way.
+async function findSavedMethodForAutoSecure(customerId) {
+  const ConsentService = require('./payment-method-consents');
+  const lastToggle = await db('autopay_log')
+    .where({ customer_id: customerId })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .first('event_type');
+  return lastToggle?.event_type === 'autopay_disabled' ? null : ConsentService.findConsentedChargeableCard(customerId);
+}
+
 /**
  * The one entry point (operator surfaces only). Returns
  *   { requested, action: 'link_created' | 'sent' | 'auto_secured' | 'skipped', reason, channel?, secureUrl?, expiresAt? }
@@ -474,7 +520,7 @@ async function undeliverableSkip({ requireDeliverable, customerId, customer, del
  * wants a link without a deliverable channel (an Intelligence Bar confirm
  * card) opts in.
  */
-async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin', requireDeliverable }) {
+async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin', requireDeliverable, allowAutoSecure = true, expectedRecipient = null }) {
   try {
     if (!['inline', 'sms', 'email'].includes(delivery)) delivery = 'inline';
     const eligibility = await setupLinkIneligibility(customerId);
@@ -483,20 +529,14 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
 
     // A consented, chargeable saved card covers the ask — enroll it and
     // send nothing (mirrors the visit lane's auto-secure, minus the row:
-    // there is no visit to mark satisfied). An OPT-OUT is sacred: a
-    // customer whose latest Auto Pay toggle is a disable is never
-    // re-enrolled from an old consent by an office click — they get a
-    // fresh link and a fresh checkbox instead (findConsentedChargeableCard
-    // already returns null after an opt-out; the explicit check below
-    // makes the contract visible here — pre-push Codex P0).
-    const ConsentService = require('./payment-method-consents');
-    const lastToggle = await db('autopay_log')
-      .where({ customer_id: customerId })
-      .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
-      .orderBy('created_at', 'desc')
-      .first('event_type');
-    const optedOut = lastToggle?.event_type === 'autopay_disabled';
-    const saved = optedOut ? null : await ConsentService.findConsentedChargeableCard(customerId);
+    // there is no visit to mark satisfied). An OPT-OUT is sacred (see
+    // findSavedMethodForAutoSecure): that customer gets a fresh link and a
+    // fresh checkbox instead.
+    const saved = await findSavedMethodForAutoSecure(customerId);
+    // allowAutoSecure === false: enrolling a saved card turns Auto Pay on for
+    // the account (a billing change) — a caller that must never make it gets
+    // a skip here, before anything is enrolled, minted or sent.
+    if (saved && allowAutoSecure === false) return skip('saved_method_available');
     if (saved) {
       // The ORIGINAL consent's moment rides into enrollment (pre-push Codex
       // P0): the unlocked opt-out read above can race a disable that commits
@@ -546,6 +586,8 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
 
     const undeliverable = await undeliverableSkip({ requireDeliverable, customerId, customer, delivery, trigger });
     if (undeliverable) return undeliverable;
+    // The pin against the row this call read, before any link row is touched.
+    if (delivery !== 'inline' && !recipientMatchesPin(expectedRecipient, delivery, customer)) return skip('recipient_changed');
 
     // Dedup on the LIVE row — pending OR mid-completion (partial unique
     // index: one live standalone row per customer; a completing row is a
@@ -614,7 +656,7 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     }
 
     if (delivery === 'email') {
-      const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger });
+      const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger, expectedRecipient });
       return { ...emailed, ...linkMeta };
     }
 
@@ -623,11 +665,14 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     const { renderTemplate } = require('./appointment-card-request');
     const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY);
     if (!body) return skip('template_inactive', linkMeta);
+    // The provider-boundary pin: the number texted is the one just re-read.
+    const target = await recipientAtSend({ expectedRecipient, delivery: 'sms', customerId, customer });
+    if (!target) return skip('recipient_changed', linkMeta);
 
     let result;
     try {
       result = await sendCustomerMessage({
-        to: customer.phone,
+        to: target.phone,
         body,
         channel: 'sms',
         audience: 'customer',
@@ -1453,6 +1498,7 @@ module.exports = {
   setupLinkIneligibility,
   requestAutopaySetupLink,
   autopayDeliveryPreflight,
+  findSavedMethodForAutoSecure,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,
