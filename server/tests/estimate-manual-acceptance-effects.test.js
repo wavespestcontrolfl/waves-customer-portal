@@ -829,6 +829,30 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const raw = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: '150.00', billingCadence: 'one_time' }], { engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, billingCadence: 'one_time' }] } });
     expect(await lineNames(raw)).toEqual([['Wasp Nest Removal', 150]]);
   });
+  test('round 42: an explicit taxable:false on one mirror (the other silent) rides onto the kept row: no tax note', async () => {
+    const world = feeWorld(solo, { items: [{ ...roach }], specItems: [{ ...roach, taxable: false }] });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([expect.objectContaining({ name: 'German Roach Cleanout', amount: 350 })]);
+    expect(effects.find((e) => e.kind === 'one_time_line')).not.toHaveProperty('taxable');
+  });
+  test('round 42: an installation charge mirrored with 500 and "500.00" is one line, not two', async () => {
+    const line = (price) => ({ service: 'termite_bait', label: 'Termite Bait Stations', monthly: 50, visitsPerYear: 4, installation: { price } });
+    const world = rawOnly([line(500)], { engineResult: { lineItems: [line('500.00')] } });
+    const lines = (await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }))).effects.filter((e) => e.kind === 'one_time_line');
+    expect(lines.map((e) => e.amount)).toEqual([500]);
+  });
+  test('round 42: mapped sold nets ($80 Kitchen, $90 Garage from a $100 gross) meet their $100 raw twins by scope, in reverse order', async () => {
+    const mapped = (detail, net) => ({ service: 'bed_bug', name: 'Bed Bug Treatment', price: 100, amountAfterDiscount: net, detail });
+    const raw = (detail) => ({ service: 'bed_bug', label: 'Bed Bug Treatment', price: 100, detail, billingCadence: 'one_time' });
+    const world = rawOnly([raw('Garage'), raw('Kitchen')], { result: { oneTime: { items: [mapped('Kitchen', 80), mapped('Garage', 90)] }, lineItems: [raw('Garage'), raw('Kitchen')] } });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.amount, e.includes])).toEqual([[80, ['Kitchen']], [90, ['Garage']]]);
+  });
+  test('round 42: scope stated by only one same-shape mirror (specItems adds visits 3 + detail) is kept, not a conflict', async () => {
+    const world = feeWorld(solo, { items: [{ service: 'flea', name: 'Flea Package', price: 300 }], specItems: [{ service: 'flea', name: 'Flea Package', price: 300, visits: 3, detail: 'Whole home' }] });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.visits, e.includes])).toEqual([['Flea Package', 300, 3, ['Whole home']]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
