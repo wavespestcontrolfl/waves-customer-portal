@@ -828,6 +828,30 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  // The Intelligence Bar's create_customer_link runs the same handler without
+  // an HTTP request (module.exports.customerLinkInsert): the answer it reads
+  // is exactly the route's status + JSON body, for the 200 and the 404 alike.
+  test("customerLinkInsert answers the route's own { status, body } without a request", async () => {
+    const { customerLinkInsert } = communicationsRouter;
+    wireDb({ customers: soloCustomer() });
+    builders.buildPayBalanceLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/l/py222',
+      line: 'You can view and pay your balance securely here: https://portal.wavespestcontrol.com/l/py222\n\n',
+      balance: { total: 184, count: 2 },
+    });
+    const ok = await customerLinkInsert({ phone: '+15551234567', kind: 'pay_balance' });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ kind: 'pay_balance', url: 'portal.wavespestcontrol.com/l/py222', balance: { total: 184, count: 2 } });
+
+    wireDb({ customers: soloCustomer() });
+    builders.buildPayBalanceLink.mockResolvedValue({ url: null, line: '', reason: 'No open balance on this account' });
+    const none = await customerLinkInsert({ phone: '+15551234567', kind: 'pay_balance' });
+    expect(none).toEqual({ status: 404, body: { error: 'No open balance on this account' } });
+
+    const badKind = await customerLinkInsert({ phone: '+15551234567', kind: 'nope' });
+    expect(badKind.status).toBe(400);
+  });
+
   // POST /send-prep — a zero-confirmed send whose leg the provider MAY have
   // accepted must not read as "try again" (GH Codex #3856 r8 P2).
   describe('POST /send-prep', () => {
