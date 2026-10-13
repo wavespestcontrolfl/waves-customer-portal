@@ -154,7 +154,8 @@ describe('extraction failure: attempt counter + terminal triage card', () => {
     await processor.processRecording(CALL_SID);
 
     const sqls = state.whereRawCalls.map((w) => w.sql);
-    expect(sqls).toContain("processing_status IS DISTINCT FROM 'extraction_failed'");
+    // Both retry lanes share the guard (codex #6271 r40 P1).
+    expect(sqls).toContain("processing_status IS DISTINCT FROM 'extraction_failed' AND processing_status IS DISTINCT FROM 'no_transcription'");
     const capClause = state.whereRawCalls.find((w) => w.sql.includes('COALESCE(extraction_attempts, 0) <'));
     expect(capClause).toBeDefined();
     expect(capClause.bindings).toEqual([3]);
