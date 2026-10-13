@@ -22,8 +22,10 @@
  * person can settle from the record (the model was unsure, or part of the
  * record could not be read). A failed model call raises nothing: the next
  * run asks again. The lane shares the auto-dispatch ring allowance of 24
- * hours (audit.ringsLeft), soonest date first. A notice closes when its
- * visit leaves the date or is no longer open.
+ * hours (audit.ringsLeft), soonest date first. A notice is for the placement
+ * the visit had at the check (date, arrival time, technician): it is not
+ * raised when the visit left that placement before the run's end, and it
+ * closes when the visit leaves it or is no longer open.
  *
  * Behind GATE_AUTO_DISPATCH_PROOFREADER (config.proofreaderEnabled).
  */
@@ -44,7 +46,18 @@ const PERSON_SETTLES = {
   record_too_long: 'The customer record is too long to check.',
 };
 
-const DETAIL_MAX_CHARS = 2000;
+// The model's own sentence and its quote have no length bound in the answer
+// schema. Each gets its own budget, so the quote and the closing instruction
+// are always whole inside the 2,000-character detail (Codex #6313 r1).
+const REASON_MAX_CHARS = 300;
+const QUOTE_MAX_CHARS = 1000;
+
+// The placement a notice is about, as the database prints it.
+const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'scheduledDate'"
+  + " AND s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'"
+  + " AND s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'";
+const OPEN_STATUSES = ['pending', 'confirmed'];
+const textOrNull = (value) => (value == null || value === '' ? null : String(value));
 
 const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
@@ -121,6 +134,7 @@ function collectNotice(state, service, { answer, move, entry }) {
   if (!date || state.notices.has(key)) return;
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
+    window_start: textOrNull(service.window_start), technician_id: textOrNull(service.technician_id),
     quote: answer.quote || null, reason: answer.reason || null, entry: entry ? { channel: entry.channel, from: entry.from, at: entry.at } : null,
   });
 }
@@ -170,20 +184,26 @@ function approvedSlotTaken(checked, err) {
 
 const slotWords = (slot, shortDateET) => `${slot.weekday} ${shortDateET(`${slot.date}T12:00:00Z`)}, ${slot.arrival_window}`;
 
+// Cut at a word, with a visible mark that words are missing.
+function bounded(text, max) {
+  const { cutAtWord } = require('../../admin-alert-compose');
+  return text.length > max ? cutAtWord(text, max) : text;
+}
+
 function detailFor(item, { shortDateET, redactedWords }) {
   const lines = [
     `Auto-dispatch wanted to move this ${item.move.service} visit from ${slotWords(item.move.from, shortDateET)} to ${slotWords(item.move.to, shortDateET)}.`,
     'It did not move the visit.',
   ];
-  if (item.reason) lines.push(`The check said: ${redactedWords(item.reason)}`);
+  if (item.reason) lines.push(`The check said: ${bounded(redactedWords(item.reason), REASON_MAX_CHARS)}`);
   if (item.quote) {
     const where = item.entry ? ` (${[item.entry.channel, item.entry.from, item.entry.at].filter(Boolean).join(', ')})` : '';
-    lines.push(`From the customer record${where}: “${redactedWords(item.quote)}”`);
+    lines.push(`From the customer record${where}: “${bounded(redactedWords(item.quote), QUOTE_MAX_CHARS)}”`);
   } else {
     lines.push(PERSON_SETTLES[item.why]);
   }
   lines.push('If the move is right, move the visit in dispatch. If not, mark this done and the visit stays.');
-  return lines.join('\n').slice(0, DETAIL_MAX_CHARS);
+  return lines.join('\n');
 }
 
 function whyFor(item, { shortDateET, redactedWords, whyWithQuote }) {
@@ -209,18 +229,21 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
     dedupeKey: item.key,
     detail: detailFor(item, names),
     metadata: {
-      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, kind: item.why, proposedDate: item.move.to.date,
+      scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, windowStart: item.window_start, technicianId: item.technician_id,
+      kind: item.why, proposedDate: item.move.to.date,
     },
   });
 }
 
-// A notice stays open while its visit is still open on the notice's date.
+// A notice stays open while its visit is still open on the placement the
+// notice is about. A person who gives the visit a new time or technician on
+// the same date has decided (Codex #6313 r1).
 async function closeResolved(audit, nowDate) {
   try {
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
-        q.whereRaw("s.scheduled_date::text = notifications.metadata->>'scheduledDate'").whereIn('s.status', ['pending', 'confirmed']);
+        q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
       },
       resolvedTitle: RESOLVED_TITLE,
       resolution: 'The visit moved or is no longer open',
@@ -228,6 +251,21 @@ async function closeResolved(audit, nowDate) {
     }, nowDate);
   } catch (err) {
     logger.error(`[auto-dispatch] move-check notice close failed: ${err.message}`);
+  }
+}
+
+// The visit is still open on the placement the check read. A person can move
+// or cancel it between the check and the run's end; that notice would be
+// stale at once and would spend a ring (Codex #6313 r1). An unreadable visit
+// raises nothing: the next run asks again.
+async function stillAsChecked(item, conn) {
+  try {
+    const row = await conn('scheduled_services').where({ id: item.id }).first('status', 'scheduled_date', 'window_start', 'technician_id');
+    return !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
+      && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${err.message}`);
+    return false;
   }
 }
 
@@ -242,7 +280,7 @@ async function closeNotices(nowDate = new Date()) {
  * held move for the shared allowance): raise this run's notices. Returns how
  * many writes rang. Never throws.
  */
-async function raiseNotices(state) {
+async function raiseNotices(state, { conn = require('../../../models/db') } = {}) {
   const audit = require('../audit');
   if (!state || state.notices.size === 0) return 0;
   let rang = 0;
@@ -254,6 +292,7 @@ async function raiseNotices(state) {
     for (const item of audit.withinRingBudget([...state.notices.values()], new Set(), Infinity, (row) => row.key)) {
       // Allowance spent: the rest wait for the next run, which asks again.
       if (left <= 0) break;
+      if (!(await stillAsChecked(item, conn))) continue;
       try {
         // Only a new notice rings and spends a slot; a key that exists is left as it is.
         if (audit.noticeRang(await raiseOne(item, { raiseAdminAlert, names, audit }))) { left -= 1; rang += 1; }

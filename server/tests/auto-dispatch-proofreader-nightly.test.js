@@ -134,6 +134,23 @@ describe('the write of a checked move', () => {
 });
 
 describe('raiseNotices', () => {
+  // The run-end re-read of each visit: by default it is still as the check read it.
+  let visitRow;
+  beforeEach(() => { visitRow = (id) => ({ status: 'confirmed', scheduled_date: null, window_start: '09:00', technician_id: 't1', id }); });
+  const visits = () => () => {
+    let wanted = null;
+    const chain = {
+      where: (cond) => { wanted = cond.id; return chain; },
+      first: async () => {
+        const row = visitRow(wanted);
+        if (row instanceof Error) throw row;
+        return row && row.scheduled_date === null ? { ...row, scheduled_date: DATES[wanted] || '2026-10-20' } : row;
+      },
+    };
+    return chain;
+  };
+  const DATES = { late: '2026-11-20', soon: '2026-10-18', mid: '2026-10-30' };
+
   const unsure = async (answer, service = SERVICE) => {
     const run = runOf();
     await nightly.checkMove({ service, best: BEST, run }, { conn: conn(), proofreader: proofreaderOf({ verdict: 'unknown', ...answer }) });
@@ -142,14 +159,14 @@ describe('raiseNotices', () => {
 
   test('an unsure move with a quote: the notice names the customer, both dates and the words', async () => {
     const state = await unsure({ why: 'model_unsure', entry_id: 'E1', quote: 'never come on Thursdays', reason: 'The note may be about another service.' });
-    expect(await nightly.raiseNotices(state)).toBe(1);
+    expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(1);
     const [category, title, body, opts] = notifications.notifyAdmin.mock.calls[0];
     expect(category).toBe('schedule_conflict');
     expect(title).toBe("Schedule — check a held move of Pat Sample's visit");
     expect(body).toBe('Move from Oct 20 to Oct 22 held; the record says “never come on Thursdays”');
     expect(opts).toMatchObject({
       bell: true, dedupeKey: 'auto-dispatch-proofreader:s1:2026-10-20', link: '/admin/dispatch?tab=schedule&date=2026-10-20&appointment=s1',
-      metadata: { scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-10-20', kind: 'model_unsure', proposedDate: '2026-10-22' },
+      metadata: { scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-10-20', windowStart: '09:00', technicianId: 't1', kind: 'model_unsure', proposedDate: '2026-10-22' },
     });
     // Written once: a later run that is still unsure must not reopen a notice a person closed.
     expect(opts.refreshOnDedupe).toBeUndefined();
@@ -161,14 +178,14 @@ describe('raiseNotices', () => {
 
   test('a record that could not be read in full says so, in one sentence', async () => {
     const state = await unsure({ why: 'record_incomplete' });
-    await nightly.raiseNotices(state);
+    await nightly.raiseNotices(state, { conn: visits() });
     expect(notifications.notifyAdmin.mock.calls[0][2]).toBe('Move from Oct 20 to Oct 22 held: part of the customer record could not be read.');
   });
 
   test('a same-day new time reads as a new time, not a move', async () => {
     const run = runOf();
     await nightly.checkMove({ service: SERVICE, best: { ...BEST, date: '2026-10-20' }, run }, { conn: conn(), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
-    await nightly.raiseNotices(run.proofreader);
+    await nightly.raiseNotices(run.proofreader, { conn: visits() });
     expect(notifications.notifyAdmin.mock.calls[0][2]).toBe('New time on Oct 20 held: a note may limit when this visit can happen.');
   });
 
@@ -179,14 +196,48 @@ describe('raiseNotices', () => {
       await nightly.checkMove({ service: { ...SERVICE, id, scheduled_date: date }, best: BEST, run }, { conn: conn(), proofreader });
     }
     audit.ringsLeft.mockResolvedValue(2);
-    expect(await nightly.raiseNotices(run.proofreader)).toBe(2);
+    expect(await nightly.raiseNotices(run.proofreader, { conn: visits() })).toBe(2);
     expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].metadata.scheduledServiceId)).toEqual(['soon', 'mid']);
+  });
+
+  test.each([
+    ['cancelled', { status: 'cancelled', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' }],
+    ['moved to another day', { status: 'confirmed', scheduled_date: '2026-10-21', window_start: '09:00', technician_id: 't1' }],
+    ['given a new time that day', { status: 'confirmed', scheduled_date: '2026-10-20', window_start: '13:00', technician_id: 't1' }],
+    ['given another technician', { status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't9' }],
+    ['gone', null],
+    ['unreadable', new Error('db down')],
+  ])('a visit %s since the check raises nothing and spends no slot', async (_name, row) => {
+    const state = await unsure({ why: 'model_unsure' });
+    visitRow = () => row;
+    expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a long answer never pushes the quote or the closing instruction out of the detail', async () => {
+    const state = await unsure({ why: 'model_unsure', entry_id: 'E1', quote: `never on Thursdays ${'and more words '.repeat(200)}`, reason: 'word '.repeat(400) });
+    await nightly.raiseNotices(state, { conn: visits() });
+    const { detail } = notifications.notifyAdmin.mock.calls[0][3];
+    expect(detail.length).toBeLessThan(2000);
+    expect(detail).toContain('“never on Thursdays and more words');
+    expect(detail.endsWith('mark this done and the visit stays.')).toBe(true);
+  });
+
+  test('the close keeps a notice open only while the visit is on the placement the check read', async () => {
+    await nightly.closeNotices();
+    const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
+    audit.retireResolvedNotices.mock.calls[0][0].stillOpen(q);
+    const sql = q.whereRaw.mock.calls[0][0];
+    expect(sql).toContain("metadata->>'scheduledDate'");
+    expect(sql).toContain("s.window_start::text IS NOT DISTINCT FROM notifications.metadata->>'windowStart'");
+    expect(sql).toContain("s.technician_id::text IS NOT DISTINCT FROM notifications.metadata->>'technicianId'");
+    expect(q.whereIn).toHaveBeenCalledWith('s.status', ['pending', 'confirmed']);
   });
 
   test('a notice that already exists is left as it is and spends no slot', async () => {
     const state = await unsure({ why: 'model_unsure' });
     notifications.notifyAdmin.mockResolvedValue({ id: 'n1', deduped: true });
-    expect(await nightly.raiseNotices(state)).toBe(0);
+    expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
   });
 
   test('every run closes the notices whose visit moved or is no longer open, the check off included', async () => {
@@ -203,6 +254,6 @@ describe('raiseNotices', () => {
     notifications.notifyAdmin.mockRejectedValue(new Error('store down'));
     audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
     await expect(nightly.closeNotices()).resolves.toBeUndefined();
-    expect(await nightly.raiseNotices(state)).toBe(0);
+    expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
   });
 });
