@@ -635,4 +635,5 @@ module.exports = {
   REPEAT_INTERVAL_MINUTES,
   repeatWindowOpen,
   officeClosedCall,
+  INACTIVE_STATUSES,
 };
