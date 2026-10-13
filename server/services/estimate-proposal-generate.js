@@ -1178,7 +1178,11 @@ function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap,
       const twin = claimManualNetTwin(rawPool, item);
       if (!twin) { out.comped.push(label); continue; }
       if (twinIsGated(rawPool, twin)) { pushGated(out, label); continue; }
-      if (twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) { out.conflicted.push(label); continue; }
+      // Only a LOWER alias's zero is outranked: a mapped manualFinalOneTime
+      // of 0 is itself an operator decision, and a twin's different manual
+      // net is a conflict, never an override (codex #6113 r50).
+      const manualZero = zeroInFirstAlias(item, ['manualFinalOneTime']);
+      if (manualZero || twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) { out.conflicted.push(label); continue; }
       out.work.push(mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
       continue;
     }

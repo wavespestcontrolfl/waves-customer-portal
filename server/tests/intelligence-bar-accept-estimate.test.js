@@ -178,6 +178,20 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     });
   });
 
+  test('round 50: a one-time package (3 visits) makes the visits line and the accepted message say schedule every visit, not only the first', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 300, estimate_data: { result: { oneTime: { items: [{ service: 'flea', name: 'Flea Package', price: 300, visits: 3 }] } } } } });
+    dryEffects = () => [
+      { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+      { kind: 'customer', before: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }), after: customerFields({ monthly_rate: '55.00', billing_mode: 'per_application', waveguard_tier: 'Bronze' }) },
+      { kind: 'one_time_line', name: 'Flea Package', amount: 300, visits: 3, consequence: 'schedule_and_invoice_by_hand' },
+      postCommit([]),
+    ];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(labels(card(preview))).toContain('Visits: books none — book the first visit on the calendar after, and schedule every visit of Flea Package (all 3 visits)');
+    realReply = async () => ({ status: 200, json: { success: true, alreadyAccepted: false, conversion: {}, warnings: [] } });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT, { confirmed: true, technicianId: 'tech-owner', executionPins: { _verified_accept_plan: preview } });
+    expect(result.message).toMatch(/schedule every visit of Flea Package \(all 3 visits\)\.$/);
+  });
   test('round 44: with no persisted aggregate the headline one-time total is the sum of the itemized lines, never $0', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
     dryEffects = () => [

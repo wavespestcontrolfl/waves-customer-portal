@@ -517,6 +517,15 @@ function itemizedOneTimeTotal(effects) {
   const cents = effectsOfKind(effects, 'one_time_line').reduce((sum, l) => sum + Math.round(Number(l.amount || 0) * 100), 0);
   return cents / 100;
 }
+// The scheduling instruction, from the one-time lines: a one-time package
+// (visits > 1) is booked by nobody else after this accept, so staff
+// schedule every visit of it, not only the first (codex #6113 r50).
+function visitsInstruction(preview) {
+  const packages = (preview.one_time_lines || []).filter((l) => Number(l.visits) > 1).map((l) => `${l.name} (all ${l.visits} visits)`);
+  return packages.length
+    ? `book the first visit on the calendar after, and schedule every visit of ${packages.join(', ')}`
+    : 'book the first visit on the calendar after';
+}
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
     kind: 'operational',
@@ -545,7 +554,7 @@ function cardLines(preview) {
       before: preview.property_type.before, after: preview.property_type.after,
     }]),
     { kind: 'billing', label: 'No setup invoice, no charge and no receipt now' },
-    { kind: 'operational', label: 'Visits: books none — book the first visit on the calendar after' },
+    { kind: 'operational', label: `Visits: books none — ${visitsInstruction(preview)}` },
     {
       kind: 'operational',
       label: preview.converts
@@ -710,7 +719,7 @@ function acceptedResult(preview, json, stored) {
     // reads the singular field: one or more post-commit warnings make the
     // outcome partially_completed and show on the card.
     ...(Array.isArray(json.warnings) && json.warnings.length ? { warning: json.warnings.join(' ') } : {}),
-    message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted. No visits were booked — book the first visit on the calendar.`,
+    message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted. No visits were booked — ${visitsInstruction(preview)}.`,
   };
 }
 
