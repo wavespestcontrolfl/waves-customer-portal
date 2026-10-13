@@ -75,6 +75,8 @@ export function bannerShowsAnything(banner) {
   return watering || isText(banner.mowHold?.line);
 }
 
+// Live-only sentences about the short run: they end with it.
+const SHORT_RUN_EXTRAS = ['forecastLine', 'observedRain', 'setupLine'];
 const finiteMs = (iso) => { const ms = iso ? Date.parse(iso) : NaN; return Number.isFinite(ms) ? ms : null; };
 
 /**
@@ -88,8 +90,9 @@ export function bannerAtNow(banner, nowMs = Date.now(), printing = false) {
   const laterMs = finiteMs(later?.at);
   const lines = Array.isArray(later?.lines) ? later.lines.filter(isText) : [];
   if (printing || laterMs == null || nowMs <= laterMs || !lines.length) return banner;
-  const { forecastLine, observedRain, setupLine, ...rest } = banner;
-  return { ...rest, state: later.state || banner.state, lines };
+  const now = { ...banner, state: later.state || banner.state, lines };
+  SHORT_RUN_EXTRAS.forEach((key) => { delete now[key]; });
+  return now;
 }
 
 /** The next moment the live banner changes (its later phase starts, or it ends), or null when none is ahead. */
