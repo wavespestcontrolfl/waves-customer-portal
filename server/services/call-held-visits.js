@@ -16,17 +16,18 @@
  *               Never a voicemail, spam or a call that needed no action.
  * One row per call; confirmed wins when a call qualifies as both.
  *
- * A held row clears when the office has acted: a visit carries the call (any
- * date, any customer), the call's customer has a live visit that day, a
- * namesake account booked the confirmed slot after the call (watchdog rule),
- * a day-only call's customer got any live visit after the call, or the office
- * closed the call's triage cards. A visit the office books by hand carries no
- * call reference, and an unlinked call has no customer to match, so one more rule
- * covers the normal hand booking (and "Book it"): a live visit CREATED AFTER the
- * call clears the row when its customer carries the caller's phone number, or
- * when its address is the property stated on the call (house number, street,
- * unit, and the city and ZIP when stated). Only a visit that is on the calendar
- * or done counts for these fallback rules; a skipped one never does.
+ * A held row clears when the office has acted:
+ *   - a visit carries the call (source_call_log_id or the Call SID note), any date, any customer;
+ *   - the call's customer has a live visit on the promised day;
+ *   - a namesake account booked the confirmed slot after the call (the watchdog rule);
+ *   - a live visit created after the call, on the promised day, sits under a customer who
+ *     carries the caller's number, or at the property stated on the call (house number,
+ *     street, unit, and the city and ZIP when stated). This covers the normal hand booking
+ *     and "Book it", which carry no call reference;
+ *   - the office closed the call's triage cards.
+ * "Live" is on the calendar or done; a skipped, cancelled or rescheduled visit never counts.
+ * A visit on ANOTHER day clears only through the call reference: a recurring visit generated
+ * after the call is not this promise.
  * Dates come from to_char in SQL, never a JS
  * Date round-trip. Dark behind GATE_CALL_HELD_VISIT; read-only.
  */
@@ -71,8 +72,10 @@ const externalPhone = (call) => (String(call.direction || '').startsWith('outbou
 // call stated them, and the same unit (statedAddressCorroborates, fail closed). `row` carries
 // customer_phone, customer_secondary_phone and the visit's address parts (visit_address,
 // visit_address_line2, visit_city, visit_zip: the visit's own, else the customer's).
-function bookedForCallerAfterCall(row, call, extraction) {
-  if (!LIVE_STATUSES.has(row.status)) return false;
+function bookedForCallerAfterCall(row, call, extraction, dateET) {
+  // On the promised day only: a later visit on another day (a recurring visit generated after
+  // the call, another service) is not this promise. That needs the call reference.
+  if (!LIVE_STATUSES.has(row.status) || row.sched_date !== dateET) return false;
   const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
   const callAt = call.created_at ? new Date(call.created_at).getTime() : NaN;
   if (!Number.isFinite(rowAt) || !Number.isFinite(callAt) || rowAt <= callAt) return false;
@@ -144,13 +147,11 @@ function computeHeldVisits(calls, bookedRows, triageRows, {
     // A visit that is on the calendar or done; a skipped, cancelled or rescheduled one is not a booking.
     const own = (row) => !!call.customer_id && row.customer_id === call.customer_id && LIVE_STATUSES.has(row.status);
     const sameName = namesakes.get(call.id);
-    const callAt = new Date(call.created_at).getTime();
     const cleared = bookedRows.some((row) => (
       rowCarriesCall(row, call)
       || (own(row) && row.sched_date === dateET)
       || (kind === 'confirmed' && !!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot))
-      || (kind === 'day_only' && own(row) && new Date(row.created_at).getTime() > callAt)
-      || bookedForCallerAfterCall(row, call, extraction)
+      || bookedForCallerAfterCall(row, call, extraction, dateET)
     ));
     if (cleared) continue;
     if (officeClosedCall(triageRows.filter((r) => r.call_log_id === call.id))) continue;
@@ -237,16 +238,12 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
       if (sidPatterns.length) this.orWhereRaw('ss.notes LIKE ANY(?)', [sidPatterns]);
       if (customerIds.length) {
         this.orWhere(function ownOrNamesake() {
-          this.whereIn('ss.customer_id', customerIds)
-            .andWhere(function onDateOrAfterCall() {
-              this.whereRaw("to_char(ss.scheduled_date, 'YYYY-MM-DD') = ?", [dateET])
-                .orWhere('ss.created_at', '>=', earliestCall);
-            });
+          this.whereIn('ss.customer_id', customerIds).whereRaw("to_char(ss.scheduled_date, 'YYYY-MM-DD') = ?", [dateET]);
         });
       }
       if (phoneForms.length || houseNumbers.length) {
         this.orWhere(function handBookedAfterCall() {
-          this.where('ss.created_at', '>=', earliestCall).andWhere(function callerOrAddress() {
+          this.where('ss.created_at', '>=', earliestCall).whereRaw("to_char(ss.scheduled_date, 'YYYY-MM-DD') = ?", [dateET]).andWhere(function callerOrAddress() {
             if (phoneForms.length) {
               this.whereRaw(`${digits('cu.phone')} = ANY(?)`, [phoneForms]).orWhereRaw(`${digits('cu.secondary_phone')} = ANY(?)`, [phoneForms]);
             }

@@ -175,11 +175,10 @@ describe('clearing rules', () => {
     expect(run([call({ ai_extraction_enriched: dayOnly() })], [namesakeVisit], [], { namesakes })).toHaveLength(1);
   });
 
-  it('clears a day-only row when its customer got any live visit after the call, on any date', () => {
+  it('does not clear a day-only row on a visit on another date (a recurring visit generated after the call)', () => {
     const linked = call({ customer_id: 'cust-1', ai_extraction_enriched: dayOnly() });
-    expect(run([linked], [visit({ sched_date: '2026-10-20', created_at: '2026-10-12T15:00:00Z' })])).toEqual([]);
-    expect(run([linked], [visit({ sched_date: '2026-10-20', created_at: '2026-10-01T15:00:00Z' })])).toHaveLength(1);
-    expect(run([linked], [visit({ sched_date: '2026-10-20', status: 'cancelled' })])).toHaveLength(1);
+    expect(run([linked], [visit({ sched_date: '2026-10-20', created_at: '2026-10-12T15:00:00Z' })])).toHaveLength(1);
+    expect(run([linked], [visit({ created_at: '2026-10-01T15:00:00Z' })])).toEqual([]); // the promised day itself
   });
 
   it('does not clear a confirmed row on a later visit on another date', () => {
@@ -217,10 +216,14 @@ describe('order and gate', () => {
 describe('a hand booking after the call clears the row', () => {
   const unlinkedDayOnly = () => call({ ai_extraction_enriched: dayOnly() });
 
-  it('clears on a later visit under a customer who carries the caller number, any date', () => {
-    const booked = visit({ customer_id: 'cust-new', customer_phone: '(941) 555-0100', sched_date: '2026-10-16' });
+  it('clears on a later visit, on the promised day, under a customer who carries the caller number', () => {
+    const booked = visit({ customer_id: 'cust-new', customer_phone: '(941) 555-0100' });
     expect(run([unlinkedDayOnly()], [booked])).toEqual([]);
     expect(run([call()], [booked])).toEqual([]); // a confirmed slot too
+    // An unrelated later booking that shares the phone, on another day, is not this promise.
+    const otherDay = visit({ customer_id: 'cust-new', customer_phone: '(941) 555-0100', sched_date: '2026-10-16' });
+    expect(run([unlinkedDayOnly()], [otherDay])).toHaveLength(1);
+    expect(run([call()], [otherDay])).toHaveLength(1);
     expect(run([unlinkedDayOnly()], [visit({ customer_id: 'cust-new', customer_secondary_phone: '+19415550100' })])).toEqual([]);
   });
 
