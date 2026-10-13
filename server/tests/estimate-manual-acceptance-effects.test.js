@@ -1010,6 +1010,12 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const world = rawOnly(raw, { result: { oneTime: { items: mapped }, lineItems: raw } });
     expect(await lineNames(world)).toEqual([['Wasp Nest Removal', 80]]);
   });
+  test('round 62: two services with the generic name "Treatment", mirrored in reverse order, pair by service key: each keeps its own net', async () => {
+    const mapped = [{ service: 'wasp', name: 'Treatment', price: 100, priceAfterDiscount: 80 }, { service: 'flea', name: 'Treatment', price: 200, priceAfterDiscount: 150 }];
+    const raw = [{ service: 'flea', label: 'Treatment', price: 200, billingCadence: 'one_time' }, { service: 'wasp', label: 'Treatment', price: 100, billingCadence: 'one_time' }];
+    const world = rawOnly(raw, { result: { oneTime: { items: mapped }, lineItems: raw } });
+    expect(await lineNames(world)).toEqual([['Treatment', 80], ['Treatment', 150]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

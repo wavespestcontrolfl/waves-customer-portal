@@ -1125,7 +1125,15 @@ const explicitTaxableOf = (item, twin) => ((item.taxable === true || item.taxabl
 // (codex #6113 r61).
 const rowNames = (row) => new Set([row.service, row.name, row.label, row.displayName, row.display?.name]
   .map((v) => String(v || '').trim().toLowerCase()).filter(Boolean));
-const sameIdentity = (item, line) => { const names = rowNames(item); return [...rowNames(line)].some((n) => names.has(n)); };
+// Two rows that both carry a service key are the same charge only when the
+// keys match: a shared generic label ("Treatment") never pairs rows of two
+// services (codex #6113 r62). A label is the identity only when a side has
+// no key.
+const serviceKeyOf = (row) => String(row.service || '').trim().toLowerCase();
+const sameIdentity = (item, line) => {
+  if (serviceKeyOf(item) && serviceKeyOf(line)) return serviceKeyOf(item) === serviceKeyOf(line);
+  const names = rowNames(item); return [...rowNames(line)].some((n) => names.has(n));
+};
 // Twin: the exact-amount mirror, else any same-service raw row (one engine
 // run persists both shapes, so the same service key is a mirror).
 function claimRawTwin(rawPool, item, mappedAmount) {
