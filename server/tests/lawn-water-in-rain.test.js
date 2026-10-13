@@ -97,6 +97,34 @@ describe('resolveRainCoverage', () => {
     expect(late.fetchForecast.mock.calls[0][0].to.toISOString()).toBe('2026-10-01T18:00:00.000Z');
   });
 
+  test('a short water-in beside a 14-day one: rain counts through the LONG deadline, against the larger amount', async () => {
+    const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+    const twoWindows = buildWateringInstruction({
+      rules: [
+        { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' },
+        { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 336, source: 'label' },
+      ],
+      completedAt: instruction.completedAt,
+    });
+    expect(twoWindows.later).toMatchObject({ waterInInches: 0.5 });
+    expect(rain.windowEndMs(twoWindows)).toBe(Date.parse(twoWindows.later.waterInBy));
+    expect(rain.windowEndMs(instruction)).toBe(Date.parse(instruction.waterInBy));
+    expect(rain.thresholdInches({ waterInInches: 0.25, later: { waterInInches: 0.75 } }, [])).toBe(0.75);
+    // Day 6: the short deadline is long past, the window is still open to now.
+    const day6 = new Date(Date.parse(twoWindows.completedAt) + 6 * 24 * 3600000);
+    const open = await call(0.6, { instruction: twoWindows, now: day6 });
+    expect(open.fetchForecast.mock.calls[0][0].to.toISOString()).toBe(day6.toISOString());
+    expect(open.coverage).toMatchObject({ covered: true, thresholdInches: 0.5 });
+    // Past the long deadline: the window closes there.
+    const late = await call(0.3, { instruction: twoWindows, now: new Date(Date.parse(twoWindows.later.waterInBy) + 5 * 24 * 3600000) });
+    expect(late.fetchForecast.mock.calls[0][0].to.toISOString()).toBe(twoWindows.later.waterInBy);
+    expect(late.coverage).toMatchObject({ covered: false });
+    // Covered: the rain sentences, and no later phase left.
+    const covered = rain.applyWaterInRain(twoWindows, open.coverage);
+    expect(covered).toMatchObject({ state: rain.COVERED_STATE, rainCovered: true });
+    expect(covered).not.toHaveProperty('later');
+  });
+
   test('a miss is unread (null), never rain and never zero', async () => {
     expect((await call('fail')).coverage).toBeNull();
     expect((await call(null)).coverage).toBeNull();
