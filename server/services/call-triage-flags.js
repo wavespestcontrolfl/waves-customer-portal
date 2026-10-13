@@ -998,11 +998,12 @@ function staffNameSavedAsCaller({ firstName, lastName, staffName, transcript = '
   if (staff !== first || STAFF_ROLE_LABELS.has(staff)) return false;
   const text = String(transcript || '');
   // Lines where the STAFF member gives the name: after greeting another name ("Hey Morgan, it's
-  // Riley"), or as Waves ("this is Riley with Waves", "Waves Pest Control, this is Riley").
+  // Riley"), or as Waves: "this is Riley with Waves", or a turn that OPENS with the company name
+  // ("Waves Pest Control, this is Riley"). A caller who only mentions Waves is not staff.
   const intro = `(?:this is|it'?s|it is|i'?m|i am)\\s+${first}\\b`;
   const staffSpoke = new RegExp([
     `\\b(?:hey|hi|hello)[,\\s]+(?!(?:${first}|${GREETING_FILLER_WORDS})\\b)[a-z]+[,.!\\s]+(?:it'?s|it is|this is)\\s+${first}\\b`,
-    `\\bwaves\\b[^.?!\\n]{0,40}?${intro}`,
+    `(?:^|\\n)(?:[a-z]+:\\s*)?(?:(?:hello|hi|good (?:morning|afternoon)|thank you for calling|thanks for calling)[,\\s]+)?waves(?: pest control)?[,.\\s]+${intro}`,
     `${intro}[,\\s]+(?:here\\s+)?(?:with|from|at)\\s+waves\\b`,
   ].join('|'), 'ig');
   // A caller who ALSO gives the name as their own, anywhere else on the call, keeps it: two

@@ -7,7 +7,7 @@
 const { staffNameSavedAsCaller } = require('../services/call-triage-flags');
 const { _test } = require('../services/call-recording-processor');
 
-const { answeringStaffName, callerNameIsStaffName, clearV2CallerFirstName, v2CallerNameParts } = _test;
+const { answeringStaffName, callerNameIsStaffName, clearV2CallerFirstName, v2CallerNameParts, applyStaffNameGuardToV2 } = _test;
 
 // Synthetic names only (AGENTS.md): "Riley" is the staff member, "Morgan" the customer.
 const base = { firstName: 'Riley', lastName: null, staffName: 'Riley' };
@@ -47,6 +47,10 @@ describe('staffNameSavedAsCaller', () => {
   test('a caller who shares the staff name and says so keeps it, whatever the staff member said', () => {
     expect(staffNameSavedAsCaller({ ...base, transcript: 'Agent: Waves Pest Control, this is Riley.\nCaller: Hi, my name is Riley. I need a quote.' })).toBe(false);
     expect(staffNameSavedAsCaller({ ...base, transcript: "Agent: Hey Morgan, it's Riley.\nCaller: Sorry, this is Riley, Morgan's son." })).toBe(false);
+  });
+
+  test('a caller who only mentions Waves before naming themselves keeps the name', () => {
+    expect(staffNameSavedAsCaller({ ...base, transcript: 'Agent: Hello.\nCaller: I found Waves online, and this is Riley.' })).toBe(false);
   });
 
   test('a filler word after the greeting is not another name', () => {
@@ -130,8 +134,10 @@ describe('clearV2CallerFirstName', () => {
 
   test('a V2 record that carries only a one-word name_full is read and cleared too', () => {
     expect(v2CallerNameParts({ name_full: 'Riley', first_name: null, last_name: null })).toEqual({ first_name: 'Riley', last_name: null });
-    // A full name is not a first name: nothing to judge.
-    expect(v2CallerNameParts({ name_full: 'Riley Example' })).toEqual({ first_name: null, last_name: null });
+    // A multiword name_full carries the last name, with or without a split first name: the
+    // check sees a last name and never fires (adoption splits it the same way).
+    expect(v2CallerNameParts({ name_full: 'Riley Example' })).toEqual({ first_name: 'Riley', last_name: 'Example' });
+    expect(v2CallerNameParts({ first_name: 'Riley', last_name: null, name_full: 'Riley Example' })).toEqual({ first_name: 'Riley', last_name: 'Example' });
     const v2 = { status: 'valid', extraction: { caller: { first_name: null, name_full: 'Riley' } } };
     clearV2CallerFirstName(v2);
     expect(v2.extraction.caller).toEqual({ first_name: null, name_full: null });
@@ -147,9 +153,28 @@ describe('the stored V2 record', () => {
     // The enriched blob is written once, right after the V2 pass; a guard after that write
     // would leave the staff name in the stored record that call-intelligence displays.
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const guard = src.indexOf('staff-name guard (V2) skipped');
+    const guard = src.indexOf('await applyStaffNameGuardToV2(db, { call, v2Result, transcript: transcription });');
     const store = src.indexOf('ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null');
     expect(guard).toBeGreaterThan(-1);
     expect(store).toBeGreaterThan(guard);
+  });
+});
+
+describe('applyStaffNameGuardToV2 (production and the extraction replay share it)', () => {
+  const none = () => { const q = { whereNull: () => q, whereRaw: () => q, where: () => q, first: async () => undefined }; return q; };
+  const call = { direction: 'inbound', from_phone: '+15005550006', metadata: { forward_acceptance: { csr_name: 'Riley' } } };
+  const transcript = 'Agent: Waves Pest Control.\nCaller: Hey Riley, are you coming today?';
+
+  test('a result that is not valid V2 is left alone', async () => {
+    const v2 = { status: 'invalid', extraction: { caller: { first_name: 'Riley' } } };
+    await expect(applyStaffNameGuardToV2(none, { call, v2Result: v2, transcript })).resolves.toBe(false);
+    expect(v2.extraction.caller.first_name).toBe('Riley');
+  });
+
+  test('the replay script runs the guard on its candidate before comparing fields', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    const guard = src.indexOf('applyStaffNameGuardToV2(db, { call, v2Result: current');
+    expect(guard).toBeGreaterThan(-1);
+    expect(src.indexOf('const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;')).toBeGreaterThan(guard);
   });
 });

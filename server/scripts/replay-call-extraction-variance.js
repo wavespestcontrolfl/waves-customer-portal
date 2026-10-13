@@ -1565,6 +1565,9 @@ async function replayCall(call, context) {
     : { status: replayTranscription.status || 'no_transcription', extraction: null, errors: null };
   const durationMs = Date.now() - startedAt;
 
+  // The stored V2 record passed the staff-name guard before it was written; the candidate gets
+  // the same guard, or an unchanged model would show a first_name variance on those calls.
+  if (transcriptForExtraction) await CRP._test.applyStaffNameGuardToV2(db, { call, v2Result: current, transcript: transcriptForExtraction });
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
   const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');

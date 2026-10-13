@@ -3896,21 +3896,32 @@ async function callerNameIsStaffName(conn, { call, extracted, transcript }) {
     return false;
   }
 }
-// The caller name a V2 record carries, as the staff-name check reads it. V2 may give only
-// name_full: a one-word name_full with no first or last name IS the first name (adoption
-// derives it the same way), so the check must see it before the record is stored.
+// The caller name a V2 record carries, split the way adoption splits it: with no first and no
+// last name, name_full gives both; with a first name and no last name, the words of name_full
+// after the first are the last name. So "Riley" + name_full "Riley Example" HAS a last name and
+// is never judged, and a one-word name_full IS the first name.
 function v2CallerNameParts(caller = {}) {
-  const full = String(caller?.name_full || '').trim();
-  const first = String(caller?.first_name || '').trim() || (!String(caller?.last_name || '').trim() && /^\S+$/.test(full) ? full : '');
-  return { first_name: first || null, last_name: caller?.last_name || null };
+  const words = String(caller?.name_full || '').trim().split(/\s+/).filter(Boolean);
+  const first = String(caller?.first_name || '').trim() || words[0] || '';
+  const last = String(caller?.last_name || '').trim() || words.slice(1).join(' ');
+  return { first_name: first || null, last_name: last || null };
 }
-// Drops the caller first name from a V2 result in place, and a name_full that is only that name.
+// Drops the caller first name from a V2 result in place. Only reached when v2CallerNameParts
+// found no last name, so name_full is at most that one name and is dropped with it.
 function clearV2CallerFirstName(v2Result) {
   const caller = v2Result?.extraction?.caller;
   if (!caller) return;
-  const first = String(v2CallerNameParts(caller).first_name || '').toLowerCase();
-  if (String(caller.name_full || '').trim().toLowerCase() === first) caller.name_full = null;
   caller.first_name = null;
+  if ('name_full' in caller) caller.name_full = null;
+}
+// The staff-name guard on a V2 result, in place: production runs it before the record is stored,
+// and the extraction replay runs it on its candidate so both sides of a comparison are guarded.
+// Returns whether the name was dropped.
+async function applyStaffNameGuardToV2(conn, { call, v2Result, transcript }) {
+  if (v2Result?.status !== 'valid' || !isV2Extraction(v2Result.extraction)) return false;
+  if (!(await callerNameIsStaffName(conn, { call, extracted: v2CallerNameParts(v2Result.extraction.caller), transcript }))) return false;
+  clearV2CallerFirstName(v2Result);
+  return true;
 }
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
@@ -11305,11 +11316,7 @@ const CallRecordingProcessor = {
         // ai_extraction_enriched is serialized below, so the stored V2 record and every reader
         // of it agree with the canonical record (cleared after adoption). Fail-open.
         try {
-          if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
-            if (await callerNameIsStaffName(db, { call, extracted: v2CallerNameParts(v2Result.extraction.caller), transcript: transcription })) {
-              clearV2CallerFirstName(v2Result);
-            }
-          }
+          await applyStaffNameGuardToV2(db, { call, v2Result, transcript: transcription });
         } catch (guardErr) {
           logger.warn(`[call-proc] staff-name guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
         }
@@ -24784,6 +24791,7 @@ CallRecordingProcessor._test = {
   callerNameIsStaffName,
   clearV2CallerFirstName,
   v2CallerNameParts,
+  applyStaffNameGuardToV2,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
   emailCardSignature,
