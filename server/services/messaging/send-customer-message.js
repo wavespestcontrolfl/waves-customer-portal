@@ -1795,6 +1795,12 @@ module.exports = {
   // must route through this instead of reading `blocked`/`deliveryOutcome`
   // itself, so a future outcome shape only needs updating here.
   classifyDeliveryCertainty,
+  // The send's own hold predicates and the callback-number hold's blocked
+  // outcome, for a read-only preflight that must refuse what this send would
+  // (autopay-setup-link.js autopayDeliveryPreflight). Never a second copy.
+  billingHoldBlock,
+  callbackNumberHoldBlocksSend,
+  CALLBACK_NUMBER_HOLD_BLOCK,
   // Exposed for tests
   _internals: {
     validateContract,

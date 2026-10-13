@@ -408,7 +408,7 @@ const PREFLIGHT_LINK_PATH = '/secure/preflight-check';
 // compliance), on the same input shape, same order, nothing sent or written.
 // Returns the skip reason the send result would carry, or null.
 async function smsPolicyReason({ customer, customerId, trigger }) {
-  const { normalizeRecipient } = require('./messaging/send-customer-message');
+  const { normalizeRecipient, billingHoldBlock, callbackNumberHoldBlocksSend, CALLBACK_NUMBER_HOLD_BLOCK } = require('./messaging/send-customer-message');
   const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
   const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
   const { checkSendWindow } = require('./messaging/validators/send-window');
@@ -435,6 +435,12 @@ async function smsPolicyReason({ customer, customerId, trigger }) {
     const lookupFailed = verdict.code === 'CONSENT_LOOKUP_FAILED' || verdict.code === 'SUPPRESSION_LOOKUP_FAILED';
     return lookupFailed ? 'sms_policy_check_uncertain' : (verdict.reason || 'send_blocked');
   }
+  // The send's own holds, by its own predicates (codex P2 #6318 r2): a
+  // collections hold on a hold-gated notice, and a callback_number_needed hold
+  // on the destination, each stop the text after the link would be minted.
+  const held = await billingHoldBlock(input);
+  if (held) return held.reason || held.code || 'send_blocked';
+  if (await callbackNumberHoldBlocksSend(input)) return CALLBACK_NUMBER_HOLD_BLOCK.reason;
   return null;
 }
 

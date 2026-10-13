@@ -88,11 +88,17 @@ jest.mock('../services/stripe', () => ({
 const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
+const mockBillingHoldBlock = jest.fn(async () => null);
+const mockCallbackNumberHold = jest.fn(async () => false);
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
   // The real shared reader of a send's certainty (a pure function).
   classifyDeliveryCertainty: (...a) => jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty(...a),
   normalizeRecipient: (phone) => (String(phone || '').replace(/\D/g, '').length === 10 ? `+1${String(phone).replace(/\D/g, '')}` : phone),
+  // The send's own hold predicates, as the preflight calls them.
+  billingHoldBlock: (...a) => mockBillingHoldBlock(...a),
+  callbackNumberHoldBlocksSend: (...a) => mockCallbackNumberHold(...a),
+  CALLBACK_NUMBER_HOLD_BLOCK: jest.requireActual('../services/messaging/send-customer-message').CALLBACK_NUMBER_HOLD_BLOCK,
 }));
 const mockSendTemplate = jest.fn(async () => ({ sent: true }));
 const mockPreflightTemplateSend = jest.fn(async () => ({ ok: true }));
@@ -553,6 +559,25 @@ describe('autopayDeliveryPreflight — read-only "could this channel deliver" (r
     const r = await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' });
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^Recipient is suppressed \(reason: opt_out_keyword/);
+  });
+
+  it('sms: the send\'s own holds refuse too — a callback-number hold and a collections hold (codex P2 #6318 r2)', async () => {
+    mockCallbackNumberHold.mockResolvedValueOnce(true);
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'Caller disclaimed this number (callback_number_needed)' });
+    // Called with the same send input the pipeline would get.
+    expect(mockCallbackNumberHold).toHaveBeenLastCalledWith(expect.objectContaining({ channel: 'sms', to: '+19415551234', purpose: 'card_request', customerId: 'cust-1' }));
+    mockBillingHoldBlock.mockResolvedValueOnce({ ok: false, code: 'COLLECTION_HOLD_DEFER', reason: 'collections hold' });
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' }))
+      .toEqual({ ok: false, reason: 'collections hold' });
+    // No hold: deliverable. A requireDeliverable send behind a hold mints nothing.
+    expect(await autopayDeliveryPreflight({ customerId: 'cust-1', customer: CUSTOMER, delivery: 'sms' })).toEqual({ ok: true });
+    mockCallbackNumberHold.mockResolvedValueOnce(true);
+    mockSendCustomerMessage.mockClear();
+    const held = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', requireDeliverable: true });
+    expect(held).toMatchObject({ action: 'skipped', reason: 'Caller disclaimed this number (callback_number_needed)' });
+    expect(held.secureUrl).toBeUndefined();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   it('sms: a customer with texts turned off is refused with the consent reason', async () => {
