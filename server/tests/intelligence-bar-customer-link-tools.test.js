@@ -212,6 +212,18 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
     links.linkOwnersInBody.mockResolvedValue({ owners: [{ kind: 'pay', token: 'tok', customerId: CUSTOMER_ID }], unresolved: [] });
     expect(await customerLinkSendRefusal('Pay here: portal.wavespestcontrol.com/pay/tok', '+19415550123', CUSTOMER_ID)).toBeNull();
     expect(await customerLinkSendRefusal('Pay here: portal.wavespestcontrol.com/pay/tok', '+19415550123', null)).toMatchObject({ code: 'customer_link_recipient' });
+    // A non-US number that shares the customer's last ten digits matched the same customer row: the customer's own
+    // link is still refused, at the card and at the send (the seam's non-US refusal does not count these links).
+    for (const phase of ['proposal', 'commit']) {
+      const abroad = await customerLinkSendRefusal('Pay here: portal.wavespestcontrol.com/pay/tok', '+449415550123', CUSTOMER_ID, { phase });
+      expect(abroad).toMatchObject({ blocked: true, code: 'customer_link_recipient', sent_to: '***0123' });
+      expect(abroad.error).toMatch(/US numbers only/);
+    }
+    // A plain text to that number, and an email reply (no phone), are not judged by it.
+    links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [] });
+    expect(await customerLinkSendRefusal('Running late, sorry!', '+449415550123', CUSTOMER_ID, { phase: 'proposal' })).toBeNull();
+    links.linkOwnersInBody.mockResolvedValue({ owners: [{ kind: 'pay', token: 'tok', customerId: CUSTOMER_ID }], unresolved: [] });
+    expect(await customerLinkSendRefusal('Pay here: portal.wavespestcontrol.com/pay/tok', '', CUSTOMER_ID, { phase: 'email' })).toBeNull();
 
     links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [{ kind: 'estimate', token: 'gone' }] });
     expect(await customerLinkSendRefusal('See: portal.wavespestcontrol.com/estimate/gone', '+19415550123', CUSTOMER_ID)).toMatchObject({ code: 'customer_link_unverified' });

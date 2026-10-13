@@ -1494,11 +1494,16 @@ async function autopayLinkCheck({ body, toLast10, customerId, email }) {
 // Every generated bearer the seam does not verify itself (reschedule, track,
 // re-service, pay, estimate, referral) must belong to the recipient's account
 // — a link built for one customer never rides a text to another, whatever the
-// model paired.
-async function linkOwnerCheck({ body, customerId }) {
+// model paired. A text recipient is matched to a customer by the LAST TEN
+// digits, so a non-US number sharing a customer's ten digits would pass the
+// account check; the seam's own non-US refusal covers only the bearers it
+// counts, so a text carrying any of these links goes to a US number only.
+const NON_US_LINK_REFUSAL = 'This text carries a customer link, and customer links go to US numbers only — send it to the customer\'s own US number. Nothing was sent.';
+async function linkOwnerCheck({ body, customerId, email, usDestination }) {
   const { owners, unresolved } = await links().linkOwnersInBody(body);
   if (unresolved.length) return { error: 'A customer link in this text matches no customer record — remove it and build a fresh one. Nothing was sent.', code: 'customer_link_unverified' };
   if (!owners.length) return null;
+  if (!email && !usDestination) return { error: NON_US_LINK_REFUSAL, code: 'customer_link_recipient' };
   if (!customerId) return { error: 'This text carries a customer link, but the recipient is not a known customer — send it to that customer\'s own number (pick the customer). Nothing was sent.', code: 'customer_link_recipient' };
   const accountKey = (row) => String(row?.account_id || row?.id || '');
   const recipient = await db('customers').where({ id: customerId }).first('id', 'account_id');
