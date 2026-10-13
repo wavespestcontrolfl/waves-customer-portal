@@ -13,8 +13,10 @@
  *
  * The check can only stop a move. It runs in pass 2 only, after every free
  * rule and the per-run cap, so a move that would not happen anyway is never
- * paid for. A run asks at most config.proofreaderMaxCalls times; past that a
- * move waits for the next run.
+ * paid for. A run asks at most config.proofreaderMaxCalls times and starts
+ * no call after config.proofreaderDeadlineSeconds; past either a move waits
+ * for the next run. A check that broke (the provider, a malformed answer, a
+ * read) moves nothing and the run ends completed_with_errors.
  *
  * THE NOTICE. One per visit and placement (dedupe key below), written once: a
  * later run that is still unsure about the same visit writes nothing, a
@@ -69,10 +71,19 @@ const textOrNull = (value) => (value == null || value === '' ? null : String(val
 const noticeKey = (id, date, placement) => `${KEY_PREFIX}${id}:${date}:${placement}`;
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 
-// The run's own tally and the notices it will raise at its end.
-function newRunState() {
+// "Unknown" answers that say the check itself did not work (the provider, the
+// answer's shape, a read): the run reports them, never a green run on a
+// night the model could not be asked (Codex #6313 r7).
+const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
+
+// The run's own tally and the notices it will raise at its end. `deadlineAt`:
+// no call starts after it (config.proofreaderDeadlineSeconds from the run's
+// start). The 04:10 run holds the writer lock the 04:20 route reorder needs,
+// and one call can take two minutes (r7).
+function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, notices: new Map(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, broke: 0, notices: new Map(),
+    deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
 
@@ -123,13 +134,13 @@ function auditOf(answer) {
 const DESCRIPTION = {
   hold: 'The move proofreader stopped this move: the customer record sets when visits happen',
   unknown: 'The move proofreader could not clear this move; the visit stays',
-  not_asked: 'The move proofreader had no calls left this run; the next run asks',
+  not_asked: 'The move proofreader had no calls or no time left this run; the next run asks',
   grouped: 'A stop of two or more services is not moved while the move proofreader is on',
 };
 
 function stopped(kind, answer) {
   return {
-    allowed: false, reason_code: REASON_CODE[kind], reason_description: DESCRIPTION[kind], audit: auditOf(answer),
+    allowed: false, reason_code: REASON_CODE[kind], reason_description: DESCRIPTION[kind], audit: auditOf(answer), broke: CHECK_BROKE.has(answer.why),
   };
 }
 
@@ -208,11 +219,13 @@ async function checkMove({ service, best, run }, deps = {}) {
   const grouped = await groupedStop(conn, service);
   if (grouped) {
     state[grouped.kind === 'grouped' ? 'grouped' : 'unsure'] += 1;
+    if (grouped.stop.broke) state.broke += 1;
     return grouped.stop;
   }
-  if (state.calls >= run.config.proofreaderMaxCalls) {
+  const outOf = (state.calls >= run.config.proofreaderMaxCalls && 'call_limit') || (Date.now() >= state.deadlineAt && 'deadline');
+  if (outOf) {
     state.notAsked += 1;
-    return stopped('not_asked', { verdict: 'unknown', why: 'call_limit' });
+    return stopped('not_asked', { verdict: 'unknown', why: outOf });
   }
   const asked = await ask({ service, best }, { conn, proofreader: deps.proofreader || require('./index'), state });
   const { answer } = asked;
@@ -225,6 +238,7 @@ async function checkMove({ service, best, run }, deps = {}) {
     return stopped('hold', answer);
   }
   state.unsure += 1;
+  if (CHECK_BROKE.has(answer.why)) state.broke += 1;
   collectNotice(state, service, asked);
   return stopped('unknown', answer);
 }
@@ -380,7 +394,7 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
 
 // For the run's log line.
 function tallyOf(state) {
-  return state ? `${state.calls}/${state.allowed}/${state.held}/${state.unsure}/${state.grouped}` : 'off';
+  return state ? `${state.calls}/${state.allowed}/${state.held}/${state.unsure}/${state.grouped}/${state.broke}` : 'off';
 }
 
 module.exports = {

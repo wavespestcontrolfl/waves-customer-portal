@@ -125,7 +125,7 @@ describe('day-move drive floor and conflict moves (owner 2026-10-09)', () => {
     try {
       delete process.env.GATE_AUTO_DISPATCH_PROOFREADER;
       delete process.env.AUTO_DISPATCH_PROOFREADER_MAX_CALLS;
-      expect(getAutoDispatchConfig()).toMatchObject({ proofreaderEnabled: false, proofreaderMaxCalls: 60 });
+      expect(getAutoDispatchConfig()).toMatchObject({ proofreaderEnabled: false, proofreaderMaxCalls: 60, proofreaderDeadlineSeconds: 300 });
       process.env.GATE_AUTO_DISPATCH_PROOFREADER = 'true';
       process.env.AUTO_DISPATCH_PROOFREADER_MAX_CALLS = '5';
       expect(getAutoDispatchConfig()).toMatchObject({ proofreaderEnabled: true, proofreaderMaxCalls: 5 });

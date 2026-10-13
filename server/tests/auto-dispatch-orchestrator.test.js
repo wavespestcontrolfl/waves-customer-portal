@@ -1706,6 +1706,15 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
+  test('a check that broke leaves the visit and the run ends completed_with_errors; an unsure answer does not', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: true });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: false });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
+    });
+  });
+
   test('the approved slot is taken before the write: nothing moves and the run is not a failed run', async () => {
     await applyMode(async () => {
       checkMove.mockResolvedValue(ALLOW);

@@ -147,6 +147,11 @@ function moveRuleConfig(overrides) {
     proofreaderEnabled: overrides.proofreaderEnabled ?? isProofreaderEnabled(),
     proofreaderMaxCalls: overrides.proofreaderMaxCalls
       ?? intEnv('AUTO_DISPATCH_PROOFREADER_MAX_CALLS', 60, { min: 0, max: 1000 }),
+    // No proofreader call starts later than this many seconds into the run.
+    // The 04:10 run holds the writer lock the 04:20 route reorder needs; a
+    // call can take two minutes, so 300 ends the last one by about 04:17.
+    proofreaderDeadlineSeconds: overrides.proofreaderDeadlineSeconds
+      ?? intEnv('AUTO_DISPATCH_PROOFREADER_DEADLINE_SECONDS', 300, { min: 0, max: 3600 }),
   };
 }
 

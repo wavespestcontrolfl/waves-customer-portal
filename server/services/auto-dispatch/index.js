@@ -1239,6 +1239,8 @@ async function applyPlannedMove(pm, run, attempt) {
   // for. Anything but "allow" leaves the visit where it is.
   const checked = await moveCheck.checkMove({ service: pm.service, best: fresh.best, run });
   if (checked && !checked.allowed) {
+    // The check itself did not work: never a green run (the visit stays).
+    if (checked.broke) run.guardReadDegraded = true;
     noteUnmoved(run, pm.service, checked.reason_code);
     return audit.logDecision(runId, {
       action: 'no_change', service: pm.service, reason_code: checked.reason_code, reason_description: checked.reason_description, ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
@@ -1407,7 +1409,8 @@ async function runAutoDispatch(opts = {}) {
     roadTravel: config.roadCheckEnabled === true ? roadCheck.createRunTravel(config) : null,
     // GATE_AUTO_DISPATCH_PROOFREADER: this run's move-check tally and the
     // notices it raises at its end (null = off; a dry run moves nothing).
-    proofreader: config.proofreaderEnabled === true && config.mode === 'apply' ? moveCheck.newRunState() : null,
+    proofreader: config.proofreaderEnabled === true && config.mode === 'apply'
+      ? moveCheck.newRunState({ deadlineSeconds: config.proofreaderDeadlineSeconds }) : null,
   };
 
   try {

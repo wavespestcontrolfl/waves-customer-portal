@@ -184,6 +184,22 @@ describe('checkMove', () => {
     expect(run.proofreader).toMatchObject({ calls: 0, unsure: 1 });
   });
 
+  test('no call starts after the run deadline (the 04:20 route job needs the lock)', async () => {
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    const late = runOf({ proofreader: nightly.newRunState({ startedAt: Date.now() - 301000, deadlineSeconds: 300 }) });
+    expect(await check(late, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_NOT_ASKED', audit: { why: 'deadline' }, broke: false });
+    expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
+    const inTime = runOf({ proofreader: nightly.newRunState({ startedAt: Date.now() - 1000, deadlineSeconds: 300 }) });
+    expect(await check(inTime, proofreader)).toMatchObject({ allowed: true });
+  });
+
+  test.each(['model_failed', 'bad_answer'])('a check that broke (%s) is marked so the run cannot end green; an unsure answer is not', async (why) => {
+    const run = runOf();
+    expect(await check(run, proofreaderOf({ verdict: 'unknown', why }))).toMatchObject({ allowed: false, broke: true });
+    expect(await check(run, proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }))).toMatchObject({ broke: false });
+    expect(run.proofreader.broke).toBe(1);
+  });
+
   test('past the call limit a move is held without a call', async () => {
     const run = runOf({ config: { proofreaderMaxCalls: 1 } });
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
