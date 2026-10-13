@@ -242,5 +242,19 @@ function withTurnEndingText(messages, text) {
   return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text }] }];
 }
 
+// The tool names the API's own search returned in a saved history. The strip
+// removes those server blocks, so the resume reads the names from the saved
+// checkpoint first and loads the tools on the ordinary list (if the login may
+// still use them): a search that completed before an interruption is not
+// repeated, as the continuation prompt requires.
+function searchReferencedNames(messages) {
+  const blocks = (Array.isArray(messages) ? messages : []).flatMap(message => (Array.isArray(message?.content) ? message.content : []));
+  const names = blocks.filter(block => block?.type === 'tool_search_tool_result')
+    .flatMap(block => (Array.isArray(block.content?.tool_references) ? block.content.tool_references : []))
+    .map(reference => reference?.tool_name).filter(name => typeof name === 'string' && name);
+  return [...new Set(names)];
+}
+
 module.exports = {
+  searchReferencedNames,
   hasSearchAndThinking, withTurnEndingText, hasPendingServerSearch, toolResultContent, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };

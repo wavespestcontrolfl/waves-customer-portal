@@ -340,6 +340,20 @@ describe('a resumed task runs on the ordinary tool list', () => {
     expect(requests[0].messages.some(m => m.role === 'assistant')).toBe(false);
   });
 
+  test('a tool the API search returned but the model never called is loaded on resume', async () => {
+    resumeWith([
+      { role: 'user', content: 'review numbers' },
+      { role: 'assistant', content: [searchUse('srvtoolu_r'), searchResult('srvtoolu_r', ['get_review_stats', 'merge_customers', 'no_such_tool']), { type: 'text', text: 'Found it.' }] },
+    ]);
+    const { requests } = await resume('owner');
+    const request = requests[0];
+    expectOrdinaryResume(request);
+    expect(request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
+    // A gated tool and an unknown name are not loaded.
+    expect(names(request.tools)).not.toContain('merge_customers');
+    expect(names(request.tools)).not.toContain('no_such_tool');
+  });
+
   test('(c) a trailing tool_result turn with an unresolved search: stripped, no search call left', async () => {
     resumeWith([
       { role: 'user', content: 'review numbers' },

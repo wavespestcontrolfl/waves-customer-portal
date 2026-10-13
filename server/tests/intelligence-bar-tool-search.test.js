@@ -333,3 +333,21 @@ describe('stripServerSearchBlocks and tool_reference blocks in tool_result conte
     expect(ToolSearch.stripServerSearchBlocks(plain)).toBe(plain);
   });
 });
+
+// Codex round 16: names the API's search returned are restored on resume.
+describe('searchReferencedNames', () => {
+  const result = (id, names) => ({ type: 'tool_search_tool_result', tool_use_id: id, content: { type: 'tool_search_tool_search_result', tool_references: names.map(tool_name => ({ type: 'tool_reference', tool_name })) } });
+  test('collects each referenced name once, from every saved search result', () => {
+    const messages = [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: [{ type: 'server_tool_use', id: 's1', name: 'tool_search_tool_bm25', input: { query: 'x' } }, result('s1', ['a', 'b'])] },
+      { role: 'assistant', content: [result('s2', ['b', 'c'])] },
+    ];
+    expect(ToolSearch.searchReferencedNames(messages)).toEqual(['a', 'b', 'c']);
+  });
+  test('an error result, a string message and a missing checkpoint give no names', () => {
+    const error = { type: 'tool_search_tool_result', tool_use_id: 's3', content: { type: 'tool_search_tool_result_error', error_code: 'unavailable' } };
+    expect(ToolSearch.searchReferencedNames([{ role: 'user', content: 'q' }, { role: 'assistant', content: [error] }])).toEqual([]);
+    expect(ToolSearch.searchReferencedNames(undefined)).toEqual([]);
+  });
+});

@@ -3608,8 +3608,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
         .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
       const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
-      const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
-        .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
+      const searchedNames = ToolSearch.searchReferencedNames(req.ibResumedTask.checkpoint);
+      const previouslyLoaded = [...invokedNames, ...discoveredNames, ...searchedNames].map(name => ActionRegistry.actions.get(name))
+        .filter(Boolean).filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
     let finalResponse = null;
