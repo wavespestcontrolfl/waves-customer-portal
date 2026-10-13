@@ -4322,10 +4322,18 @@ const shutdownStampSql = (conn) => conn.raw(
 // valid extraction that is not spam and whose disposition is the callback task.
 // Only while V2 is the primary extractor: in shadow mode (V2 on, routing off)
 // its verdict is recorded for evaluation and rings nothing.
-function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled() } = {}) {
+// Call audit 2026-10-13: an urgent "please call me back immediately" voicemail
+// rang nothing because the model filed it voicemail_processed. The disposition
+// is the model's choice between two labels for the same message, so the
+// caller's own words are a second basis: a not-spam voicemail message whose
+// transcript asks for the call back. Spam stays out on the verdict, as before.
+const VOICEMAIL_CALLBACK_WORDS = /\b(?:call|ring|phone)\s+(?:me|us|him|her)\s+back\b|\bcall\s+(?:me|us)\b|\bcall\s+back\b|\breturn(?:ing)?\s+(?:my|this|our|the)\s+call\b|\bgive\s+(?:me|us)\s+a\s+(?:call|ring)\b|\bget\s+back\s+(?:to|with)\s+(?:me|us)\b/i;
+function voicemailCallbackAsked(v2Result, { v2Primary = callExtractionV2PrimaryEnabled(), transcript = '' } = {}) {
   if (!v2Primary) return false;
   const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
-  return v2?.recommended_disposition === 'callback_task_created' && v2?.spam_verdict?.spam_kind === 'not_spam';
+  if (v2?.spam_verdict?.spam_kind !== 'not_spam') return false;
+  if (v2.recommended_disposition === 'callback_task_created') return true;
+  return v2.call_nature === 'voicemail_message' && VOICEMAIL_CALLBACK_WORDS.test(String(transcript || ''));
 }
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
@@ -12310,7 +12318,7 @@ const CallRecordingProcessor = {
             outbound: isOutboundCall(call),
             knownCustomer: Boolean(vmAlertCustomer?.id),
             transcript: transcription,
-            callbackAsked: voicemailCallbackAsked(v2Result),
+            callbackAsked: voicemailCallbackAsked(v2Result, { transcript: transcription }),
           });
           if (alertPlan) {
             // One alert per call even across reprocessing (retranscription

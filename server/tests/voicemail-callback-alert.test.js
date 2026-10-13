@@ -104,6 +104,17 @@ describe('voicemailCallbackAlertPlan', () => {
     expect(voicemailCallbackAsked(v2({ ...asked, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
     expect(voicemailCallbackAsked(v2({ ...asked, recommended_disposition: 'voicemail_processed' }), primary)).toBe(false);
     expect(voicemailCallbackAsked(null, primary)).toBe(false);
+    // The caller's own words are a second basis: the model filed the same
+    // message under the other voicemail label (call audit 2026-10-13).
+    const filed = { recommended_disposition: 'voicemail_processed', call_nature: 'voicemail_message', spam_verdict: { spam_kind: 'not_spam' } };
+    const words = { ...primary, transcript: 'Caller: Hi, this is Sam. Please call me back on this number. This is urgent.' };
+    expect(voicemailCallbackAsked(v2(filed), words)).toBe(true);
+    expect(voicemailCallbackAsked(v2(filed), { ...primary, transcript: 'Caller: I will return your call tomorrow.' })).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed), { ...primary, transcript: 'Caller: just checking in, no need to do anything.' })).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'existing_customer_service' }), words)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, spam_verdict: { spam_kind: 'solicitation' } }), { ...primary, transcript: 'Please return this call at your earliest convenience.' })).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed, 'invalid'), words)).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed), { v2Primary: false, transcript: words.transcript })).toBe(false);
     // Shadow mode (V2 on, routing off): the verdict is evaluation data and rings nothing.
     expect(voicemailCallbackAsked(v2(asked), { v2Primary: false })).toBe(false);
     // The default reads the live mode; this test process runs with V2 off.
