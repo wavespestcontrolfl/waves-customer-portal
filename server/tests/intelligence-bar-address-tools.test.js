@@ -241,13 +241,6 @@ describe('check_address served south-Hillsborough towns', () => {
     expect(out.in_service_area).toBe(false);
   });
 
-  test('a non-Florida state written inside the address keeps the validator state veto', async () => {
-    validateAddress.mockResolvedValue(hills({ outOfAreaReason: 'state' }));
-    const out = await run({ address: '100 Example Way, Ruskin, GA 33570' });
-    expect(out.status).toBe('out_of_service_area');
-    expect(out.in_service_area).toBe(false);
-  });
-
   test('a failed county lookup on a confirmed premise is a provider gap, not an address defect', async () => {
     validateAddress.mockResolvedValue(google({ status: 'confirm_needed', county: null, inServiceArea: null }));
     const out = await run({ address: '100 Example Way, Sarasota, FL 34236' });
@@ -270,11 +263,30 @@ describe('check_address served south-Hillsborough towns', () => {
     expect(out.note).toMatch(/ZIP\+4/);
   });
 
-  test('a state read from the address text is not reported as the Florida hint', async () => {
-    validateAddress.mockResolvedValue(google({ status: 'out_of_service_area', inServiceArea: false, outOfAreaReason: 'state', statedState: 'GA' }));
+  test('the tool asks the validator not to read a state from the text; Google and the county rule decide', async () => {
+    validateAddress.mockResolvedValue(google({ status: 'out_of_service_area', inServiceArea: false, county: 'Fulton County', normalized: normalized({ city: 'Atlanta', state: 'GA', postal_code: '30303' }) }));
     const out = await run({ address: '100 Example Way, Atlanta, GA 30303' });
-    expect(out.state_hint_used).toBeNull();
-    expect(out.note).not.toMatch(/used as a hint/);
+    expect(validateAddress.mock.calls[0][0]).toMatchObject({ stateFromText: false, administrativeArea: 'FL' });
+    expect(out.status).toBe('out_of_service_area');
+    expect(out.normalized.state).toBe('GA');
+  });
+
+  test('an ambiguous result beside a failed county lookup is not a lookup gap', async () => {
+    validateAddress.mockResolvedValue(google({ status: 'ambiguous', county: null, inServiceArea: null }));
+    const out = await run({ address: '100 Example Way, Sarasota, FL 34236' });
+    expect(out.service_area_lookup_failed).toBe(false);
+    expect(out.note).toMatch(/Do not save this address yet/);
+  });
+
+  test('a rejected input is a tool failure with a refusal code', async () => {
+    const { isPolicyRefusal } = require('../services/intelligence-bar/outcomes');
+    for (const input of [{ address: '' }, { address: '100 Example Way', state: 'Flordia' }]) {
+      const out = await run(input);
+      expect(out).toMatchObject({ status: 'invalid_input', code: 'invalid_input' });
+      expect(typeof out.error).toBe('string');
+      expect(isPolicyRefusal(out)).toBe(true);
+    }
+    expect(validateAddress).not.toHaveBeenCalled();
   });
 
   test('another Hillsborough city stays outside the service area', async () => {

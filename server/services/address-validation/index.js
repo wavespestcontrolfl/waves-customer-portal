@@ -162,16 +162,13 @@ function withTimeout(signal) {
   return signal ? AbortSignal.any([signal, AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS)]) : AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS);
 }
 
-async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null, signal } = {}) {
-  const lines = (addressLines || []).filter(Boolean);
+// The state a caller's address text names, read from locality/state tails.
+function statedStateOf(lines, stateFromText) {
+  if (stateFromText === false) return '';
   // Geography comes from locality/state tails only. A line that starts
   // with a house number ("100 Main St Apt CT") carries a state only when the
   // parse also found a locality or ZIP — otherwise the state-shaped token
   // is a unit value or a street suffix, not Connecticut (codex r11 P1).
-  // `fl` is the abbreviated floor ("Fl GA" = floor GA); a real "FL <ZIP>" state
-  // tail is not affected, because only a state-shaped token AFTER the
-  // designator is discounted, and the line is then read again.
-  const UNIT_DESIGNATOR_WORDS = 'apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room';
   const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
   const geographyState = (line) => {
     const parsed = parseRawAddress(line);
@@ -180,17 +177,20 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     // state CT — a unit designator is not a locality either.
     const locality = parsed.city && !UNIT_WORD.test(parsed.city) ? parsed.city : '';
     if (/^\d/.test(String(line).trim()) && !locality && !parsed.zip) return '';
-    // "100 Main St Unit GA 34236": a state-shaped token right after a unit
-    // designator is the unit's identifier, with or without a ZIP after it.
-    // Only the unit position is discounted: with that token taken out, a
-    // state named elsewhere on the line ("Unit GA, Atlanta, GA 30303") is
-    // still the stated state.
-    const unitCode = new RegExp(`(^|[\\s,])((?:#|${UNIT_DESIGNATOR_WORDS})\\.?\\s*#?\\s*)${parsed.state}(?![A-Za-z])`, 'i');
-    if (unitCode.test(String(line))) return geographyState(String(line).replace(unitCode, '$1$2'));
     return parsed.state;
   };
-  const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]
+  return [lines.join(' ').replace(/,/g, ' '), ...lines]
     .map(geographyState).filter(Boolean).pop();
+}
+
+// `stateFromText: false`: the caller does not want a state read from the
+// address text to steer the region hint or to veto the result (the
+// Intelligence Bar address check: it shows Google's own answer beside the
+// operator's words, and the county rule already places a non-Florida address
+// outside the service area).
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null, signal, stateFromText } = {}) {
+  const lines = (addressLines || []).filter(Boolean);
+  const statedState = statedStateOf(lines, stateFromText);
   const regionHint = statedState || administrativeArea;
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
@@ -223,13 +223,7 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     if (statedState && (statedState !== SERVICE_STATE || (providerState && providerState !== statedState))) {
       out.status = STATUSES.OUT_OF_SERVICE_AREA;
       out.inServiceArea = false;
-      // Provenance for consumers that apply a county exception: this
-      // rejection is the STATE veto, not the county rule.
-      out.outOfAreaReason = 'state';
     }
-    // Provenance: the state read from the address text, when one was (it,
-    // not the caller's fallback hint, was sent to the provider).
-    out.statedState = statedState || null;
     out.providerResponseId = data.responseId || null;
     return out;
   } catch (err) {

@@ -115,9 +115,7 @@ function noteFor(status, result, hintUsed) {
 function servedHillsborough(result, state) {
   // An explicit non-Florida state from the operator is the provider's veto; keep it.
   if (state && state !== DEFAULT_STATE) return result;
-  // The validator also reads a state written inside the address text; its
-  // state veto (outOfAreaReason 'state') is never overridden by a county rule.
-  if (result.status !== STATUSES.OUT_OF_SERVICE_AREA || result.outOfAreaReason === 'state') return result;
+  if (result.status !== STATUSES.OUT_OF_SERVICE_AREA) return result;
   const n = result.normalized || {};
   if (normalizeState(n.state) !== DEFAULT_STATE) return result;
   if (!servedSouthHillsborough(result.county, { city: n.city, zip: n.postal_code })) return result;
@@ -142,12 +140,12 @@ function shape(providerResult, given, state) {
   // isCountyGap also covers "only the unit is missing"; that stays an
   // explicit hold, so only a result with nothing missing is a pure lookup gap.
   const missing = Array.isArray(result.missingComponents) ? result.missingComponents : [];
-  const countyGap = isCountyGap(result) && missing.length === 0;
+  const countyGap = isCountyGap(result) && missing.length === 0 && result.status === STATUSES.CONFIRM_NEEDED;
   const zipPlus4 = ZIP_PLUS4_RE.test(`${given.address || ''} ${given.zip || ''}`);
   const n = result.normalized;
-  // The FL fallback was used only when no state field was passed AND the
-  // validator read no state from the address text itself.
-  const hintUsed = !state && !result.statedState;
+  // The tool asks the validator not to read a state from the text, so the FL
+  // hint is in use exactly when no state field was passed.
+  const hintUsed = !state;
   return {
     status: result.status,
     verdict: countyGap ? 'Google matched the address; the service-area lookup is unavailable.' : (VERDICTS[result.status] || 'Google returned a result this tool does not recognize.'),
@@ -197,20 +195,25 @@ function changesAddress(toolName, input) {
   return ADDRESS_FIELD_NAMES.some(name => cleanText(String(fields[name] ?? '')) !== '');
 }
 
+// A rejected input is a tool failure in the standard shape (the check never
+// ran), with a refusal code so it is not counted as a system fault.
+const invalidInput = message => ({ status: 'invalid_input', error: message, code: 'invalid_input', note: message });
+
 async function executeAddressTool(toolName, input) {
   if (toolName !== CHECK_ADDRESS_TOOL_NAME) return { error: `Unknown tool: ${toolName}` };
   const given = asGiven(input);
   if (!given.address || given.address.length < 3) {
-    return { status: 'invalid_input', note: 'check_address needs the street address as heard. Ask the operator for it.' };
+    return invalidInput('check_address needs the street address as heard. Ask the operator for it.');
   }
   // Only an explicit state field is checked; the address text is never read.
   const state = given.state ? normalizeState(given.state) : '';
   if (given.state && !state) {
-    return { status: 'invalid_input', note: `"${given.state.slice(0, 30)}" is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.` };
+    return invalidInput(`"${given.state.slice(0, 30)}" is not a state this check recognizes. Ask the operator which state it is; do not assume ${DEFAULT_STATE}.`);
   }
   const result = await validateAddress({
     addressLines: providerLines(given),
     administrativeArea: state || DEFAULT_STATE,
+    stateFromText: false,
     signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
   });
   return shape(result, given, state);
