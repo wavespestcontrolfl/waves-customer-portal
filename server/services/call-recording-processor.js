@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -7223,12 +7223,19 @@ function existingStructureTermiteWork(words) {
 //     one split on the conjunctions; a bare V2 category word is a placeholder
 //     and is skipped) is the
 //     pre-slab service or plain "pre-treat" wording; one that classifies as
-//     anything else, or as nothing, keeps the card. Narrative sentences
+//     anything else, or as nothing, keeps the card. On a VALID V2 record the
+//     proof reads the SERVICE fields only (view service words,
+//     service_request.specific_service_name, secondary_categories,
+//     pests_observed); objections_raised is sentiment, checked apart for
+//     another service family. Bora-Care / wood treatment counts as pre-treat
+//     wording with new-construction context (same fragment, or the service
+//     name for narrative) and no existing-structure wording. Narrative sentences
 //     (call_summary) may be anything that carries no cue and is not another
 //     termite service, and at least one fragment overall is the pre-treat.
 //  6. No unit, suite, bay or condo wording anywhere in the transcript.
 // Any doubt keeps the card. Do not add one regex per Codex round: add a cue
 // to the matching class above.
+const SERVICE_SENTENCE_SPLIT_RE = /[.!?;,]\s+/;
 const SERVICE_FRAGMENT_SPLIT_RE = /[.!?;,]\s+|\s+(?:and|plus|also|with)\s+|\s*[&/+]\s*/i;
 // A pre-treat IS a soil treatment, so bare "soil treatment" is pre-treat wording
 // (existing-structure context still vetoes it when a building qualifier follows).
@@ -7247,14 +7254,39 @@ function hasTermiteAddonWording(text) {
     && !TERMITE_NEW_SLAB_WORDING_RE.test(text);
 }
 const TERMITE_SERVICE_LABELS = new Set(['Pre-Slab Termidor', 'Termite Wood Treatment', 'Termite Foam Drill', 'Liquid Termite Perimeter', 'WDO Inspection', 'Termite Inspection']);
+const ATTIC_CRAWLSPACE_RE = /\b(?:attic|crawl\s?space)\b/i;
 const EXISTING_STRUCTURE_CONTEXT_RE = /\b(?:existing|current|occupied|around the|of the)\s+(?:home|house|structure|building|property|foundation|residence)\b/i;
 const NEW_BUILD_WORDING_RE = /\b(?:pour|before the slab|new[-\s]construction|new[-\s]build|pre[-\s]?slab)\b/i;
 function hasExistingStructureContext(text) {
-  return EXISTING_STRUCTURE_CONTEXT_RE.test(text) && !NEW_BUILD_WORDING_RE.test(text);
+  return (EXISTING_STRUCTURE_CONTEXT_RE.test(text) || ATTIC_CRAWLSPACE_RE.test(text)) && !NEW_BUILD_WORDING_RE.test(text);
 }
-function hasNonPretreatTermiteCue(text) {
+// New-construction wording for the wood-treatment exemption below: Bora-Care
+// sprayed on new framing is a builder's pre-construction add-on, not work on an
+// existing structure.
+const NEW_CONSTRUCTION_CONTEXT_RE = /\bpre[-\s]?(?:slab|construction)\b|\bslab\s+pre[-\s]?treat\w*|\bnew[-\s](?:construction|build)\b|\bnew\s+framing\b|\bframing\s+(?:before|prior to)\s+(?:the\s+)?(?:slab|pour)\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bpour\b|\bbuilder\b/i;
+// Wood treatment / Bora-Care is a cue only without new-construction context
+// (the caller supplies it: the same fragment, or the call's service name).
+// Existing-structure context and a second service still veto on their own.
+// Termite treatments that are NOT a pre-construction pre-treat, named by what
+// they are rather than by the family label canonicalWavesService gives a generic
+// phrase: drywood work, tent / no-tent / fumigation, subterranean treatment or
+// control of an existing infestation, Termidor around or trenched at a building,
+// localized and injection work. One class for the objection check and every
+// service-word veto: a match is another ask whatever the family label says.
+const TERMITE_OTHER_TREATMENT_RE = /\bdry[-\s]?wood\b|\bno[-\s]tent\b|\btent(?:s|ing|ed)?\b|\bfumigat\w*|\blocalized\b/i;
+// The liquid / subterranean / injection class is soil work too, so a fragment
+// that says outright it is pre-construction ("injection before the slab pour")
+// is the pre-treat itself. Existing-structure wording on the fragment still vetoes.
+const TERMITE_LIQUID_TREATMENT_RE = /\bsubterranean\s+(?:termite\s+)?(?:treatment|control)\b|\btermidor\s+(?:around|trench\w*|foam\w*|perimeter)\b|\binject\w*|\bliquid\s+(?:termite\b|treatment\b)|\btermite\s+liquid\b/i;
+const EXPLICIT_PRECONSTRUCTION_RE = /\bpre[-\s]?(?:slab|construction)\b|\bbefore (?:the )?(?:slab|pour)\b|\bslab pour\b|\bnew[-\s]construction\b|\bslab\s+pre[-\s]?treat\w*/i;
+function isLiquidTreatmentVeto(value, softTreatmentOk) {
+  if (softTreatmentOk || !TERMITE_LIQUID_TREATMENT_RE.test(value)) return false;
+  const explicit = EXPLICIT_PRECONSTRUCTION_RE.test(value);
+  return !explicit || EXISTING_WORK_WORDING_RE.test(value) || EXISTING_STRUCTURE_CONTEXT_RE.test(value);
+}
+function hasNonPretreatTermiteCue(text, { woodTreatmentOk = false, softTreatmentOk = false } = {}) {
   const value = String(text || '').toLowerCase();
-  return TERMITE_WOOD_TREATMENT_CUE_RE.test(value) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
+  return TERMITE_OTHER_TREATMENT_RE.test(value) || isLiquidTreatmentVeto(value, softTreatmentOk) || (!woodTreatmentOk && TERMITE_WOOD_TREATMENT_CUE_RE.test(value)) || TERMITE_FOAM_DRILL_CUE_RE.test(value)
     || TERMITE_LIQUID_PERIMETER_CUE_RE.test(value) || TERMITE_WDO_CUE_RE.test(value)
     || hasTermiteAddonWording(value) || existingStructureTermiteWork(value) || hasExistingStructureContext(value);
 }
@@ -7279,8 +7311,25 @@ function isV2CategoryPlaceholder(fragment, field, v2Extraction) {
   const legacy = category ? mapServiceCategoryToLegacy(category) : null;
   return !!legacy && value === String(legacy).toLowerCase();
 }
-// Every structured field is split on the conjunctions, not only pain_points.
-function structuredFragmentsOf(view, v2Extraction) {
+// Legacy (V1-only) view: the structured fields are requested_service,
+// matched_service, specific_service_name and every pain_points item, each split
+// on the conjunctions.
+// VALID V2 record (follow-up to #6105, Codex r17 P2): flatView copies
+// sentiment_and_lead.objections_raised into pain_points, so an ordinary
+// objection ("price") read as a service fragment and the fail-closed proof
+// never held. The V2 proof reads SERVICE fields only: the view's service
+// words, service_request.specific_service_name, the second-service fields
+// (secondary_categories, pests_observed). Objections are checked apart
+// (objectionNamesOtherService), never as proof.
+function v2SecondServiceWords(v2Extraction) {
+  const request = v2Extraction?.service_request || {};
+  const secondary = Array.isArray(request.secondary_categories) ? request.secondary_categories : [];
+  const pests = Array.isArray(request.pests_observed) ? request.pests_observed.map((p) => p?.pest_type) : [];
+  return [...secondary, ...pests]
+    .filter((word) => word && word !== 'unspecified')
+    .map((word) => String(word).replace(/_/g, ' '));
+}
+function structuredFragmentsOf(view, v2Extraction, { v2Proof = false } = {}) {
   const out = [];
   const add = (text, field) => {
     for (const fragment of splitFragments(text)) {
@@ -7289,28 +7338,117 @@ function structuredFragmentsOf(view, v2Extraction) {
   };
   add(view.requested_service, 'requested_service');
   add(view.matched_service, 'matched_service');
-  add(view.specific_service_name, 'specific_service_name');
+  // "Pre-slab pre-treat with Bora-Care" splits on "with": the Bora-Care piece
+  // keeps the whole service name beside it so its new-construction context
+  // travels with it. Only the service name does this, no other field.
+  const addServiceName = (name) => {
+    for (const fragment of splitFragments(name)) {
+      if (isV2CategoryPlaceholder(fragment, 'specific_service_name', v2Extraction)) continue;
+      const wood = TERMITE_WOOD_TREATMENT_CUE_RE.test(fragment.toLowerCase()) && fragment !== String(name).trim();
+      out.push(wood ? `${fragment} (${name})` : fragment);
+    }
+  };
+  addServiceName(view.specific_service_name);
+  if (v2Proof) {
+    addServiceName(v2Extraction?.service_request?.specific_service_name);
+    // A second service named by the V2 record is never a placeholder.
+    for (const word of v2SecondServiceWords(v2Extraction)) out.push(word);
+    return out;
+  }
   const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
   for (const item of painPoints) add(item, 'pain_points');
   return out;
 }
-function pretreatIsOnlyTermiteWork(view, v2Extraction = null) {
-  const structured = structuredFragmentsOf(view, v2Extraction);
+// Objections and pain points on a V2 call are sentiment: "price" is not a
+// service. Only one that names a service family (or classifies to a service)
+// other than the pre-slab service is another ask and keeps the card.
+function objectionNamesOtherService(fragment) {
+  // Any non-pre-treat termite treatment is another ask, pre-treat wording or not.
+  if (hasNonPretreatTermiteCue(fragment)) return true;
+  if (isPretreatFragment(fragment)) return false;
+  // The current service family is not another ask ("termite treatment is too
+  // expensive"). Another ask is a non-termite family or a catalog service
+  // outside the termite family.
+  if (familiesIn(fragment).some((f) => f.key !== 'termite')) return true;
+  const label = canonicalWavesService(fragment);
+  return !!(label && !TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor');
+}
+function v2ObjectionTexts(view, v2Extraction) {
+  const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
+  const painPoints = Array.isArray(view.pain_points) ? view.pain_points : [view.pain_points];
+  return [...(Array.isArray(objections) ? objections : []), ...painPoints];
+}
+function v2ObjectionFragments(view, v2Extraction) {
+  return v2ObjectionTexts(view, v2Extraction).flatMap(splitFragments);
+}
+const EXISTING_WORK_WORDING_RE = /\b(?:existing|current|occupied|old|older|already built|attic|crawl\s?space)\b/i;
+// The service name's new-construction context may be borrowed only by a
+// sentence about the SAME job. A separate-job marker or a different location
+// ("also Bora-Care at the sales office") must carry its own context.
+const SEPARATE_JOB_MARKER_RE = /\b(?:also|another|other|second|separate|additional|as well|in addition|plus)\b/i;
+const DIFFERENT_LOCATION_RE = /\b(?:offices?|units?|suites?|garages?|sheds?|barns?|guest house|next door|across|their home|the house)\b/i;
+// "building <identifier>" names a distinct building (B, 2, beta, annex); a
+// function or construction word after "building" ("the building before the
+// pour", "building permit") is the same job (codex #6289 r4).
+const DIFFERENT_BUILDING_RE = /\bbuilding\s+(?!(?:is|was|are|were|be|being|been|has|have|had|will|would|can|that|which|and|or|but|so|under|before|after|once|when|while|for|to|on|in|at|with|by|from|of|the|a|an|this|it|its|site|pad|slab|footprint|permit|inspector|department|code|codes|plans|next|now|too|also|as|we|they|he|she|i|you)\b)[A-Za-z0-9][\w-]*\b/i;
+function isSeparateJobSentence(text) {
+  return SEPARATE_JOB_MARKER_RE.test(text) || DIFFERENT_LOCATION_RE.test(text) || DIFFERENT_BUILDING_RE.test(text);
+}
+function isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction) {
+  const text = String(fragment || '');
+  return TERMITE_WOOD_TREATMENT_CUE_RE.test(text.toLowerCase())
+    && !EXISTING_WORK_WORDING_RE.test(text)
+    && (NEW_CONSTRUCTION_CONTEXT_RE.test(text) || (nameHasNewConstruction && !isSeparateJobSentence(text)));
+}
+// The marker is read on the whole SENTENCE (splitting on "also" and "plus"
+// would drop it); the new-construction context on the conjunction FRAGMENT
+// ("slab pre-treat and Bora-Care on building B": the pre-treat half must not
+// vouch for the Bora-Care half).
+function woodSentenceNeedsOwnContext(texts, nameHasNewConstruction) {
+  return texts.flatMap((t) => String(t || '').split(SERVICE_SENTENCE_SPLIT_RE)).some((sentence) => {
+    const borrow = nameHasNewConstruction && !isSeparateJobSentence(sentence);
+    return splitFragments(sentence).some((fragment) => (
+      TERMITE_WOOD_TREATMENT_CUE_RE.test(fragment.toLowerCase()) && !isWoodTreatmentOnNewConstruction(fragment, borrow)
+    ));
+  });
+}
+function isPretreatFragment(fragment, nameHasNewConstruction = false) {
+  return canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment)
+    || isWoodTreatmentOnNewConstruction(fragment, nameHasNewConstruction);
+}
+// Wood treatment is judged per sentence (woodSentenceNeedsOwnContext).
+function narrativeNamesOtherTermite(narrative) {
+  return narrative.some((fragment) => {
+    const label = canonicalWavesService(fragment);
+    if (!label || !TERMITE_SERVICE_LABELS.has(label) || label === 'Pre-Slab Termidor' || label === 'Termite Wood Treatment') return false;
+    return label !== 'Termite Inspection' || !TERMITE_NEW_SLAB_WORDING_RE.test(fragment);
+  });
+}
+function pretreatIsOnlyTermiteWork(view, v2Extraction = null, { v2Proof = false } = {}) {
+  const structured = structuredFragmentsOf(view, v2Extraction, { v2Proof });
   const narrative = splitFragments(view.call_summary);
-  const fragments = [...structured, ...narrative];
-  if (hasNonPretreatTermiteCue(fragments.join('. ')) || fragments.some(hasNonPretreatTermiteCue)) return false;
+  const objections = v2Proof ? v2ObjectionFragments(view, v2Extraction) : [];
+  // The call's service name decides whether a Bora-Care sentence in the
+  // narrative is new-construction work. A structured fragment needs its own
+  // context (structuredFragmentsOf carries the service name's along).
+  const nameHasNewConstruction = NEW_CONSTRUCTION_CONTEXT_RE.test(
+    [view.specific_service_name, v2Proof ? v2Extraction?.service_request?.specific_service_name : null].filter(Boolean).join(' '),
+  );
+  // The joined check skips the wood cue (a single-word cue judged per fragment).
+  const joined = [...structured, ...narrative, ...objections].join('. ');
+  if (hasNonPretreatTermiteCue(joined, { woodTreatmentOk: true, softTreatmentOk: true })) return false;
+  // Wood treatment: a structured fragment carries its own context; narrative and
+  // objection sentences may borrow the service name's only for the same job.
+  if (structured.some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: isWoodTreatmentOnNewConstruction(f, false) }))) return false;
+  if ([...narrative, ...objections].some((f) => hasNonPretreatTermiteCue(f, { woodTreatmentOk: true }))) return false;
+  if (woodSentenceNeedsOwnContext([view.call_summary, ...(v2Proof ? v2ObjectionTexts(view, v2Extraction) : [])], nameHasNewConstruction)) return false;
   // Fail closed: a structured fragment that is not the pre-slab service (or
   // plain pre-treat wording) keeps the card, including one nothing classifies.
-  const isPretreat = (fragment) => canonicalWavesService(fragment) === 'Pre-Slab Termidor' || PRETREAT_WORDING_RE.test(fragment);
-  if (!structured.every(isPretreat)) return false;
+  if (!structured.every((f) => isPretreatFragment(f)) || objections.some(objectionNamesOtherService)) return false;
   // Narrative sentences may be anything without a cue, but none may be some
   // other termite service.
-  const narrativeOtherTermite = narrative.some((fragment) => {
-    const label = canonicalWavesService(fragment);
-    return label && TERMITE_SERVICE_LABELS.has(label) && label !== 'Pre-Slab Termidor'
-      && !(label === 'Termite Inspection' && TERMITE_NEW_SLAB_WORDING_RE.test(fragment));
-  });
-  return !narrativeOtherTermite && fragments.some(isPretreat);
+  if (narrativeNamesOtherTermite(narrative)) return false;
+  return [...structured, ...narrative].some((f) => isPretreatFragment(f));
 }
 
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
@@ -7336,7 +7474,10 @@ function propertyHasNoUnitToAsk(v2Extraction) {
     && !(Array.isArray(secondary) && secondary.length);
 }
 
-function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+// v2Valid: the caller's word that the V2 payload passed validation. A valid V2
+// record gives the structured proof from its SERVICE fields (pretreatIsOnlyTermiteWork
+// v2Proof); the V1 view heard before adoption keeps the legacy flat-view proof.
+function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false, v2Valid = true } = {}) {
   // Same conservative views as wholeStructureUnitWaiverForCall: a call the
   // unclear-service rule may book as a Waves Assessment is not whole-structure,
   // and the V1 service as heard BEFORE V2-primary adoption must agree too.
@@ -7344,8 +7485,13 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
   if (!propertyHasNoUnitToAsk(v2Extraction)) return false;
   // A revisit, complaint, callback or cancellation is not a new slab job.
   if (EXISTING_SERVICE_INTENTS.has(String(v2Extraction?.service_request?.service_intent || ''))) return false;
-  const views = [preAdoptionExtracted, extracted, v2BookingServiceView(extracted, v2Extraction)].filter(Boolean);
-  return views.every((view) => {
+  const useV2Proof = !!v2Valid && isV2Extraction(v2Extraction);
+  const views = [
+    preAdoptionExtracted ? { view: preAdoptionExtracted, v2Proof: false } : null,
+    { view: extracted, v2Proof: useV2Proof },
+    { view: v2BookingServiceView(extracted, v2Extraction), v2Proof: useV2Proof },
+  ].filter((entry) => entry && entry.view);
+  return views.every(({ view, v2Proof }) => {
     const coarse = resolveSchedulableCallService(view, { transcription });
     const row = resolveCallBookingCatalogService({
       extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
@@ -7368,7 +7514,7 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
     const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
     const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
     const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !existingStructureTermiteWork(serviceWords)
-      && pretreatIsOnlyTermiteWork(view, v2Extraction);
+      && pretreatIsOnlyTermiteWork(view, v2Extraction, { v2Proof });
     return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
@@ -8192,6 +8338,190 @@ Rules:
   }
 }
 
+// Why the contact pass / decoder runs for this transcript, or null when it does not.
+// 'signals' = the dictation detector (always on). 'collapse:<signal>' = a collapsed
+// spelling's marks (GATE_CALL_SPELLING_COLLAPSE_TRIGGER, dark): the ONLY case the new
+// trigger adds a pass, so it is the one that is logged. `ctx` carries { extracted,
+// knownCustomer } once the extraction exists; the second pass runs before it, so the
+// near-miss signal can only fire at the decoder gate.
+function contactPassTrigger(transcription, ctx = {}) {
+  if (!transcription) return null;
+  if (detectContactDictationSignals(transcription).any) return 'signals';
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
+  // The name-only trigger feeds the name-spelling card, which never files on an outbound call
+  // (outbound diarization can swap the labels): no paid pass for it there.
+  if (ctx.call && isOutboundCall(ctx.call)) return null;
+  const sig = spellingCollapseSignals(transcription, ctx);
+  if (!sig.any) return null;
+  return `collapse:${['repeated', 'announced', 'nearMiss'].filter((k) => sig[k]).join('+')}`;
+}
+
+function contactPassTriggerLogged(transcription, call, stage, ctx = {}) {
+  const trigger = contactPassTrigger(transcription, ctx);
+  logCollapseTrigger(trigger, call?.twilio_call_sid, stage);
+  return trigger !== null;
+}
+
+function logCollapseTrigger(trigger, callSid, stage) {
+  if (typeof trigger === 'string' && trigger.startsWith('collapse:')) {
+    logger.info(`[call-proc] spelling collapse trigger (${stage}): ${trigger.slice(9)} for ${maskSid(callSid)}`);
+  }
+}
+
+// The expected recording length to verify a download against, or null. Verification (and the
+// retryable not-ready classification) only applies inside the CDN propagation window: an old row's
+// recording is as complete as it will ever get, and verifying it would reject it forever (Codex
+// #3037 P2). The window is anchored at call END (created_at + duration), since the recording only
+// exists once the call ends (Codex #3037 round-2 P2). Shared by the primary download and the late
+// contact pass so a truncated CDN response is never transcribed by either.
+function propagationExpectedSeconds(call) {
+  const callCreatedMs = call?.created_at ? new Date(call.created_at).getTime() : null;
+  const callEndMs = Number.isFinite(callCreatedMs)
+    ? callCreatedMs + recordingDurationSeconds(call || {}) * 1000
+    : null;
+  const withinPropagationWindow = Number.isFinite(callEndMs)
+    && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
+  return withinPropagationWindow ? (recordingDurationSeconds(call || {}) || null) : null;
+}
+
+// One extra dictation-focused transcription pass over the call audio, scrubbed like the primary.
+// Returns { text, model, chars } or, when this pass is the first leg to hear a card number,
+// { pan: true, panCount } with no text: the caller quarantines the recording and decodes nothing.
+async function lateContactPass(call) {
+  let buffer;
+  try {
+    buffer = await downloadRecording(call.recording_url, { expectedSeconds: propagationExpectedSeconds(call) });
+  } catch (err) {
+    if (err.code !== RECORDING_NOT_READY) throw err;
+    // A short or missing CDN read: never transcribe or persist it. The pass simply does not run.
+    logger.warn(`[call-proc] late contact pass: recording not ready, pass skipped: ${err.message}`);
+    return null;
+  }
+  const second = await transcribeWithOpenAI(buffer, {
+    model: process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe',
+    prompt: CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
+  });
+  if (!second?.text) return null;
+  const scrubbed = scrubPansDetailed(second.text);
+  const panCount = Math.max(Number(second.panCount || 0), scrubbed.count);
+  if (panCount > 0) return { pan: true, panCount };
+  return { text: scrubbed.text, model: second.model || null, chars: scrubbed.text.length };
+}
+
+// The same card-number handling the normal wrapper and the choke-point scrub use: quarantine the
+// recording (Twilio delete, strip the URL, stamp pan_detected, alert the office) and clear the URL
+// on the in-memory row so nothing downstream re-downloads the audio.
+async function quarantineLatePanPass(call, panCount) {
+  await quarantineCardRecording(call, { source: 'late_contact_pass' });
+  call.recording_url = null;
+  return panCount;
+}
+
+// Whether the late (post-extraction) pass may run at all: gate on, contact dictation not switched
+// off, an inbound call whose recording is still there, and an extraction with a name to work with.
+// The wrapper already bought (and may have lost) the pass for the transcript-only signals; only the
+// near miss, which needs the extraction, is new after it, and the near miss needs a last name.
+function lateContactPassAllowed({ call, extracted, contactPassAttempted }) {
+  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return false;
+  if (process.env.CONTACT_DICTATION_ENABLED === 'false') return false;
+  if (!call.recording_url || isOutboundCall(call)) return false;
+  if (!extracted?.first_name && !extracted?.last_name) return false;
+  return !(contactPassAttempted && !extracted.last_name);
+}
+
+// The collapse trigger for the late pass, or null. Either extracted name is context for the
+// repeated-name signal; only the stored-last-name near miss needs a customer lookup. After a pass
+// the wrapper already tried, only the near miss counts.
+async function lateContactPassTrigger({ call, contactPhone, transcription, extracted, contactPassAttempted }) {
+  let known = null;
+  if (extracted.last_name) {
+    known = call.customer_id
+      ? await db('customers').where({ id: call.customer_id }).first('last_name')
+      : await findCustomerForCallContact(contactPhone, extracted).catch(() => null);
+  }
+  const trigger = contactPassTrigger(transcription, { extracted, knownCustomer: known, call });
+  if (!trigger || (contactPassAttempted && !trigger.includes('nearMiss'))) return null;
+  return trigger;
+}
+
+// The decoder gate. Runs when a second-pass transcript exists or the dictation detector fires
+// (as before). With GATE_CALL_SPELLING_COLLAPSE_TRIGGER on it also runs for a collapsed spelling the
+// wrapper could not see before the extraction existed (the near miss): one late second pass on a
+// fresh, verified download. A pass that hears a card number is quarantined and nothing is decoded.
+// Fail-open: any failure leaves the decoder off. `late` carries what the caller must persist;
+// `panCount` means the recording is gone.
+async function contactDecoderGate(args) {
+  const { call, transcription, contactPassTranscript, callSid } = args;
+  const off = { run: false, lateContactPass: null, late: null, panCount: 0 };
+  if (contactPassTranscript) return { ...off, run: true };
+  if (detectContactDictationSignals(transcription).any) return { ...off, run: true };
+  if (!lateContactPassAllowed(args)) return off;
+  try {
+    const trigger = await lateContactPassTrigger(args);
+    if (!trigger) return off;
+    logCollapseTrigger(trigger, callSid, 'decoder');
+    const late = await lateContactPass(call);
+    if (late?.pan) return { ...off, panCount: await quarantineLatePanPass(call, late.panCount) };
+    return late ? { ...off, run: true, lateContactPass: late.text, late } : off;
+  } catch (err) {
+    logger.warn(`[call-proc] spelling collapse decoder gate skipped for ${maskSid(callSid)}: ${err.message}`);
+    return off;
+  }
+}
+
+// transcript_structured as the main transcript write builds it: the diarized segments plus the
+// dictation-focused second stream as the audit trail.
+function structuredTranscriptJson(result, contactPassTranscript) {
+  return JSON.stringify({
+    provider: result.provider,
+    model: result.model || OPENAI_TRANSCRIPTION_MODEL,
+    segments: result.structuredSegments || null,
+    ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
+  });
+}
+
+// What a late pass adds to the call row's transcription metadata: the second stream's model and
+// size, or, for a pass that heard a card number, pan_detected + pan_count (quarantineCardRecording
+// already stripped the URL and stamped the quarantine). Plain object, merged into the caller's
+// in-memory provenance too so a later metadata write does not restore an older pan_count.
+function lateContactPassMeta({ provenanceMetadata, gate }) {
+  if (gate.panCount > 0) {
+    return { pan_detected: true, pan_count: Math.max(Number(provenanceMetadata?.pan_count || 0), gate.panCount) };
+  }
+  return { contact_pass_model: gate.late.model, contact_pass_chars: gate.late.chars };
+}
+
+// Written through the same token-fenced, quarantine-preserving metadata write as the main
+// transcript. The second stream is merged INTO whatever transcript_structured the accepted
+// transcript already has (primary segments, a fallback's, or none): it never replaces them. A
+// composite relay call has no structured form, so only the metadata is written there. Returns
+// false when the fence says a peer owns the call.
+async function persistLateContactPass({ call, procToken, provenanceMetadata, gate, relay }) {
+  if (!gate?.late && !(gate?.panCount > 0)) return true;
+  const meta = lateContactPassMeta({ provenanceMetadata, gate });
+  if (provenanceMetadata) Object.assign(provenanceMetadata, meta);
+  // Only the new fields are merged into the CURRENT jsonb: a relay close or summary write between
+  // the main transcript write and this one may have added keys the in-memory provenance lacks.
+  const metaWrite = db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(meta)]);
+  const patch = { transcription_metadata: metaWrite, updated_at: new Date() };
+  if (gate.late && !relay) {
+    patch.transcript_structured = db.raw(
+      "COALESCE(transcript_structured, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({ contact_pass_transcript: gate.late.text })],
+    );
+  }
+  const rows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update(patch);
+  return Number(rows) > 0;
+}
+
+// Persists a late contact pass and answers whether the claim is still ours: null to carry on, or
+// the same ownership-lost result the transcript write returns when a peer reclaimed the call.
+async function settleLateContactPass({ callSid, ...rest }) {
+  if (await persistLateContactPass(rest)) return null;
+  logger.warn(`[call-proc] late contact pass write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer; abandoning this pass`);
+  return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+}
+
 // Wrapper: primary transcription + (when the call dictated contact info) a
 // SECOND full-call pass on a promptable model. The diarized primary cannot be
 // prompted, so token-level dictation fidelity ("W, C as in Charlie, W, six
@@ -8209,8 +8539,11 @@ async function transcribeRecording(mp3Url, opts = {}) {
       // forceContactPass (bounce re-verify): the primary transcript may have
       // normalized a misheard address into a shape that no longer trips the
       // dictation signals — the caller knows an email was dictated.
-      && (opts.forceContactPass === true || detectContactDictationSignals(result.transcription).any)
+      && (opts.forceContactPass === true || contactPassTriggerLogged(result.transcription, opts.call, 'second_pass', { call: opts.call }))
     ) {
+      // Recorded BEFORE the paid call: a pass that returns nothing or throws still counts as tried, so
+      // the late decoder gate never repeats it for the same signal.
+      result.contactPassAttempted = true;
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
         model: contactModel,
@@ -8284,24 +8617,10 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
     // as it will ever get — verifying it would either reject it forever
     // (starving the sweep on dead URLs, Codex #3037 P2) or block a partial
     // recording that is still better transcribed than dropped.
-    const callCreatedMs = opts.call?.created_at ? new Date(opts.call.created_at).getTime() : null;
-    // Anchor the window at call END (created_at + duration), not call start —
-    // the recording only exists once the call ends, so an hour-long call
-    // anchored at creation would already be outside the window when the
-    // recording-completed webhook fires and would never get verification
-    // (Codex #3037 round-2 P2).
-    const callEndMs = Number.isFinite(callCreatedMs)
-      ? callCreatedMs + recordingDurationSeconds(opts.call || {}) * 1000
-      : null;
-    const withinPropagationWindow = Number.isFinite(callEndMs)
-      && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
+    const expectedSeconds = propagationExpectedSeconds(opts.call);
     let audioBuffer;
     try {
-      audioBuffer = await downloadRecording(mp3Url, {
-        expectedSeconds: withinPropagationWindow
-          ? (recordingDurationSeconds(opts.call || {}) || null)
-          : null,
-      });
+      audioBuffer = await downloadRecording(mp3Url, { expectedSeconds });
     } catch (err) {
       if (err.code === RECORDING_NOT_READY) {
         // CDN propagation lag (404 or truncated buffer for the known
@@ -10156,6 +10475,8 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // The wrapper already tried the second pass (it may have returned nothing).
+    let contactPassAttempted = false;
     // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
     // near-silence) is discarded here so the Twilio-builtin fallback below can
     // supply a real transcript; the terminal rejection only fires if the
@@ -10289,6 +10610,7 @@ const CallRecordingProcessor = {
       transcription = result.transcription;
       recordingNotReady = result.notReady === true;
       contactPassTranscript = result.contactPassTranscript || null;
+      contactPassAttempted = result.contactPassAttempted === true;
       // PAN redaction guard (card-on-file spec Phase 0): a card number
       // blurted on the recorded line must become a non-event — scrubbed
       // BEFORE the plausibility gate, BEFORE persistence, and therefore
@@ -10327,6 +10649,7 @@ const CallRecordingProcessor = {
         rejectedPrimaryChars = transcription.length; // keep the metric before discarding
         transcription = null;
         contactPassTranscript = null;
+        contactPassAttempted = false; // the wrapper's pass belonged to the discarded transcript
       }
       if (transcription) {
         transcriptionProvenance = {
@@ -10369,14 +10692,9 @@ const CallRecordingProcessor = {
         if (relaySegment) {
           transcriptUpdate.transcript_structured = null;
         } else if (result.structuredSegments || contactPassTranscript) {
-          transcriptUpdate.transcript_structured = JSON.stringify({
-            provider: result.provider,
-            model: result.model || OPENAI_TRANSCRIPTION_MODEL,
-            segments: result.structuredSegments || null,
-            // Audit trail for the contact-field decoder's second evidence
-            // stream (dictation-focused re-transcription of the same audio).
-            ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
-          });
+          // Includes the audit trail for the contact-field decoder's second evidence
+          // stream (dictation-focused re-transcription of the same audio).
+          transcriptUpdate.transcript_structured = structuredTranscriptJson(result, contactPassTranscript);
         }
         // Token-fenced like the terminal writes: this runs AFTER a
         // multi-minute provider await, by which time a peer may have
@@ -11745,8 +12063,20 @@ const CallRecordingProcessor = {
     // address-recovery lookup below. Fail-open.
     let contactDictation = null;
     let dictationEmailPayload = null;
+    // The late contact pass (paid) is persisted OUTSIDE the fail-open try below: a lost claim abandons
+    // the pass like the transcript write above, and a THROWN fence write escapes to the outer
+    // processing-failure path instead of marking the call processed with the late transcript
+    // neither saved nor decoded.
+    const decoderGate = transcription
+      ? await contactDecoderGate({ call, contactPhone, transcription, contactPassTranscript, contactPassAttempted, extracted, callSid })
+      : null;
+    if (decoderGate?.lateContactPass) contactPassTranscript = decoderGate.lateContactPass;
+    const lost = decoderGate
+      ? await settleLateContactPass({ call, procToken, provenanceMetadata: transcriptionProvenance?.metadata, gate: decoderGate, relay: Boolean(recordedSegmentText), callSid })
+      : null;
+    if (lost) return lost;
     try {
-      if (transcription && (contactPassTranscript || detectContactDictationSignals(transcription).any)) {
+      if (decoderGate?.run) {
         contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
       }
       if (contactDictation) {
@@ -12232,7 +12562,7 @@ const CallRecordingProcessor = {
             canonicalStreet: extracted?.address_line1,
             preConstructionPretreat: finalFlags.includes('missing_unit_number')
               && callIsPreConstructionPretreat({
-                extracted, preAdoptionExtracted, v2Extraction, transcription,
+                extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
           }).dropped);
@@ -24269,6 +24599,12 @@ function legacyDisputeServiceIntent(extracted) {
 
 CallRecordingProcessor._test = {
   fileNameSpellingCard,
+  contactPassTrigger,
+  contactPassTriggerLogged,
+  contactDecoderGate,
+  persistLateContactPass,
+  settleLateContactPass,
+  lateContactPassMeta,
   // Tests only: the drain flag is process-wide, so a suite that exercised the
   // shutdown path resets it to play the replacing pod.
   resetShutdownForTests() { shuttingDown = false; },
