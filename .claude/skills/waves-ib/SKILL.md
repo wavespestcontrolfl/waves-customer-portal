@@ -36,14 +36,16 @@ the page list below as its eager tools (without `discover_capabilities`), gets
 the API's own tool search (`tool_search_tool_bm25_20251119`, no beta header),
 and every other action `allowed()` accepts (not `confirmed_endpoint`) is sent
 with `defer_loading: true`, sorted by name (`initialTools` with
-`scope.toolSearch`, set by `toolSearchWanted` in `tool-search.js`). Anthropic
+`scope.toolSearch`, set by `toolSearchWanted` in `tool-search.js`, never on a resumed task). Anthropic
 documents tool-selection accuracy dropping past 30 to 50 active tools, so the
 owner's active set stays page-sized. Deferred tools are outside the cached
 prefix and carry no `cache_control`. Search blocks (`server_tool_use`,
 `tool_search_tool_result`) are not `tool_use`: the loop never executes them
 and passes the assistant content back unchanged; `pause_turn` continues the
-turn. A resumed task whose saved history holds search blocks keeps this shape
-even if the gate is off by then. Gate off = the page list plus
+turn. A request that continues after a card or an interruption continues on
+the ordinary tool list: `stripServerSearchBlocks` removes the saved search
+blocks when the checkpoint is loaded, and the resumed request keeps
+`discover_capabilities`. Gate off = the page list plus
 `discover_capabilities` for everyone. Other admins, technicians, the tech
 context and the `agent_estimate` rail always follow the mapping below and keep
 `discover()`. Smoke check: `ops/agents/ib-tool-search-smoke.js`.

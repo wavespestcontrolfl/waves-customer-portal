@@ -209,67 +209,9 @@ describe('GATE_IB_TOOL_SEARCH off', () => {
   });
 });
 
-// A saved search result can name a tool that is gone by the time the task
-// resumes (a gate turned off). The API answers 400 "Tool reference 'x' not
-// found in available tools", so the reference is dropped from what is sent.
-describe('a resumed task whose saved search names a tool that is no longer available', () => {
-  const searchHistory = [
-    { role: 'user', content: [{ type: 'text', text: 'merge the two duplicate records' }] },
-    { role: 'assistant', content: [
-      { type: 'server_tool_use', id: 'srvtoolu_9', name: 'tool_search_tool_bm25', input: { query: 'merge customers' } },
-      { type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_9',
-        content: { type: 'tool_search_tool_search_result', tool_references: [
-          { type: 'tool_reference', tool_name: 'merge_customers' }, { type: 'tool_reference', tool_name: 'get_review_stats' }] } },
-      { type: 'text', text: 'Found them.' },
-    ] },
-  ];
-  const savedTask = () => ({
-    id: '7e1c2f7a-1111-2222-3333-deadbeef0009', state: 'awaiting_approval', session_id: '7e1c2f7a-1111-2222-3333-deadbeef0008',
-    request_key: 'resume-key-0001', runner_token: '7e1c2f7a-1111-2222-3333-deadbeef0007',
-    request: { prompt: 'merge the two duplicate records', context: 'dashboard', pageData: {} },
-    checkpoint: JSON.parse(JSON.stringify(searchHistory)), target: null, response: null,
-  });
-
-  beforeEach(() => {
-    delete process.env.GATE_IB_TOOL_SEARCH; // off at resume: the saved search blocks still keep the shape
-    delete process.env.GATE_IB_MERGE_CUSTOMERS; // merge_customers is no longer available
-    IbTasks.claimResume.mockReset();
-    IbTasks.claimResume.mockResolvedValue({ task: savedTask(), receipts: [] });
-  });
-
-  test('the request goes out without that reference, keeps the other one, and the removed tool is refused', async () => {
-    const turns = [
-      { content: [{ type: 'tool_use', id: 'toolu_m', name: 'merge_customers', input: {} }], usage: {}, stop_reason: 'tool_use' },
-      { content: [{ type: 'text', text: 'Cannot do that.' }], usage: {} },
-    ];
-    const { requests } = await ask('owner', 'dashboard', turns, { path: '/tasks/7e1c2f7a-1111-2222-3333-deadbeef0009/resume', body: { session_id: savedTask().session_id } });
-    const sent = requests[0];
-    expect(names(sent.tools)).not.toContain('merge_customers');
-    expect(names(sent.tools)).toContain('tool_search_tool_bm25');
-    const result = sent.messages.flatMap(m => (Array.isArray(m.content) ? m.content : [])).find(b => b.type === 'tool_search_tool_result');
-    expect(result.content.tool_references).toEqual([{ type: 'tool_reference', tool_name: 'get_review_stats' }]);
-    // Every reference sent names a tool that is in `tools`.
-    const available = new Set(names(sent.tools));
-    for (const request of requests) {
-      for (const message of request.messages) {
-        for (const block of Array.isArray(message.content) ? message.content : []) {
-          if (block.type === 'tool_search_tool_result') for (const ref of block.content.tool_references) expect(available.has(ref.tool_name)).toBe(true);
-        }
-      }
-    }
-    // The paired server_tool_use stays.
-    expect(sent.messages.flatMap(m => (Array.isArray(m.content) ? m.content : [])).some(b => b.type === 'server_tool_use' && b.id === 'srvtoolu_9')).toBe(true);
-    // The stored history was not changed.
-    expect(IbTasks.claimResume).toHaveBeenCalled();
-    // Calling the removed tool from memory is refused by the existing guard, not executed.
-    const refusal = requests[1].messages[requests[1].messages.length - 1].content.find(b => b.type === 'tool_result');
-    expect(refusal.is_error).toBe(true);
-    expect(refusal.content).toMatch(/permission_denied|capability_not_loaded/);
-  });
-});
-
-// ─── Round 5: split server-tool responses and saved-task resume ─────────────
-describe('tool search: split responses and resume', () => {
+// A resumed task never uses tool search: the saved search blocks are stripped on
+// load and the request runs on the ordinary list with discover_capabilities.
+describe('a resumed task runs on the ordinary tool list', () => {
   const RESUME = '/tasks/7e1c2f7a-1111-2222-3333-deadbeef0009/resume';
   const SESSION = '7e1c2f7a-1111-2222-3333-deadbeef0008';
   const taskWith = (checkpoint) => ({
@@ -278,92 +220,99 @@ describe('tool search: split responses and resume', () => {
     request: { prompt: 'look up the numbers', context: 'dashboard', pageData: {} },
     checkpoint: JSON.parse(JSON.stringify(checkpoint)), target: null, response: null,
   });
-  const resumeWith = (checkpoint, receipts = []) => {
+  const RECEIPTS = [{ tool: 'block_sender', outcome: 'completed' }];
+  const resumeWith = (checkpoint) => {
     IbTasks.claimResume.mockReset();
-    IbTasks.claimResume.mockResolvedValue({ task: taskWith(checkpoint), receipts });
+    IbTasks.claimResume.mockResolvedValue({ task: taskWith(checkpoint), receipts: RECEIPTS });
     IbTasks.get.mockReset();
     IbTasks.get.mockResolvedValue(taskWith(checkpoint));
   };
   const searchUse = id => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'review numbers' } });
   const searchResult = (id, names = []) => ({ type: 'tool_search_tool_result', tool_use_id: id,
     content: { type: 'tool_search_tool_search_result', tool_references: names.map(tool_name => ({ type: 'tool_reference', tool_name })) } });
-  const lastCheckpointMessages = () => IbTasks.checkpoint.mock.calls.map(call => call[2].messages).filter(Boolean).pop();
   const blocksOf = messages => messages.flatMap(m => (Array.isArray(m.content) ? m.content : []));
+  const continuationCount = messages => JSON.stringify(messages).split('Continue the original request').length - 1;
+  const resume = (token, turns) => ask(token, 'dashboard', turns, { path: RESUME, body: { session_id: SESSION } });
+
+  // The resumed request carries no server blocks, no defer_loading, no search tool; roles never
+  // repeat for assistants and nothing is empty; the receipts turn appears exactly once.
+  function expectOrdinaryResume(request) {
+    expect(blocksOf(request.messages).some(b => b.type === 'server_tool_use' || b.type === 'tool_search_tool_result')).toBe(false);
+    expect(request.tools.some(t => t.defer_loading || t.type || t.name === 'tool_search_tool_bm25')).toBe(false);
+    expect(names(request.tools)[0]).toBe('discover_capabilities');
+    expect(systemText(request)).toContain(ToolSearch.DISCOVER_LINE);
+    request.messages.forEach((message, index) => {
+      expect(message.content.length).toBeGreaterThan(0);
+      if (message.role === 'assistant') expect(request.messages[index - 1]?.role).not.toBe('assistant');
+    });
+    expect(request.messages[request.messages.length - 1].role).toBe('user');
+    expect(continuationCount(request.messages)).toBe(1);
+    expect(JSON.stringify(request.messages)).toContain('block_sender');
+  }
 
   beforeEach(() => { process.env.GATE_IB_TOOL_SEARCH = 'true'; delete process.env.GATE_IB_MERGE_CUSTOMERS; });
   afterEach(() => { delete process.env.GATE_IB_TOOL_SEARCH; });
 
-  test('1: a result that arrives in the next response is saved, and the resume sends the paired result', async () => {
-    const first = [searchUse('srvtoolu_a'), { type: 'tool_use', id: 'toolu_a', name: 'offer_choices', input: { options: ['One', 'Two'] } }];
-    const second = [searchResult('srvtoolu_a'), { type: 'text', text: 'Pick one.' }];
-    await ask('owner', 'dashboard', [{ content: first, usage: {}, stop_reason: 'tool_use' }, { content: second, usage: {}, stop_reason: 'end_turn' }]);
-    const saved = lastCheckpointMessages();
-    // The saved history holds the call, its tool_result turn and the next response (with the result).
-    expect(saved[saved.length - 1]).toEqual({ role: 'assistant', content: second });
-    expect(saved[saved.length - 3]).toEqual({ role: 'assistant', content: first });
-    // Resume: the request carries the call and its paired result before the continuation turn.
-    resumeWith(saved);
-    const { requests } = await ask('owner', 'dashboard', [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path: RESUME, body: { session_id: SESSION } });
-    const sent = requests[0].messages;
-    const kinds = blocksOf(sent).map(b => `${b.type}:${b.id || b.tool_use_id || ''}`);
-    expect(kinds.indexOf('server_tool_use:srvtoolu_a')).toBeGreaterThan(-1);
-    expect(kinds.indexOf('tool_search_tool_result:srvtoolu_a')).toBeGreaterThan(kinds.indexOf('server_tool_use:srvtoolu_a'));
-    expect(sent[sent.length - 1].role).toBe('user');
-    expect(sent[sent.length - 2]).toEqual({ role: 'assistant', content: second });
+  test('(a) a resolved search, a deferred-tool call and a card: stripped, the used tool is loaded once and not deferred', async () => {
+    resumeWith([
+      { role: 'user', content: 'review numbers, then block that sender' },
+      { role: 'assistant', content: [searchUse('srvtoolu_a'), searchResult('srvtoolu_a', ['get_review_stats']),
+        { type: 'tool_use', id: 'toolu_a', name: 'get_review_stats', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_a', content: '{}' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_b', name: 'block_sender', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: '{"status":"pending_confirmation"}' }] },
+    ]);
+    const { requests } = await resume('owner');
+    const request = requests[0];
+    expectOrdinaryResume(request);
+    // The deferred tool the history already called is loaded eagerly, once.
+    expect(request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
+    expect(request.tools.find(t => t.name === 'get_review_stats').defer_loading).toBeUndefined();
+    expect(request.tools.filter(t => t.name === 'block_sender')).toHaveLength(1);
+    // The calls and their results stay paired.
+    const kinds = blocksOf(request.messages).map(b => `${b.type}:${b.id || b.tool_use_id || ''}`);
+    expect(kinds).toEqual(expect.arrayContaining(['tool_use:toolu_a', 'tool_result:toolu_a', 'tool_use:toolu_b', 'tool_result:toolu_b']));
   });
 
-  test('3: a resumed task that used a deferred tool sends it still deferred, once, in the same array', async () => {
-    const history = [
-      { role: 'user', content: 'review numbers please' },
-      { role: 'assistant', content: [searchUse('srvtoolu_b'), searchResult('srvtoolu_b', ['get_review_stats']),
-        { type: 'tool_use', id: 'toolu_b', name: 'get_review_stats', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: '{}' }] },
-      { role: 'assistant', content: [{ type: 'text', text: 'Here.' }] },
-    ];
-    delete process.env.GATE_IB_TOOL_SEARCH; // saved search blocks keep the shape
-    resumeWith(history);
-    const { requests } = await ask('owner', 'dashboard', [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path: RESUME, body: { session_id: SESSION } });
-    const tools = requests[0].tools;
-    expect(tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
-    expect(tools.find(t => t.name === 'get_review_stats').defer_loading).toBe(true);
-    expect(tools).toEqual(registry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true, toolSearch: true }).map(apiToolDefinition));
+  test('(b) a paused search-only assistant tail: dropped, the history ends on the user turn with the receipts once', async () => {
+    resumeWith([{ role: 'user', content: 'look up the numbers' }, { role: 'assistant', content: [searchUse('srvtoolu_p')] }]);
+    const { requests } = await resume('owner');
+    expectOrdinaryResume(requests[0]);
+    expect(requests[0].messages.some(m => m.role === 'assistant')).toBe(false);
   });
 
-  test('4: a login that lost full access cannot resume a saved search task: 409, no model call, task not claimed', async () => {
-    resumeWith([{ role: 'user', content: 'x' }, { role: 'assistant', content: [searchUse('srvtoolu_c'), searchResult('srvtoolu_c')] }]);
-    const { body, requests } = await ask('otheradmin', 'dashboard', [], { path: RESUME, body: { session_id: SESSION }, status: 409 });
-    expect(body.code).toBe('access_changed');
-    expect(body.error).toMatch(/owner-only tools/);
-    expect(requests).toHaveLength(0);
-    expect(IbTasks.claimResume).not.toHaveBeenCalled();
+  test('(c) a trailing tool_result turn with an unresolved search: stripped, no search call left', async () => {
+    resumeWith([
+      { role: 'user', content: 'review numbers' },
+      { role: 'assistant', content: [searchUse('srvtoolu_u'), { type: 'tool_use', id: 'toolu_u', name: 'offer_choices', input: { options: ['A', 'B'] } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_u', content: '{}' }] },
+    ]);
+    const { requests } = await resume('owner');
+    expectOrdinaryResume(requests[0]);
+    expect(blocksOf(requests[0].messages).filter(b => b.type === 'tool_use').map(b => b.id)).toEqual(['toolu_u']);
   });
 
-  test('6: a saved paused turn is re-sent as is, and the receipts turn waits until the call is resolved', async () => {
-    const paused = [{ type: 'text', text: 'Searching.' }, searchUse('srvtoolu_d')];
-    resumeWith([{ role: 'user', content: 'look up the numbers' }, { role: 'assistant', content: paused }], [{ tool: 'update_customer', outcome: 'completed' }]);
+  test('a login that lost full access resumes on the ordinary list, and an owner-only tool call is refused by the existing guard', async () => {
+    resumeWith([
+      { role: 'user', content: 'resolve that issue' },
+      { role: 'assistant', content: [searchUse('srvtoolu_o'), searchResult('srvtoolu_o', ['resolve_sentry_issue']),
+        { type: 'tool_use', id: 'toolu_o', name: 'resolve_sentry_issue', input: { issue_short_id: 'WAVES-PORTAL-1A' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_o', content: '{"status":"pending_confirmation"}' }] },
+    ]);
     const turns = [
-      { content: [searchResult('srvtoolu_d', ['get_review_stats']), { type: 'tool_use', id: 'toolu_d', name: 'offer_choices', input: { options: ['A', 'B'] } }], usage: {}, stop_reason: 'tool_use' },
-      { content: [{ type: 'text', text: 'Done.' }], usage: {} },
+      { content: [{ type: 'tool_use', id: 'toolu_o2', name: 'resolve_sentry_issue', input: { issue_short_id: 'WAVES-PORTAL-1A' } }], usage: {}, stop_reason: 'tool_use' },
+      { content: [{ type: 'text', text: 'Cannot do that.' }], usage: {} },
     ];
-    const { requests } = await ask('owner', 'dashboard', turns, { path: RESUME, body: { session_id: SESSION } });
-    // Request 1 ends with the paused assistant message: no user turn after it.
-    const first = requests[0].messages;
-    expect(first[first.length - 1]).toEqual({ role: 'assistant', content: paused });
-    // Request 2: the result is in, the tool_result comes first, and the receipts turn follows as text.
-    const second = requests[1].messages;
-    const last = second[second.length - 1];
-    expect(last.role).toBe('user');
-    expect(last.content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'toolu_d' });
-    expect(last.content[last.content.length - 1].type).toBe('text');
-    expect(last.content[last.content.length - 1].text).toContain('Continue the original request');
-    expect(last.content[last.content.length - 1].text).toContain('"outcome":"completed"');
+    const { requests } = await resume('otheradmin', turns);
+    expectOrdinaryResume(requests[0]);
+    expect(names(requests[0].tools)).not.toContain('resolve_sentry_issue');
+    const refusal = requests[1].messages[requests[1].messages.length - 1].content.find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_o2');
+    expect(refusal.is_error).toBe(true);
+    expect(refusal.content).toMatch(/permission_denied|capability_not_loaded/);
   });
 
-  test('6: a saved history with every search resolved still gets the ordinary continuation turn', async () => {
-    resumeWith([{ role: 'user', content: 'x' }, { role: 'assistant', content: [searchUse('srvtoolu_e'), searchResult('srvtoolu_e'), { type: 'text', text: 'Nothing.' }] }]);
-    const { requests } = await ask('owner', 'dashboard', undefined, { path: RESUME, body: { session_id: SESSION } });
-    const sent = requests[0].messages;
-    expect(sent[sent.length - 1].role).toBe('user');
-    expect(JSON.stringify(sent[sent.length - 1].content)).toContain('Continue the original request');
+  test('a fresh request after the same gate still gets tool search (only a resume is ordinary)', async () => {
+    const { requests } = await ask('owner', 'dashboard');
+    expect(requests[0].tools.some(t => t.name === 'tool_search_tool_bm25')).toBe(true);
   });
 });
