@@ -949,6 +949,61 @@ describe('idle conversations start fresh', () => {
     });
   });
 
+  describe('a saved task restored into the palette', () => {
+    const TASK_THREAD = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const taskHistory = [{ role: 'user', content: 'Synthetic saved ask' }, { role: 'assistant', content: 'Saved answer' }];
+    const taskBody = (threadId, extra = {}) => ({ taskId: 'saved-task', taskState: 'responded', response: 'Saved answer', canContinue: false,
+      conversationHistory: taskHistory, threadId, threadSeq: 2, pendingActions: [], receipts: [], ...extra });
+    const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
+
+    it('a task whose thread is 6 hours idle: the first follow-up carries the thread, thread_reopened and the history, the next does not', async () => {
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return reply({ threadId: TASK_THREAD, threadSeq: 4 });
+        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
+        if (url.includes('/tasks/saved-task')) return ok(taskBody(TASK_THREAD));
+        if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'saved-task', target: { target: { label: 'Synthetic saved target' } }, state: 'responded' }] });
+        return ok({ actions: [], threads: [] });
+      });
+      useIsMobile.mockReturnValue(true);
+      await mount();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+      skewMs = 6 * 3600000;
+      fireEvent.click(screen.getByLabelText('Conversation options'));
+      fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+      fireEvent.click(await screen.findByRole('button', { name: /Synthetic saved target/ }));
+      await screen.findByText('Saved answer');
+      submit('Synthetic follow-up');
+      await waitFor(() => expect(queryBodies()).toHaveLength(1));
+      expect(queryBodies()[0].thread_id).toBe(TASK_THREAD);
+      expect(queryBodies()[0].thread_reopened).toBe(true);
+      expect(queryBodies()[0].conversationHistory).toEqual(taskHistory);
+      await screen.findByText('Done.');
+      submit('Synthetic second follow-up');
+      await waitFor(() => expect(queryBodies()).toHaveLength(2));
+      expect(queryBodies()[1].thread_id).toBe(TASK_THREAD);
+      expect(queryBodies()[1].thread_reopened).toBeUndefined();
+    });
+
+    it('refreshing the task whose thread is already attached does not make a normal thread "reopened"', async () => {
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return reply({ taskId: 'saved-task', taskState: 'responded', threadId: TASK_THREAD, threadSeq: 2 });
+        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
+        if (url.includes('/tasks/saved-task')) return ok(taskBody(TASK_THREAD, { conversationHistory: [
+          { role: 'user', content: 'Synthetic first ask' }, { role: 'assistant', content: 'Done.' }] }));
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      await mount();
+      submit('Synthetic first ask');
+      fireEvent.click(await screen.findByRole('button', { name: /Refresh status/ }));
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/tasks/saved-task'))).toBe(true));
+      await screen.findByText('Saved answer');
+      submit('Synthetic follow-up');
+      await waitFor(() => expect(queryBodies()).toHaveLength(2));
+      expect(queryBodies()[1].thread_id).toBe(TASK_THREAD);
+      expect(queryBodies()[1].thread_reopened).toBeUndefined();
+    });
+  });
+
   it('a thread opened by hand from History is not idle-limited, however old it is', async () => {
     fetchMock.mockImplementation(async url => {
       if (url.endsWith('/query')) return reply({ threadSeq: 6 });

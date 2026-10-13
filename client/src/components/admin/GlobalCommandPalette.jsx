@@ -44,6 +44,18 @@ const RECENTS_KEY = "admin_ib_recents";
 // auto-resumed conversation). Keyed per admin account so staff sharing a
 // browser can't clear or resurrect each other's dismissal.
 const DISMISSED_THREAD_KEY = "admin_ib_dismissed_thread";
+// A task the palette loads and shows is a conversation the operator chose,
+// like a History open: its first follow-up keeps its thread (thread_reopened).
+// Rule: the flag is set when the load attaches a thread, changes the held one,
+// or finds the held one past the idle limit. A refresh of the thread already
+// attached and fresh (the Refresh button, the reload after a card is decided,
+// Continue, a target choice) leaves the flag as it was, so a normal thread
+// never becomes permanently "reopened".
+function taskLoadReopens(loadedThreadId, held) {
+  if (!loadedThreadId) return false;
+  return loadedThreadId !== held.threadId || held.idle || held.reopened;
+}
+
 function dismissedThreadKey() {
   let uid = "";
   try {
@@ -543,6 +555,21 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // looks like a new chat while silently sending the old history with the
   // next prompt. Server-side taint markers are presentation noise here;
   // they stay on the stored turns.
+  // The ONE place that sets the held thread's idle clock and its reopened flag
+  // (History open, saved-task restore, automatic resume). A thread the operator
+  // chose to open (deliberate) counts as active from now, so the idle limit
+  // never blocks reading or continuing it, and its first follow-up carries
+  // thread_reopened so the server's own idle rule keeps it. An automatic resume
+  // is anchored from the age the SERVER computed (idleForMs, database clock
+  // against database clock) on this browser's clock at the moment the reply
+  // arrives; only differences of this browser's own clock are used afterwards,
+  // so a skewed workstation clock changes nothing.
+  const anchorThreadClock = useCallback((deliberate, idleForMs) => {
+    const idleFor = Number(idleForMs);
+    threadActivityRef.current = Date.now() - (deliberate || !Number.isFinite(idleFor) || idleFor < 0 ? 0 : idleFor);
+    threadReopenedRef.current = deliberate;
+  }, []);
+
   // deliberate: the operator picked this conversation (History). Otherwise it
   // is the automatic resume, and the idle clock starts at the thread's own last
   // exchange, not at the moment the palette loaded it.
@@ -552,15 +579,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setConversationHistory(hist);
     setThreadId(thread.id);
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
-    // A thread opened by hand from History counts as active from now, so the
-    // idle limit never blocks reading or continuing an old conversation. An
-    // automatic resume is anchored from the age the SERVER computed (idleForMs,
-    // database clock against database clock) on this browser's clock at the
-    // moment the reply arrives; only differences of this browser's own clock
-    // are used afterwards, so a skewed workstation clock changes nothing.
-    const idleFor = Number(thread.idleForMs);
-    threadActivityRef.current = Date.now() - (deliberate || !Number.isFinite(idleFor) || idleFor < 0 ? 0 : idleFor);
-    threadReopenedRef.current = deliberate;
+    anchorThreadClock(deliberate, thread.idleForMs);
     setPendingActions([]);
     setChoices(null);
     setToolActivity([]);
@@ -578,7 +597,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         : null,
     );
     return true;
-  }, []);
+  }, [anchorThreadClock]);
 
   // Picker: fetch the actor's recent threads (server-side actor-bound).
   const loadThreads = useCallback(() => {
@@ -806,6 +825,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     const epoch = ++threadEpochRef.current;
     submittingRef.current = true;
     setLoading(true);
+    const held = { threadId, idle: threadIsIdle(), reopened: threadReopenedRef.current };
     // Cleared when the refresh starts, like submit: a failed refresh must not
     // bring the old buttons back under its error.
     setChoices(null);
@@ -820,7 +840,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setConversationHistory(data.conversationHistory || []);
       setThreadId(data.threadId || null);
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-      threadActivityRef.current = Date.now();
+      anchorThreadClock(taskLoadReopens(data.threadId, held), 0);
       setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
       setToolActivity(data.toolActivity || []);
       knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);
