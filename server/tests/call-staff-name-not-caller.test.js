@@ -39,6 +39,11 @@ describe('staffNameSavedAsCaller', () => {
     })).toBe(false);
   });
 
+  test('a Waves-qualified introduction is staff evidence, not a caller naming themselves', () => {
+    expect(staffNameSavedAsCaller({ ...base, transcript: 'Caller: This is Riley with Waves Pest Control.\nAgent: Thanks, Riley.' })).toBe(true);
+    expect(staffNameSavedAsCaller({ ...base, transcript: 'Caller: Waves Pest Control, this is Riley.\nAgent: Hi, I need a quote.' })).toBe(true);
+  });
+
   test('a filler word after the greeting is not another name', () => {
     // An unlinked caller who shares the staff first name and says "Hi there, it is Riley".
     expect(staffNameSavedAsCaller({ ...base, transcript: 'Agent: Waves Pest Control.\nCaller: Hi there, it is Riley.' })).toBe(false);
@@ -75,22 +80,39 @@ describe('answeringStaffName', () => {
 describe('callerNameIsStaffName', () => {
   const transcript = 'Agent: Waves Pest Control.\nCaller: Hey Riley, are you coming today?';
   const extracted = { first_name: 'Riley', last_name: null };
-  const inbound = { direction: 'inbound', metadata: { forward_acceptance: { csr_name: 'Riley' } } };
-  const connFor = (row, fail = false) => () => ({ where: () => ({ first: async () => { if (fail) throw new Error('db'); return row; } }) });
+  const inbound = { direction: 'inbound', from_phone: '+15005550006', metadata: { forward_acceptance: { csr_name: 'Riley' } } };
+  // A knex-shaped stub: records the builder calls and resolves first() with `row`.
+  const connFor = (row, { fail = false, seen = {} } = {}) => () => {
+    const q = {
+      whereNull: () => q,
+      whereRaw: (sql, binds) => { seen.name = binds; return q; },
+      where: (fn) => { const scope = { whereIn: (c, ids) => { seen.ids = ids; return scope; }, orWhereRaw: (sql, binds) => { seen.phoneSql = sql; seen.phones = binds; return scope; } }; fn.call(scope); return q; },
+      first: async () => { if (fail) throw new Error('db'); return row; },
+    };
+    return q;
+  };
 
-  test('an unlinked call drops the staff name on the words alone', async () => {
-    await expect(callerNameIsStaffName(connFor(null), { call: inbound, extracted, transcript })).resolves.toBe(true);
+  test('no customer this call can resolve to has the name: the staff name is dropped', async () => {
+    await expect(callerNameIsStaffName(connFor(undefined), { call: inbound, extracted, transcript })).resolves.toBe(true);
   });
 
-  test('a linked customer with a different first name drops it; the same first name keeps it', async () => {
-    const call = { ...inbound, customer_id: 'c1' };
-    await expect(callerNameIsStaffName(connFor({ first_name: 'Morgan' }), { call, extracted, transcript })).resolves.toBe(true);
-    await expect(callerNameIsStaffName(connFor({ first_name: 'riley' }), { call, extracted, transcript })).resolves.toBe(false);
+  test('a resolvable customer with that first name keeps it', async () => {
+    await expect(callerNameIsStaffName(connFor({ id: 'c1' }), { call: inbound, extracted, transcript })).resolves.toBe(false);
+  });
+
+  test('the read covers the linked customer, a link override and every customer on the calling number', async () => {
+    const seen = {};
+    const call = { ...inbound, customer_id: 'c1', metadata: { ...inbound.metadata, customer_link_override: { customer_id: 'c2' } } };
+    await callerNameIsStaffName(connFor(undefined, { seen }), { call, extracted, transcript });
+    expect(seen.name).toEqual(['riley']);
+    expect(seen.ids).toEqual(['c1', 'c2']);
+    expect(seen.phoneSql).toContain('service_contact_phone');
+    expect(seen.phones).toEqual(expect.arrayContaining(['5005550006', '15005550006']));
   });
 
   test('a failed customer read keeps the name; an outbound call is never judged', async () => {
-    await expect(callerNameIsStaffName(connFor(null, true), { call: { ...inbound, customer_id: 'c1' }, extracted, transcript })).resolves.toBe(false);
-    await expect(callerNameIsStaffName(connFor(null), { call: { ...inbound, direction: 'outbound-api' }, extracted, transcript })).resolves.toBe(false);
+    await expect(callerNameIsStaffName(connFor(undefined, { fail: true }), { call: inbound, extracted, transcript })).resolves.toBe(false);
+    await expect(callerNameIsStaffName(connFor(undefined), { call: { ...inbound, direction: 'outbound-api' }, extracted, transcript })).resolves.toBe(false);
   });
 });
 

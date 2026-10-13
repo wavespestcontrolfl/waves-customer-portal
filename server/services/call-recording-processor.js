@@ -3713,6 +3713,7 @@ const {
 // attribution retire path mirrors this exact gate on customer-less
 // phone-matched successors; never re-inline or duplicate it.
 const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
+const { customerPhoneLookupKey, KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 // Distinct counts for a bulk run. Extracted so the rule is testable without
 // standing up the pending-query builder — the counting, not the SQL, is what
 // the admin toast reports.
@@ -3868,14 +3869,28 @@ function answeringStaffName(call = {}) {
   return parseJsonObjectSafe(call.metadata)?.forward_acceptance?.csr_name || null;
 }
 // Did the extraction save the answering staff member's first name as the caller's own name?
-// The words decide (staffNameSavedAsCaller); a linked customer who has that first name keeps it.
-// A failed customer read keeps the name (false).
+// The words decide (staffNameSavedAsCaller). The name is kept when a customer this call can
+// resolve to has that first name: the linked customer, an operator's link override, or any
+// customer who carries the calling number (the later phone lookup would find them, and on a
+// shared number the first name is what tells them apart). A failed read keeps the name (false).
 async function callerNameIsStaffName(conn, { call, extracted, transcript }) {
   if (!staffNameSavedAsCaller({ firstName: extracted?.first_name, lastName: extracted?.last_name, staffName: answeringStaffName(call), transcript })) return false;
-  if (!call.customer_id) return true;
   try {
-    const customer = await conn('customers').where({ id: call.customer_id }).first('first_name');
-    return String(customer?.first_name || '').trim().toLowerCase() !== String(extracted.first_name).trim().toLowerCase();
+    const ids = [call.customer_id, parseJsonObjectSafe(call.metadata)?.customer_link_override?.customer_id].filter(Boolean);
+    const key = customerPhoneLookupKey(call.from_phone);
+    const forms = key.length === 10 ? [key, `1${key}`] : [];
+    if (!ids.length && !forms.length) return true;
+    const marks = forms.map(() => '?').join(', ');
+    const phoneSql = KNOWN_CALLER_PHONE_COLS.map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${marks})`).join(' OR ');
+    const sameName = await conn('customers')
+      .whereNull('deleted_at')
+      .whereRaw('lower(btrim(COALESCE(first_name, \'\'))) = ?', [String(extracted.first_name).trim().toLowerCase()])
+      .where(function resolvable() {
+        if (ids.length) this.whereIn('id', ids);
+        if (forms.length) this.orWhereRaw(`(${phoneSql})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => forms));
+      })
+      .first('id');
+    return !sameName;
   } catch (err) {
     logger.warn(`[call-proc] staff-name check skipped: ${err.code || err.name || 'error'}`);
     return false;

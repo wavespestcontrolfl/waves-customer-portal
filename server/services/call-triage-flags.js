@@ -984,6 +984,7 @@ function callEndedWithNothingToDo(extraction) {
 // not read):
 //   - the speaker greets another NAME and then gives this one ("Hey Morgan, it's Riley"; a filler
 //     word such as "there" is not a name), or
+//   - someone introduces themselves by it as Waves ("this is Riley with Waves"), or
 //   - someone greets this name ("Hey Riley") and nobody on the call introduces themselves by it
 //     ("this is Riley", "my name is Riley"): a caller who says their own name keeps it.
 // The caller applies one more guard: a linked customer with this first name keeps it. Pure.
@@ -997,6 +998,11 @@ function staffNameSavedAsCaller({ firstName, lastName, staffName, transcript = '
   const text = String(transcript || '');
   const selfAfterGreeting = new RegExp(`\\b(?:hey|hi|hello)[,\\s]+(?!(?:${first}|${GREETING_FILLER_WORDS})\\b)[a-z]+[,.!\\s]+(?:it'?s|it is|this is)\\s+${first}\\b`, 'i');
   if (selfAfterGreeting.test(text)) return true;
+  // A Waves-qualified introduction ("this is Riley with Waves", "Waves Pest Control, this is
+  // Riley") is the staff member speaking: it is staff evidence, never a caller naming themselves.
+  const intro = `(?:this is|it'?s|it is|i'?m|i am)\\s+${first}\\b`;
+  const staffIntro = new RegExp(`\\bwaves\\b[^.?!\\n]{0,40}?${intro}|${intro}[,\\s]+(?:here\\s+)?(?:with|from|at)\\s+waves\\b`, 'ig');
+  if (staffIntro.test(text)) return true;
   const greeted = new RegExp(`\\b(?:hey|hi|hello|thanks|thank you|bye)[,\\s]+${first}\\b`, 'i');
   const selfNamed = new RegExp(`\\b(?:my name is|my name's|this is|it'?s|it is|i'?m|i am)\\s+${first}\\b`, 'i');
   return greeted.test(text) && !selfNamed.test(text);
