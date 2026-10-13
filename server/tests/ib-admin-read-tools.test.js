@@ -361,6 +361,121 @@ describe('signed file links', () => {
   });
 });
 
+describe('credential fields and private links', () => {
+  const UUID = '3f2b8c1e-9d4a-4e7b-8a61-0c5d2f7e9b13';
+  const ESTIMATE_TOKEN = 'Zk3pQ9vLmN2xR7tYb4HcW8dE';
+
+  test('an estimates-summary payload loses its token but keeps ids, prices, names and status', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, {
+      estimates: [
+        { id: UUID, customer_id: UUID, token: ESTIMATE_TOKEN, status: 'sent', total: 189.5, monthly: 63, service_interest: 'Quarterly pest control', name: 'Test Customer' },
+      ],
+      count: 1,
+    }));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    const row = result.data.estimates[0];
+    expect(row.token).toBe('[removed]');
+    expect(row).toMatchObject({ id: UUID, customer_id: UUID, status: 'sent', total: 189.5, monthly: 63, service_interest: 'Quarterly pest control', name: 'Test Customer' });
+    expect(JSON.stringify(result)).not.toContain(ESTIMATE_TOKEN);
+    expect(result.credential_fields_removed).toBe(1);
+    expect(result.note).toMatch(/1 credential field/);
+  });
+
+  test('a subscribers payload loses confirmation and unsubscribe tokens at any depth', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, {
+      subscribers: [
+        { id: 1, email: 'sub@example.test', status: 'active', confirmation_token: 'a'.repeat(32), unsubscribe_token: UUID, bounce_count: 0 },
+        { id: 2, email: 'two@example.test', status: 'pending', confirmationToken: 'b'.repeat(32), meta: { unsubscribeToken: 'c'.repeat(32), tags: ['vip'] } },
+      ],
+      counts: { all: 2 },
+    }));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    const text = JSON.stringify(result);
+    expect(text).not.toContain('a'.repeat(32));
+    expect(text).not.toContain('b'.repeat(32));
+    expect(text).not.toContain('c'.repeat(32));
+    expect(text).not.toContain(`"unsubscribe_token":"${UUID}"`);
+    expect(result.data.subscribers[0]).toMatchObject({ id: 1, email: 'sub@example.test', status: 'active', bounce_count: 0, confirmation_token: '[removed]', unsubscribe_token: '[removed]' });
+    expect(result.data.subscribers[1].meta).toMatchObject({ unsubscribeToken: '[removed]', tags: ['vip'] });
+    expect(result.credential_fields_removed).toBe(4);
+  });
+
+  test('every credential-named key loses its value, whatever the type, and ordinary look-alikes stay', async () => {
+    const body = {
+      password: 'x', password_hash: 'y', passcode: '1234', pin: '9876', client_secret: 's', apiKey: 'k', api_key: 'k', access_key: 'k', private_key: 'k',
+      session: 'a', sessionId: 'b', jwt: 'j', otp: '1', nonce: 'n', authorization: 'Bearer z', cookie: 'c', magic_link: 'm', reset_link: 'r',
+      invite_code: 'i', salt: 's', sig: 'g', signature: 'sig', tokens: ['one', 'two'], token: { nested: 'object' }, s3_key: 'estimates/2026/10/abcdef123456.png',
+      idempotency_key: 'a1b2c3d4e5f6a7b8c9',
+      // kept
+      pinned: true, shipping_address: '1 Test Way', key: 'name', status_key: 'open', gate_code: '4821', access_code: '7730', code: 'A1',
+      price: 49, customer_id: UUID, lat: 27.5, notes: 'Dog in yard',
+    };
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, body));
+    const { data, credential_fields_removed: removed } = await read({ endpoint: NO_PARAM.endpoint });
+    for (const key of ['password', 'password_hash', 'passcode', 'pin', 'client_secret', 'apiKey', 'api_key', 'access_key', 'private_key', 'session', 'sessionId', 'jwt', 'otp',
+      'nonce', 'authorization', 'cookie', 'magic_link', 'reset_link', 'invite_code', 'salt', 'sig', 'signature', 'tokens', 'token', 's3_key', 'idempotency_key']) {
+      expect({ key, value: data[key] }).toEqual({ key, value: '[removed]' });
+    }
+    expect(data).toMatchObject({ pinned: true, shipping_address: '1 Test Way', key: 'name', status_key: 'open', gate_code: '4821', access_code: '7730', code: 'A1',
+      price: 49, customer_id: UUID, lat: 27.5, notes: 'Dog in yard' });
+    expect(removed).toBe(26);
+  });
+
+  test('a customer-facing link inside a text field, or any depth of nesting, is removed; readable links stay', async () => {
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, {
+      sms: [{ body: `Your estimate is ready: https://portal.example.test/estimate/Zk3pQ9vLmN2xR7tYb4HcW8dE thanks!` }],
+      links: {
+        pay: `https://portal.example.test/pay/${UUID}`,
+        query: 'https://portal.example.test/r?id=9f8e7d6c5b4a39281716',
+        unsubscribe: 'https://portal.example.test/unsubscribe/abc123def456ghi789',
+        go: 'https://portal.example.test/go/0123456789abcdef0123456789abcdef',
+        blog: 'https://www.example.test/blog/pest-control-services-in-bradenton',
+        blogWithYear: 'https://www.example.test/blog/best-lawn-care-2026-guide',
+        plain: 'https://www.example.test/about',
+        map: 'https://maps.example.test/?q=27.5,-82.5',
+      },
+      deep: [[{ href: `https://portal.example.test/report/${UUID}` }]],
+      id: UUID,
+    }));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    const text = JSON.stringify(result);
+    for (const secret of ['Zk3pQ9vLmN2xR7tYb4HcW8dE', 'abc123def456ghi789', '0123456789abcdef0123456789abcdef', '9f8e7d6c5b4a39281716']) expect(text).not.toContain(secret);
+    expect(text).not.toContain(`portal.example.test/pay/${UUID}`);
+    expect(text).not.toContain(`portal.example.test/report/${UUID}`);
+    expect(result.data.sms[0].body).toBe('Your estimate is ready: [private link removed] thanks!');
+    expect(result.data.links.pay).toBe('[private link removed]');
+    expect(result.data.deep[0][0].href).toBe('[private link removed]');
+    expect(result.data.links.blog).toBe('https://www.example.test/blog/pest-control-services-in-bradenton');
+    expect(result.data.links.blogWithYear).toBe('https://www.example.test/blog/best-lawn-care-2026-guide');
+    expect(result.data.links.plain).toBe('https://www.example.test/about');
+    expect(result.data.links.map).toBe('https://maps.example.test/?q=27.5,-82.5');
+    expect(result.data.id).toBe(UUID);
+    expect(result.signed_links_removed).toBe(6);
+    expect(result.note).toMatch(/private link/);
+  });
+
+  test('ids, names, prices and gate codes in an ordinary payload all survive untouched', async () => {
+    const body = {
+      customers: [{ id: UUID, first_name: 'Test', last_name: 'Customer', phone: '+15555550100', gate_code: '1234', access_code: 'A-77', monthly_rate: 63, waveguard_tier: 'Gold', balance: 0 }],
+      page: 1, total: 1,
+    };
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, body));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    expect(result.data).toEqual(body);
+    expect(result.credential_fields_removed).toBeUndefined();
+    expect(result.note).toBeNull();
+  });
+
+  test('credentials are removed before the answer is cut, so none hide in the dropped part', async () => {
+    const rows = Array.from({ length: 900 }, (_, i) => ({ id: i, token: `tok-${i}-abcdefghijklmnop`, label: `row ${i}` }));
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, rows));
+    const result = await read({ endpoint: NO_PARAM.endpoint });
+    expect(result.truncated).toBe(true);
+    expect(result.credential_fields_removed).toBe(900);
+    expect(JSON.stringify(result)).not.toContain('abcdefghijklmnop');
+  });
+});
+
 describe('find_admin_reads', () => {
   test('returns up to 10 entries with endpoint, params, label and screen, and reads no rows', async () => {
     const result = await executeAdminReadTool(FIND, { query: 'customer' }, ownerContext());

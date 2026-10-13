@@ -124,6 +124,33 @@ router.get('/signed', async (req, res) => { res.json({ url: await getSignedUrl(r
 module.exports = router;
 `,
 };
+FILES['fx-router-mw.js'] = `const express = require('express');
+const db = require('./fx-db');
+const router = express.Router();
+router.get('/before', async (req, res) => { res.json(await db('things').where({ id: req.query.id }).first()); });
+router.use(async (req, res, next) => { await db.raw('CREATE TABLE IF NOT EXISTS fx_boot (id int)'); next(); });
+router.get('/after', async (req, res) => { res.json(await db('things').where({ id: req.query.id }).first()); });
+module.exports = router;
+`;
+FILES['fx-router-scoped.js'] = `const express = require('express');
+const db = require('./fx-db');
+const router = express.Router();
+router.use('/scoped', async (req, res, next) => { await db('things').update({ seen: true }); next(); });
+router.get('/scoped/inside', async (req, res) => { res.json(await db('things').where({ id: req.query.id }).first()); });
+router.get('/elsewhere', async (req, res) => { res.json(await db('things').where({ id: req.query.id }).first()); });
+module.exports = router;
+`;
+FILES['fx-router-cred.js'] = `const express = require('express');
+const db = require('./fx-db');
+const router = express.Router();
+router.get('/column-select', async (req, res) => { res.json(await db('things').select('things.id', 'estimates.token')); });
+router.get('/whole-row', async (req, res) => { res.json(await db('newsletter_subscribers').where({ status: 'active' }).limit(5)); });
+router.get('/aggregate', async (req, res) => { res.json(await db('newsletter_subscribers').count('* as n').first()); });
+router.get('/explicit', async (req, res) => { res.json(await db('newsletter_subscribers').select('id', 'email').limit(3)); });
+router.get('/link', async (req, res) => { res.json({ link: payUrl(req.query.id) }); });
+router.get('/sql', async (req, res) => { res.json(await db.raw('select * from newsletter_subscribers limit 5')); });
+module.exports = router;
+`;
 const NO_REVIEW = { exclude: new Map(), allow: new Map() };
 
 describe('the handler scan fails closed', () => {
@@ -134,6 +161,11 @@ describe('the handler scan fails closed', () => {
     routes = routerRoutes(path.join(FIXTURE_DIR, 'fx-router.js')).routes;
   });
   afterAll(() => fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }));
+
+  const judgeIn = (file, routePath) => {
+    const found = routerRoutes(path.join(FIXTURE_DIR, file)).routes.find(r => r.path === routePath);
+    return judgeRoute({ full: `/admin/fx${routePath}`, route: found }, NO_REVIEW, []);
+  };
 
   const judge = (routePath, exclusions = NO_REVIEW) => judgeRoute({ full: `/admin/fx${routePath}`, route: routes.find(r => r.path === routePath) }, exclusions, []);
   const allow = (routePath, row) => ({ exclude: new Map(), allow: new Map([[`GET /admin/fx${routePath}`, { route: `GET /admin/fx${routePath}`, reason: 'fixture review', ...row }]]) });
@@ -177,4 +209,47 @@ describe('the handler scan fails closed', () => {
     expect(bare.signals).toEqual(expect.arrayContaining(['signed_url:getSignedUrl']));
     expect(judge('/signed', allow('/signed', { signals: bare.signals, unresolved: bare.unresolved })).safe).toBe(false);
   });
+
+  test('router.use middleware that runs DDL excludes every route declared after it, not the ones before', () => {
+    expect(judgeIn('fx-router-mw.js', '/before')).toMatchObject({ safe: true });
+    const after = judgeIn('fx-router-mw.js', '/after');
+    expect(after.safe).toBe(false);
+    expect(after.signals).toEqual(expect.arrayContaining(['write:sql_text']));
+  });
+
+  test('a path-scoped router.use applies only to its sub-path', () => {
+    const inside = judgeIn('fx-router-scoped.js', '/scoped/inside');
+    expect(inside.safe).toBe(false);
+    expect(inside.signals).toEqual(expect.arrayContaining(['write:update']));
+    expect(judgeIn('fx-router-scoped.js', '/elsewhere')).toMatchObject({ safe: true });
+  });
+
+  test('a handler that selects a credential column, reads whole rows of a table that has one, or builds a token link is excluded', () => {
+    expect(judgeIn('fx-router-cred.js', '/column-select').signals).toEqual(expect.arrayContaining(['credential_field:estimates.token']));
+    expect(judgeIn('fx-router-cred.js', '/whole-row').signals).toEqual(['credential_table:newsletter_subscribers']);
+    expect(judgeIn('fx-router-cred.js', '/sql').signals).toEqual(expect.arrayContaining(['credential_table:newsletter_subscribers']));
+    expect(judgeIn('fx-router-cred.js', '/link').signals).toEqual(expect.arrayContaining(['credential_link:payUrl']));
+  });
+
+  test('an aggregate or an explicit column list on the same table is not a credential read', () => {
+    expect(judgeIn('fx-router-cred.js', '/aggregate')).toMatchObject({ safe: true });
+    expect(judgeIn('fx-router-cred.js', '/explicit')).toMatchObject({ safe: true });
+  });
+
+  test('no allow row clears a credential signal', () => {
+    for (const routePath of ['/column-select', '/whole-row', '/link']) {
+      const routeObj = routerRoutes(path.join(FIXTURE_DIR, 'fx-router-cred.js')).routes.find(r => r.path === routePath);
+      const bare = judgeRoute({ full: `/admin/fx${routePath}`, route: routeObj }, NO_REVIEW, []);
+      const row = { route: `GET /admin/fx${routePath}`, reason: 'fixture review', signals: bare.signals, unresolved: bare.unresolved };
+      const verdict = judgeRoute({ full: `/admin/fx${routePath}`, route: routeObj }, { exclude: new Map(), allow: new Map([[row.route, row]]) }, []);
+      expect({ routePath, safe: verdict.safe }).toEqual({ routePath, safe: false });
+    }
+  });
+});
+
+test('the endpoints that run middleware DDL or return credentials are not in the catalog', () => {
+  const endpoints = committed.entries.map(e => e.endpoint);
+  expect(endpoints.filter(e => /^\/admin\/(health|equipment-maintenance)(\/|$)/.test(e))).toEqual([]);
+  expect(endpoints).not.toContain('/admin/customers/:id/estimates-summary');
+  expect(endpoints).not.toContain('/admin/newsletter/subscribers');
 });

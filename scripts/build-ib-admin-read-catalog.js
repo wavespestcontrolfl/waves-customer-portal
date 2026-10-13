@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const parser = require('@babel/parser');
 const rules = require('../server/utils/admin-read-rules');
+const { isCredentialName, isStrongCredentialName } = require('../server/utils/credential-fields');
 
 const ROOT = path.resolve(__dirname, '..');
 const CENSUS_FILE = path.join(ROOT, 'docs/intelligence-bar-capabilities.json');
@@ -254,10 +255,13 @@ function mountedRouters() {
       inline.push({ path: prefix.replace(/^\/api/, ''), args: node.arguments.slice(1), info, line: node.loc.start.line });
     }
     if (method !== 'use') return;
-    for (const arg of node.arguments.slice(1)) {
-      const mount = mountTarget(arg, info);
-      if (mount) mounts.push({ prefix: prefix.replace(/^\/api/, ''), line: node.loc.start.line, ...mount });
-    }
+    const args = node.arguments.slice(1);
+    const targets = args.map(arg => mountTarget(arg, info));
+    // Whatever else is in the same app.use(...) runs before the router.
+    const mw = args.filter((arg, i) => !targets[i]).map(arg => ({ arg, info }));
+    targets.forEach((mount) => {
+      if (mount) mounts.push({ prefix: prefix.replace(/^\/api/, ''), line: node.loc.start.line, mw, ...mount });
+    });
   });
   return { mounts, inline };
 }
@@ -281,15 +285,52 @@ function routePaths(arg) {
   return null;
 }
 
+// `router.use([path], mw...)` and `router.param(name, fn)` in a router file.
+function collectRouterMiddleware(node, info, uses) {
+  const callee = node.callee;
+  if (callee.object.type !== 'Identifier' || !info.routers.has(callee.object.name)) return;
+  const base = { recv: callee.object.name, line: node.loc.start.line, info };
+  if (callee.property.name === 'param') uses.push({ ...base, param: stringOf(node.arguments[0]), mws: node.arguments.slice(1) });
+  if (callee.property.name !== 'use') return;
+  const first = node.arguments[0];
+  const paths = first && !isFunction(first) && first.type !== 'Identifier' ? routePaths(first) || ['*'] : null;
+  uses.push({ ...base, paths, mws: paths ? node.arguments.slice(1) : node.arguments });
+}
+
+// Does `router.use(paths, ...)` run for a request to `routePath`? A prefix
+// match, with parameters and wildcards matching anything.
+function usePathApplies(paths, routePath) {
+  if (!paths) return true;
+  const target = rules.splitPath(routePath);
+  return paths.some((p) => {
+    const prefix = rules.splitPath(p);
+    return p.includes('*') || (prefix.length <= target.length
+      && prefix.every((seg, i) => rules.routeSegmentIsWild(seg) || rules.routeSegmentIsWild(target[i]) || seg.toLowerCase() === target[i].toLowerCase()));
+  });
+}
+
+// The router-level middleware that runs before a route: `use` entries
+// declared above it whose path matches, and `param` callbacks for its params.
+function middlewareFor(route, uses) {
+  const out = [];
+  for (const use of uses.filter(u => u.recv === route.recv)) {
+    const applies = use.param ? route.path.includes(`:${use.param}`) : use.line < route.line && usePathApplies(use.paths, route.path);
+    if (applies) use.mws.forEach(arg => out.push({ arg, info: use.info }));
+  }
+  return out;
+}
+
 // Every GET (or catch-all) registration in a router file, by receiver.
 function routerRoutes(file) {
   const info = parseFile(file);
   const routes = [];
   const opaque = [];
+  const uses = [];
   walk(info.ast, (node) => {
     if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression') return;
     const callee = node.callee;
     const method = callee.property.name;
+    if (['use', 'param'].includes(method)) collectRouterMiddleware(node, info, uses);
     if (callee.object.type === 'Identifier' && info.routers.has(callee.object.name) && ['get', 'all'].includes(method)) {
       const paths = routePaths(node.arguments[0]);
       if (!paths) { opaque.push({ line: node.loc.start.line, why: 'dynamic route path' }); return; }
@@ -301,6 +342,7 @@ function routerRoutes(file) {
       for (const p of paths) routes.push({ recv: callee.object.callee.object.name, path: p, args: node.arguments, all: false, line: node.loc.start.line, info });
     }
   });
+  routes.forEach((route) => { route.middleware = middlewareFor(route, uses); });
   return { routes, opaque };
 }
 
@@ -320,12 +362,12 @@ function routeTable() {
     for (const route of routes) {
       if (receivers && !receivers.has(route.recv)) continue;
       if (route.all || /[*]/.test(route.path)) opaqueMounts.push(mount.prefix);
-      table.push({ full: joinPath(mount.prefix, route.path), file: path.relative(ROOT, mount.file), line: route.line, route });
+      table.push({ full: joinPath(mount.prefix, route.path), file: path.relative(ROOT, mount.file), line: route.line, route, mountMw: mount.mw, mountLine: mount.line });
     }
     if (opaque.length) opaqueMounts.push(mount.prefix);
   }
   for (const route of inline) {
-    table.push({ full: joinPath(route.path, ''), file: 'server/index.js', line: route.line, route: { args: route.args, info: route.info, path: '' } });
+    table.push({ full: joinPath(route.path, ''), file: 'server/index.js', line: route.line, mountLine: route.line, route: { args: route.args, info: route.info, path: '' } });
   }
   return { table, opaqueMounts };
 }
@@ -400,12 +442,36 @@ const SAFE_NEW = new Set(['Date', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Error', '
 //      method on it is safe; `this` inside a knex `.where(function () {...})`
 //      callback is the builder, so READ methods on `this` are too.
 const KNEX_HANDLES = new Set(['db', 'trx', 'tx', 'knex', 'conn', 'connection', 'database', 'dbh', 'dbOrTrx', 'this']);
-// Auth middleware every admin route already runs; not part of what a read does.
+// Auth guards: the loopback read must pass them exactly as the screen does,
+// so they cannot be left out of a route. Each was read:
+//   adminAuthenticate  server/middleware/admin-auth.js:40  (JWT check, technician row read, MFA and scope checks)
+//   requireAdmin       server/middleware/admin-auth.js:89  (role check)
+//   requireTechOrAdmin server/middleware/admin-auth.js:121 (role check)
+//   requireFullAccess  server/services/intelligence-bar/ib-access.js:59 (owner-login check)
 const TRUSTED_MIDDLEWARE = new Set(['adminAuthenticate', 'requireAdmin', 'requireTechOrAdmin', 'requireFullAccess']);
+// App-level middleware (server/index.js) that runs before an admin router.
+// A new entry in index.js that is not listed here makes every route unresolved.
+// Read, with file:line:
+//   inline helmet selector     server/index.js:216  (picks a helmet header set by path)
+//   staffMaintenance           server/middleware/staff-maintenance.js:135 (env flag check, answers 503 or next)
+//   requireStaffTokenForLargeBody server/middleware/large-body-auth.js:54 (header and JWT checks only)
+//   express.json() verify hook server/middleware/link-worker-auth.js:75 rawBodyVerify (copies bytes onto req)
+// npm library middleware (no application writes): cors() index.js:307, limiter (express-rate-limit, index.js:328),
+//   express.json() / express.urlencoded() / express.static() (index.js:637,677,678,683), morgan() (index.js:697, logs to logger).
+const TRUSTED_APP_MIDDLEWARE = new Set(['inline:helmet-selector', 'staffMaintenance', 'requireStaffTokenForLargeBody', 'cors()',
+  'limiter', 'express.json()', 'express.urlencoded()', 'express.static()', 'morgan()']);
 // A helper that mints a link carrying its own credential (an S3 presigned
 // URL and friends). Found in getSignedUrl (@aws-sdk/s3-request-presigner),
 // signedViewUrl, signedUrl, presignUpload, stopPhotoViewUrls, getViewUrl,
 // getEvidenceUrl. A route that reaches one is never in the catalog.
+// A helper that builds a customer-facing link carrying an access token (pay,
+// estimate, portal, report, review, unsubscribe, booking, statement, tracking
+// and share links; see payUrl, portalUrl, reviewUrl, reportUrl, unsubscribeUrl,
+// trackUrl, receiptUrl, mintEstimateLink, createTrackedShortLink, ...), or one
+// that mints a token. A route that calls one is never in the catalog.
+const LINK_BUILDER_RE = /(pay|portal|estimate|unsubscribe|review|report|invoice|booking|receipt|statement|proposal|reset|magic|short|track|tracking|share|public|capture|consultation|accept|handoff)[A-Za-z]*(url|link|token)s?$/i;
+const MINT_RE = /^(mint|generate|create|issue|sign|make)[A-Za-z]*(token|link)s?$/i;
+const COLUMN_TEXT_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_*][A-Za-z0-9_]*)*(\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?$/i;
 const SIGNING_RE = /(signed(url|link|view|photo|read|get)|presign|view_?urls?$|evidence_?url|sign_?(url|link)|temporary_?url|download_?url)/i;
 const SQL_WRITE_RE = /\b(insert\s+into|update\s+\w|delete\s+from|truncate|alter\s+table|drop\s+table|create\s+table|create\s+index|nextval|setval|pg_advisory|for\s+update|on\s+conflict|refresh\s+materialized)\b/i;
 const RESPONSE_BINARY = new Set(['sendFile', 'download', 'redirect', 'write', 'pipe', 'attachment', 'cookie', 'clearCookie', 'sendStatus', 'type', 'format']);
@@ -472,6 +538,8 @@ function visitNode(node, parent, ctx) {
   if (node.type === 'Identifier' && OUTSIDE_IDENTIFIERS.has(node.name) && !isPropertyName(node, parent)) flag(signals, `outside:${node.name}`, info, node);
   if (node.type === 'Identifier' && node.name === 'GetObjectCommand') flag(signals, 'signed_url:GetObjectCommand', info, node);
   if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression' && node.left.object.name === 'process') flag(signals, 'writes_process_state', info, node);
+  inspectCredentialName(node, parent, ctx);
+  inspectTableChain(node, parent, ctx);
   if (node.type === 'NewExpression') { inspectNew(node, ctx); return; }
   if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
   if (node.callee.type === 'Import') { noteUnresolved(info, 'import()'); return; }
@@ -480,7 +548,115 @@ function visitNode(node, parent, ctx) {
   if (isResponseCall(node, receiver)) { inspectResponseCall(node, name, ctx); return; }
   inspectWriteCall(node, name, receiver, info, signals);
   if (SIGNING_RE.test(name)) flag(signals, `signed_url:${name}`, info, node);
+  if (name && (LINK_BUILDER_RE.test(name) || MINT_RE.test(name) || isCredentialName(name))) flag(signals, `credential_link:${name}`, info, node);
   inspectCallee(node, name, receiver, ctx);
+}
+
+// A credential column or property named in the code: a select list entry
+// ('estimates.token', 'token as t'), an object key or shorthand in what is
+// built for the response, a `.token` read, or a word in a raw SQL string.
+// Reads of the request itself (req.headers.authorization) are not response data.
+function inspectCredentialName(node, parent, ctx) {
+  const { info, signals } = ctx;
+  let text = null;
+  if (node.type === 'StringLiteral' && COLUMN_TEXT_RE.test(node.value)) text = node.value;
+  if ((node.type === 'ObjectProperty' || node.type === 'ObjectMethod') && !node.computed) text = node.key?.name || node.key?.value || null;
+  if (node.type === 'MemberExpression' && !node.computed && node.object.name !== 'req' && node.property.name) text = node.property.name;
+  if (text && isCredentialName(text)) flag(signals, `credential_field:${String(text).slice(0, 40)}`, info, node);
+  if (node.type === 'CallExpression' && RAW_QUERY_METHODS.has(calleeName(node.callee).name) && node.arguments[0]
+    && sourceOf(info, node.arguments[0]).split(/[^A-Za-z0-9_]+/).some(word => word && isCredentialName(word))) {
+    flag(signals, 'credential_field:raw_sql', info, node);
+  }
+  inspectSqlText(node, info, signals);
+}
+
+const SQL_TEXT_RE = /\b(insert\s+into|delete\s+from|truncate\s+table|alter\s+table|drop\s+(table|index|column)|create\s+(or\s+replace\s+)?(unique\s+)?(table|index|view|function|extension|trigger)|update\s+[a-z_."]+\s+set\b|on\s+conflict|refresh\s+materialized)/i;
+const SQL_WHOLE_ROW_RE = /select\s+(distinct\s+)?([a-z_]+\.)?\*|,\s*[a-z_]+\.\*/i;
+
+// Any SQL written out in a string (even one passed through a variable): a
+// write statement, or a whole-row select from a table with a credential column.
+function inspectSqlText(node, info, signals) {
+  if (node.type !== 'StringLiteral' && node.type !== 'TemplateLiteral') return;
+  const text = node.type === 'StringLiteral' ? node.value : node.quasis.map(q => q.value.cooked).join(' ');
+  if (text.length < 12) return;
+  if (SQL_TEXT_RE.test(text)) flag(signals, 'write:sql_text', info, node);
+  if (!SQL_WHOLE_ROW_RE.test(text)) return;
+  const table = [...text.matchAll(/\b(?:from|join)\s+"?([a-z_][a-z0-9_]*)"?/gi)].map(m => m[1]).find(name => credentialTables().has(name));
+  if (table) flag(signals, `credential_table:${table}`, info, node);
+}
+
+// ── tables that hold a credential column ────────────────────────────────
+
+const MIGRATIONS_DIR = path.join(ROOT, 'server/models/migrations');
+let credentialTableCache = null;
+
+// table -> credential column names, from the migrations: knex column
+// definitions after a createTable/alterTable/table call, and
+// `ALTER TABLE x ADD COLUMN y` in raw SQL.
+function credentialTables() {
+  if (credentialTableCache) return credentialTableCache;
+  credentialTableCache = new Map();
+  const add = (table, column) => {
+    if (!isStrongCredentialName(column)) return;
+    if (!credentialTableCache.has(table)) credentialTableCache.set(table, new Set());
+    credentialTableCache.get(table).add(column);
+  };
+  const tableRe = /\b(?:createTable(?:IfNotExists)?|alterTable|table)\(\s*['"`]([a-z0-9_]+)['"`]/g;
+  const columnRe = /\.(?:string|text|uuid|binary|specificType|jsonb?)\(\s*['"`]([a-z0-9_]+)['"`]/g;
+  const sqlRe = /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?"?([a-z0-9_]+)"?\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z0-9_]+)"?/gi;
+  for (const file of fs.readdirSync(MIGRATIONS_DIR).filter(f => f.endsWith('.js'))) {
+    const text = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+    const tables = [...text.matchAll(tableRe)].map(m => ({ at: m.index, name: m[1] }));
+    for (const m of text.matchAll(columnRe)) {
+      const owner = [...tables].reverse().find(t => t.at < m.index);
+      if (owner) add(owner.name, m[1]);
+    }
+    for (const m of text.matchAll(sqlRe)) add(m[1], m[2]);
+  }
+  return credentialTableCache;
+}
+
+const JOIN_METHODS = new Set(['join', 'leftJoin', 'rightJoin', 'innerJoin', 'crossJoin', 'fullOuterJoin', 'leftOuterJoin', 'from', 'table']);
+const AGGREGATES = new Set(['count', 'countDistinct', 'sum', 'avg', 'min', 'max']);
+const PROJECTIONS = new Set(['select', 'first', 'pluck', 'column', 'columns', 'distinct']);
+const WRITES_IN_CHAIN = new Set(['insert', 'update', 'del', 'delete']);
+
+function tableOf(arg) {
+  const text = stringOf(arg);
+  return text ? text.trim().split(/\s+/)[0].replace(/^"|"$/g, '') : null;
+}
+
+// The calls of a query-builder chain from its outermost call down to the
+// `db('table')` root, or null when the chain does not start at a knex handle.
+function queryChain(node) {
+  const calls = [];
+  let cur = node;
+  while (cur?.type === 'CallExpression' && cur.callee.type === 'MemberExpression') {
+    calls.push({ method: cur.callee.property.name, args: cur.arguments });
+    cur = cur.callee.object;
+  }
+  const rooted = cur?.type === 'CallExpression' && cur.callee.type === 'Identifier' && KNEX_HANDLES.has(cur.callee.name);
+  return rooted ? { calls, root: tableOf(cur.arguments[0]) } : null;
+}
+
+// Does the chain name its columns? An aggregate does; so does a select list
+// with no `*` or `alias.*` in it. `.first()` or no select returns whole rows.
+function chainProjectsColumns(calls) {
+  if (calls.some(call => AGGREGATES.has(call.method))) return true;
+  const picks = calls.filter(call => PROJECTIONS.has(call.method) && call.args.length);
+  const wild = arg => /(^|\.)\*$/.test(stringOf(arg) || '');
+  return picks.length > 0 && picks.every(call => !call.args.some(wild));
+}
+
+// A read of whole rows from a table that has a credential column.
+function inspectTableChain(node, parent, ctx) {
+  if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression') return;
+  if (parent?.type === 'MemberExpression' && parent.object === node) return; // not the top of the chain
+  const chain = queryChain(node);
+  if (!chain || chain.calls.some(call => WRITES_IN_CHAIN.has(call.method)) || chainProjectsColumns(chain.calls)) return;
+  const tables = [chain.root, ...chain.calls.filter(call => JOIN_METHODS.has(call.method)).map(call => tableOf(call.args[0]))].filter(Boolean);
+  const hit = tables.find(table => credentialTables().has(table));
+  if (hit) flag(ctx.signals, `credential_table:${hit}`, ctx.info, node);
 }
 
 function inspectNew(node, ctx) {
@@ -644,6 +820,55 @@ function loadExclusions() {
   };
 }
 
+// ── middleware that runs before a route ──────────────────────────────────
+
+function middlewareLabel(arg) {
+  if (isFunction(arg)) return 'inline';
+  return argLabel(arg);
+}
+
+// The functions of every middleware that applies to the route, in the order it
+// runs: app-level (index.js, above the mount), the mount's own, and the router's
+// `use` / `param` entries. A middleware that does not resolve to scanned
+// source, and is not a trusted auth guard, counts as an unresolved call.
+function middlewareFunctions(entry) {
+  const list = [...appLevelMiddleware(entry.mountLine ?? 0), ...(entry.mountMw || []), ...(entry.route.middleware || [])];
+  const out = [];
+  for (const { arg, info } of list) {
+    const label = middlewareLabel(arg);
+    if (TRUSTED_MIDDLEWARE.has(label)) continue;
+    const resolved = resolveArg(arg, info);
+    if (resolved) out.push(resolved); else noteUnresolved(info, `middleware ${label}`);
+  }
+  return out;
+}
+
+let appLevelCache = null;
+// app.use(...) entries in server/index.js above `beforeLine` that run for
+// /api/admin requests and are not routers. Trusted ones are filtered out here;
+// the rest come back to be scanned (and fail closed when they do not resolve).
+function appLevelMiddleware(beforeLine = Infinity, all = false) {
+  if (!appLevelCache) {
+    const info = parseFile(path.join(ROOT, 'server/index.js'));
+    appLevelCache = [];
+    walk(info.ast, (node) => {
+      if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression' || node.callee.object.name !== 'app' || node.callee.property.name !== 'use') return;
+      const first = node.arguments[0];
+      const prefix = stringOf(first);
+      const everywhere = !first || prefix === null || ['/api', '/api/', '/api/admin'].includes(prefix);
+      if (!everywhere || (prefix === null && first?.type === 'ArrayExpression')) return;
+      node.arguments.slice(prefix === null && !isFunction(first) && first?.type === 'Identifier' && /Prefix$/.test(first.name) ? 1 : (prefix ? 1 : 0))
+        .filter(arg => !mountTarget(arg, info)).forEach(arg => appLevelCache.push({ arg, info, line: node.loc.start.line }));
+    });
+  }
+  return appLevelCache.filter(item => item.line < beforeLine && (all || !TRUSTED_APP_MIDDLEWARE.has(appLabel(item))));
+}
+
+function appLabel({ arg, info }) {
+  if (isFunction(arg)) return sourceOf(info, arg).includes('embedHelmet') && sourceOf(info, arg).includes('strictHelmet') ? 'inline:helmet-selector' : 'inline';
+  return argLabel(arg);
+}
+
 // A reviewer's allow row clears a route only for the exact scan result the
 // reviewer read: the same signals AND the same unresolved callee list.
 function allowedBy(exclusions, key, list, unresolved) {
@@ -664,16 +889,20 @@ function judgeRoute(entry, exclusions, opaqueMounts) {
   touchedFiles.clear();
   const { functions, handlerFound } = routeFunctions(entry.route);
   if (!functions.length || !handlerFound) return { safe: false, kind: 'review', reason: 'handler_not_found' };
+  const middleware = middlewareFunctions(entry);
   const signals = new Set();
-  functions.forEach(({ fn, info }) => analyze(fn, info, 0).forEach(signal => signals.add(signal)));
+  // Only the handler must answer with JSON; middleware may call next().
+  const handler = functions[functions.length - 1];
+  [...functions, ...middleware].forEach((item) => {
+    analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
+  });
   const unresolved = [...unresolvedCalls].sort();
   const touched = [...touchedFiles].sort();
-  // The final handler must answer with JSON; middleware need not.
-  if (functions.length > 1) signals.delete('no_json_response');
   const list = [...signals].sort();
   if (!list.length && !unresolved.length) return { safe: true, signals: list, unresolved, touched };
-  // A route that mints signed links is never cleared by a review.
-  const allowed = list.some(signal => signal.startsWith('signed_url')) ? null : allowedBy(exclusions, key, list, unresolved);
+  // A route that mints signed links, or selects, returns or builds a
+  // credential or a token link, is never cleared by a review.
+  const allowed = list.some(signal => /^(signed_url|credential_)/.test(signal)) ? null : allowedBy(exclusions, key, list, unresolved);
   if (allowed) return { safe: true, signals: list, unresolved, touched, cleared: allowed.reason };
   const why = [list.length ? `scan: ${list.join(', ')}` : null, unresolved.length ? `unresolved: ${unresolved.join(', ')}` : null].filter(Boolean).join(' | ');
   return { safe: false, kind: 'review', reason: why, signals: list, unresolved };
@@ -861,4 +1090,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, routeKey, loadExclusions, CENSUS_FILE, OUT_FILE, EXCLUSIONS_FILE };
+module.exports = { appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, routeKey, loadExclusions, CENSUS_FILE, OUT_FILE, EXCLUSIONS_FILE };

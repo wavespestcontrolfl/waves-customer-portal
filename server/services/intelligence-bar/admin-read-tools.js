@@ -25,7 +25,7 @@
 const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
-const { redactSignedLinks, redactString } = require('../../utils/signed-link-redaction');
+const { newState, redactSecrets, redactString } = require('../../utils/signed-link-redaction');
 const catalog = require('./admin-read-catalog.json');
 
 const LOOPBACK_HOST = '127.0.0.1';
@@ -229,7 +229,7 @@ function fitToCap(data) {
 
 function errorText(parsed, status) {
   const message = parsed && typeof parsed === 'object' ? (parsed.error || parsed.message) : null;
-  return typeof message === 'string' && message.trim() ? redactString(message.trim().slice(0, 300), { removed: 0 }) : `The admin endpoint answered HTTP ${status}`;
+  return typeof message === 'string' && message.trim() ? redactString(message.trim().slice(0, 300), newState()) : `The admin endpoint answered HTTP ${status}`;
 }
 
 // The body text, with the caller's own token blanked if an endpoint echoes it.
@@ -255,13 +255,19 @@ async function shapeResponse(response, entry, authorization) {
   return answerFrom(parsed, status, entry);
 }
 
-// The answer: signed links removed first, then cut to the cap.
+// The answer: credentials removed first (signed links, private links, credential
+// fields), then cut to the cap.
 function answerFrom(parsed, status, entry) {
-  const state = { removed: 0 };
-  const clean = redactSignedLinks(parsed, state);
+  const state = newState();
+  const clean = redactSecrets(parsed, state);
   const fitted = fitToCap(clean);
+  const removed = [
+    state.links ? `${state.links} signed file link(s)` : null,
+    state.privateLinks ? `${state.privateLinks} private link(s)` : null,
+    state.fields ? `${state.fields} credential field(s)` : null,
+  ].filter(Boolean);
   const notes = [
-    state.removed ? `${state.removed} signed file link(s) were removed (shown as "[signed link removed]"); the bar never holds a link that carries its own credential.` : null,
+    removed.length ? `Removed ${removed.join(', ')} (shown as "[signed link removed]", "[private link removed]" or "[removed]"); the bar never holds a credential or a link that carries one.` : null,
     fitted.truncated
       ? `Cut to fit ${MAX_RESULT_CHARS} characters: lists show their first items (see total_items or *_total_items). Narrow with "query" filters (a date range, status, id or limit) to see the rest.${paginationHint(clean)}`
       : null,
@@ -269,7 +275,8 @@ function answerFrom(parsed, status, entry) {
   return {
     status, endpoint: entry.endpoint, data: fitted.data, truncated: fitted.truncated,
     ...(fitted.total_items !== undefined ? { total_items: fitted.total_items } : {}),
-    ...(state.removed ? { signed_links_removed: state.removed } : {}),
+    ...(state.links + state.privateLinks ? { signed_links_removed: state.links + state.privateLinks } : {}),
+    ...(state.fields ? { credential_fields_removed: state.fields } : {}),
     note: notes.length ? notes.join(' ') : null,
   };
 }
