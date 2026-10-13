@@ -60,7 +60,9 @@ describe('the path builder', () => {
     expect(parsed.origin).toBe(ORIGIN);
     expect(parsed.pathname).toBe(`/api${ONE_PARAM.endpoint.replace(`:${ONE_PARAM.params[0]}`, 'abc-123')}`);
     expect(Object.fromEntries(parsed.searchParams)).toEqual({});
-    expect(options.headers[ADMIN_READ_HEADER]).toBe('1');
+    // The marker carries the zero-based indexes of the parameter segments after /api.
+    const paramIndexes = rules.splitPath(ONE_PARAM.endpoint).flatMap((segment, index) => (rules.isParam(segment) ? [index] : []));
+    expect(options.headers[ADMIN_READ_HEADER]).toBe(`1;p=${paramIndexes.join(',')}`);
     expect(options.method).toBe('GET');
     expect(options.headers.Authorization).toBe(AUTH);
     expect(options.redirect).toBe('manual');
@@ -68,8 +70,9 @@ describe('the path builder', () => {
     expect(options.body).toBeUndefined();
   });
 
-  test('a pattern with no parameters needs none', async () => {
+  test('a pattern with no parameters needs none, and its marker carries none', async () => {
     await read({ endpoint: NO_PARAM.endpoint });
+    expect(callsOf()[0][1].headers[ADMIN_READ_HEADER]).toBe('1');
     expect(new URL(callsOf()[0][0]).pathname).toBe(`/api${NO_PARAM.endpoint}`);
   });
 

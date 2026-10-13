@@ -150,7 +150,7 @@ test('the owner login reads through the request token, and the token is stored a
   expect(loopbackCalls).toHaveLength(1);
   expect(loopbackCalls[0].headers.Authorization).toBe(OWNER);
   expect(new URL(loopbackCalls[0].url).pathname).toBe(`/api${ENTRY.endpoint.replace(`:${ENTRY.params[0]}`, 'abc-1')}`);
-  expect(loopbackCalls[0].headers[ADMIN_READ_HEADER]).toBe('1');
+  expect(loopbackCalls[0].headers[ADMIN_READ_HEADER]).toMatch(/^1;p=\d+(,\d+)*$/);
 
   const stored = JSON.stringify({
     inserts: mockInsert.mock.calls, events: mockToolEvent.mock.calls, checkpoints: mockCheckpoint.mock.calls,

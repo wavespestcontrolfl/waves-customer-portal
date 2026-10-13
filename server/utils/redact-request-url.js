@@ -161,26 +161,81 @@ function redactRequestUrl(rawUrl, { maskAllQuery = false } = {}) {
 
 // The Intelligence Bar's general admin read (services/intelligence-bar/
 // admin-read-tools.js) sends its loopback GET with this header. The query
-// filters on it are chosen by the model and can hold a name, phone or email
-// the key-based rules above do not know ("email", "phone", "name"), so the
-// request logs mask EVERY query value for such a request. The header only
-// ever REDUCES what is logged: a caller who sends it themselves hides their
-// own query values from the log and gains nothing else.
+// filters and the path parameters on it are chosen by the model and can hold a
+// name, phone or email the key-based rules above do not know ("email",
+// "phone", "name", a free-text service name), so the request logs mask EVERY
+// query value and every path segment that came from a parameter. The header
+// only ever REDUCES what is logged: a caller who sends it themselves hides
+// their own values from the log and gains nothing else.
+//
+// Format: "1" (no path parameters) or "1;p=3,5": the zero-based indexes of the
+// path segments after /api that are parameters (the tool filled the pattern,
+// so it knows). Parsed strictly: digits and commas only, at most 12 indexes,
+// each under 40. A marked value that does not parse (malformed, or sent by
+// someone else) falls back to masking EVERY path segment after the first two
+// (/api/admin/... stays), so a bad header can only log less, never more.
 const ADMIN_READ_HEADER = 'x-ib-admin-read';
+const MAX_PARAM_INDEXES = 12;
+const MAX_SEGMENT_INDEX = 40;
+const MARKER_RE = /^1(?:;p=(\d{1,2}(?:,\d{1,2})*))?$/;
+
+function markerValue(req) {
+  const value = req?.headers?.[ADMIN_READ_HEADER];
+  return String(Array.isArray(value) ? value[0] : value ?? '');
+}
+
+// null: not an admin-read request.
+// { params: [indexes] } for a valid marker; { params: null } for a marked but
+// unparseable value (mask every segment after the first two).
+function adminReadMarker(req) {
+  const value = markerValue(req);
+  if (!value.startsWith('1')) return null;
+  const match = MARKER_RE.exec(value);
+  if (!match) return { params: null };
+  const indexes = match[1] ? match[1].split(',').map(Number) : [];
+  const valid = indexes.length <= MAX_PARAM_INDEXES && indexes.every(index => index < MAX_SEGMENT_INDEX);
+  return { params: valid ? indexes : null };
+}
 
 function isAdminReadRequest(req) {
-  const value = req?.headers?.[ADMIN_READ_HEADER];
-  return (Array.isArray(value) ? value[0] : value) === '1';
+  return adminReadMarker(req) !== null;
+}
+
+// Mask path segments of the logged URL by their position after /api. `params`
+// is a list of indexes, or null for "every segment after /api/admin".
+function maskPathSegments(url, params) {
+  const queryStart = url.search(/[?#]/);
+  const path = queryStart < 0 ? url : url.slice(0, queryStart);
+  const rest = queryStart < 0 ? '' : url.slice(queryStart);
+  const segments = path.split('/');
+  // segments[0] is '' (before the first slash) and segments[1] is "api".
+  const first = segments[1] === 'api' ? 2 : 1;
+  const masked = segments.map((segment, position) => {
+    const index = position - first;
+    if (index < 0 || !segment) return segment;
+    return params === null ? (index >= 1 ? REDACTED : segment) : (params.includes(index) ? REDACTED : segment);
+  });
+  return masked.join('/') + rest;
 }
 
 // The request's URL as it may be logged: the redactor above, with every query
-// value masked when the request carries the admin-read marker.
+// value and every parameter path segment masked when the request carries the
+// admin-read marker. One helper for the access log and the error logger.
 function redactRequestUrlFor(req, rawUrl = req?.originalUrl || req?.url || '') {
-  return redactRequestUrl(rawUrl, { maskAllQuery: isAdminReadRequest(req) });
+  const marker = adminReadMarker(req);
+  if (!marker || typeof rawUrl !== 'string') return redactRequestUrl(rawUrl);
+  return redactRequestUrl(maskPathSegments(rawUrl, marker.params), { maskAllQuery: true });
+}
+
+// What the tool sends: "1" or "1;p=<indexes>" for the parameter segments of
+// the catalog pattern (zero-based, after /api).
+function adminReadMarkerValue(paramIndexes = []) {
+  return paramIndexes.length ? `1;p=${paramIndexes.join(',')}` : '1';
 }
 
 module.exports = {
   ADMIN_READ_HEADER,
+  adminReadMarkerValue,
   isAdminReadRequest,
   redactRequestUrlFor,
   REDACTED,

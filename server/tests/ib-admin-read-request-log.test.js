@@ -10,7 +10,7 @@ const express = require('express');
 const morgan = require('morgan');
 const logger = require('../services/logger');
 const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('../utils/request-log-format');
-const { ADMIN_READ_HEADER, redactRequestUrl, redactRequestUrlFor } = require('../utils/redact-request-url');
+const { ADMIN_READ_HEADER, adminReadMarkerValue, redactRequestUrl, redactRequestUrlFor } = require('../utils/redact-request-url');
 const { errorHandler } = require('../middleware/errors');
 
 const QUERY = 'email=a@example.test&phone=9415550100&name=Pat&days=30';
@@ -20,7 +20,10 @@ function appWith(handler) {
   registerRedactedTokens(morgan);
   const app = express();
   app.use(morgan(REDACTED_COMBINED_LOG, { stream: { write: message => logger.info(message.trim()) } }));
-  app.get('/api/admin/csr/overview', handler || ((req, res) => res.json({ ok: true })));
+  const respond = handler || ((req, res) => res.json({ ok: true }));
+  app.get('/api/admin/csr/overview', respond);
+  app.get('/api/admin/job-forms/templates/by-service/:serviceType', respond);
+  app.get('/api/admin/customers/:id/credits', respond);
   app.use(errorHandler);
   const server = app.listen(0);
   return { server, base: `http://127.0.0.1:${server.address().port}` };
@@ -69,6 +72,64 @@ describe('the error logger', () => {
   test('is unchanged without the header', async () => {
     await call(`/api/admin/csr/overview?${QUERY}`, {}, () => { throw new Error('boom'); });
     expect(logger.error.mock.calls[0][0]).toBe(`GET /api/admin/csr/overview?${QUERY}: boom`);
+  });
+});
+
+describe('path parameters on a marked request', () => {
+  const NAME = 'Synthetic%20Person%209415550100';
+  const SERVICE = '/api/admin/job-forms/templates/by-service/';
+  const CUSTOMER = '10000000-0000-4000-8000-00000000000a';
+  const lineFor = fragment => loggedLines().find(text => text.includes(fragment));
+  const leaks = text => /Synthetic|Person|9415550100/.test(text);
+
+  test('a free-text parameter with a name and phone is masked in the access line and the error line', async () => {
+    const header = { [ADMIN_READ_HEADER]: adminReadMarkerValue([4]) };
+    expect(header[ADMIN_READ_HEADER]).toBe('1;p=4');
+    await call(`${SERVICE}${NAME}`, header);
+    const line = lineFor('/api/admin/job-forms');
+    expect(line).toContain('GET /api/admin/job-forms/templates/by-service/[REDACTED] HTTP/1.1');
+    expect(leaks(line)).toBe(false);
+    jest.clearAllMocks();
+    await call(`${SERVICE}${NAME}?x=1`, header, () => { throw new Error('boom'); });
+    expect(logger.error.mock.calls[0][0]).toBe('GET /api/admin/job-forms/templates/by-service/[REDACTED]?x=[REDACTED]: boom');
+    expect(leaks(logger.error.mock.calls[0][0])).toBe(false);
+  });
+
+  test('a UUID customer parameter is masked too, the literal segments stay', async () => {
+    await call(`/api/admin/customers/${CUSTOMER}/credits?days=7`, { [ADMIN_READ_HEADER]: adminReadMarkerValue([2]) });
+    expect(lineFor('/api/admin/customers')).toContain('GET /api/admin/customers/[REDACTED]/credits?days=[REDACTED] HTTP/1.1');
+    expect(lineFor('/api/admin/customers')).not.toContain(CUSTOMER);
+  });
+
+  test('an endpoint with no parameters logs its path unchanged', async () => {
+    await call('/api/admin/csr/overview?days=30', { [ADMIN_READ_HEADER]: adminReadMarkerValue([]) });
+    expect(lineFor('/api/admin/csr')).toContain('GET /api/admin/csr/overview?days=[REDACTED] HTTP/1.1');
+  });
+
+  test.each(['1;p=', '1;p=a', '1;p=3,', '1;p=3;x', '1;p=99', '1;p=1,2,3,4,5,6,7,8,9,10,11,12,13', '10', '1 ; p=3', '1;p=-1'])(
+    'a malformed marker (%s) masks every segment after /api/admin', async (value) => {
+      await call(`${SERVICE}${NAME}?x=1`, { [ADMIN_READ_HEADER]: value });
+      const line = lineFor('HTTP/1.1');
+      expect(line).toContain('GET /api/admin/[REDACTED]/[REDACTED]/[REDACTED]/[REDACTED]?x=[REDACTED] HTTP/1.1');
+      expect(leaks(line)).toBe(false);
+    });
+
+  test('a header that is not a marker masks nothing; an unmarked request is unchanged', async () => {
+    await call(`${SERVICE}Plain%20Name?x=1`, { [ADMIN_READ_HEADER]: '0' });
+    expect(lineFor('/api/admin/job-forms')).toContain('by-service/Plain%20Name?x=1 HTTP/1.1');
+    jest.clearAllMocks();
+    await call(`${SERVICE}Plain%20Name?x=1`);
+    expect(lineFor('/api/admin/job-forms')).toContain('by-service/Plain%20Name?x=1 HTTP/1.1');
+  });
+
+  test('the helper: strict parse, 12 indexes at most, each under 40; spoofing only logs less', () => {
+    const urlFor = value => redactRequestUrlFor({ headers: { [ADMIN_READ_HEADER]: value }, originalUrl: '/api/admin/a/b/c?q=1' });
+    expect(urlFor('1')).toBe('/api/admin/a/b/c?q=[REDACTED]');
+    expect(urlFor('1;p=1,2')).toBe('/api/admin/[REDACTED]/[REDACTED]/c?q=[REDACTED]');
+    expect(urlFor('1;p=0')).toBe('/api/[REDACTED]/a/b/c?q=[REDACTED]');
+    expect(urlFor('1;p=1,2,3,4,5,6,7,8,9,10,11,12')).toBe('/api/admin/[REDACTED]/[REDACTED]/[REDACTED]?q=[REDACTED]');
+    expect(urlFor('1;p=40')).toBe('/api/admin/[REDACTED]/[REDACTED]/[REDACTED]?q=[REDACTED]');
+    expect(urlFor('1;p=39')).toBe('/api/admin/a/b/c?q=[REDACTED]');
   });
 });
 

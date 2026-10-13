@@ -26,7 +26,7 @@
 const config = require('../../config');
 const logger = require('../logger');
 const rules = require('../../utils/admin-read-rules');
-const { ADMIN_READ_HEADER } = require('../../utils/redact-request-url');
+const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../../utils/redact-request-url');
 const { newState, redactSecrets, redactString } = require('../../utils/signed-link-redaction');
 const catalog = require('./admin-read-catalog.json');
 
@@ -181,7 +181,8 @@ function buildRequestPath(endpoint, input) {
   if (rules.denyReason(filled.path, { encodedParams: Boolean(entry.paramKinds) }) || BLOCKED_ROUTES.some(route => rules.collidesWithRoute(route, segments, entry.endpoint))) {
     return { refusal: refusal('That parameter value points outside the reviewed admin read catalog.', 'invalid_input') };
   }
-  return { entry, path: filled.path, search: search.search };
+  const paramIndexes = rules.splitPath(entry.endpoint).flatMap((segment, index) => (rules.isParam(segment) ? [index] : []));
+  return { entry, path: filled.path, search: search.search, paramIndexes };
 }
 
 function paginationHint(data) {
@@ -326,13 +327,13 @@ function answerFrom(parsed, status, entry) {
   };
 }
 
-async function fetchAdminRead(entry, path, search, authorization) {
+async function fetchAdminRead(entry, path, search, authorization, paramIndexes = []) {
   const origin = loopbackOrigin();
   if (!origin) return refusal('The admin read could not find this server', 'read_connection_failed');
   try {
     const response = await fetch(`${origin}/api${path}${search}`, {
       method: 'GET',
-      headers: { Authorization: authorization, Accept: 'application/json', [ADMIN_READ_HEADER]: '1' },
+      headers: { Authorization: authorization, Accept: 'application/json', [ADMIN_READ_HEADER]: adminReadMarkerValue(paramIndexes) },
       redirect: 'manual',
       signal: AbortSignal.timeout(READ_TIMEOUT_MS),
     });
@@ -363,7 +364,7 @@ async function readAdminData(input, actionContext) {
   }
   const built = buildRequestPath(input?.endpoint, input || {});
   if (built.refusal) return built.refusal;
-  return fetchAdminRead(built.entry, built.path, built.search, authorization);
+  return fetchAdminRead(built.entry, built.path, built.search, authorization, built.paramIndexes);
 }
 
 async function executeAdminReadTool(name, input, actionContext = {}) {
