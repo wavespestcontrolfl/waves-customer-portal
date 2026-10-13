@@ -71,6 +71,7 @@ const MODULES = [
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
+  ['address-tools', 'ADDRESS_TOOLS', 'executeAddressTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -213,6 +214,9 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   // Tap-to-answer buttons for a "which value?" question (choice-tools.js):
   // display only, reads and writes nothing.
   'offer_choices',
+  // Google address check (address-tools.js): run before any address write so a
+  // dictated street gets Google's spelling and ZIP, never a guessed one.
+  'check_address',
   // Owner IB history 10-12: on the dashboard the bar answered "no
   // appointment-creation tool" (booking is filed under customers, and its
   // schedule-domain search missed it), and a "fix the address from the last

@@ -62,6 +62,11 @@ const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../se
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
 const { CHOICE_TOOLS, executeChoiceTool, OFFER_CHOICES_TOOL_NAME } = require('../services/intelligence-bar/choice-tools');
+const { ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME } = require('../services/intelligence-bar/address-tools');
+// Scope 'none' (they read no customer rows) but their inputs or results can
+// carry a customer's name or street address: treated as PII-bearing for logs
+// and thread redaction, as PII_TOOL_NAMES would if their scope were not 'none'.
+const SCOPE_NONE_PII_TOOL_NAMES = new Set([OFFER_CHOICES_TOOL_NAME, CHECK_ADDRESS_TOOL_NAME]);
 const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
@@ -3014,7 +3019,7 @@ const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
 function withEveryPageTools(tools, context, isAdmin) {
   if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
   const present = new Set(tools.map(t => t.name));
-  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...ADDRESS_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
     .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
 }
 
@@ -3248,6 +3253,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (toolName === OFFER_CHOICES_TOOL_NAME) {
     return executeChoiceTool(toolName, input);
   }
+  if (toolName === CHECK_ADDRESS_TOOL_NAME) {
+    return executeAddressTool(toolName, input);
+  }
   if (BILLING_READER_TOOL_NAMES.has(toolName)) {
     return executeBillingReaderTool(toolName, input, actionContext);
   }
@@ -3351,6 +3359,7 @@ RULES:
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
 - Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
 - Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values as the operator would say them ("$61.33", not a sentence), then ask the question in your reply text as usual. A button shows the value and a tap sends exactly that value as the operator's next message: treat it as their answer to the question you just asked. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
+- Addresses: before you save or change any street address (add_customer_property, update_customer, update_lead_contact, create_customer, correct_invoice_address), run check_address on it and use Google's spelling, city and ZIP. Never guess a ZIP and never fix a street spelling from memory. If Google's result differs from what the operator said or from a call transcript, show both and ask which is right. If the operator says a spelling is wrong, run check_address again with their words instead of repeating the transcript. If check_address returns not_attempted or api_unavailable, say the address could not be verified and ask the operator for the ZIP. An address change always shows a confirmation card with the exact address, so put Google's version on it.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
@@ -3743,8 +3752,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // in PII_TOOL_NAMES.
         // offer_choices too: its scope is 'none' (it reads no rows), but an
         // option can name a customer the operator is choosing between.
+        // check_address likewise: its input is a customer's street address.
         const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)
-          || toolUse.name === OFFER_CHOICES_TOOL_NAME;
+          || SCOPE_NONE_PII_TOOL_NAMES.has(toolUse.name);
         const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
@@ -4031,8 +4041,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
     // offer_choices is scope 'none' too, and the question it rides on can
     // name the customers being chosen between with no PII reader in this turn.
+    // check_address is scope 'none' too; the street address it checked is the
+    // customer's, and the reply that follows repeats it.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name)
-      || c.name === OFFER_CHOICES_TOOL_NAME);
+      || SCOPE_NONE_PII_TOOL_NAMES.has(c.name));
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'
@@ -4436,7 +4448,7 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action) || SCOPE_NONE_PII_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,

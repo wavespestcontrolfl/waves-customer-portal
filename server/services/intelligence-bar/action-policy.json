@@ -119,6 +119,14 @@
     "approval": null,
     "scope": "none"
   },
+  "check_address": {
+    "module": "address-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "check_customer_status": {
     "module": "tech-tools.js",
     "domain": "tech",
