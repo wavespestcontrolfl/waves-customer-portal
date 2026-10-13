@@ -281,7 +281,8 @@ describe('check_address round 2 cases', () => {
     expect(out.status).toBe('invalid_input');
     expect(validateAddress).not.toHaveBeenCalled();
   });
-  test.each(['100 Example Way, Sarasota, FL 34236', '100 Example Way, Apt 4, Sarasota, Florida', '100 Example Way, Sarasota'])('%s has no state problem', async (address) => {
+  test.each(['100 Example Way, Sarasota, FL 34236', '100 Example Way, Apt 4, Sarasota, Florida', '100 Example Way, Sarasota',
+    '100 Example Way, Sarasota, FL 34236, USA', '100 Example Way, Sarasota, FL 34236, United States', '100 Example Way, Sarasota, FL 34236 USA'])('%s has no state problem', async (address) => {
     validateAddress.mockResolvedValue(google());
     expect((await run({ address })).status).toBe('validated_accept');
   });

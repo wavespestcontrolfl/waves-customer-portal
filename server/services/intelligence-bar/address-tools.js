@@ -196,12 +196,16 @@ function changesAddress(toolName, input) {
 // text itself ("100 Example Way, Sarasota, Flordia 34236"). With three or more
 // comma parts (street, city, state) the last part, minus its ZIP, must be a
 // state; otherwise the check would silently fall back to the FL hint.
+const COUNTRY_TAIL_RE = /^(?:usa|u\.s\.a\.?|u\.s\.?|us|united states(?: of america)?)[.,;:!?]?$/i;
 function embeddedStateProblem(text) {
   const rawUnit = unitAnywhereOnLine(text).toLowerCase();
   const parts = (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
     .filter(part => !(rawUnit && ` ${rawUnit} `.includes(` ${part.toLowerCase()} `)));
+  // A pasted address may end with a country ("…, FL 34236, USA"); the shared
+  // parser strips it, so it is not the state part.
+  while (parts.length && COUNTRY_TAIL_RE.test(parts[parts.length - 1])) parts.pop();
   if (parts.length < 3) return null;
-  const candidate = parts[parts.length - 1].replace(/\b\d{5}(?:-\d{4})?\b/g, '').trim();
+  const candidate = parts[parts.length - 1].replace(/\b\d{5}(?:-\d{4})?\b/g, '').replace(/\s+(?:usa|u\.s\.a\.?|u\.s\.?|us|united states(?: of america)?)[.,;:!?]?$/i, '').trim();
   if (!candidate || !/^[A-Za-z .]+$/.test(candidate)) return null;
   return normalizeState(candidate) ? null : candidate;
 }
