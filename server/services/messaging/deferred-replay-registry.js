@@ -1618,6 +1618,8 @@ const REGISTRY = {
         ? await visitStillInStatus(meta.scheduled_service_id, meta.required_visit_statuses, 'notice-contact')
         : await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact', meta);
       if (visit.eligible === false) return visit;
+      const mergedDay = await require('../one-text-per-day').recheckMergedDay(meta);
+      if (mergedDay) return mergedDay;
       return contactSlotStillAuthorized(meta, 'notice-contact');
     },
   },

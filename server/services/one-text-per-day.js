@@ -31,6 +31,7 @@ const logger = require('./logger');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { oneTextPerCustomerDayLive } = require('../config/feature-gates');
+const { heldVisitSubquery } = require('./street-level-hold');
 
 const REMINDER_TIER_COLUMNS = {
   '72h': [['reminder_72h_sent', 'reminder_72h_sent_at']],
@@ -72,10 +73,29 @@ async function loadRef(conn, serviceId) {
 }
 
 /**
- * Every sendable, windowed service of the reference service's text day (the
- * reference included), each with its live reminder row when it has one. Empty
- * when the reference has no saved property: the rule does not apply and every
- * row keeps its own text, as before.
+ * The MEMBERS a merged day reminder may name: every service of the reference
+ * service's text day (the reference included) that its OWN single-visit reminder
+ * would be allowed to send for, each with its live reminder row when it has one.
+ * Empty when the reference has no saved property: the rule does not apply and
+ * every row keeps its own text, as before.
+ *
+ * Eligibility is the single-visit reminder path's own send predicates, applied to
+ * every member (at render AND at handoff, which reads this same function):
+ *  - sendable status (not cancelled / skipped / completed / no_show / rescheduled):
+ *    REMINDER_BLOCKING_STATUSES in appointment-reminders.js, the scan's live-status guard;
+ *  - a real window (not a windowless pre-closed 08:00 placeholder): the scan's
+ *    `windows_preclosed = false` and buildMergedServiceLabel's placeholder rule;
+ *  - a registered reminder is past its confirmation (`confirmation_sent`): the scan only
+ *    reads rows with `confirmation_sent = true`;
+ *  - no live `move_hold_until` on its reminder row: the scan's own WHERE and the
+ *    send-time guard visit-groups appointmentSendHeld (holdLive);
+ *  - not a street-level address hold awaiting the office confirm
+ *    (street-level-hold heldVisitSubquery): the scan's guard, the self-heal sweep, and
+ *    the send step STREET_LEVEL_HOLD in send-customer-message.
+ * A held member is left out: it is not named, not quoted, not closed, and stays
+ * armed to send its own reminder once released. The customer-level holds (deleted
+ * customer, the disclaimed-number callback hold) are the same for every member of
+ * one customer and are applied to the merged send itself at the send boundary.
  */
 async function loadDayRows(conn, serviceId) {
   const ref = await loadRef(conn, serviceId);
@@ -88,6 +108,10 @@ async function loadDayRows(conn, serviceId) {
     .whereRaw('ss.scheduled_date between ?::date - 1 and ?::date + 1', [ref.day, ref.day])
     .whereIn('ss.status', SENDABLE_STATUSES)
     .whereNotNull('ss.window_start')
+    .where(function confirmed() { this.whereNull('ar.id').orWhere('ar.confirmation_sent', true); })
+    .where(function notPreclosed() { this.whereNull('ar.id').orWhere('ar.windows_preclosed', false); })
+    .where(function notMoveHeld() { this.whereNull('ar.move_hold_until').orWhere('ar.move_hold_until', '<', new Date()); })
+    .whereNotExists(function notAddressHeld() { heldVisitSubquery(this, 'ss'); })
     .orderBy('ss.window_start', 'asc')
     .orderBy('ss.id', 'asc')
     .select(
@@ -117,29 +141,53 @@ function earliestArrivalMs(rows) {
   return times.length ? Math.min(...times) : null;
 }
 
+// The token a merged day reminder carries to the send boundary: one `id@arrival-ms` per
+// member the text named, as read when it was rendered.
+function renderedDayToken(rows) {
+  return (Array.isArray(rows) ? rows : []).map((m) => `${m.scheduled_service_id}@${memberArrivalMs(m)}`);
+}
+
 /**
- * Extra arrival instants the send-time slot validator accepts for a reminder
- * about `serviceId`: the earliest live arrival of its customer-day, but ONLY for
- * the merged day reminder that rendered it. That send passes `renderedDay`, the
- * ids of the members its text named. Any other caller passes nothing and gets [],
- * so a confirmation or reschedule notice quoting a sibling's time is held as
- * before. The live day must still be exactly the rendered members (a service
- * added, cancelled or dropped since means the text is stale: held, re-rendered on
- * the next scan). [] with the gate off or on any error.
+ * THE validator for a merged day reminder (visit-groups appointmentSendHeld calls it for
+ * every send that carries the rendered-day token, and for no other send).
+ *
+ * INVARIANT: a merged day reminder is handed to the provider only if, at handoff, every
+ * member it names is still live on that day at the quoted time, is not under any hold that
+ * would defer its own reminder (loadDayRows' predicates), and the member set is exactly
+ * what was rendered. Otherwise the merged send is held (nothing goes) and the next scan
+ * re-renders. A member is closed only after such a delivery (closeCoveredReminderTiers).
+ *
+ * Returns the one arrival instant (the day's earliest) the text may quote, or [] when the
+ * token is not a valid, current rendering of this service's day: the caller then holds the
+ * send. No ordinary slot candidate (the sender's own arrival, a visit stop start) can rescue
+ * a token that fails here. [] with the gate off or on any error (fail closed for this send).
  */
 async function dayArrivalCandidates(serviceId, renderedDay) {
   try {
     if (!Array.isArray(renderedDay) || !oneTextPerCustomerDayLive()) return [];
     const rendered = renderedDay.map(String).sort();
-    if (rendered.length < 2 || !rendered.includes(String(serviceId))) return [];
+    if (rendered.length < 2 || !rendered.some((t) => t.startsWith(`${serviceId}@`))) return [];
     const rows = await loadDayRows(db, serviceId);
-    const live = rows.map((m) => String(m.scheduled_service_id)).sort();
-    const earliest = live.length === rendered.length && live.every((id, i) => id === rendered[i])
-      ? earliestArrivalMs(rows) : null;
+    const live = renderedDayToken(rows).sort();
+    const same = live.length === rendered.length && live.every((t, i) => t === rendered[i]);
+    const earliest = same ? earliestArrivalMs(rows) : null;
     return earliest === null ? [] : [earliest];
   } catch {
     return [];
   }
+}
+
+/**
+ * Re-check for a merged day reminder that was frozen into the deferred-contact queue (a
+ * partial fan-out held at 20:00; deferred-replay-registry appointment_notice_contact_deferred).
+ * The queued row carries the token and the slot it was rendered with. Null = not a merged
+ * reminder, or still valid (the same day validator as the live send); otherwise the ineligible
+ * verdict, so the frozen text is never replayed for a day that changed.
+ */
+async function recheckMergedDay(meta) {
+  if (!meta || !Array.isArray(meta.rendered_day_members)) return null;
+  const accepted = await dayArrivalCandidates(meta.scheduled_service_id, meta.rendered_day_members);
+  return accepted.includes(Number(meta.rendered_slot_ms)) ? null : { eligible: false, reason: 'merged-day-changed' };
 }
 
 // The row is still on the reminder time the text quoted for it.
@@ -307,7 +355,9 @@ module.exports = {
   dayOf,
   loadDayRows,
   earliestArrivalMs,
+  renderedDayToken,
   dayArrivalCandidates,
+  recheckMergedDay,
   closeCoveredReminderTiers,
   sendTrackTextOnce,
 };

@@ -39,7 +39,7 @@ const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { buildAppointmentLink } = require('./appointment-link');
-const { closeCoveredReminderTiers, loadDayRows, earliestArrivalMs } = require('./one-text-per-day');
+const { closeCoveredReminderTiers, loadDayRows, earliestArrivalMs, renderedDayToken } = require('./one-text-per-day');
 // Canonical service_type normalization — the estimate-backed label recovery
 // compares stored fall-through values against this exact transform; reusing
 // the writer's implementation keeps the two from drifting.
@@ -1451,11 +1451,19 @@ function daySnapshotOf(row) {
   return day ? day.rows : null;
 }
 
-// The ids of the snapshot's members: the send boundary's token for "this is a merged
-// day reminder" (undefined for every other send).
+// The send boundary's token for "this is a merged day reminder": the members it named,
+// each with the arrival it was rendered at (undefined for every other send).
 function daySnapshotIds(row) {
   const rows = daySnapshotOf(row);
-  return rows ? rows.map((m) => m.scheduled_service_id) : undefined;
+  return rows ? renderedDayToken(rows) : undefined;
+}
+
+// What a queued (deferred) copy of a merged day reminder must carry so its replay can re-run the
+// day validator ({} for every other notice).
+function mergedDayReplayStamp(metaExtra) {
+  return Array.isArray(metaExtra.rendered_day_members)
+    ? { rendered_day_members: metaExtra.rendered_day_members, rendered_slot_ms: metaExtra.rendered_slot_ms }
+    : {};
 }
 
 // The send-boundary input for a merged day reminder ({} for every other send).
@@ -2096,6 +2104,8 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         replay_purpose: purpose,
         ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
         ...(slotStamp || {}),
+        // A merged day reminder replays only while its day validator still accepts it.
+        ...mergedDayReplayStamp(metaExtra),
         resolve_from_by_customer: true,
       }),
     };
