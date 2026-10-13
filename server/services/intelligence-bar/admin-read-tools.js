@@ -69,7 +69,9 @@ Use for: "which screen shows X", "what can I read about Y", before any read_admi
         endpoint: { type: 'string', maxLength: 200, description: 'The exact endpoint pattern from find_admin_reads, with :name placeholders. Never a URL.' },
         params: {
           type: 'object', description: 'A value for each :name in the endpoint pattern, e.g. { "id": "123" }.',
-          additionalProperties: { type: 'string', maxLength: 80 },
+          // The ceiling of the widest kind (a reviewed text parameter, 120);
+          // fillPattern applies the stricter limit of each parameter's kind.
+          additionalProperties: { type: 'string', maxLength: 120 },
         },
         query: {
           type: 'object', description: 'Optional filters sent as query-string values. Only the keys find_admin_reads lists as query_keys for the endpoint are accepted, e.g. { "days": 30 }.',

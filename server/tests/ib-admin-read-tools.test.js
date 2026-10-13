@@ -916,3 +916,12 @@ describe('protocol-relative links', () => {
     expect(redactString(text, newState())).toBe(text);
   });
 });
+
+// Codex: the schema ceiling must not be below the widest reviewed parameter kind.
+describe('params schema ceiling', () => {
+  test('the tool schema admits a 120-character parameter value', () => {
+    const { ADMIN_READ_TOOLS } = require('../services/intelligence-bar/admin-read-tools');
+    const tool = ADMIN_READ_TOOLS.find(t => t.input_schema?.properties?.params);
+    expect(tool.input_schema.properties.params.additionalProperties.maxLength).toBe(120);
+  });
+});
