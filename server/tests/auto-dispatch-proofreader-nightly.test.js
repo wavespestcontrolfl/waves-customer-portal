@@ -200,6 +200,18 @@ describe('checkMove', () => {
     expect(run.proofreader.broke).toBe(1);
   });
 
+  test('a record with a source the database could not read is a broken check: no notice, the run is marked', async () => {
+    const run = runOf();
+    const partial = { ...RECORD, unread: [{ channel: 'call', reason: 'read_failed' }] };
+    const got = await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, partial));
+    expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { why: 'check_failed' }, broke: true });
+    expect(run.proofreader.notices.size).toBe(0);
+    // A record that is incomplete for a reason about the customer (a call with no transcript) is not.
+    const noTranscript = { ...RECORD, unread: [{ channel: 'call', reason: 'no_transcript' }] };
+    expect(await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, noTranscript))).toMatchObject({ broke: false });
+    expect(run.proofreader.notices.size).toBe(1);
+  });
+
   test('past the call limit a move is held without a call', async () => {
     const run = runOf({ config: { proofreaderMaxCalls: 1 } });
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });

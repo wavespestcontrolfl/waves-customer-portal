@@ -155,7 +155,11 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
     const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
-    return { answer, move, entry: entry || null };
+    // A source the record builder could not query (it lists the source as
+    // unread and does not throw) is a broken check too, whatever the verdict:
+    // a database fault, not a fact about the customer.
+    const readFailed = record.unread.some((row) => row.reason === 'read_failed');
+    return { answer: readFailed ? { ...answer, verdict: 'unknown', why: 'check_failed' } : answer, move, entry: entry || null };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
