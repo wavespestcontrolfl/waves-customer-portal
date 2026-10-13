@@ -261,9 +261,12 @@ async function stampTrackGuard(kind, fence) {
   await db('scheduled_services').where(fence).whereNull(TRACK_TEXTS[kind].stamp).update({ [TRACK_TEXTS[kind].stamp]: new Date() });
 }
 
-// A sibling of the same technician, still live on this day, with a "delivered"
-// row for this kind and day: proof the customer was really told.
-async function deliveredSibling(trx, ref, kind) {
+// A sibling, still live on this day, with a "delivered" row for this kind and day that
+// NAMED the same person: proof the customer was really told by that technician. The person
+// is the one recorded on the delivered row (the technician the text named, which for an
+// arrival can be the one who actually arrived, not the scheduled one), compared with the
+// one this text would name. The sibling's own assignment is mutable and is never read.
+async function deliveredSibling(trx, ref, kind, technicianId) {
   const spec = TRACK_TEXTS[kind];
   const rows = await trx('audit_log as al')
     .join('scheduled_services as sib', 'sib.id', 'al.resource_id')
@@ -275,12 +278,13 @@ async function deliveredSibling(trx, ref, kind) {
     .whereNotIn('sib.status', ['cancelled', 'skipped', 'rescheduled'])
     .whereIn('sib.track_state', spec.states)
     .whereRaw('sib.scheduled_date between ?::date - 1 and ?::date + 1', [ref.day, ref.day])
-    .select('sib.id', 'sib.customer_id', 'sib.property_id', 'sib.technician_id',
+    .select('sib.id', 'sib.customer_id', 'sib.property_id',
+      trx.raw("al.metadata->>'technician_id' as delivered_technician_id"),
       trx.raw("to_char(sib.scheduled_date, 'YYYY-MM-DD') as day"));
-  return rows.find((r) => sameTextDay(ref, r, { sameTechnician: true })) || null;
+  return rows.find((r) => sameTextDay(ref, r) && String(r.delivered_technician_id || '') === String(technicianId || '')) || null;
 }
 
-async function recordTrackOutcome(trx, ref, kind, covering) {
+async function recordTrackOutcome(trx, ref, kind, covering, technicianId) {
   await recordAuditEvent({
     actor_type: 'system',
     action: covering ? `track.one_text_per_day.${kind}` : DELIVERED_ACTION,
@@ -288,7 +292,7 @@ async function recordTrackOutcome(trx, ref, kind, covering) {
     resource_id: ref.id,
     metadata: {
       kind, customer_id: ref.customer_id, property_id: ref.property_id, day: ref.day,
-      technician_id: ref.technician_id || null,
+      technician_id: technicianId || null,
       ...(covering ? { covered_by_scheduled_service_id: covering.id } : {}),
     },
     trx,
@@ -302,7 +306,8 @@ async function lockTrackDay(trx, ref, kind) {
 
 /**
  * Run a tracker text's sender `sendFn` (returns the sender's result) once per
- * customer, address, technician and day. With the gate on and a saved address,
+ * customer, address, technician and day (`technicianId`: the person the text names; the
+ * scheduled technician when not given). With the gate on and a saved address,
  * the check and the send happen under one advisory lock, so a second tap waits
  * for the first send to finish and then sees its "delivered" row. A sender that
  * did not return success leaves no row, so the next tap sends. Returns the
@@ -310,7 +315,7 @@ async function lockTrackDay(trx, ref, kind) {
  * stamping the guard and writing an audit row. Gate off, no saved address, or a
  * failure before the send: the sender runs unlocked, as without the rule.
  */
-async function sendTrackTextOnce(svc, kind, sendFn, { fence = null } = {}) {
+async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId = null } = {}) {
   let applies = false;
   try {
     applies = Boolean(TRACK_TEXTS[kind] && svc && svc.property_id && oneTextPerCustomerDayLive());
@@ -330,15 +335,16 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null } = {}) {
       const ref = await loadRef(trx, svc.id);
       if (!ref) return send();
       await lockTrackDay(trx, ref, kind);
-      const covering = await deliveredSibling(trx, ref, kind);
+      const named = technicianId || ref.technician_id;
+      const covering = await deliveredSibling(trx, ref, kind, named);
       if (covering) {
         await stampTrackGuard(kind, fence);
-        await recordTrackOutcome(trx, ref, kind, covering);
+        await recordTrackOutcome(trx, ref, kind, covering, named);
         logger.info(`[one-text-per-day] ${kind} text for ${ref.id} covered by ${covering.id} (delivered text, same customer, address, technician, day)`);
         return COVERED_BY_DAY;
       }
       const result = await send();
-      if (result && result.success === true) await recordTrackOutcome(trx, ref, kind, null);
+      if (result && result.success === true) await recordTrackOutcome(trx, ref, kind, null, named);
       return result;
     });
   } catch (err) {

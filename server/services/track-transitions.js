@@ -512,7 +512,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
           notificationEventKey: enRouteNotificationKey(svc, attemptAt),
           scheduledServiceId: svc.id,
         },
-      ), { fence: attemptFence });
+      ), { fence: attemptFence, technicianId: svc.technician_id });
 
       // undefined = deterministic opt-out (tech_en_route off / SMS disabled,
       // twilio.js sendTechEnRoute) — handled, not a retry (codex r9).
@@ -974,7 +974,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
     const techName = tech?.name || 'Your Waves technician';
     // GATE_ONE_TEXT_PER_CUSTOMER_DAY: once per customer, address, technician and day, from a recorded
     // delivery, not from the claim above (which is stamped before any send). Gate off: just the send.
-    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }));
+    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }), { technicianId: techId });
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);

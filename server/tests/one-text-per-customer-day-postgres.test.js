@@ -979,6 +979,72 @@ postgres('one text per customer, address and day', () => {
       expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
     });
 
+    // The arrived text names the technician who actually arrived (actingTechId), not the scheduled one.
+    const arriveBy = (id, tech) => TrackTransitions.markOnProperty(id, { actingTechId: technicians[tech], allowFutureDate: true });
+    const deliveredRow = (id, kind) => mockPg('audit_log').where({ resource_id: id, action: 'track.one_text_per_day.delivered' })
+      .whereRaw("metadata->>'kind' = ?", [kind]).first();
+
+    test('crew swap: two different people arrive for two visits both assigned to the same technician: two arrived texts', async () => {
+      gateOn();
+      const f = await twoVisits(); // both scheduled to technician 0
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      await arriveBy(f.rows[0].id, 0);
+      await arriveBy(f.rows[1].id, 1);
+      expect(texted(TwilioService.sendTechArrived)).toBe(2);
+      expect(TwilioService.sendTechArrived.mock.calls.map((c) => c[1])).toEqual(['Synthetic Tech 1', 'Synthetic Tech 2']);
+      expect((await deliveredRow(f.rows[0].id, 'arrived')).metadata.technician_id).toBe(technicians[0]);
+      expect((await deliveredRow(f.rows[1].id, 'arrived')).metadata.technician_id).toBe(technicians[1]);
+    });
+
+    test('the same person arrives for both visits although the second is assigned to someone else: one arrived text', async () => {
+      gateOn();
+      const f = await fixture({ date: etDateString(), specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control', tech: 0 },
+        { start: '10:00', end: '11:00', name: 'Lawn Care', tech: 1 },
+      ] });
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      await arriveBy(f.rows[0].id, 0);
+      await arriveBy(f.rows[1].id, 0);
+      expect(texted(TwilioService.sendTechArrived)).toBe(1);
+      expect(await auditFor(f.rows[1].id, 'track.one_text_per_day.arrived')).toHaveLength(1);
+    });
+
+    test('the first visit is reassigned after its text was delivered: the comparison uses the recorded technician', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      await arriveBy(f.rows[0].id, 0);
+      expect(texted(TwilioService.sendTechArrived)).toBe(1);
+      await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ technician_id: technicians[1] });
+      // technician 1 now arrives for the second visit: the delivered text named technician 0, so this person is texted
+      await arriveBy(f.rows[1].id, 1);
+      expect(texted(TwilioService.sendTechArrived)).toBe(2);
+    });
+
+    test('the first visit is reassigned after its text was delivered: the same recorded person on the second visit is still covered', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      await enRoute(f.rows[1].id);
+      await arriveBy(f.rows[0].id, 0);
+      await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ technician_id: technicians[1] });
+      await arriveBy(f.rows[1].id, 0);
+      expect(texted(TwilioService.sendTechArrived)).toBe(1);
+    });
+
+    test('on the way names the scheduled technician: recorded on the delivered row, and a reassignment of the first visit does not change the comparison', async () => {
+      gateOn();
+      const f = await twoVisits();
+      await enRoute(f.rows[0].id);
+      expect((await deliveredRow(f.rows[0].id, 'en_route')).metadata.technician_id).toBe(technicians[0]);
+      await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ technician_id: technicians[1] });
+      await enRoute(f.rows[1].id); // scheduled to technician 0, the person the delivered text named
+      expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+    });
+
     test('gate on: a cancelled sibling that was texted does not cover the live visit', async () => {
       gateOn();
       const f = await fixture({ date: etDateString(), specs: [
