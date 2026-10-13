@@ -1622,6 +1622,25 @@ const REGISTRY = {
       if (mergedDay) return mergedDay;
       return contactSlotStillAuthorized(meta, 'notice-contact');
     },
+    // A queued MERGED day reminder re-validates its day at the true provider boundary (run by twilio.js
+    // after the executor's and the pipeline's own awaits), not only at the scheduler's early recheck: a
+    // sibling cancelled, moved or held in between stops the frozen text. Any other row of this entry
+    // registers nothing, so its replay is unchanged. A day proven changed is terminal; a day that could
+    // not be read stays retryable (the executor's bounded retry).
+    providerPreSendCheck(meta) {
+      if (!meta || !Array.isArray(meta.rendered_day_members)) return undefined;
+      return async () => {
+        const again = await require('../one-text-per-day').recheckMergedDay(meta);
+        if (!again) return { ok: true };
+        const retryable = again.retryable === true;
+        return {
+          ok: false,
+          code: retryable ? 'MERGED_DAY_CHECK_FAILED_AT_BOUNDARY' : 'MERGED_DAY_CHANGED_AT_BOUNDARY',
+          reason: again.reason || 'merged-day-changed',
+          ...(retryable ? { retryable: true } : {}),
+        };
+      };
+    },
   },
 
   // The report text to an on-location contact (GATE_CONTACT_REPORT_TEXT,

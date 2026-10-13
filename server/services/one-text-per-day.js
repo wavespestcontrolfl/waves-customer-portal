@@ -23,15 +23,27 @@
  *    the sender returned success. Coverage needs that row from a sibling of the
  *    same technician, still live on the same day.
  *
+ * PRINCIPLES (every rule below follows from these):
+ *  - Proof of delivery is durable and written WITH the send: a tracker "delivered" row is written
+ *    as a critical write in the send's own transaction, and re-written outside it if that failed.
+ *    Without proof the NEXT sibling sends (a duplicate is possible); THIS visit never sends twice.
+ *  - "Could not read" is never treated as "not eligible" or "already told". A render that cannot
+ *    read its day sends the sender's own single-visit reminder and closes nothing. A live send
+ *    that cannot validate its merged day is held and re-rendered on the next scan. A queued copy
+ *    that cannot validate its day is retried (bounded); only a day proven changed is dropped.
+ *  - Every named member is covered, and only named members are covered: a merged text names only
+ *    members that have a live reminder row, and closure covers exactly those named.
+ *
  * Every read or write error fails OPEN toward the customer being informed: the
  * text goes out as it does with the gate off.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
-const { recordAuditEvent } = require('./audit-log');
+const auditLog = require('./audit-log');
 const { oneTextPerCustomerDayLive } = require('../config/feature-gates');
 const { heldVisitSubquery } = require('./street-level-hold');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 
 const REMINDER_TIER_COLUMNS = {
   '72h': [['reminder_72h_sent', 'reminder_72h_sent_at']],
@@ -75,7 +87,7 @@ async function loadRef(conn, serviceId) {
 /**
  * The MEMBERS a merged day reminder may name: every service of the reference
  * service's text day (the reference included) that its OWN single-visit reminder
- * would be allowed to send for, each with its live reminder row when it has one.
+ * would be allowed to send for, each with its live reminder row.
  * Empty when the reference has no saved property: the rule does not apply and
  * every row keeps its own text, as before.
  *
@@ -85,8 +97,10 @@ async function loadRef(conn, serviceId) {
  *    REMINDER_BLOCKING_STATUSES in appointment-reminders.js, the scan's live-status guard;
  *  - a real window (not a windowless pre-closed 08:00 placeholder): the scan's
  *    `windows_preclosed = false` and buildMergedServiceLabel's placeholder rule;
- *  - a registered reminder is past its confirmation (`confirmation_sent`): the scan only
- *    reads rows with `confirmation_sent = true`;
+ *  - a live reminder row, past its confirmation (`confirmation_sent`): the scan only reads
+ *    rows with `confirmation_sent = true`. A service with no reminder row yet (the self-heal
+ *    sweep has not armed it) is NOT a member: it could not be covered, so it is not named, and
+ *    it sends its own reminder once armed;
  *  - no live `move_hold_until` on its reminder row: the scan's own WHERE and the
  *    send-time guard visit-groups appointmentSendHeld (holdLive);
  *  - not a street-level address hold awaiting the office confirm
@@ -101,15 +115,15 @@ async function loadDayRows(conn, serviceId) {
   const ref = await loadRef(conn, serviceId);
   if (!ref || !ref.property_id) return [];
   const rows = await conn('scheduled_services as ss')
-    .leftJoin('appointment_reminders as ar', function liveReminderRow() {
+    .join('appointment_reminders as ar', function liveReminderRow() {
       this.on('ar.scheduled_service_id', 'ss.id').andOn('ar.cancelled', conn.raw('false'));
     })
     .where({ 'ss.customer_id': ref.customer_id, 'ss.property_id': ref.property_id })
     .whereRaw('ss.scheduled_date between ?::date - 1 and ?::date + 1', [ref.day, ref.day])
     .whereIn('ss.status', SENDABLE_STATUSES)
     .whereNotNull('ss.window_start')
-    .where(function confirmed() { this.whereNull('ar.id').orWhere('ar.confirmation_sent', true); })
-    .where(function notPreclosed() { this.whereNull('ar.id').orWhere('ar.windows_preclosed', false); })
+    .where('ar.confirmation_sent', true)
+    .where('ar.windows_preclosed', false)
     .where(function notMoveHeld() { this.whereNull('ar.move_hold_until').orWhere('ar.move_hold_until', '<', new Date()); })
     .whereNotExists(function notAddressHeld() { heldVisitSubquery(this, 'ss'); })
     .orderBy('ss.window_start', 'asc')
@@ -163,31 +177,48 @@ function renderedDayToken(rows) {
  * a token that fails here. [] with the gate off or on any error (fail closed for this send).
  */
 async function dayArrivalCandidates(serviceId, renderedDay) {
+  const verdict = await mergedDayVerdict(serviceId, renderedDay);
+  return verdict.state === 'valid' ? [verdict.earliest] : [];
+}
+
+/**
+ * The merged-day check with "could not read" kept apart from "changed":
+ *   { state: 'valid', earliest }  the token is a current rendering of this service's day
+ *   { state: 'changed' }          the day is proven different (or the gate is off): terminal
+ *   { state: 'unreadable' }       the day could not be read: never a verdict on the day
+ * dayArrivalCandidates (the live send boundary) holds the send for both non-valid states and the
+ * next scan re-renders; recheckMergedDay (a queued copy) retries 'unreadable' and drops only
+ * 'changed'.
+ */
+async function mergedDayVerdict(serviceId, renderedDay) {
   try {
-    if (!Array.isArray(renderedDay) || !oneTextPerCustomerDayLive()) return [];
+    if (!Array.isArray(renderedDay) || !oneTextPerCustomerDayLive()) return { state: 'changed' };
     const rendered = renderedDay.map(String).sort();
-    if (rendered.length < 2 || !rendered.some((t) => t.startsWith(`${serviceId}@`))) return [];
+    if (rendered.length < 2 || !rendered.some((t) => t.startsWith(`${serviceId}@`))) return { state: 'changed' };
     const rows = await loadDayRows(db, serviceId);
     const live = renderedDayToken(rows).sort();
     const same = live.length === rendered.length && live.every((t, i) => t === rendered[i]);
     const earliest = same ? earliestArrivalMs(rows) : null;
-    return earliest === null ? [] : [earliest];
-  } catch {
-    return [];
+    return earliest === null ? { state: 'changed' } : { state: 'valid', earliest };
+  } catch (err) {
+    logger.warn(`[one-text-per-day] merged day for ${serviceId} could not be read (${err.code || err.name || 'error'}): not treated as changed`);
+    return { state: 'unreadable' };
   }
 }
 
 /**
  * Re-check for a merged day reminder that was frozen into the deferred-contact queue (a
- * partial fan-out held at 20:00; deferred-replay-registry appointment_notice_contact_deferred).
- * The queued row carries the token and the slot it was rendered with. Null = not a merged
- * reminder, or still valid (the same day validator as the live send); otherwise the ineligible
- * verdict, so the frozen text is never replayed for a day that changed.
+ * partial fan-out held at 20:00; deferred-replay-registry appointment_notice_contact_deferred),
+ * run early by the executor and again at the provider boundary. The queued row carries the
+ * token and the slot it was rendered with. Null = not a merged reminder, or still valid (the
+ * same validator as the live send). A day proven changed is the terminal verdict; a day that
+ * could not be read is retryable (the executor's bounded retry), never a drop.
  */
 async function recheckMergedDay(meta) {
   if (!meta || !Array.isArray(meta.rendered_day_members)) return null;
-  const accepted = await dayArrivalCandidates(meta.scheduled_service_id, meta.rendered_day_members);
-  return accepted.includes(Number(meta.rendered_slot_ms)) ? null : { eligible: false, reason: 'merged-day-changed' };
+  const verdict = await mergedDayVerdict(meta.scheduled_service_id, meta.rendered_day_members);
+  if (verdict.state === 'unreadable') return { eligible: false, retryable: true, reason: 'merged-day-unreadable' };
+  return verdict.state === 'valid' && verdict.earliest === Number(meta.rendered_slot_ms) ? null : { eligible: false, reason: 'merged-day-changed' };
 }
 
 // The row is still on the reminder time the text quoted for it.
@@ -206,7 +237,7 @@ async function closeSiblingTiers(m, columns, tier, sender) {
   if (!Object.keys(patch).length) return 0;
   const closed = await query.update(patch);
   if (closed > 0) {
-    await recordAuditEvent({
+    await auditLog.recordAuditEvent({
       actor_type: 'system',
       action: 'reminder.one_text_per_day.covered',
       resource_type: 'scheduled_service',
@@ -275,7 +306,9 @@ async function deliveredSibling(trx, ref, kind, technicianId) {
     .whereRaw("al.metadata->>'day' = ?", [ref.day])
     .where({ 'sib.customer_id': ref.customer_id, 'sib.property_id': ref.property_id })
     .whereNot('sib.id', ref.id)
-    .whereNotIn('sib.status', ['cancelled', 'skipped', 'rescheduled'])
+    // A visit that did not happen (cancelled, skipped, no-show, awaiting re-placement) told the customer
+    // nothing about THIS service: the canonical non-performed list. A completed visit still covers.
+    .whereNotIn('sib.status', RETAINED_HISTORY_STATUSES)
     .whereIn('sib.track_state', spec.states)
     .whereRaw('sib.scheduled_date between ?::date - 1 and ?::date + 1', [ref.day, ref.day])
     .select('sib.id', 'sib.customer_id', 'sib.property_id',
@@ -284,8 +317,9 @@ async function deliveredSibling(trx, ref, kind, technicianId) {
   return rows.find((r) => sameTextDay(ref, r) && String(r.delivered_technician_id || '') === String(technicianId || '')) || null;
 }
 
-async function recordTrackOutcome(trx, ref, kind, covering, technicianId) {
-  await recordAuditEvent({
+async function recordTrackOutcome(trx, ref, kind, covering, technicianId, { critical = false } = {}) {
+  await auditLog.recordAuditEvent({
+    critical,
     actor_type: 'system',
     action: covering ? `track.one_text_per_day.${kind}` : DELIVERED_ACTION,
     resource_type: 'scheduled_service',
@@ -323,7 +357,7 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
     applies = false;
   }
   if (!applies) return sendFn();
-  const state = { sending: false, done: false, result: null };
+  const state = { sending: false, done: false, result: null, proof: null };
   const send = async () => {
     state.sending = true;
     state.result = await sendFn();
@@ -344,16 +378,33 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
         return COVERED_BY_DAY;
       }
       const result = await send();
-      if (result && result.success === true) await recordTrackOutcome(trx, ref, kind, null, named);
+      state.proof = result && result.success === true ? { ref, named } : null;
+      // CRITICAL write: a database error must surface here, not be swallowed (the row is the only proof).
+      if (state.proof) await recordTrackOutcome(trx, ref, kind, null, named, { critical: true });
       return result;
     });
   } catch (err) {
     // The sender itself threw: its caller handles that, as without the rule.
     if (state.sending && !state.done) throw err;
-    logger.error(`[one-text-per-day] ${kind} once-per-day check failed for ${svc.id} (sent as usual): ${err.message}`);
-    // Bookkeeping failed after a real send: never send a second one.
-    return state.sending ? state.result : sendFn();
+    logger.error(`[one-text-per-day] ${kind} once-per-day bookkeeping failed for ${svc.id}: ${err.message}`);
+    // Bookkeeping failed AFTER a real send: never send a second one for this visit, and keep the proof.
+    if (state.sending) return rescueDeliveryProof(state, kind);
+    return sendFn();
   }
+}
+
+// The text is already out but its proof row did not commit (the insert failed, or the transaction
+// did): write it again outside that transaction. If that also fails, say so loudly: this visit's
+// text stands as delivered, and the NEXT same-day sibling will send (a possible duplicate, never a
+// silence).
+async function rescueDeliveryProof(state, kind) {
+  if (!state.proof) return state.result;
+  try {
+    await recordTrackOutcome(null, state.proof.ref, kind, null, state.proof.named, { critical: true });
+  } catch (err) {
+    logger.error(`[one-text-per-day] DELIVERY PROOF NOT RECORDED for ${kind} text of ${state.proof.ref.id} (${err.code || err.name || 'error'}): the next same-day sibling will send`);
+  }
+  return state.result;
 }
 
 module.exports = {

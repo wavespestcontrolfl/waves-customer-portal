@@ -16,8 +16,18 @@
  * reminders and markEnRoute / markOnProperty for the tracker texts, over real
  * scheduled_services / appointment_reminders rows.
  */
+// mockDb.failDayRead makes the merged-day read fail (loadDayRows builds its join predicate with raw('false')).
+const mockDb = { failDayRead: false };
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
-  get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
+  get: (_, key) => {
+    if (key === 'raw' && mockDb.failDayRead) {
+      return (sql, ...rest) => {
+        if (sql === 'false') throw new Error('synthetic read failure');
+        return mockPg.raw(sql, ...rest);
+      };
+    }
+    return typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key];
+  },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // Stub mode (default): the send boundary is a stub. Real-boundary mode: the REAL sendCustomerMessage runs
@@ -47,13 +57,24 @@ jest.mock('../services/tech-status', () => ({
   setTechJobStatus: jest.fn(async () => {}),
   clearTechCurrentJob: jest.fn(async () => {}),
 }));
-// No email provider call can happen: the email legs are stubs too.
-jest.mock('../services/appointment-email', () => ({
-  sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
-  sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
-  sendAppointmentNoShowEmail: jest.fn(async () => ({ ok: true })),
-  sendTechArrivedEmail: jest.fn(async () => ({ ok: true })),
-  sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
+// Email legs: stub mode (default) replaces the five senders. Real-email mode runs the REAL appointment-email
+// senders (recipient resolution, sendTemplate and its moveHoldLive guard) and stubs only the provider call
+// (EmailTemplateLibrary.sendTemplate, below), so nothing can reach a real mailbox.
+const mockEmail = { real: false };
+jest.mock('../services/appointment-email', () => {
+  const actual = jest.requireActual('../services/appointment-email');
+  const names = ['sendAppointmentConfirmationEmail', 'sendAppointmentReminderEmail', 'sendAppointmentNoShowEmail', 'sendTechArrivedEmail', 'sendTechEnRouteEmail'];
+  const stubs = {};
+  for (const name of names) stubs[name] = jest.fn(async (...args) => (mockEmail.real ? actual[name](...args) : { ok: true }));
+  return { ...actual, ...stubs };
+});
+// The library's dispatch contract: onQueued resolving false aborts before the provider call.
+jest.mock('../services/email-template-library', () => ({
+  ...jest.requireActual('../services/email-template-library'),
+  sendTemplate: jest.fn(async (opts) => {
+    if (typeof opts.onQueued === 'function' && (await opts.onQueued()) === false) return { aborted: true };
+    return { sent: true, message: { provider_message_id: 'stub-email' } };
+  }),
 }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn(async () => null) }));
 jest.mock('../sockets', () => ({ getIo: () => null }));
@@ -82,6 +103,7 @@ jest.setTimeout(120000);
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const TwilioService = require('../services/twilio');
+const EmailTemplateLibrary = require('../services/email-template-library');
 const { gates } = require('../config/feature-gates');
 
 postgres('one text per customer, address and day', () => {
@@ -116,6 +138,8 @@ postgres('one text per customer, address and day', () => {
   });
 
   afterEach(() => {
+    mockDb.failDayRead = false;
+    mockEmail.real = false;
     jest.useRealTimers();
     delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
     gates.visitGroups = false;
@@ -127,6 +151,7 @@ postgres('one text per customer, address and day', () => {
     if (ids.length) {
       await mockPg('audit_log').whereIn('resource_id', ids).del();
       await mockPg('messaging_audit_log').whereIn('customer_id', created.customers).del();
+      await mockPg('customer_interactions').whereIn('customer_id', created.customers).del().catch(() => {});
       await mockPg('sms_log').whereIn('customer_id', created.customers).del().catch(() => {});
       await mockPg('short_codes').whereIn('entity_id', ids).del();
       await mockPg('scheduled_services').whereIn('id', ids).update({ visit_id: null });
@@ -714,6 +739,376 @@ postgres('one text per customer, address and day', () => {
     });
   });
 
+  // The rendered-day token (the members a merged reminder named, each at its rendered arrival) must reach the
+  // day validator at EVERY provider boundary. The spy sits on the one guard both the SMS and the email boundary
+  // call (visit-groups appointmentSendHeld), so a hop that drops the token fails here whatever the hop is.
+  describe('the rendered-day token reaches every provider boundary (real SMS and email guards, only provider calls stubbed)', () => {
+    const vg = require('../services/visit-groups');
+    let guard;
+    let lastSid;
+    const providerCalls = (phone) => TwilioService.sendSMS.mock.calls.filter((c) => c[0] === phone);
+    const tokenCalls = (serviceId) => guard.mock.calls.filter((c) => String(c[0]) === String(serviceId) && Array.isArray(c[2]));
+    const plainCalls = (serviceId) => guard.mock.calls.filter((c) => String(c[0]) === String(serviceId) && c[2] === undefined);
+    const emailsFor = (customerId) => EmailTemplateLibrary.sendTemplate.mock.calls.map((c) => c[0]).filter((o) => o.recipientId === customerId);
+    const idsOf = (token) => token.map((t) => t.split('@')[0]).sort();
+    const setChannel = (customerId, channel) => mockPg('notification_prefs').insert({ customer_id: customerId, service_reminder_24h_channel: channel });
+    const failNextSms = (beforeFail) => TwilioService.sendSMS.mockImplementationOnce(async () => {
+      if (beforeFail) await beforeFail();
+      return { success: false, error: 'stub provider failure' };
+    });
+
+    beforeEach(() => {
+      mockBoundary.real = true;
+      mockEmail.real = true;
+      guard = jest.spyOn(vg, 'appointmentSendHeld');
+      TwilioService.sendSMS.mockImplementation(async () => {
+        lastSid = `SM${randomUUID().replaceAll('-', '')}`;
+        return { success: true, sid: lastSid, deliveryOutcome: 'accepted' };
+      });
+    });
+    afterEach(() => {
+      guard.mockRestore();
+      mockBoundary.real = false;
+      mockEmail.real = false;
+      mockBoundary.before = null;
+    });
+
+    const armedPair = (date) => fixture({ date, specs: [
+      { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+      { start: '10:00', end: '11:00', name: 'Lawn Care' },
+    ] });
+    // The 09:00 service was already told; the 10:30 one is added later and is the SENDER of the merged reminder.
+    const laterSender = async (date) => {
+      const f = await fixture({ date, specs: [{ start: '09:00', end: '10:00', name: 'Quarterly Pest Control' }] });
+      await mockPg('appointment_reminders').where({ scheduled_service_id: f.rows[0].id }).update({ reminder_24h_sent: true });
+      const added = await addService(f, { start: '10:30', end: '11:30', name: 'Mosquito Control' });
+      return { f, added };
+    };
+
+    test('SMS: the merged text reaches the guard with the token', async () => {
+      gateOn();
+      const f = await armedPair(nextDate());
+      await runReminders(f.date);
+      expect(providerCalls(f.phone)).toHaveLength(1);
+      const calls = tokenCalls(f.rows[0].id);
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      expect(idsOf(calls[0][2])).toEqual(f.rows.map((r) => r.id).sort());
+      expect(plainCalls(f.rows[0].id)).toHaveLength(0);
+    });
+
+    test('reminder email: the merged email reaches the guard with the token, at both guard calls', async () => {
+      gateOn();
+      const f = await armedPair(nextDate());
+      await setChannel(f.customerId, 'email');
+      await runReminders(f.date);
+      expect(providerCalls(f.phone)).toHaveLength(0);
+      const emails = emailsFor(f.customerId);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+      expect(emails[0].payload.service_type).toMatch(/Lawn Care/);
+      const calls = tokenCalls(f.rows[0].id);
+      expect(calls.length).toBeGreaterThanOrEqual(2); // before the provider call and inside the library's onQueued
+      expect(plainCalls(f.rows[0].id)).toHaveLength(0);
+      expect(idsOf(calls[0][2])).toEqual(f.rows.map((r) => r.id).sort());
+    });
+
+    test('night-skip email: outside the send window a both-channel reminder emails the merged day with the token', async () => {
+      gateOn();
+      const f = await armedPair(nextDate());
+      await setChannel(f.customerId, 'both');
+      const evening = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${f.date}T12:00:00`), -1))}T21:00:00`);
+      const windowWasOn = gates.smsSendWindow;
+      gates.smsSendWindow = true; // the 8AM-8PM ET send window is what sends the notice down the night-skip email path
+      try {
+        await runReminders(f.date, evening);
+      } finally {
+        gates.smsSendWindow = windowWasOn;
+      }
+      expect(providerCalls(f.phone)).toHaveLength(0);
+      const emails = emailsFor(f.customerId);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Lawn Care/);
+      expect(tokenCalls(f.rows[0].id).length).toBeGreaterThanOrEqual(2);
+      expect(plainCalls(f.rows[0].id)).toHaveLength(0);
+    });
+
+    test('SMS-failure email fallback (i): nothing changed, the fallback email goes with the merged label and the token', async () => {
+      gateOn();
+      const f = await armedPair(nextDate());
+      failNextSms();
+      await runReminders(f.date);
+      expect(providerCalls(f.phone)).toHaveLength(1); // the one failed text
+      const emails = emailsFor(f.customerId);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+      expect(emails[0].payload.service_type).toMatch(/Lawn Care/);
+      expect(emails[0].payload.appointment_when).toMatch(/9:00 AM/);
+      // the SMS attempt and the email (two guard calls) all carried the token
+      expect(tokenCalls(f.rows[0].id).length).toBeGreaterThanOrEqual(3);
+      expect(plainCalls(f.rows[0].id)).toHaveLength(0);
+      // delivered by email: the other service is covered
+      expect((await reminderOf(f.rows[1].id)).reminder_24h_sent).toBe(true);
+      expect(await auditFor(f.rows[1].id, 'reminder.one_text_per_day.covered')).toHaveLength(1);
+    });
+
+    test('SMS-failure email fallback (ii): the other service is cancelled before the fallback, so the email is held and nothing is sent', async () => {
+      gateOn();
+      const f = await armedPair(nextDate());
+      failNextSms(() => mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' }));
+      await runReminders(f.date);
+      expect(emailsFor(f.customerId)).toHaveLength(0);
+      expect((await reminderOf(f.rows[0].id)).reminder_24h_sent).toBe(false);
+      // the next scan re-renders: a single-visit reminder for the remaining service, by text
+      await runReminders(f.date);
+      const calls = providerCalls(f.phone);
+      expect(calls).toHaveLength(2);
+      expect(calls[1][1]).toMatch(/Pest Control/);
+      expect(calls[1][1]).not.toMatch(/Lawn Care/);
+      expect(emailsFor(f.customerId)).toHaveLength(0);
+    });
+
+    test('SMS-failure email fallback (iii): the later row as sender quotes the earliest time and its fallback email is NOT held', async () => {
+      gateOn();
+      const { f, added } = await laterSender(nextDate());
+      failNextSms();
+      await runReminders(f.date);
+      const emails = emailsFor(f.customerId);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+      expect(emails[0].payload.service_type).toMatch(/Mosquito/);
+      expect(emails[0].payload.appointment_when).toMatch(/9:00 AM/);
+      expect(tokenCalls(added.id).length).toBeGreaterThanOrEqual(3);
+      expect(plainCalls(added.id)).toHaveLength(0);
+      expect((await reminderOf(added.id)).reminder_24h_sent).toBe(true);
+    });
+
+    test('bounced text: the email for a merged text that bounced is an ordinary single-visit email (own label, own time, no token)', async () => {
+      gateOn();
+      const f = await armedPair(nextDate());
+      await runReminders(f.date);
+      expect(providerCalls(f.phone)).toHaveLength(1);
+      guard.mockClear();
+      EmailTemplateLibrary.sendTemplate.mockClear();
+      freezeNow(dayBefore(f.date));
+      await AppointmentReminders.handleUndeliveredSms({ sid: lastSid, status: 'undelivered', errorCode: '30003', to: f.phone });
+      jest.useRealTimers();
+      const emails = emailsFor(f.customerId);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Pest Control/);
+      expect(emails[0].payload.service_type).not.toMatch(/Lawn Care/);
+      expect(guard.mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(guard.mock.calls.every((c) => c[2] === undefined)).toBe(true);
+    });
+
+    test('deferred replay: a queued copy carries the token and replays only while the day validator accepts it', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      gateOn();
+      const f = await armedPair(nextDate());
+      const { loadDayRows, renderedDayToken } = require('../services/one-text-per-day');
+      const token = renderedDayToken(await loadDayRows(mockPg, f.rows[0].id));
+      const ms = parseETDateTime(`${f.date}T09:00:00`).getTime();
+      const customer = await mockPg('customers').where({ id: f.customerId }).first();
+      await AppointmentReminders._internals.queueHeldNoticeContacts({
+        customer,
+        heldContacts: [{ contact: { phone: '+19415550123', role: 'service_contact' }, body: 'Synthetic held text', nextAllowedAt: new Date(Date.now() + 3600e3) }],
+        messageType: 'reminder_72h',
+        purpose: 'appointment_reminder_72h',
+        metaExtra: { scheduled_service_id: f.rows[0].id, rendered_day_members: token, rendered_slot_ms: ms, templateKey: 'reminder_72h' },
+      });
+      const queued = await mockPg('sms_log').where({ customer_id: f.customerId, status: 'scheduled' }).first();
+      const meta = typeof queued.metadata === 'string' ? JSON.parse(queued.metadata) : queued.metadata;
+      expect(meta.rendered_day_members).toEqual(token);
+      expect(meta.rendered_slot_ms).toBe(ms);
+      const entry = 'appointment_notice_contact_deferred';
+      const valid = await recheckDeferredReplay(entry, { ...meta, customer_id: f.customerId, to_phone: queued.to_phone });
+      expect(valid && valid.reason).not.toBe('merged-day-changed');
+      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
+      const stale = await recheckDeferredReplay(entry, { ...meta, customer_id: f.customerId, to_phone: queued.to_phone });
+      expect(stale).toMatchObject({ eligible: false, reason: 'merged-day-changed' });
+    });
+  });
+
+  describe('named = covered (members, technicians)', () => {
+    // A service with no reminder row yet (the self-heal sweep has not armed it) is not a member of the
+    // merged day: it is not named, so it is not closed, and it sends its own reminder once armed.
+    test('a service without a reminder row is not named; after the self-heal sweep arms it, it sends its own reminder (each named once)', async () => {
+      gateOn();
+      const f = await fixture({ date: nextDate(), specs: [{ start: '09:00', end: '10:00', name: 'Quarterly Pest Control' }] });
+      const second = await addService(f, { start: '10:00', end: '11:00', name: 'Lawn Care' });
+      await mockPg('appointment_reminders').where({ scheduled_service_id: second.id }).del();
+      const heal = jest.spyOn(AppointmentReminders, 'selfHealMissingReminderRows').mockResolvedValueOnce(0);
+      await runReminders(f.date);
+      heal.mockRestore();
+      const first = textsTo(f.phone).map((a) => a.body);
+      expect(first).toHaveLength(1);
+      expect(first[0]).toMatch(/Pest Control/);
+      expect(first[0]).not.toMatch(/Lawn Care/);
+      await runReminders(f.date); // the sweep now arms the second service
+      const bodies = textsTo(f.phone).map((a) => a.body);
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1]).toMatch(/Lawn Care/);
+    });
+
+    test('loadDayRows lists only services that have a live reminder row', async () => {
+      const { loadDayRows } = require('../services/one-text-per-day');
+      const f = await fixture({ date: nextDate(), specs: [{ start: '09:00', end: '10:00', name: 'Quarterly Pest Control' }] });
+      const second = await addService(f, { start: '10:00', end: '11:00', name: 'Lawn Care' });
+      expect((await loadDayRows(mockPg, f.rows[0].id)).map((m) => m.scheduled_service_id).sort()).toEqual([f.rows[0].id, second.id].sort());
+      await mockPg('appointment_reminders').where({ scheduled_service_id: second.id }).del();
+      expect((await loadDayRows(mockPg, f.rows[0].id)).map((m) => m.scheduled_service_id)).toEqual([f.rows[0].id]);
+    });
+
+    const techEmail = async (kind, techs) => {
+      gateOn();
+      mockEmail.real = true;
+      const f = await fixture({ date: nextDate(), armed72: kind === '72h', specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control', tech: techs[0] },
+        { start: '10:00', end: '11:00', name: 'Lawn Care', tech: techs[1] },
+      ] });
+      await mockPg('notification_prefs').insert({ customer_id: f.customerId, [kind === '72h' ? 'service_reminder_72h_channel' : 'service_reminder_24h_channel']: 'email' });
+      await runReminders(f.date, kind === '72h' ? threeDaysBefore(f.date) : dayBefore(f.date));
+      return EmailTemplateLibrary.sendTemplate.mock.calls.map((c) => c[0]).filter((o) => o.recipientId === f.customerId);
+    };
+
+    test.each(['24h', '72h'])('%s reminder email for a merged day with two technicians names no technician', async (kind) => {
+      const emails = await techEmail(kind, [0, 1]);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Lawn Care/);
+      expect(emails[0].payload.technician_name).toBe('');
+    });
+
+    test.each(['24h', '72h'])('%s reminder email for a merged day with one technician names that technician, as today', async (kind) => {
+      const emails = await techEmail(kind, [0, 0]);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].payload.service_type).toMatch(/Lawn Care/);
+      expect(emails[0].payload.technician_name).toBe('Synthetic');
+    });
+  });
+
+  // Read-error table (what each caller of the merged-day validator does when the day cannot be read):
+  //   render (dayReminderRows)         -> null: the sender's own single-visit reminder, nothing closed
+  //   live boundary (appointmentSendHeld via dayArrivalCandidates) -> held; the next scan re-renders
+  //   queued early recheck / boundary recheck (recheckMergedDay)   -> retryable, never a terminal drop
+  describe('queued merged reminders and read errors', () => {
+    const registry = require('../services/messaging/deferred-replay-registry');
+    const { loadDayRows, renderedDayToken } = require('../services/one-text-per-day');
+    const ENTRY = 'appointment_notice_contact_deferred';
+    const queuedMeta = async () => {
+      const f = await armedPair(nextDate());
+      gateOn();
+      const token = renderedDayToken(await loadDayRows(mockPg, f.rows[0].id));
+      const meta = {
+        scheduled_service_id: f.rows[0].id, rendered_day_members: token,
+        rendered_slot_ms: parseETDateTime(`${f.date}T09:00:00`).getTime(), customer_id: f.customerId,
+      };
+      return { f, meta };
+    };
+    const armedPair = (date) => fixture({ date, specs: [
+      { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+      { start: '10:00', end: '11:00', name: 'Lawn Care' },
+    ] });
+    // The day read fails: loadDayRows' join builds its predicate with raw('false'); every other query is untouched.
+    const failDayRead = () => { mockDb.failDayRead = true; return { mockRestore: () => { mockDb.failDayRead = false; } }; };
+
+    test('a merged queued copy registers the provider-boundary recheck; any other queued row registers none', async () => {
+      const { meta } = await queuedMeta();
+      expect(typeof registry.deferredProviderPreSendCheck(ENTRY, meta)).toBe('function');
+      expect(registry.deferredProviderPreSendCheck(ENTRY, { scheduled_service_id: meta.scheduled_service_id })).toBeUndefined();
+    });
+
+    test('a sibling cancelled between the early recheck and the handoff stops the queued text at the boundary (terminal)', async () => {
+      const { f, meta } = await queuedMeta();
+      expect(await registry.recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: true }); // the early recheck passes
+      const boundary = registry.deferredProviderPreSendCheck(ENTRY, meta);
+      expect(await boundary({})).toEqual({ ok: true });
+      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
+      expect(await boundary({})).toMatchObject({ ok: false, code: 'MERGED_DAY_CHANGED_AT_BOUNDARY', reason: 'merged-day-changed' });
+    });
+
+    test('through the scheduler\'s real replay block and the real registry: a sibling changed between the early recheck and the handoff stops the text', async () => {
+      const { f, meta } = await queuedMeta();
+      const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+      const start = source.indexOf('const sendReplay = () => {');
+      const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+      expect(await registry.recheckDeferredReplay(ENTRY, meta)).toMatchObject({ eligible: true }); // the early recheck passes
+      // Stands in for twilio.js dispatch(): after its own awaits it runs the caller's providerPreSendCheck; a not-ok
+      // verdict is a refusal and the provider request is never made.
+      const providerRequest = jest.fn();
+      const sendCustomerMessageAtProvider = jest.fn(async (input) => {
+        await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' }); // changes during those awaits
+        const verdict = await input.providerPreSendCheck({ channel: 'sms', dbi: mockPg });
+        if (!verdict || verdict.ok !== true) return { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
+        providerRequest();
+        return { sent: true };
+      });
+      const result = await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+        msg: { id: 'queue-row', customer_id: f.customerId, to_phone: '+19415550123', message_body: 'Frozen merged reminder', message_type: 'reminder_72h' },
+        claimMeta: { ...meta, entry_point: ENTRY },
+        toPhone: '+19415550123', purpose: 'appointment_reminder', replayConsentBasis: undefined,
+        sendCustomerMessage: sendCustomerMessageAtProvider,
+        dispatchScheduledSms: async (_msg, _meta, send) => send(),
+        SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+        require: () => registry,
+      });
+      expect(sendCustomerMessageAtProvider).toHaveBeenCalledWith(expect.objectContaining({ providerPreSendCheck: expect.any(Function) }));
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ sent: false, code: 'MERGED_DAY_CHANGED_AT_BOUNDARY', retryable: false });
+    });
+
+    test('a day that cannot be read is retryable, not a terminal drop, at the early recheck and at the boundary', async () => {
+      const { meta } = await queuedMeta();
+      const boundary = registry.deferredProviderPreSendCheck(ENTRY, meta);
+      const failing = failDayRead();
+      let early;
+      let late;
+      try {
+        early = await require('../services/one-text-per-day').recheckMergedDay(meta);
+        late = await boundary({});
+      } finally {
+        failing.mockRestore();
+      }
+      expect(early).toEqual({ eligible: false, retryable: true, reason: 'merged-day-unreadable' });
+      expect(late).toMatchObject({ ok: false, retryable: true, code: 'MERGED_DAY_CHECK_FAILED_AT_BOUNDARY' });
+      // and once the database answers again the same copy is valid
+      expect(await require('../services/one-text-per-day').recheckMergedDay(meta)).toBeNull();
+    });
+
+    test('a proven changed day stays terminal (not retryable) at the early recheck', async () => {
+      const { f, meta } = await queuedMeta();
+      await mockPg('scheduled_services').where({ id: f.rows[1].id }).update({ status: 'cancelled' });
+      expect(await registry.recheckDeferredReplay(ENTRY, meta)).toEqual({ eligible: false, reason: 'merged-day-changed' });
+    });
+
+    test('live boundary: a day that cannot be read HOLDS the merged send (nothing goes, nothing is dropped)', async () => {
+      const { f, meta } = await queuedMeta();
+      const vg = require('../services/visit-groups');
+      const failing = failDayRead();
+      let held;
+      try {
+        held = await vg.appointmentSendHeld(f.rows[0].id, meta.rendered_slot_ms, meta.rendered_day_members);
+      } finally {
+        failing.mockRestore();
+      }
+      expect(held).toBe(true);
+      expect(await vg.appointmentSendHeld(f.rows[0].id, meta.rendered_slot_ms, meta.rendered_day_members)).toBe(false);
+    });
+
+    test('render: a day that cannot be read gives the sender its own single-visit reminder and closes nothing', async () => {
+      const f = await armedPair(nextDate());
+      gateOn();
+      const failing = failDayRead();
+      try {
+        await runReminders(f.date);
+      } finally {
+        failing.mockRestore();
+      }
+      const bodies = textsTo(f.phone).map((a) => a.body);
+      // nothing could be read, so nothing is "already told": each service texts for itself, naming only itself
+      expect(bodies).toHaveLength(2);
+      expect(bodies.filter((b) => /Pest Control/.test(b) && /Lawn Care/.test(b))).toHaveLength(0);
+    });
+  });
+
   describe('reminder closure covers only what the text named', () => {
     test('sender moved while the send was in flight: the new day\'s reminders stay armed', async () => {
       gateOn();
@@ -1064,6 +1459,80 @@ postgres('one text per customer, address and day', () => {
       await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ status: 'cancelled' });
       await enRoute(f.rows[1].id);
       expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+    });
+
+    test('gate on: a no-show sibling that was texted does not cover the live visit (its track state stays en_route)', async () => {
+      gateOn();
+      const f = await fixture({ date: etDateString(), specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+      ] });
+      await enRoute(f.rows[0].id);
+      await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ status: 'no_show' });
+      expect((await mockPg('scheduled_services').where({ id: f.rows[0].id }).first('track_state')).track_state).toBe('en_route');
+      await enRoute(f.rows[1].id);
+      expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+    });
+
+    test('gate on: a completed sibling that was texted still covers the live visit', async () => {
+      gateOn();
+      const f = await fixture({ date: etDateString(), specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+      ] });
+      await enRoute(f.rows[0].id);
+      await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ status: 'completed', track_state: 'complete' });
+      await enRoute(f.rows[1].id);
+      expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+    });
+
+    // The proof row is the only evidence a text went out. Outcomes by failure point:
+    //   1. the row's insert inside the send transaction fails: the row is written again outside it; this visit
+    //      does not send twice and the next sibling is covered.
+    //   2. that second write also fails: this visit still does not send twice; the next sibling sends (a
+    //      possible duplicate, never silence).
+    describe('delivery proof write failures', () => {
+      const auditLog = require('../services/audit-log');
+      const failProof = (times) => {
+        const real = auditLog.recordAuditEvent;
+        let left = times;
+        const spy = jest.spyOn(auditLog, 'recordAuditEvent').mockImplementation(async (input) => {
+          if (input.action !== 'track.one_text_per_day.delivered') return real(input);
+          // a non-critical write swallows its own error: model that exactly (a lost row, no throw)
+          if (left > 0) { left -= 1; if (input.critical !== true) return undefined; throw new Error('synthetic audit insert failure'); }
+          return real(input);
+        });
+        return spy;
+      };
+      const pair = () => fixture({ date: etDateString(), specs: [
+        { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
+        { start: '10:00', end: '11:00', name: 'Lawn Care' },
+      ] });
+      const proofRows = (id) => auditFor(id, 'track.one_text_per_day.delivered');
+
+      test('the proof insert fails once: the text went out once, the proof is written again, the next sibling is covered', async () => {
+        gateOn();
+        const spy = failProof(1);
+        const f = await pair();
+        await enRoute(f.rows[0].id);
+        spy.mockRestore();
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+        expect(await proofRows(f.rows[0].id)).toHaveLength(1);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
+      test('the proof cannot be written at all: this visit never sends twice, and the next sibling sends (never silence)', async () => {
+        gateOn();
+        const spy = failProof(2);
+        const f = await pair();
+        await enRoute(f.rows[0].id);
+        spy.mockRestore();
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+        expect(await proofRows(f.rows[0].id)).toHaveLength(0);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
     });
   });
 });

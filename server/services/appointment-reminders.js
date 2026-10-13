@@ -473,9 +473,9 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
 // the email handoff is recorded there as MOVE_HOLD so the notice defers
 // (row unmarked, visit claim released) instead of reading as suppressed.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms', renderedDay }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel, renderedDay });
   if (res?.reason === 'preferences_unavailable') {
     if (smsOutcome) {
       smsOutcome.retryable = true;
@@ -6014,7 +6014,7 @@ AppointmentReminders._test = {
 };
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
-AppointmentReminders._internals = { isLandline };
+AppointmentReminders._internals = { isLandline, queueHeldNoticeContacts };
 
 // Shared with the OTHER booking-confirmation senders (estimate acceptance,
 // call pipeline) so gate-on means link-first copy everywhere, not only for

@@ -473,10 +473,26 @@ async function technicianFirstName(scheduledServiceId) {
   }
 }
 
+// The technician row of a reminder email. A merged day reminder (it carries the rendered-day token,
+// `id@arrival` per member) covers several services: one technician is named only when every member
+// has that same technician; with different (or missing) technicians no one is named, and the
+// template drops its empty Technician row. Any read problem names no one.
+async function reminderTechnicianName(scheduledServiceId, renderedDay) {
+  if (!Array.isArray(renderedDay)) return technicianFirstName(scheduledServiceId);
+  try {
+    const ids = renderedDay.map((t) => String(t).split('@')[0]).filter(Boolean);
+    const rows = await db('scheduled_services').whereIn('id', ids).select('technician_id');
+    const people = new Set(rows.map((r) => r.technician_id || null));
+    return rows.length === ids.length && people.size === 1 ? technicianFirstName(scheduledServiceId) : '';
+  } catch {
+    return '';
+  }
+}
+
 // kind: '72h' | '24h'
 async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null, renderedDay } = {}) {
   const apptTime = toDate(appointmentTime);
-  const techName = await technicianFirstName(scheduledServiceId);
+  const techName = await reminderTechnicianName(scheduledServiceId, renderedDay);
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
