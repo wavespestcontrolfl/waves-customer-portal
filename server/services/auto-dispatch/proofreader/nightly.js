@@ -18,9 +18,10 @@
  * for the next run. A check that broke (the provider, a malformed answer, a
  * read) moves nothing and the run ends completed_with_errors.
  *
- * THE NOTICE. One per visit and placement (dedupe key below), written once: a
- * later run that is still unsure about the same visit writes nothing, a
- * notice a person marked done included. It is raised for an "unknown" a
+ * THE NOTICE. One per visit and placement (dedupe key below), rung once: a
+ * later run that is still unsure about the same visit rings nothing (it
+ * rewrites the text when the proposal changed), a notice a person marked
+ * done included. It is raised for an "unknown" a
  * person can settle from the record (the model was unsure, or part of the
  * record could not be read). A failed model call, or a record that changed
  * while the model read it, raises nothing: the next run asks again. The lane shares the auto-dispatch ring allowance of 24
@@ -188,6 +189,7 @@ function recordPrint(record) {
   // The services at the stop are part of what the model judged (r5).
   hash.update(`${(record.serviceTypes || []).join('|')}\n`);
   for (const row of record.entries) hash.update(`${row.channel}|${row.from}|${row.at}|${row.text}\n`);
+  for (const row of record.unread) hash.update(`unread|${row.channel}|${row.reason}|${row.at || ''}\n`);
   return `${record.entries.length}:${record.unread.length}:${hash.digest('hex')}`;
 }
 
@@ -202,9 +204,11 @@ async function recordStillAsRead(answer, record, { service, conn, proofreader })
   if (!matters) return answer;
   const was = answer.verdict === 'allow' ? { model_verdict: 'allow' } : {};
   const again = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
-  if (recordPrint(again) === recordPrint(record)) return answer;
-  // The second read itself failed: a broken check, not new words (r11).
+  // The second read itself failed: a broken check, not new words (r11). Asked
+  // before the compare: a source already unread for another reason can fail
+  // without changing the print (r13).
   if (readFailed(again)) return { ...answer, verdict: 'unknown', why: 'check_failed', ...was };
+  if (recordPrint(again) === recordPrint(record)) return answer;
   return { ...answer, verdict: 'unknown', why: 'record_changed', ...was };
 }
 
@@ -381,6 +385,12 @@ async function raiseOne(item, { raiseAdminAlert, names, audit, trx }) {
   }, {
     bell: true,
     dedupeKey: item.key,
+    // A later run that holds a DIFFERENT proposal for the same placement
+    // rewrites the standing notice's text, so a person never judges a
+    // proposal that is no longer the one held (Codex #6313 r13). Quietly: no
+    // ring, no slot, and a notice a person marked done stays done.
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
     trx,
     detail: detailFor(item, names),
     metadata: {

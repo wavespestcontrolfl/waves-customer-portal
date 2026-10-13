@@ -149,6 +149,15 @@ describe('checkMove', () => {
     expect(await check(runOf(), proofreader)).toMatchObject({ allowed: false, audit: { why: 'check_failed' }, broke: true });
   });
 
+  test('a source already unread that fails on the second read is a broken check, not an unchanged record', async () => {
+    const run = runOf();
+    const first = { ...RECORD, unread: [{ channel: 'call', reason: 'no_transcript' }] };
+    const proofreader = proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' });
+    proofreader.buildCustomerRecord.mockResolvedValueOnce(first).mockResolvedValueOnce({ ...RECORD, unread: [{ channel: 'call', reason: 'read_failed' }] });
+    expect(await check(run, proofreader)).toMatchObject({ allowed: false, audit: { why: 'check_failed' }, broke: true });
+    expect(run.proofreader.notices.size).toBe(0);
+  });
+
   test('a service changed at the stop while the model read: the allow does not stand', async () => {
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
     proofreader.buildCustomerRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce({ ...RECORD, serviceTypes: ['Lawn Care'] });
@@ -349,8 +358,9 @@ describe('raiseNotices', () => {
       bell: true, dedupeKey: 'auto-dispatch-proofreader:s1:2026-10-20:09:00:t1', link: '/admin/dispatch?tab=schedule&date=2026-10-20&appointment=s1',
       metadata: { scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-10-20', windowStart: '09:00', technicianId: 't1', kind: 'model_unsure', proposedDate: '2026-10-22', proposedWindowStart: '13:00', proposedTechnicianId: 't2' },
     });
-    // Written once: a later run that is still unsure must not reopen a notice a person closed.
-    expect(opts.refreshOnDedupe).toBeUndefined();
+    // A later run with another proposal rewrites the text, and never rings or reopens.
+    expect(opts.refreshOnDedupe).toBe(true);
+    expect(opts.ringOnRefresh()).toBe(false);
     // The visit is read under a row lock, and the notice is written on that same transaction.
     expect(locked).toEqual(['s1']);
     expect(opts.trx.isTrx).toBe(true);
@@ -444,6 +454,10 @@ describe('raiseNotices', () => {
     const state = await unsure({ why: 'model_unsure' });
     notifications.notifyAdmin.mockResolvedValue({ id: 'n1', deduped: true });
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
+    // Its text rewritten for a new proposal, quietly: still no ring and no slot.
+    notifications.notifyAdmin.mockResolvedValue({ id: 'n1', deduped: true, refreshed: true, rung: false });
+    expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
+    expect(state.noticesFailed).toBe(0);
   });
 
   test('every run closes the notices whose visit moved or is no longer open, the check off included', async () => {
