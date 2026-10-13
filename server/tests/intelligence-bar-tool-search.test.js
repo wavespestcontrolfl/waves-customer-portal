@@ -16,11 +16,11 @@ describe('toolSearchWanted', () => {
   afterEach(() => { delete process.env.GATE_IB_TOOL_SEARCH; });
 
   test('follows the gate for a fresh full-access request on the platform path', () => {
-    expect(ToolSearch.toolSearchWanted({}, true, owner)).toBe(false);
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-opus-4-8')).toBe(false);
     process.env.GATE_IB_TOOL_SEARCH = 'true';
-    expect(ToolSearch.toolSearchWanted({}, true, owner)).toBe(true);
-    expect(ToolSearch.toolSearchWanted({}, false, owner)).toBe(false);
-    expect(ToolSearch.toolSearchWanted({}, true, { ...owner, fullAccess: false })).toBe(false);
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-opus-4-8')).toBe(true);
+    expect(ToolSearch.toolSearchWanted({}, false, owner, 'claude-opus-4-8')).toBe(false);
+    expect(ToolSearch.toolSearchWanted({}, true, { ...owner, fullAccess: false }, 'claude-opus-4-8')).toBe(false);
   });
 
   test('a model that thinks by default never uses tool search; the current flagship does', () => {
@@ -30,6 +30,9 @@ describe('toolSearchWanted', () => {
     // Haiku 5.5 thinks by default too, and so does any later family numbered 5+.
     for (const model of ['claude-haiku-5-5', 'claude-haiku-5-5-20270101', 'claude-opus-6', 'claude-sonnet-7-1']) expect(ToolSearch.toolSearchWanted({}, true, owner, model)).toBe(false);
     for (const model of ['claude-haiku-4-5-20251001', 'claude-opus-4-8', 'claude-opus-4-10']) expect(ToolSearch.toolSearchWanted({}, true, owner, model)).toBe(true);
+    // Anthropic's compatibility table: Opus 4.1 and earlier do not take tool search; an unknown id fails closed.
+    for (const model of ['claude-opus-4-1', 'claude-opus-4-1-20250805', 'claude-sonnet-4-20250514', 'claude-3-7-sonnet-latest', 'some-other-model', '']) expect(ToolSearch.toolSearchWanted({}, true, owner, model)).toBe(false);
+    for (const model of ['claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-sonnet-4-6']) expect(ToolSearch.toolSearchWanted({}, true, owner, model)).toBe(true);
     expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-sonnet-5')).toBe(false);
     expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-fable-5-1')).toBe(false);
     expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-sonnet-4-6')).toBe(true);

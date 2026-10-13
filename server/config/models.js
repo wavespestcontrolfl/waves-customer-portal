@@ -138,6 +138,18 @@ function anthropicThinksByDefault(model) {
   return ANTHROPIC_THINKS_BY_DEFAULT_RE.test(id) || ANTHROPIC_THINKING_FLOOR_RE.test(id);
 }
 
+// Does `model` accept Anthropic's tool search tool (tool_search_tool_*_20251119)?
+// The list is the "Model compatibility" table of
+// platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+// (read 2026-10-13): Opus 4.5 and later, Sonnet 4.5 and later, Haiku 4.5 and
+// later, Fable and Mythos; "Claude Opus 4.1 and earlier models don't support
+// the tool search tool." An unknown id is NOT supported (fail closed: the
+// caller keeps its ordinary tool list).
+const ANTHROPIC_TOOL_SEARCH_RE = /^claude-(?:opus|sonnet|haiku)-4-(?:[5-9]|[1-9][0-9])(?![0-9])|^claude-(?:opus|sonnet|haiku)-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+function anthropicSupportsToolSearch(model) {
+  return ANTHROPIC_TOOL_SEARCH_RE.test(String(model || ''));
+}
+
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
@@ -773,6 +785,7 @@ module.exports = {
   anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
   anthropicThinksByDefault,
+  anthropicSupportsToolSearch,
   ANTHROPIC_THINKING_REQUIRED_RE,
   anthropicThinkingAlwaysOn,
   DEEP,

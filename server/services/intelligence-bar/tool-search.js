@@ -48,9 +48,18 @@ const SEARCH_BLOCK_TYPES = new Set(['server_tool_use', 'tool_search_tool_result'
 // MODELS.anthropicThinksByDefault (config/models.js, the list the max_tokens
 // floor already uses); it is read at call time, and a registry mock without it
 // reads as "does not think".
+// The model must accept the tool search tool (MODELS.anthropicSupportsToolSearch:
+// Anthropic's compatibility table; an unknown id is not supported) and must not
+// think by default. Both are read at call time; a registry mock that lacks a
+// predicate reads as "supported" / "does not think".
+function modelTakesToolSearch(model) {
+  const supported = typeof MODELS.anthropicSupportsToolSearch !== 'function' || MODELS.anthropicSupportsToolSearch(model);
+  const thinks = typeof MODELS.anthropicThinksByDefault === 'function' && MODELS.anthropicThinksByDefault(model);
+  return supported && !thinks;
+}
+
 function toolSearchWanted(req, platformEnabled, actionScope, model) {
-  return platformEnabled === true && actionScope.fullAccess === true && !req.ibResumedTask && ibToolSearchLive()
-    && !(typeof MODELS.anthropicThinksByDefault === 'function' && MODELS.anthropicThinksByDefault(model));
+  return platformEnabled === true && actionScope.fullAccess === true && !req.ibResumedTask && ibToolSearchLive() && modelTakesToolSearch(model);
 }
 
 // The system prompt sentence that tells the model how to reach other tools.
