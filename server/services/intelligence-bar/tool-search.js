@@ -82,4 +82,37 @@ function observeServerToolSearches(content, gapCollector) {
   }
 }
 
-module.exports = { toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, SEARCH_LINE, DISCOVER_LINE };
+// The API rejects a tool_reference with no matching definition in `tools`
+// (400 "Tool reference 'x' not found in available tools"). A saved search
+// result, or one from an earlier round, can name a tool the rebuilt list no
+// longer holds (a gate turned off, access changed). Applied to the messages
+// sent on every request: the reference entries naming a tool that is not in
+// `tools` are dropped. The block itself and its server_tool_use stay (an empty
+// tool_references list is a valid "nothing found" result). Returns new objects
+// only where something changed, the same array otherwise; stored messages are
+// never mutated. Calling the removed tool from memory is still refused by the
+// existing guards (allowed(), capability_not_loaded, permission_denied). This
+// code never puts tool_reference content in a client tool_result block, so
+// those are not touched.
+function isStaleSearchResult(block, available) {
+  return block?.type === 'tool_search_tool_result' && Array.isArray(block.content?.tool_references)
+    && block.content.tool_references.some(reference => !available.has(reference?.tool_name));
+}
+
+function withoutMissingReferences(block, available) {
+  return { ...block, content: { ...block.content,
+    tool_references: block.content.tool_references.filter(reference => available.has(reference?.tool_name)) } };
+}
+
+function dropMissingToolReferences(messages, tools) {
+  const available = new Set(tools.map(tool => tool.name));
+  let changed = false;
+  const result = messages.map(message => {
+    if (!Array.isArray(message.content) || !message.content.some(block => isStaleSearchResult(block, available))) return message;
+    changed = true;
+    return { ...message, content: message.content.map(block => (isStaleSearchResult(block, available) ? withoutMissingReferences(block, available) : block)) };
+  });
+  return changed ? result : messages;
+}
+
+module.exports = { dropMissingToolReferences, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, SEARCH_LINE, DISCOVER_LINE };

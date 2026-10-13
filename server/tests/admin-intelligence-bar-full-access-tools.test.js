@@ -68,7 +68,7 @@ const names = list => list.map(t => t.name);
 // The platform path stores the reply payload on the task.
 const repliedText = () => IbTasks.checkpoint.mock.calls.map(call => call[2].response?.response).filter(Boolean).pop();
 
-async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'ok' }], usage: {} }]) {
+async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path = '/query', body: requestBody } = {}) {
   const app = express();
   app.use(express.json());
   app.use('/admin/intelligence-bar', intelligenceRouter);
@@ -78,10 +78,10 @@ async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'o
     mockMessagesCreate.mockReset();
     IbTasks.checkpoint.mockClear();
     for (const turn of turns) mockMessagesCreate.mockResolvedValueOnce(turn);
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/intelligence-bar/query`, {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/intelligence-bar${path}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: 'anything', context }),
+      body: JSON.stringify(requestBody || { prompt: 'anything', context }),
     });
     const body = await res.json();
     expect({ status: res.status, error: body.error, stack: body.stack }).toEqual({ status: 200, error: undefined, stack: undefined });
@@ -206,5 +206,64 @@ describe('GATE_IB_TOOL_SEARCH off', () => {
     ];
     const { requests } = await ask('owner', 'dashboard', turns);
     expect(new Set(names(requests[1].tools)).size).toBe(requests[1].tools.length);
+  });
+});
+
+// A saved search result can name a tool that is gone by the time the task
+// resumes (a gate turned off). The API answers 400 "Tool reference 'x' not
+// found in available tools", so the reference is dropped from what is sent.
+describe('a resumed task whose saved search names a tool that is no longer available', () => {
+  const searchHistory = [
+    { role: 'user', content: [{ type: 'text', text: 'merge the two duplicate records' }] },
+    { role: 'assistant', content: [
+      { type: 'server_tool_use', id: 'srvtoolu_9', name: 'tool_search_tool_bm25', input: { query: 'merge customers' } },
+      { type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_9',
+        content: { type: 'tool_search_tool_search_result', tool_references: [
+          { type: 'tool_reference', tool_name: 'merge_customers' }, { type: 'tool_reference', tool_name: 'get_review_stats' }] } },
+      { type: 'text', text: 'Found them.' },
+    ] },
+  ];
+  const savedTask = () => ({
+    id: '7e1c2f7a-1111-2222-3333-deadbeef0009', state: 'awaiting_approval', session_id: '7e1c2f7a-1111-2222-3333-deadbeef0008',
+    request_key: 'resume-key-0001', runner_token: '7e1c2f7a-1111-2222-3333-deadbeef0007',
+    request: { prompt: 'merge the two duplicate records', context: 'dashboard', pageData: {} },
+    checkpoint: JSON.parse(JSON.stringify(searchHistory)), target: null, response: null,
+  });
+
+  beforeEach(() => {
+    delete process.env.GATE_IB_TOOL_SEARCH; // off at resume: the saved search blocks still keep the shape
+    delete process.env.GATE_IB_MERGE_CUSTOMERS; // merge_customers is no longer available
+    IbTasks.claimResume.mockReset();
+    IbTasks.claimResume.mockResolvedValue({ task: savedTask(), receipts: [] });
+  });
+
+  test('the request goes out without that reference, keeps the other one, and the removed tool is refused', async () => {
+    const turns = [
+      { content: [{ type: 'tool_use', id: 'toolu_m', name: 'merge_customers', input: {} }], usage: {}, stop_reason: 'tool_use' },
+      { content: [{ type: 'text', text: 'Cannot do that.' }], usage: {} },
+    ];
+    const { requests } = await ask('owner', 'dashboard', turns, { path: '/tasks/7e1c2f7a-1111-2222-3333-deadbeef0009/resume', body: { session_id: savedTask().session_id } });
+    const sent = requests[0];
+    expect(names(sent.tools)).not.toContain('merge_customers');
+    expect(names(sent.tools)).toContain('tool_search_tool_bm25');
+    const result = sent.messages.flatMap(m => (Array.isArray(m.content) ? m.content : [])).find(b => b.type === 'tool_search_tool_result');
+    expect(result.content.tool_references).toEqual([{ type: 'tool_reference', tool_name: 'get_review_stats' }]);
+    // Every reference sent names a tool that is in `tools`.
+    const available = new Set(names(sent.tools));
+    for (const request of requests) {
+      for (const message of request.messages) {
+        for (const block of Array.isArray(message.content) ? message.content : []) {
+          if (block.type === 'tool_search_tool_result') for (const ref of block.content.tool_references) expect(available.has(ref.tool_name)).toBe(true);
+        }
+      }
+    }
+    // The paired server_tool_use stays.
+    expect(sent.messages.flatMap(m => (Array.isArray(m.content) ? m.content : [])).some(b => b.type === 'server_tool_use' && b.id === 'srvtoolu_9')).toBe(true);
+    // The stored history was not changed.
+    expect(IbTasks.claimResume).toHaveBeenCalled();
+    // Calling the removed tool from memory is refused by the existing guard, not executed.
+    const refusal = requests[1].messages[requests[1].messages.length - 1].content.find(b => b.type === 'tool_result');
+    expect(refusal.is_error).toBe(true);
+    expect(refusal.content).toMatch(/permission_denied|capability_not_loaded/);
   });
 });

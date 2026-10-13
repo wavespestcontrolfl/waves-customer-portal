@@ -3639,7 +3639,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
-        messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
+        messages: withCacheBreakpoint(ToolSearch.dropMissingToolReferences(finalRound ? finalRoundMessages(currentMessages) : currentMessages, tools)),
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds

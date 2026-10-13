@@ -106,3 +106,45 @@ describe('wire shape', () => {
       .filter(t => t.defer_loading).some(t => t.strict === true));
   });
 });
+
+describe('dropMissingToolReferences', () => {
+  const ref = tool_name => ({ type: 'tool_reference', tool_name });
+  const result = (id, names) => ({ type: 'tool_search_tool_result', tool_use_id: id, content: { type: 'tool_search_tool_search_result', tool_references: names.map(ref) } });
+  const use = id => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'q' } });
+  const tools = names => names.map(name => ({ name }));
+  const history = (...blocks) => [{ role: 'user', content: 'hi' }, { role: 'assistant', content: blocks }];
+
+  test('nothing missing: the same array identity comes back', () => {
+    const messages = history(use('s1'), result('s1', ['a', 'b']));
+    expect(ToolSearch.dropMissingToolReferences(messages, tools(['a', 'b', 'c']))).toBe(messages);
+    const plain = [{ role: 'user', content: 'hi' }];
+    expect(ToolSearch.dropMissingToolReferences(plain, tools(['a']))).toBe(plain);
+  });
+
+  test('one missing reference is removed, the others kept, the server_tool_use stays', () => {
+    const messages = history(use('s1'), result('s1', ['a', 'gone', 'b']), { type: 'text', text: 'ok' });
+    const out = ToolSearch.dropMissingToolReferences(messages, tools(['a', 'b']));
+    expect(out).not.toBe(messages);
+    expect(out[0]).toBe(messages[0]);
+    expect(out[1].content[0]).toBe(messages[1].content[0]);
+    expect(out[1].content[1].content.tool_references).toEqual([ref('a'), ref('b')]);
+    expect(out[1].content[2]).toBe(messages[1].content[2]);
+  });
+
+  test('all missing: the block stays with an empty list', () => {
+    const out = ToolSearch.dropMissingToolReferences(history(use('s1'), result('s1', ['x', 'y'])), tools(['a']));
+    expect(out[1].content[1]).toEqual({ type: 'tool_search_tool_result', tool_use_id: 's1',
+      content: { type: 'tool_search_tool_search_result', tool_references: [] } });
+    expect(out[1].content[0].type).toBe('server_tool_use');
+  });
+
+  test('error results and other blocks are untouched, and the input is not mutated', () => {
+    const error = { type: 'tool_search_tool_result', tool_use_id: 's2', content: { type: 'tool_search_tool_result_error', error_code: 'unavailable' } };
+    const messages = history(use('s1'), result('s1', ['a', 'gone']), error, { type: 'tool_use', id: 'toolu_1', name: 'gone', input: {} });
+    const before = JSON.stringify(messages);
+    const out = ToolSearch.dropMissingToolReferences(messages, tools(['a']));
+    expect(JSON.stringify(messages)).toBe(before);
+    expect(out[1].content[2]).toBe(error);
+    expect(out[1].content[3]).toBe(messages[1].content[3]);
+  });
+});
