@@ -46,9 +46,17 @@ the endpoint returns after any `select a as b`, renamed key in a `.map`, camelCa
 (`autopay-state` returns `pause_reason`, though the column is `autopay_pause_reason`; a key that matches no
 response key withholds nothing). Withholding matches response keys at any depth. Check each key against the
 handler line that builds the response, and add a fixture for it in `ib-admin-read-free-text-shapes.test.js`
-(it fails when a declared key is missing from the fixture or a note value is not withheld). The reviewer owns one duty
-that no tool can prove: when a response has a free-text field, the row must declare it. An undeclared
-field is only scrubbed. Credential query keys in a link (`session`, `sid`, `nonce`, `otp`, `auth_token`,
+(it fails when a declared key is missing from the fixture or a note value is not withheld). **The default is deny (Codex round 10).** On EVERY endpoint a response key whose name looks like free
+text is withheld, declared or not, unless its row declares that key `content`. The name test splits the key into words
+(snake, camel, kebab) and checks them against `FREE_TEXT_WORDS` (`utils/signed-link-redaction.js`, one exported constant):
+note(s), comment(s), reason(s), instruction(s), detail(s), memo(s), remark(s), message(s), description(s), text(s), body,
+summary/summaries, script(s), feedback, explanation(s), directions, special, plus transcript(s), transcription, narrative,
+excerpt and snippet. A string, or an object or array, under such a key is withheld whole; numbers, booleans, null and
+empty text are not. So `content` is an explicit opt-in: it is the only way to return a name-matched key, and a collection
+key such as `scripts` or `lossReasons` needs it too. A `note` declaration adds a key the name test would not catch.
+Every catalog row has a verified response fixture in `ib-admin-read-free-text-shapes.test.js`. A free-text field whose
+name is outside the list (a label, an address line, a file name) still depends on review. The reviewer owns one duty
+that no tool can prove: when a response has a free-text field, the row must declare it. Credential query keys in a link (`session`, `sid`, `nonce`, `otp`, `auth_token`,
 `ticket`, `passcode`, `password`, `pwd`, `bearer`, ...) come from the same name list as the credential
 fields (`utils/credential-fields.js`); `code` is left out on purpose because it is too common.
 

@@ -315,9 +315,8 @@ const NOTES_WITHHELD_NOTE = 'Free-text notes are not read through this tool, bec
 
 function answerFrom(parsed, status, entry) {
   const state = newState();
-  // Operator notes first: their values are never read, so nothing in them can leak.
-  const noteKeys = new Set(Object.entries(entry.freeText || {}).filter(([, kind]) => kind === 'note').map(([key]) => key));
-  const clean = redactSecrets(withholdNotes(parsed, noteKeys, state), state);
+  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read.
+  const clean = redactSecrets(withholdNotes(parsed, entry.freeText || {}, state), state);
   const fitted = fitToCap(clean);
   const removed = [
     state.links ? `${state.links} signed file link(s)` : null,

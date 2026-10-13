@@ -35,7 +35,7 @@
  * Defense in depth behind the catalog generator, which keeps routes that
  * select or build such values out of the catalog.
  */
-const { isCredentialField, isCredentialName } = require('./credential-fields');
+const { isCredentialField, isCredentialName, nameWords } = require('./credential-fields');
 const { scrubSecretText } = require('./secret-text-scrubber');
 
 const REDACTED_LINK = '[signed link removed]';
@@ -271,24 +271,61 @@ function newState() {
 // OPERATOR NOTES. A free-text field typed by staff or customers about a record
 // (notes, admin_notes, reason, instructions ...) is where a password, a
 // session link or a card number gets pasted, and a best-effort scrubber cannot
-// win that. A reviewed row declares such a field as kind "note"; its value is
-// not read through the general read at all: it is replaced by a marker that
-// carries only its length. Matched by key name at any depth in the response.
+// win that. Such a value is not read through the general read at all: it is
+// replaced by a marker that carries only its length.
+//
+// Fail closed (Codex round 10): a reviewer who forgets to declare a field must
+// not leak it, so on EVERY endpoint a response key whose NAME looks like free
+// text is withheld, unless the reviewed row declares that key "content"
+// (business reference text that is the point of the read). A row may also
+// declare "note" for a key the name test would not catch. Matched by key name
+// at any depth. A free-text field whose name is outside this list still
+// depends on the review (see the README).
+//
+// The list is words of the key (snake_case, camelCase, kebab-case), singular
+// and plural written out. `direction` alone is not on it (a sort direction);
+// `directions` is. Added beyond the owner's first list: transcript(s),
+// transcription, narrative, excerpt, snippet (spoken or typed text of a call or
+// message). Dropped: none.
+const FREE_TEXT_WORDS = Object.freeze([
+  'note', 'notes', 'comment', 'comments', 'reason', 'reasons', 'instruction', 'instructions', 'detail', 'details',
+  'memo', 'memos', 'remark', 'remarks', 'message', 'messages', 'description', 'descriptions', 'text', 'texts', 'body',
+  'summary', 'summaries', 'script', 'scripts', 'feedback', 'explanation', 'explanations', 'directions', 'special',
+  'transcript', 'transcripts', 'transcription', 'narrative', 'excerpt', 'snippet',
+]);
+const FREE_TEXT_WORD_SET = new Set(FREE_TEXT_WORDS);
+
+function isFreeTextName(key) {
+  return nameWords(key).some(word => FREE_TEXT_WORD_SET.has(word));
+}
+
 function withheldMarker(length) {
   return `[note withheld: ${length} characters]`;
 }
 
-function withholdNotes(value, noteKeys, state, depth = 0) {
-  if (!noteKeys || !noteKeys.size || !value || typeof value !== 'object') return value;
-  if (depth > MAX_DEPTH) return value;
-  if (Array.isArray(value)) return value.map(item => withholdNotes(item, noteKeys, state, depth + 1));
+// A value worth withholding: a non-blank string, or a non-empty object or array
+// (the JSON `details` case). Numbers, booleans, null and empty text are not.
+function hasFreeText(item) {
+  if (typeof item === 'string') return item.trim() !== '';
+  return item !== null && typeof item === 'object' && Object.keys(item).length > 0;
+}
+
+function shouldWithhold(key, item, freeText) {
+  const kind = Object.hasOwn(freeText, key) ? freeText[key] : undefined;
+  const flagged = kind === 'note' || (kind !== 'content' && isFreeTextName(key));
+  return flagged && hasFreeText(item);
+}
+
+// `freeText` is the reviewed row's map { key: 'note' | 'content' }.
+function withholdNotes(value, freeText, state, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > MAX_DEPTH) return value;
+  if (Array.isArray(value)) return value.map(item => withholdNotes(item, freeText, state, depth + 1));
   const out = {};
   for (const [key, item] of Object.entries(value)) {
-    const present = item !== null && item !== undefined && item !== '' && (typeof item !== 'object' || Object.keys(item).length > 0);
-    if (noteKeys.has(key) && present && typeof item !== 'number' && typeof item !== 'boolean') {
+    if (shouldWithhold(key, item, freeText)) {
       state.notes += 1;
       out[key] = withheldMarker(typeof item === 'string' ? item.length : JSON.stringify(item).length);
-    } else out[key] = withholdNotes(item, noteKeys, state, depth + 1);
+    } else out[key] = withholdNotes(item, freeText, state, depth + 1);
   }
   return out;
 }
@@ -317,5 +354,5 @@ function redactSecrets(value, state, depth = 0) {
 }
 
 module.exports = {
-  withholdNotes, REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
+  withholdNotes, isFreeTextName, FREE_TEXT_WORDS, REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
 };

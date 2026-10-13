@@ -238,7 +238,7 @@ describe('the token', () => {
 
 describe('the answer', () => {
   test('cuts a big array to the first items that fit and says how to narrow', async () => {
-    const rows = Array.from({ length: 2000 }, (_, i) => ({ id: i, name: `row ${i}`, note: 'some descriptive text' }));
+    const rows = Array.from({ length: 2000 }, (_, i) => ({ id: i, name: `row ${i}`, blurb: 'some descriptive text' }));
     global.fetch.mockResolvedValueOnce(jsonResponse(200, rows));
     const result = await read({ endpoint: NO_PARAM.endpoint });
     expect(result.truncated).toBe(true);
@@ -268,10 +268,10 @@ describe('the answer', () => {
 
   test('cuts a big nested object and long strings', async () => {
     const nested = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`group${i}`, { text: 'y'.repeat(900), inner: { a: 1, b: { c: 'deep'.repeat(100) } } }]));
-    global.fetch.mockResolvedValueOnce(jsonResponse(200, { nested, summary: 'kept' }));
+    global.fetch.mockResolvedValueOnce(jsonResponse(200, { nested, tagline: 'kept' }));
     const result = await read({ endpoint: NO_PARAM.endpoint });
     expect(result.truncated).toBe(true);
-    expect(result.data.summary).toBe('kept');
+    expect(result.data.tagline).toBe('kept');
     expect(JSON.stringify(result.data).length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
   });
 
@@ -341,7 +341,7 @@ describe('signed file links', () => {
   test('every shape of signed or storage link is replaced, wherever it sits in the JSON', async () => {
     const body = {
       screenshots: SIGNED.slice(0, 6).map((url, i) => ({ label: `shot ${i}`, url })),
-      nested: { deeper: { list: [{ href: SIGNED[6] }, { href: SIGNED[7] }], note: `see ${SIGNED[8]} for the file` } },
+      nested: { deeper: { list: [{ href: SIGNED[6] }, { href: SIGNED[7] }], blurb: `see ${SIGNED[8]} for the file` } },
       more: SIGNED.slice(9),
       kept: 'https://www.example.test/page?tab=2',
     };
@@ -354,7 +354,7 @@ describe('signed file links', () => {
     }
     expect(result.data.screenshots[0].url).toBe('[signed link removed]');
     expect(result.data.nested.deeper.list[0].href).toBe('[signed link removed]');
-    expect(result.data.nested.deeper.note).toBe('see [signed link removed] for the file');
+    expect(result.data.nested.deeper.blurb).toBe('see [signed link removed] for the file');
     expect(result.data.kept).toBe('https://www.example.test/page?tab=2');
     expect(result.signed_links_removed).toBe(SIGNED.length);
     expect(result.note).toMatch(/signed file link/);
@@ -432,7 +432,7 @@ describe('credential fields and private links', () => {
       idempotency_key: 'a1b2c3d4e5f6a7b8c9',
       // kept
       pinned: true, shipping_address: '1 Test Way', key: 'name', status_key: 'open', gate_code: '4821', access_code: '7730', code: 'A1',
-      price: 49, customer_id: UUID, lat: 27.5, notes: 'Dog in yard',
+      price: 49, customer_id: UUID, lat: 27.5, nickname: 'Dog in yard',
     };
     global.fetch.mockResolvedValueOnce(jsonResponse(200, body));
     const { data, credential_fields_removed: removed } = await read({ endpoint: NO_PARAM.endpoint });
@@ -441,13 +441,13 @@ describe('credential fields and private links', () => {
       expect({ key, value: data[key] }).toEqual({ key, value: '[removed]' });
     }
     expect(data).toMatchObject({ pinned: true, shipping_address: '1 Test Way', key: 'name', status_key: 'open', gate_code: '4821', access_code: '7730', code: 'A1',
-      price: 49, customer_id: UUID, lat: 27.5, notes: 'Dog in yard' });
+      price: 49, customer_id: UUID, lat: 27.5, nickname: 'Dog in yard' });
     expect(removed).toBe(26);
   });
 
   test('a customer-facing link inside a text field, or any depth of nesting, is removed; readable links stay', async () => {
     global.fetch.mockResolvedValueOnce(jsonResponse(200, {
-      sms: [{ body: `Your estimate is ready: https://portal.example.test/estimate/Zk3pQ9vLmN2xR7tYb4HcW8dE thanks!` }],
+      sms: [{ line: `Your estimate is ready: https://portal.example.test/estimate/Zk3pQ9vLmN2xR7tYb4HcW8dE thanks!` }],
       links: {
         pay: `https://portal.example.test/pay/${UUID}`,
         query: 'https://portal.example.test/r?id=9f8e7d6c5b4a39281716',
@@ -466,7 +466,7 @@ describe('credential fields and private links', () => {
     for (const secret of ['Zk3pQ9vLmN2xR7tYb4HcW8dE', 'abc123def456ghi789', '0123456789abcdef0123456789abcdef', '9f8e7d6c5b4a39281716']) expect(text).not.toContain(secret);
     expect(text).not.toContain(`portal.example.test/pay/${UUID}`);
     expect(text).not.toContain(`portal.example.test/report/${UUID}`);
-    expect(result.data.sms[0].body).toBe('Your estimate is ready: [private link removed] thanks!');
+    expect(result.data.sms[0].line).toBe('Your estimate is ready: [private link removed] thanks!');
     expect(result.data.links.pay).toBe('[private link removed]');
     expect(result.data.deep[0][0].href).toBe('[private link removed]');
     expect(result.data.links.blog).toBe('https://www.example.test/blog/pest-control-services-in-bradenton');
