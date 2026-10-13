@@ -50,11 +50,11 @@ function parseNotes(value) {
 function wateringLinesOf(instruction) {
   if (!instruction || !Array.isArray(instruction.lines)) return [];
   // Same sentences as the report, with the typographic apostrophe the report
-  // uses (U+2019) swapped for ASCII: one curly quote forces the whole text
-  // into UCS-2 and roughly doubles its segments.
+  // uses (U+2019) and the inch fractions (½ ¼ ¾) swapped for ASCII: one such
+  // character forces the whole text into UCS-2 and roughly doubles its segments.
   return instruction.lines
     .filter((line) => typeof line === 'string' && line.trim() !== '')
-    .map((line) => line.replace(/\u2019/g, "'"));
+    .map((line) => line.replace(/\u2019/g, "'").replace(/½/g, '1/2').replace(/¼/g, '1/4').replace(/¾/g, '3/4'));
 }
 
 // Has this visit's watering text already been handled (sent, queued, blocked,

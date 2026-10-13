@@ -841,7 +841,7 @@ describe('amount-only water-in on the report payload', () => {
       completedAt: out.instruction.completedAt, nowMs: Date.parse(out.instruction.completedAt) + 60000,
     });
     expect(plan.send).toBe(true);
-    expect(plan.vars.watering_lines).toBe("Water in today's treatment with about ¼ inch by Thu 2 PM. Run it even if it is not your usual day.");
+    expect(plan.vars.watering_lines).toBe("Water in today's treatment with about 1/4 inch by Thu 2 PM. Run it even if it is not your usual day.");
     expect(plan.vars.watering_lines).not.toMatch(/minute|sprinkler setup/);
   });
 
@@ -1072,7 +1072,8 @@ describe('GATE_LAWN_WATER_IN_RAIN on the report payload', () => {
     expect(JSON.stringify(frozen)).toBe(before);
     const planAfter = lawnWateringSmsPlan({ instruction: frozen, ...smsArgs });
     expect(planAfter.vars.watering_lines).toBe(planBefore.vars.watering_lines);
-    expect(planAfter.vars.watering_lines).toBe("Water in today's treatment with about ½ inch by Thu 2 PM. Run it even if it is not your usual day.");
+    // The text sends fractions as 1/2 (GSM-7: a ½ would make the whole text UCS-2); the frozen line keeps ½.
+    expect(planAfter.vars.watering_lines).toBe("Water in today's treatment with about 1/2 inch by Thu 2 PM. Run it even if it is not your usual day.");
   });
 
   test('a hold-only, a none and an unfrozen visit are not touched and read no rain', async () => {

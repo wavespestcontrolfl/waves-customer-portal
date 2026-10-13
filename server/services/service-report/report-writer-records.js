@@ -10,7 +10,9 @@
  * written, so the next visit renders live on the report itself
  * (nextSameServiceAppointment) and never enters this text (Codex #5500).
  */
-const { buildWhatToExpect, toExpectationProduct, whatToExpectClasses } = require('./pest-report-expectations');
+const {
+  buildWhatToExpect, expectationWindowClasses, toExpectationProduct,
+} = require('./pest-report-expectations');
 const { findReportProductCopyEntry } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
@@ -79,7 +81,7 @@ function expectationProducts(applications) {
 function writerExpectations({ line = null, findingsType = null, applications = [] } = {}) {
   const products = line === 'pest' ? expectationProducts(applications) : [];
   const pestLines = products.length ? (buildWhatToExpect({ products, plain: true })?.lines || []) : [];
-  const classes = products.length ? whatToExpectClasses({ products }) : [];
+  const classes = products.length ? expectationWindowClasses({ products }) : [];
   const recorded = Array.isArray(applications) ? applications : [];
   const serviceLines = (SERVICE_EXPECTATIONS[findingsType] || SERVICE_EXPECTATIONS[line] || [])
     .filter((text) => !LINE_REQUIRES.has(text) || LINE_REQUIRES.get(text)(recorded))
@@ -95,6 +97,37 @@ function writerExpectations({ line = null, findingsType = null, applications = [
 // (config/report-product-copy.js, owner-approved 2026-09-28; owner "ok go"
 // 2026-10-01 lets the writer use it too), labeled with the recorded job,
 // method and area so the writer ties each line to the right piece of work.
+// What each recorded treatment is for (owner 2026-10-12: the writer should
+// know Taurus is for ants, Alpine and Gentrol for roaches). The label's pest
+// count stays on the product card: a figure the writer may say needs a screen
+// that knows the count and whether the customer asked. One line per job, never a product name. Reviewed config
+// only: config/report-product-copy.js.
+function productFactLines(applications) {
+  const seen = new Set();
+  return (Array.isArray(applications) ? applications : []).flatMap((application) => {
+    const entry = findReportProductCopyEntry({ epaReg: application?.epaReg, name: application?.name });
+    if (!entry?.mainPests?.length) return [];
+    const tagged = (Array.isArray(application.targets) ? application.targets : []).map(cleanText).filter(Boolean);
+    const facts = [
+      `mainly used for ${entry.mainPests.join(' and ')}`,
+      tagged.length ? `tagged today for ${tagged.join(', ')}` : 'not tagged today (its reason is not recorded here)',
+    ].filter(Boolean);
+    const label = [application.role, application.methodLabel, application.applicationArea]
+      .map(cleanText).filter(Boolean).join(', ');
+    const lineText = `- ${label ? `${label}: ` : ''}${facts.join('; ')}.`;
+    if (seen.has(lineText)) return [];
+    seen.add(lineText);
+    return [lineText];
+  });
+}
+
+function productFactsSection(applications) {
+  const lines = productFactLines(applications);
+  if (!lines.length) return null;
+  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Tagged today for" is what the technician recorded this one treatment for.):'
+    + `\n${lines.join('\n')}`;
+}
+
 function howItWorksLines(applications) {
   const seen = new Set();
   return (Array.isArray(applications) ? applications : []).flatMap((application) => {
@@ -133,6 +166,8 @@ function buildWriterRecords({
   if (howItWorks.length) {
     sections.push(`HOW IT WORKS (approved product wording for the work recorded today; use it only to say why the work fits what was found, never for where or how anything was applied):\n${howItWorks.join('\n')}`);
   }
+  const productFacts = line === 'pest' ? productFactsSection(applications) : null;
+  if (productFacts) sections.push(productFacts);
   if (SERVICE_KIND_LABELS[serviceKind]) sections.push(`SERVICE TYPE: ${SERVICE_KIND_LABELS[serviceKind]}.`);
   const reach = (serviceKind === 'one_time' || serviceKind === 're_service')
     ? reachOutDate(serviceYmd, expectations.windowDays)
