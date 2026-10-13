@@ -97,6 +97,12 @@ const SECRET_PATTERNS = Object.freeze([
   { name: 'google_api_key', re: /\bAIza[0-9A-Za-z_-]{35}/g },
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { name: 'pem_private_key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
+  // An Authorization header (any scheme: Basic, Bearer, Digest, Negotiate, a
+  // vendor scheme) is removed to the end of its line: scheme and payload together.
+  { name: 'authorization_header', re: /\b((?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?)[^\r\n]{1,400}/gi, keep: 1 },
+  // A scheme with its payload outside a header ("Basic dXNlcjpwYXNz"). Basic
+  // payloads are short, so the payload needs only 8 base64 characters.
+  { name: 'basic_credentials', re: /\b(Basic[ \t]+)[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/])/g, keep: 1 },
   { name: 'bearer_token', re: /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{20,}/gi, keep: 1 },
   // A credential-named identifier assigned a value (see the rules above).
   { name: 'credential_identifier_assignment', scrub: scrubIdentifierAssignments },

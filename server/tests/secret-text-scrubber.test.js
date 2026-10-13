@@ -22,6 +22,8 @@ const FORMATS = {
   google_api_key: ['AI' + 'za' + x(35, 'a')],
   jwt: ['ey' + 'Jhbgci0i.' + 'eyJ' + 'zdWIiOjEy.' + b64(20)],
   pem_private_key: ['-----BEGIN ' + 'PRIVATE KEY-----\n' + b64(30) + '\n-----END ' + 'PRIVATE KEY-----', '-----BEGIN RSA ' + 'PRIVATE KEY-----\n' + b64(30)],
+  authorization_header: ['Authorization: Basic ' + x(12, 'b')],
+  basic_credentials: ['Basic ' + x(12, 'c')],
   bearer_token: ['Bearer ' + x(24, 'a')],
   credential_identifier_assignment: ['AWS_SECRET' + '_ACCESS_KEY=' + x(40, 'q')],
 };
@@ -220,6 +222,26 @@ describe('multi-word labelled values', () => {
     expect(scrubSecretText(text).text).toBe(expected);
   });
   test.each(['password is correct', 'The pin is required before booking', 'password is on file', 'Password is not set', 'gate PIN: 1234', 'pin is blue'])('prose stays: %s', (text) => {
+    expect(scrubSecretText(text).text).toBe(text);
+  });
+});
+
+// Codex r11: an Authorization header carries a reusable credential in any scheme.
+describe('authorization headers and Basic credentials', () => {
+  const { scrubSecretText } = require('../utils/secret-text-scrubber');
+  const payload = ['dXNl', 'cjpw', 'YXNz'].join('');
+  test.each([
+    [`Authorization: Basic ${payload}`, 'Authorization: [removed]'],
+    [`Send the header authorization: Digest username="a", response="${payload}"\nthen retry`, null],
+    [`Proxy-Authorization: Basic ${payload}`, 'Proxy-Authorization: [removed]'],
+    [`curl -u is not needed; use Basic ${payload} instead`, 'curl -u is not needed; use Basic [removed] instead'],
+  ])('%s', (text, expected) => {
+    const out = scrubSecretText(text).text;
+    expect(out).not.toContain(payload);
+    if (expected) expect(out).toBe(expected);
+    else expect(out).toContain('then retry');
+  });
+  test.each(['Basic lawn care plan', 'Authorization is required before the visit', 'The Basic package covers ants'])('prose stays: %s', (text) => {
     expect(scrubSecretText(text).text).toBe(text);
   });
 });
