@@ -145,7 +145,9 @@ function shape(providerResult, given, state) {
   const countyGap = isCountyGap(result) && missing.length === 0;
   const zipPlus4 = ZIP_PLUS4_RE.test(`${given.address || ''} ${given.zip || ''}`);
   const n = result.normalized;
-  const hintUsed = !state;
+  // The FL fallback was used only when no state field was passed AND the
+  // validator read no state from the address text itself.
+  const hintUsed = !state && !result.statedState;
   return {
     status: result.status,
     verdict: countyGap ? 'Google matched the address; the service-area lookup is unavailable.' : (VERDICTS[result.status] || 'Google returned a result this tool does not recognize.'),

@@ -227,6 +227,9 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
       // rejection is the STATE veto, not the county rule.
       out.outOfAreaReason = 'state';
     }
+    // Provenance: the state read from the address text, when one was (it,
+    // not the caller's fallback hint, was sent to the provider).
+    out.statedState = statedState || null;
     out.providerResponseId = data.responseId || null;
     return out;
   } catch (err) {

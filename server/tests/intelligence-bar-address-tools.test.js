@@ -270,6 +270,13 @@ describe('check_address served south-Hillsborough towns', () => {
     expect(out.note).toMatch(/ZIP\+4/);
   });
 
+  test('a state read from the address text is not reported as the Florida hint', async () => {
+    validateAddress.mockResolvedValue(google({ status: 'out_of_service_area', inServiceArea: false, outOfAreaReason: 'state', statedState: 'GA' }));
+    const out = await run({ address: '100 Example Way, Atlanta, GA 30303' });
+    expect(out.state_hint_used).toBeNull();
+    expect(out.note).not.toMatch(/used as a hint/);
+  });
+
   test('another Hillsborough city stays outside the service area', async () => {
     validateAddress.mockResolvedValue(hills({ normalized: normalized({ city: 'Tampa', postal_code: '33602' }) }));
     const out = await run({ address: '100 Example Way, Tampa, FL 33602' });
