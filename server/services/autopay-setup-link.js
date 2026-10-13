@@ -481,10 +481,14 @@ async function autopayDeliveryPreflight({ customerId, customer = null, delivery 
 
 // requestAutopaySetupLink's `requireDeliverable` guard: the skip to return
 // before any row is written, or null to carry on (guard off, or inline).
-async function undeliverableSkip({ requireDeliverable, customerId, customer, delivery, trigger }) {
-  if (requireDeliverable !== true || delivery === 'inline') return null;
-  const preflight = await autopayDeliveryPreflight({ customerId, customer, delivery, trigger });
-  return preflight.ok ? null : skip(preflight.reason);
+// Also the expectedRecipient pin against the row this call read.
+async function undeliverableSkip({ requireDeliverable, expectedRecipient, customerId, customer, delivery, trigger }) {
+  if (delivery === 'inline') return null;
+  if (requireDeliverable === true) {
+    const preflight = await autopayDeliveryPreflight({ customerId, customer, delivery, trigger });
+    if (!preflight.ok) return skip(preflight.reason);
+  }
+  return recipientMatchesPin(expectedRecipient, delivery, customer) ? null : skip('recipient_changed');
 }
 
 // Read-only: the consented, chargeable saved card the auto-secure step would
@@ -584,10 +588,8 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       }
     }
 
-    const undeliverable = await undeliverableSkip({ requireDeliverable, customerId, customer, delivery, trigger });
+    const undeliverable = await undeliverableSkip({ requireDeliverable, expectedRecipient, customerId, customer, delivery, trigger });
     if (undeliverable) return undeliverable;
-    // The pin against the row this call read, before any link row is touched.
-    if (delivery !== 'inline' && !recipientMatchesPin(expectedRecipient, delivery, customer)) return skip('recipient_changed');
 
     // Dedup on the LIVE row — pending OR mid-completion (partial unique
     // index: one live standalone row per customer; a completing row is a

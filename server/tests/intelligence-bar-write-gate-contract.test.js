@@ -22,6 +22,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 process.env.GATE_EDIT_APPT_ADDRESS = 'true';
+// send_autopay_setup_link's preview runs the Auto Pay service's own eligibility
+// read, which refuses before the channel preflight while the lane is dark.
+process.env.GATE_AUTOPAY_SETUP_LINK = 'true';
+// Its default delivery (sms) preflights the customer-SMS gate, read-only.
+process.env.GATE_AUTOPAY_CUSTOMER_SMS = 'true';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => {
@@ -163,6 +168,7 @@ const WRITE_TWO_STEP = [
   'repair_closeout',
   'resend_receipt',
   'create_customer_link',
+  'send_autopay_setup_link',
   'remove_saved_payment_method',
   'correct_invoice_address',
   'send_invoice',
@@ -667,6 +673,14 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['customer-link-tools', 'executeCustomerLinkTool', 'create_customer_link', { customer_id: '00000000-0000-0000-0000-00000000f101', kind: 'pay_balance' }, {
       customers: [{ id: '00000000-0000-0000-0000-00000000f101', first_name: 'Link', last_name: 'Fixture', phone: '9415550100', email: 'link@example.com', deleted_at: null }],
     }],
+    // send_autopay_setup_link's preview runs the service's own setupLinkIneligibility
+    // (customer, payer exemption, saved-method reads), the saved-card finder and the
+    // channel preflight — all read-only, so an unconfirmed call writes nothing.
+    ['customer-link-tools', 'executeCustomerLinkTool', 'send_autopay_setup_link', { customer_id: '00000000-0000-0000-0000-00000000f102' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f102', first_name: 'Auto', last_name: 'Fixture', phone: '9415550100', email: 'auto@example.com',
+        billing_mode: 'per_application', autopay_enabled: false, autopay_paused_until: null, payer_id: null, deleted_at: null }],
+      sms_templates: [{ template_key: 'autopay_setup_link', is_active: true }],
+    }],
     ['receipt-resend-tools', 'executeReceiptResendTool', 'resend_receipt', { invoice_id: '00000000-0000-0000-0000-00000000f001' }, {
       invoices: [{ id: '00000000-0000-0000-0000-00000000f001', invoice_number: 'WPC-2026-0900', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null, paid_at: new Date('2026-10-01T15:00:00Z') }],
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.com', phone: '9415550100' }],
@@ -905,6 +919,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           .mockResolvedValue({ ok: true, recipient: { email: 'pat@example.com' }, customer: { id: 'cust-1', phone: '9415550100' } }),
         jest.spyOn(require('../services/invoice'), 'receiptAmountFor').mockResolvedValue('129.00'),
       ] : [];
+    // The channel preflight reads the SMS template table and the messaging validators (their own
+    // paths are covered by autopay-setup-link.test.js); this recorder has neither, so it answers
+    // "deliverable". Eligibility and the saved-card finder stay real, on the seeded rows.
+    const autopayPreflight = toolName === 'send_autopay_setup_link'
+      ? jest.spyOn(require('../services/autopay-setup-link'), 'autopayDeliveryPreflight').mockResolvedValue({ ok: true }) : null;
     // Outside-write previews call a real third-party API (fetch), never the
     // DB — install this row's token env vars + a fetch mock that answers its
     // calls in order, and restore both afterward so nothing leaks to the
@@ -944,6 +963,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      autopayPreflight?.mockRestore();
       invoiceActionSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
@@ -1090,6 +1110,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
     // send_invoice (_sideEffects): its confirmed run texts/emails the customer.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_invoice']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice']);
   });
 });
