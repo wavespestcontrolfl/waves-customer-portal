@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 const REDACTED = '[REDACTED]';
 
 /**
@@ -164,36 +166,59 @@ function redactRequestUrl(rawUrl, { maskAllQuery = false } = {}) {
 // filters and the path parameters on it are chosen by the model and can hold a
 // name, phone or email the key-based rules above do not know ("email",
 // "phone", "name", a free-text service name), so the request logs mask EVERY
-// query value and every path segment that came from a parameter. The header
-// only ever REDUCES what is logged: a caller who sends it themselves hides
-// their own values from the log and gains nothing else.
+// query value and every path segment that came from a parameter.
 //
-// Format: "1" (no path parameters) or "1;p=3,5": the zero-based indexes of the
-// path segments after /api that are parameters (the tool filled the pattern,
-// so it knows). Parsed strictly: digits and commas only, at most 12 indexes,
-// each under 40. A marked value that does not parse (malformed, or sent by
-// someone else) falls back to masking EVERY path segment after the first two
-// (/api/admin/... stays), so a bad header can only log less, never more.
+// The marker is trusted only when it is provably ours, because anyone can send
+// a header: the value carries a per-process secret generated when this module
+// loads (never logged, never returned, never in an env var), compared in
+// constant time, AND the request arrived on a loopback socket
+// (req.socket.remoteAddress, never req.ip or a forwarded header). Anything
+// else is an ordinary request and is logged exactly as an unmarked one. The
+// tool and the logger share the secret by requiring this same module in the
+// same process: the loopback call goes to this process's own port
+// (config.port); the server runs as one Node process per container (no
+// cluster, no workers), and replicas are separate containers whose loopback is
+// their own. If a request ever reached a different process, its secret would
+// not match and it would simply be logged in full.
+//
+// Format: "<secret>" (no path parameters) or "<secret>;p=3,5": the zero-based
+// indexes of the path segments after /api that are parameters (the tool filled
+// the pattern, so it knows). The index list is parsed strictly: digits and
+// commas only, at most 12 indexes, each under 40. An authenticated marker whose
+// list does not parse falls back to masking EVERY path segment after the first
+// two (/api/admin/... stays), so a bad list can only log less, never more.
 const ADMIN_READ_HEADER = 'x-ib-admin-read';
+const MARKER_SECRET = crypto.randomBytes(16).toString('hex');
+const MARKER_SECRET_BUFFER = Buffer.from(MARKER_SECRET);
 const MAX_PARAM_INDEXES = 12;
 const MAX_SEGMENT_INDEX = 40;
-const MARKER_RE = /^1(?:;p=(\d{1,2}(?:,\d{1,2})*))?$/;
+const INDEX_LIST_RE = /^p=(\d{1,2}(?:,\d{1,2})*)$/;
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 function markerValue(req) {
   const value = req?.headers?.[ADMIN_READ_HEADER];
   return String(Array.isArray(value) ? value[0] : value ?? '');
 }
 
-// null: not an admin-read request.
-// { params: [indexes] } for a valid marker; { params: null } for a marked but
-// unparseable value (mask every segment after the first two).
+function isLoopbackRequest(req) {
+  return LOOPBACK_ADDRESSES.has(req?.socket?.remoteAddress);
+}
+
+function secretMatches(candidate) {
+  const buffer = Buffer.from(candidate);
+  return buffer.length === MARKER_SECRET_BUFFER.length && crypto.timingSafeEqual(buffer, MARKER_SECRET_BUFFER);
+}
+
+// null: an ordinary request (no marker, a wrong secret, or not from loopback).
+// { params: [indexes] } for an authenticated marker; { params: null } for an
+// authenticated marker with an unparseable index list.
 function adminReadMarker(req) {
-  const value = markerValue(req);
-  if (!value.startsWith('1')) return null;
-  const match = MARKER_RE.exec(value);
-  if (!match) return { params: null };
-  const indexes = match[1] ? match[1].split(',').map(Number) : [];
-  const valid = indexes.length <= MAX_PARAM_INDEXES && indexes.every(index => index < MAX_SEGMENT_INDEX);
+  const [secret, list, ...extra] = markerValue(req).split(';');
+  if (!secret || !secretMatches(secret) || !isLoopbackRequest(req)) return null;
+  if (list === undefined) return { params: [] };
+  const match = extra.length === 0 ? INDEX_LIST_RE.exec(list) : null;
+  const indexes = match ? match[1].split(',').map(Number) : [];
+  const valid = match && indexes.length <= MAX_PARAM_INDEXES && indexes.every(index => index < MAX_SEGMENT_INDEX);
   return { params: valid ? indexes : null };
 }
 
@@ -227,10 +252,10 @@ function redactRequestUrlFor(req, rawUrl = req?.originalUrl || req?.url || '') {
   return redactRequestUrl(maskPathSegments(rawUrl, marker.params), { maskAllQuery: true });
 }
 
-// What the tool sends: "1" or "1;p=<indexes>" for the parameter segments of
-// the catalog pattern (zero-based, after /api).
+// What the tool sends: the secret, then ";p=<indexes>" for the parameter
+// segments of the catalog pattern (zero-based, after /api).
 function adminReadMarkerValue(paramIndexes = []) {
-  return paramIndexes.length ? `1;p=${paramIndexes.join(',')}` : '1';
+  return paramIndexes.length ? `${MARKER_SECRET};p=${paramIndexes.join(',')}` : MARKER_SECRET;
 }
 
 module.exports = {

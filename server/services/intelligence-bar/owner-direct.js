@@ -38,6 +38,7 @@
 const { gateEnvValue } = require('../../config/feature-gates');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
+const IbThreads = require('./threads');
 
 // Internal single-record edits that execute without a card. A tool is added
 // here deliberately; anything new keeps its card until someone lists it.
@@ -194,6 +195,25 @@ function untrustedReadInHistory(messages) {
 
 function newRequestTaint(history) {
   return { untrustedRead: untrustedReadInHistory(history) };
+}
+
+// The flag for a new request, called once per request. It starts from the
+// message history this request carries (a resumed task's saved blocks), then
+// from the SERVER's own record of the conversation: a thread whose earlier
+// exchange read admin data stays tainted for its whole life, whatever history
+// the client resubmits (plain strings carry no tool blocks). No thread id = a
+// fresh conversation = not tainted. A thread id the server cannot read
+// (unknown to this actor, or a database error) fails closed: tainted.
+// `needed` is false when owner-direct is off, where the flag decides nothing.
+async function loadRequestTaint({ history, threadId, actorId, needed = true }) {
+  const taint = newRequestTaint(history);
+  if (taint.untrustedRead || !needed || !threadId) return taint;
+  try {
+    taint.untrustedRead = (await IbThreads.hasUntrustedRead(actorId, threadId)) === true;
+  } catch {
+    taint.untrustedRead = true;
+  }
+  return taint;
 }
 
 // Bulk cap (owner ruling 2026-10-02): one request may make at most two
@@ -375,4 +395,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { loadRequestTaint, newRequestTaint, noteUntrustedRead, untrustedReadInHistory, OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, BULK_LIMIT_RESULT, ownerDirectLive, executesWithoutCard, mayExecuteWithoutCard, seedDirectCounts, messageDirectPlan, cappedTools, recordDirectCommit, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };

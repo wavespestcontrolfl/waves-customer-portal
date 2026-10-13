@@ -314,7 +314,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
 // The persisted-turn markers are defined once, with the thread store.
-const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER } = IbThreads;
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -430,7 +430,7 @@ function stripInternalHistoryMarkers(message) {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER && line.trim() !== PII_TAINT_MARKER)
+      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER].includes(line.trim()))
       .join('\n')
       .trim(),
   };
@@ -3604,7 +3604,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     }
     // Once the general admin read returned data, nothing after it runs without
     // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
-    const requestTaint = OwnerDirect.newRequestTaint(currentMessages);
+    const requestTaint = await OwnerDirect.loadRequestTaint({
+      history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
+    });
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
@@ -4063,9 +4065,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       PII_TAINT_MARKER,
     );
     const persistedAssistantTurn = appendTaintMarker(
-      appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
-      piiTainted,
-      PII_TAINT_MARKER,
+      appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
+      requestTaint.untrustedRead,
+      UNTRUSTED_READ_MARKER,
     );
 
     // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):

@@ -282,7 +282,10 @@ function errorText(parsed, status) {
 // The body text, with the caller's own token blanked if an endpoint echoes it.
 function scrubToken(text, authorization) {
   const token = authorization.slice('Bearer '.length);
-  return token && text.includes(token) ? text.split(token).join('[redacted]') : text;
+  // The request-log marker secret is blanked too, should an endpoint echo it.
+  const marker = adminReadMarkerValue();
+  const noMarker = text.includes(marker) ? text.split(marker).join('[redacted]') : text;
+  return token && noMarker.includes(token) ? noMarker.split(token).join('[redacted]') : noMarker;
 }
 
 async function shapeResponse(response, entry, authorization) {

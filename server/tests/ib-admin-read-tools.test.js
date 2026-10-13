@@ -11,7 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const logger = require('../services/logger');
 const config = require('../config');
 const rules = require('../utils/admin-read-rules');
-const { ADMIN_READ_HEADER } = require('../utils/redact-request-url');
+const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../utils/redact-request-url');
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const registry = require('../services/intelligence-bar/action-registry');
 const { executeAdminReadTool, MAX_RESULT_CHARS } = require('../services/intelligence-bar/admin-read-tools');
@@ -71,7 +71,8 @@ describe('the path builder', () => {
     expect(Object.fromEntries(parsed.searchParams)).toEqual({});
     // The marker carries the zero-based indexes of the parameter segments after /api.
     const paramIndexes = rules.splitPath(ONE_PARAM.endpoint).flatMap((segment, index) => (rules.isParam(segment) ? [index] : []));
-    expect(options.headers[ADMIN_READ_HEADER]).toBe(`1;p=${paramIndexes.join(',')}`);
+    expect(options.headers[ADMIN_READ_HEADER]).toBe(adminReadMarkerValue(paramIndexes));
+    expect(options.headers[ADMIN_READ_HEADER]).toMatch(/^[0-9a-f]{32};p=\d+(,\d+)*$/);
     expect(options.method).toBe('GET');
     expect(options.headers.Authorization).toBe(AUTH);
     expect(options.redirect).toBe('manual');
@@ -81,7 +82,7 @@ describe('the path builder', () => {
 
   test('a pattern with no parameters needs none, and its marker carries none', async () => {
     await read({ endpoint: NO_PARAM.endpoint });
-    expect(callsOf()[0][1].headers[ADMIN_READ_HEADER]).toBe('1');
+    expect(callsOf()[0][1].headers[ADMIN_READ_HEADER]).toBe(adminReadMarkerValue());
     expect(new URL(callsOf()[0][0]).pathname).toBe(`/api${NO_PARAM.endpoint}`);
   });
 
@@ -923,5 +924,21 @@ describe('params schema ceiling', () => {
     const { ADMIN_READ_TOOLS } = require('../services/intelligence-bar/admin-read-tools');
     const tool = ADMIN_READ_TOOLS.find(t => t.input_schema?.properties?.params);
     expect(tool.input_schema.properties.params.additionalProperties.maxLength).toBe(120);
+  });
+});
+
+describe('the log marker secret stays inside the process', () => {
+  test('it is in no tool result and no logger call, success or failure', async () => {
+    const secret = adminReadMarkerValue();
+    global.fetch.mockResolvedValueOnce(jsonResponse(500, { error: `failed ${secret}` }));
+    const results = [await read({ endpoint: NO_PARAM.endpoint }), await read({ endpoint: ONE_PARAM.endpoint, params: { [ONE_PARAM.params[0]]: ONE_VALUE } })];
+    global.fetch.mockRejectedValueOnce(new TypeError(`fetch failed ${secret}`));
+    results.push(await read({ endpoint: NO_PARAM.endpoint }));
+    const everything = JSON.stringify([results, ...Object.values(logger).flatMap(fn => fn.mock.calls)]);
+    expect(everything).not.toContain(secret);
+  });
+  test('it is not an environment variable', () => {
+    const secret = adminReadMarkerValue();
+    expect(Object.values(process.env).some(value => String(value).includes(secret))).toBe(false);
   });
 });

@@ -74,7 +74,7 @@ jest.mock('../services/llm-dispatch-metrics', () => {
 const express = require('express');
 const config = require('../config');
 const logger = require('../services/logger');
-const { ADMIN_READ_HEADER } = require('../utils/redact-request-url');
+const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../utils/redact-request-url');
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const intelligenceRouter = require('../routes/admin-intelligence-bar');
 
@@ -151,7 +151,7 @@ test('the owner login reads through the request token, and the token is stored a
   expect(loopbackCalls).toHaveLength(1);
   expect(loopbackCalls[0].headers.Authorization).toBe(OWNER);
   expect(new URL(loopbackCalls[0].url).pathname).toBe(`/api${ENTRY.endpoint.replace(`:${ENTRY.params[0]}`, ENTRY_VALUE)}`);
-  expect(loopbackCalls[0].headers[ADMIN_READ_HEADER]).toMatch(/^1;p=\d+(,\d+)*$/);
+  expect(loopbackCalls[0].headers[ADMIN_READ_HEADER]).toMatch(new RegExp(`^${adminReadMarkerValue()};p=\\d+(,\\d+)*$`));
 
   const stored = JSON.stringify({
     inserts: mockInsert.mock.calls, events: mockToolEvent.mock.calls, checkpoints: mockCheckpoint.mock.calls,
@@ -355,5 +355,83 @@ describe('untrusted read data and owner-direct edits', () => {
     ]);
     expect(loopbackCalls).toHaveLength(1);
     expect(seen.find(entry => entry.tools.includes('update_customer')).untrusted).toBe(false);
+  });
+});
+
+// Codex round: the taint is read from the server's record of the thread, not
+// from the history the client resubmits (plain strings carry no tool blocks).
+describe('the taint follows the conversation (thread record)', () => {
+  const IbThreads = require('../services/intelligence-bar/threads');
+  const OwnerDirect = require('../services/intelligence-bar/owner-direct');
+  const THREAD = '10000000-0000-4000-8000-0000000000a1';
+  const plain = [{ role: 'user', content: 'check the payers screen' }, { role: 'assistant', content: 'Two payers are open.' }];
+  const edit = { customer_id: '10000000-0000-4000-8000-00000000000a', updates: { city: 'Bradenton' } };
+  let seen;
+  let spies;
+  let gates;
+  beforeEach(() => {
+    gates = { owner: process.env.GATE_IB_OWNER_DIRECT, threads: process.env.GATE_IB_THREADS };
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
+    process.env.GATE_IB_THREADS = 'true';
+    seen = [];
+    const real = OwnerDirect.messageDirectPlan;
+    spies = [
+      jest.spyOn(OwnerDirect, 'messageDirectPlan').mockImplementation((toolUses, isValid, taint) => { seen.push({ tools: toolUses.map(t => t.name), untrusted: taint?.untrustedRead === true }); return real(toolUses, isValid, taint); }),
+    ];
+  });
+  afterEach(() => {
+    spies.forEach(spy => spy.mockRestore());
+    for (const [key, name] of [['owner', 'GATE_IB_OWNER_DIRECT'], ['threads', 'GATE_IB_THREADS']]) {
+      if (gates[key] === undefined) delete process.env[name]; else process.env[name] = gates[key];
+    }
+  });
+  const run = async (steps, body = {}) => {
+    scriptModel(steps);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, OWNER, { prompt: 'fix the city', context: 'dashboard', session_id: 'session-1', conversationHistory: plain, ...body });
+      expect(status).toBe(200);
+    });
+  };
+  const editSteps = () => [toolUse('t1', 'update_customer', edit), { content: [{ type: 'text', text: 'Done.' }] }];
+  const editRound = () => seen.find(entry => entry.tools.includes('update_customer'));
+
+  test('an earlier exchange on this thread read data: the edit in a new request is planned tainted, with plain-string history', async () => {
+    const lookup = jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(true);
+    spies.push(lookup);
+    await run(editSteps(), { thread_id: THREAD, thread_seq: 2 });
+    expect(lookup).toHaveBeenCalledWith('admin-1', THREAD);
+    expect(editRound().untrusted).toBe(true);
+  });
+  test('a thread with no such exchange is not tainted', async () => {
+    spies.push(jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(false));
+    await run(editSteps(), { thread_id: THREAD, thread_seq: 2 });
+    expect(editRound().untrusted).toBe(false);
+  });
+  test('records that cannot be read taint the request (fail closed)', async () => {
+    spies.push(jest.spyOn(IbThreads, 'hasUntrustedRead').mockRejectedValue(new Error('thread not readable')));
+    await run(editSteps(), { thread_id: THREAD, thread_seq: 2 });
+    expect(editRound().untrusted).toBe(true);
+  });
+  test('no thread id is a fresh conversation: no lookup, not tainted', async () => {
+    const lookup = jest.spyOn(IbThreads, 'hasUntrustedRead').mockResolvedValue(true);
+    spies.push(lookup);
+    await run(editSteps());
+    expect(lookup).not.toHaveBeenCalled();
+    expect(editRound().untrusted).toBe(false);
+  });
+
+  test('the exchange that read data is saved with the marker; one that did not read is not', async () => {
+    const append = jest.spyOn(IbThreads, 'appendExchange').mockResolvedValue({ threadId: THREAD, lastSeq: 2 });
+    spies.push(append);
+    await run([
+      toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }),
+      toolUse('t2', 'read_admin_data', { endpoint: ENTRY.endpoint, params: { [ENTRY.params[0]]: ENTRY_VALUE } }),
+      { content: [{ type: 'text', text: 'The screen shows two payers.' }] },
+    ]);
+    expect(append.mock.calls[0][0].assistantText).toContain(IbThreads.UNTRUSTED_READ_MARKER);
+    expect(append.mock.calls[0][0].userText).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
+    append.mockClear();
+    await run([{ content: [{ type: 'text', text: 'Hello.' }] }]);
+    expect(append.mock.calls[0][0].assistantText).not.toContain(IbThreads.UNTRUSTED_READ_MARKER);
   });
 });
