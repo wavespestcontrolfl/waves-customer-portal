@@ -200,6 +200,12 @@ async function getThread(actorId, threadId) {
 // (see admin-intelligence-bar.js); the attachment note stands in for images.
 const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
 const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+// Added to the ASSISTANT turn of an exchange in which the general admin read
+// (read_admin_data) returned data. The server writes it from its own per-request
+// flag and reads it back (hasUntrustedRead) to taint every later request on the
+// thread, so the taint lives in the server's record of the thread, never in
+// anything the client sends. No LIKE wildcards in it.
+const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation and may carry untrusted text]';
 const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
 // The user turn the route persists when a saved task continues; the operator
 // never typed it.
@@ -211,7 +217,7 @@ function operatorText(content) {
   return String(content || '').split('\n')
     .filter((line) => {
       const trimmed = line.trim();
-      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== CONTINUATION_TURN
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== CONTINUATION_TURN
         && !ATTACHMENT_NOTE_RE.test(trimmed);
     })
     .join('\n').trim();
@@ -257,6 +263,24 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
 }
 
 /** Recent threads for the picker (no turns). */
+/**
+ * Did an earlier exchange on this thread read admin screen data? Answered from
+ * the server's own turns (the marker the route appended), for the life of the
+ * thread. Returns false for a thread of this actor with no such turn; throws
+ * when the thread cannot be read (not found for this actor, or a database
+ * error) so the caller can fail closed.
+ */
+async function hasUntrustedRead(actorId, threadId) {
+  // ONE query: the thread's primary key plus an EXISTS over that thread's own
+  // turns (the thread_id index). Cost: one indexed lookup and a scan of one
+  // thread's rows per owner-direct request that carries a thread id.
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${UNTRUSTED_READ_MARKER}%`]));
+  if (!row) throw new Error('thread not readable');
+  return row.marked === true;
+}
+
 async function listThreads(actorId, limit = 20) {
   if (!actorId) return [];
   return db('ib_threads')
@@ -289,6 +313,8 @@ module.exports = {
   recentOperatorTurns,
   IMAGE_TAINT_MARKER,
   PII_TAINT_MARKER,
+  UNTRUSTED_READ_MARKER,
+  hasUntrustedRead,
   CONTINUATION_TURN,
   purgeExpiredThreads,
   deriveTitle,

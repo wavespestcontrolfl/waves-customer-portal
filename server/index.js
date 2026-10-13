@@ -28,7 +28,7 @@ const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
-const { redactRequestUrl } = require('./utils/redact-request-url');
+const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('./utils/request-log-format');
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -686,14 +686,7 @@ app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
 }));
 
 // Request logging
-morgan.token('redacted-url', (req) => redactRequestUrl(req.originalUrl || req.url || ''));
-morgan.token('redacted-referrer', (req) => {
-  const referrer = req.headers?.referer || req.headers?.referrer;
-  return referrer ? redactRequestUrl(referrer) : '-';
-});
-const REDACTED_COMBINED_LOG = ':remote-addr - :remote-user [:date[clf]] '
-  + '":method :redacted-url HTTP/:http-version" :status :res[content-length] '
-  + '":redacted-referrer" ":user-agent"';
+registerRedactedTokens(morgan);
 app.use(morgan(REDACTED_COMBINED_LOG, {
   stream: { write: (message) => logger.info(message.trim()) },
 }));

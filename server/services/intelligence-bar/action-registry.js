@@ -8,13 +8,14 @@ const addFormats = require('ajv-formats');
 const policy = require('./action-policy.json');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
-  FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES, FULL_ACCESS_READ_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
 const { ibAcceptEstimateLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
+const { adminReadLive } = require('./admin-read-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -71,6 +72,7 @@ const MODULES = [
   ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
+  ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
   ['address-tools', 'ADDRESS_TOOLS', 'executeAddressTool'],
 ];
 
@@ -132,6 +134,8 @@ const GATED_ACTIONS = {
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
   accept_estimate: () => ibAcceptEstimateLive(),
+  find_admin_reads: () => adminReadLive(),
+  read_admin_data: () => adminReadLive(),
 };
 
 function allowed(action, { role, context, fullAccess } = {}) {
@@ -150,6 +154,8 @@ function allowed(action, { role, context, fullAccess } = {}) {
   // refusal, but these ARE structurally two-step (a card), so they need
   // their own check here rather than the blanket approval-kind refusal.
   if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
+  // General admin reads (owner ruling 2026-10-12): owner login only.
+  if (FULL_ACCESS_READ_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
   return true;
 }
 
@@ -220,6 +226,15 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   // call" ask spent its rounds discovering the call log and the customer edit.
   'create_appointment', 'reschedule_appointment', 'cancel_appointment',
   'update_customer', 'get_call_log',
+  // The general admin read (owner ruling 2026-10-12): the finder AND the read,
+  // so a request on any page can search the reviewed read list and call the
+  // result on the next round without a discover_capabilities detour (words like
+  // "show blocked numbers" match neither static description). Still subject to
+  // allowed(): GATE_IB_GENERAL_READ on AND the owner login (full access), so
+  // other admins, technicians, the tech rail and a gate-off deploy never see
+  // them. With GATE_IB_TOOL_SEARCH the eager page list is built without full
+  // access, so they are deferred and searchable there instead.
+  'find_admin_reads', 'read_admin_data',
 ]);
 
 // Page-specific additions beyond a page's own domain (owner ruling 2026-10-07
