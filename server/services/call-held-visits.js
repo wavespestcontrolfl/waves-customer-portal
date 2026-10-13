@@ -12,12 +12,15 @@
  *               requested ET date (the same slot the booking-miss watchdog
  *               pages on; its helpers are reused here, not copied).
  *   day_only  - a requested / offered / ambiguous visit on a two-party call whose date
- *               range is exactly the requested day, with no time ("time not set").
+ *               range is exactly the requested day, with no time ("time not set"). It is
+ *               NOT a confirmed visit: the strip labels it "Day discussed on a call" and
+ *               staff decide whether to book it (owner 2026-10-12, "day too").
  *               Never a voicemail, spam or a call that needed no action.
  * One row per call; confirmed wins when a call qualifies as both.
  *
  * A held row clears when the office has acted:
- *   - a visit carries the call (source_call_log_id or the Call SID note), any date, any customer;
+ *   - a visit carries the call (source_call_log_id, or the Call SID marker in its notes or
+ *     internal notes; "Book it" prefills that marker), any date, any customer;
  *   - the call's customer has a live visit on the promised day;
  *   - a namesake account booked the confirmed slot after the call (the watchdog rule);
  *   - a live visit created after the call, on the promised day, sits under a customer who
@@ -93,96 +96,109 @@ function timeLabel(minutes) {
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 }
 
+// Is this stored extraction a day-only ask for dateET? A requested / offered / ambiguous visit
+// on a two-party call whose date range is exactly that day. Each line is one reason it is not.
+function isDayOnlyAsk(call, extraction, dateET, callDayET) {
+  const sched = extraction.scheduling || {};
+  const spamKind = extraction.spam_verdict?.spam_kind;
+  return [
+    DAY_ONLY_STATUSES.has(sched.status),
+    sched.requested_date_range_start === dateET && sched.requested_date_range_end === dateET,
+    call.processing_status === 'processed',
+    // A voicemail lead is 'processed' too, but a one-sided message is not a visit discussed
+    // with staff on the line.
+    extraction.meta?.is_voicemail !== true && call.answered_by !== 'voicemail',
+    !spamKind || spamKind === 'not_spam',
+    !CLOSED_DISPOSITIONS.has(extraction.recommended_disposition),
+    dateET >= callDayET,
+  ].every(Boolean);
+}
+
+// A call row this module may read at all: recent, terminal, with a valid V2 extraction.
+function readableCall(call, since) {
+  const createdAt = call.created_at ? new Date(call.created_at) : null;
+  if (!createdAt || Number.isNaN(createdAt.getTime()) || createdAt.getTime() < since) return null;
+  if (call.v2_extraction_status !== undefined && call.v2_extraction_status !== 'valid') return null;
+  if (!call.processing_status || call.processing_status === 'processing') return null;
+  return createdAt;
+}
+
 // Calls that could be held on dateET, before any booking evidence is read.
-// Returns [{ call, extraction, kind, minutes }]. confirmed beats day_only.
+// Returns [{ call, extraction, kind, minutes, slot }]. confirmed beats day_only.
 function heldCandidates(calls, dateET, now = new Date()) {
   const since = now.getTime() - LOOKBACK_DAYS * 86400 * 1000;
   const out = [];
   for (const call of calls) {
-    const createdAt = call.created_at ? new Date(call.created_at) : null;
-    if (!createdAt || Number.isNaN(createdAt.getTime()) || createdAt.getTime() < since) continue;
-    if (call.v2_extraction_status !== undefined && call.v2_extraction_status !== 'valid') continue;
-    if (!call.processing_status || call.processing_status === 'processing') continue;
-    const extraction = parseExtraction(call.ai_extraction_enriched);
+    const createdAt = readableCall(call, since);
+    const extraction = createdAt && parseExtraction(call.ai_extraction_enriched);
     if (!extraction) continue;
-
     const slot = extractConfirmedSlot(extraction);
-    if (slot && slot.dateET === dateET) {
-      out.push({ call, extraction, kind: 'confirmed', minutes: slot.minutes, slot });
-      continue;
-    }
-
-    const sched = extraction.scheduling || {};
-    const start = sched.requested_date_range_start;
-    if (!DAY_ONLY_STATUSES.has(sched.status)) continue;
-    if (!ISO_DATE.test(String(start || '')) || start !== dateET || sched.requested_date_range_end !== start) continue;
-    if (call.processing_status !== 'processed') continue;
-    // A voicemail lead is 'processed' too, but a one-sided message is a request, not a visit
-    // staff agreed on the line.
-    if (extraction.meta?.is_voicemail === true || call.answered_by === 'voicemail') continue;
-    const spamKind = extraction.spam_verdict?.spam_kind;
-    if (spamKind && spamKind !== 'not_spam') continue;
-    if (CLOSED_DISPOSITIONS.has(extraction.recommended_disposition)) continue;
-    if (dateET < etDateString(createdAt)) continue;
-    out.push({ call, extraction, kind: 'day_only', minutes: null, slot: null });
+    if (slot && slot.dateET === dateET) out.push({ call, extraction, kind: 'confirmed', minutes: slot.minutes, slot });
+    else if (ISO_DATE.test(dateET) && isDayOnlyAsk(call, extraction, dateET, etDateString(createdAt))) out.push({ call, extraction, kind: 'day_only', minutes: null, slot: null });
   }
   return out;
+}
+
+// Has the office acted on this candidate? One booked row is enough (see the header for each rule).
+function clearedByBooking({ call, extraction, kind, slot }, bookedRows, { dateET, namesakes }) {
+  const sameName = namesakes.get(call.id);
+  // A visit that is on the calendar or done; a skipped, cancelled or rescheduled one is not a booking.
+  const ownOnDay = (row) => !!call.customer_id && row.customer_id === call.customer_id && LIVE_STATUSES.has(row.status) && row.sched_date === dateET;
+  const namesake = (row) => kind === 'confirmed' && !!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot);
+  return bookedRows.some((row) => rowCarriesCall(row, call) || ownOnDay(row) || namesake(row) || bookedForCallerAfterCall(row, call, extraction, dateET));
+}
+
+// The display row for one held candidate.
+function heldRow({ call, extraction, kind, minutes }, { dateET, customerNames }) {
+  const svc = extraction.property?.service_address || {};
+  const caller = extraction.caller || {};
+  const spokenName = caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' ');
+  const request = extraction.service_request || {};
+  const notes = String(extraction.scheduling?.scheduling_notes_raw || '').trim();
+  return {
+    call_log_id: call.id,
+    // The call marker "Book it" writes into the new visit's internal notes, so the visit
+    // carries the call (rowCarriesCall) under any customer and the row clears.
+    call_sid: call.twilio_call_sid || null,
+    kind,
+    date_et: dateET,
+    minutes,
+    time_label: timeLabel(minutes),
+    caller_name: (call.customer_id && customerNames.get(call.customer_id)) || spokenName || 'Unknown caller',
+    phone: externalPhone(call),
+    address: { line1: svc.street_line_1 || null, city: svc.city || null, zip: svc.postal_code || null },
+    service: request.specific_service_name || request.primary_service_category || null,
+    call_at: new Date(call.created_at).toISOString(),
+    customer_id: call.customer_id || null,
+    notes: notes ? notes.slice(0, NOTES_MAX_CHARS) : null,
+  };
+}
+
+// Timed rows by time, then the rows with no time, each group oldest call first.
+function byTimeThenCall(a, b) {
+  if ((a.minutes === null) !== (b.minutes === null)) return a.minutes === null ? 1 : -1;
+  if (a.minutes !== b.minutes) return a.minutes - b.minutes;
+  return a.call_at.localeCompare(b.call_at);
 }
 
 // Pure. `calls` are call_log rows ({ id, twilio_call_sid, customer_id,
 // direction, created_at, from_phone, to_phone, answered_by, processing_status,
 // v2_extraction_status, ai_extraction_enriched }); `bookedRows` are
 // scheduled_services rows ({ customer_id, status, sched_date ('YYYY-MM-DD'),
-// window_start, created_at, source_call_log_id, notes, customer_phone,
-// customer_secondary_phone, visit_address, visit_address_line2, visit_city,
-// visit_zip }); `triageRows` are
+// window_start, created_at, source_call_log_id, notes, internal_notes,
+// customer_phone, customer_secondary_phone, visit_address, visit_address_line2,
+// visit_city, visit_zip }); `triageRows` are
 // triage_items ({ call_log_id, status, resolution_source }). `namesakes` is
 // the watchdog's call id -> Set(customer id) map; `customerNames` maps a
 // customer id to "First Last".
 function computeHeldVisits(calls, bookedRows, triageRows, {
   dateET, namesakes = new Map(), customerNames = new Map(), now = new Date(),
 } = {}) {
-  const rows = [];
-  for (const { call, extraction, kind, minutes, slot } of heldCandidates(calls, dateET, now)) {
-    // A visit that is on the calendar or done; a skipped, cancelled or rescheduled one is not a booking.
-    const own = (row) => !!call.customer_id && row.customer_id === call.customer_id && LIVE_STATUSES.has(row.status);
-    const sameName = namesakes.get(call.id);
-    const cleared = bookedRows.some((row) => (
-      rowCarriesCall(row, call)
-      || (own(row) && row.sched_date === dateET)
-      || (kind === 'confirmed' && !!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot))
-      || bookedForCallerAfterCall(row, call, extraction, dateET)
-    ));
-    if (cleared) continue;
-    if (officeClosedCall(triageRows.filter((r) => r.call_log_id === call.id))) continue;
-
-    const svc = extraction.property?.service_address || {};
-    const caller = extraction.caller || {};
-    const spokenName = caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' ');
-    const notes = String(extraction.scheduling?.scheduling_notes_raw || '').trim();
-    rows.push({
-      call_log_id: call.id,
-      kind,
-      date_et: dateET,
-      minutes,
-      time_label: timeLabel(minutes),
-      caller_name: (call.customer_id && customerNames.get(call.customer_id)) || spokenName || 'Unknown caller',
-      phone: externalPhone(call),
-      address: { line1: svc.street_line_1 || null, city: svc.city || null, zip: svc.postal_code || null },
-      service: extraction.service_request?.specific_service_name
-        || extraction.service_request?.primary_service_category
-        || null,
-      call_at: new Date(call.created_at).toISOString(),
-      customer_id: call.customer_id || null,
-      notes: notes ? notes.slice(0, NOTES_MAX_CHARS) : null,
-    });
-  }
-  rows.sort((a, b) => {
-    if ((a.minutes === null) !== (b.minutes === null)) return a.minutes === null ? 1 : -1;
-    if (a.minutes !== b.minutes) return a.minutes - b.minutes;
-    return a.call_at < b.call_at ? -1 : a.call_at > b.call_at ? 1 : 0;
-  });
-  return rows;
+  return heldCandidates(calls, dateET, now)
+    .filter((candidate) => !clearedByBooking(candidate, bookedRows, { dateET, namesakes }))
+    .filter(({ call }) => !officeClosedCall(triageRows.filter((r) => r.call_log_id === call.id)))
+    .map((candidate) => heldRow(candidate, { dateET, customerNames }))
+    .sort(byTimeThenCall);
 }
 
 async function listHeldVisits(dateET, { now = new Date() } = {}) {
@@ -222,9 +238,10 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
   // candidate call whose customer carries a caller's number or whose address starts with a
   // stated house number. The pure function decides the exact match per call.
   const phoneForms = [...new Set(candidates.flatMap((c) => phoneMatchDigits(externalPhone(c.call) || '')))];
-  const houseNumbers = [...new Set(candidates
-    .map((c) => (String(c.extraction?.property?.service_address?.street_line_1 || '').trim().match(/^\d+/) || [])[0])
-    .filter(Boolean))].map((n) => `${n} %`);
+  // Every number on the stated street line is a candidate house number ("Unit 4, 100 Example
+  // Dr" is unit-first); the pure function decides the exact property match.
+  const numberTokens = [...new Set(candidates.flatMap((c) => String(c.extraction?.property?.service_address?.street_line_1 || '').match(/\d+/g) || []))];
+  const houseNumbers = numberTokens.flatMap((n) => [`${n} %`, `% ${n} %`]);
   const digits = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
   // The visit's own service address when it has one, else the customer's: all four parts from
   // the same source.
@@ -235,7 +252,7 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
     .leftJoin('customers as cu', 'cu.id', 'ss.customer_id')
     .where(function heldEvidence() {
       this.whereIn('ss.source_call_log_id', callIds);
-      if (sidPatterns.length) this.orWhereRaw('ss.notes LIKE ANY(?)', [sidPatterns]);
+      if (sidPatterns.length) this.orWhereRaw('(ss.notes LIKE ANY(?) OR ss.internal_notes LIKE ANY(?))', [sidPatterns, sidPatterns]);
       if (customerIds.length) {
         this.orWhere(function ownOrNamesake() {
           this.whereIn('ss.customer_id', customerIds).whereRaw("to_char(ss.scheduled_date, 'YYYY-MM-DD') = ?", [dateET]);
@@ -253,7 +270,7 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
       }
     })
     .select(
-      'ss.customer_id', 'ss.status', 'ss.window_start', 'ss.created_at', 'ss.source_call_log_id', 'ss.notes',
+      'ss.customer_id', 'ss.status', 'ss.window_start', 'ss.created_at', 'ss.source_call_log_id', 'ss.notes', 'ss.internal_notes',
       'cu.phone as customer_phone', 'cu.secondary_phone as customer_secondary_phone',
       db.raw(`${visitAddress} AS visit_address`),
       db.raw(`${part('service_address_line2', 'address_line2')} AS visit_address_line2`),

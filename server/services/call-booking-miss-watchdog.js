@@ -182,7 +182,11 @@ function windowStartMinutes(windowStart) {
 // it is the call's booking whichever customer it sits under.
 function rowCarriesCall(row, call) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
-  return !!call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`);
+  // The marker sits in either notes column: the call pipeline writes it to internal_notes on
+  // the visits it books, and the Dispatch "Book it" action prefills it there.
+  if (!call.twilio_call_sid) return false;
+  const marker = `Call SID: ${call.twilio_call_sid}`;
+  return String(row.notes || '').includes(marker) || String(row.internal_notes || '').includes(marker);
 }
 
 function rowClearsSlot(row, call, slot) {
@@ -444,7 +448,7 @@ async function runInner({ now = new Date() } = {}) {
   const bookedRows = await db('scheduled_services')
     .where(function bookedEvidence() {
       this.whereIn('source_call_log_id', callIds);
-      if (sidPatterns.length) this.orWhereRaw('notes LIKE ANY(?)', [sidPatterns]);
+      if (sidPatterns.length) this.orWhereRaw('(notes LIKE ANY(?) OR internal_notes LIKE ANY(?))', [sidPatterns, sidPatterns]);
       if (customerIds.length) {
         this.orWhere(function ownCustomerOnDate() {
           this.whereIn('customer_id', customerIds)
@@ -453,7 +457,7 @@ async function runInner({ now = new Date() } = {}) {
       }
     })
     .select(
-      'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes',
+      'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes', 'internal_notes',
       db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
   const misses = computeBookingMisses(calls, bookedRows, { now, namesakes });

@@ -1,9 +1,12 @@
 // client/src/pages/admin/HeldVisitsStrip.jsx
 //
-// "Promised on a call, not booked" strip for the admin Dispatch day view
-// (GATE_CALL_HELD_VISIT, owner 2026-10-12). Display only: each row is a visit
-// staff agreed with a caller on a recorded call that nothing on the calendar
-// carries yet. "Book it" hands the row to the page, which opens the existing
+// "From calls, not on the calendar" strip for the admin Dispatch day view
+// (GATE_CALL_HELD_VISIT, owner 2026-10-12). Display only. Two kinds of row:
+//   confirmed - staff and the caller agreed this day and time on a recorded
+//               call, and nothing on the calendar carries it ("Promised").
+//   day_only  - this day was asked for or offered on a call with no agreed
+//               time. It is NOT a confirmed visit; the row says "Day discussed"
+//               and staff decide whether to book it. "Book it" hands the row to the page, which opens the existing
 // New appointment modal. Renders nothing for an empty list.
 import React from 'react';
 import { Button, buttonStyles, cn } from '../../components/ui';
@@ -12,18 +15,28 @@ import { formatETDate, formatETTime } from '../../lib/timezone';
 // Same deep link the notification triggers and the Follow-through cards use.
 export const callHref = (callLogId) => `/admin/communications#tab=calls&call=${encodeURIComponent(callLogId)}`;
 
-function promisedOn(callAt) {
-  if (!callAt) return '';
-  const day = formatETDate(callAt, { weekday: 'long' });
-  return `Promised on a call ${day}, ${formatETTime(callAt)}`;
+// What the call established, by kind. A day-only row is never called a promise.
+const KIND_TEXT = {
+  confirmed: { lead: 'Promised on a call', tag: 'PROMISED · not booked' },
+  day_only: { lead: 'Day discussed on a call', tag: 'NOT CONFIRMED · not booked' },
+};
+const kindText = (row) => KIND_TEXT[row.kind] || KIND_TEXT.day_only;
+
+function fromCall(row) {
+  if (!row.call_at) return kindText(row).lead;
+  const day = formatETDate(row.call_at, { weekday: 'long' });
+  return `${kindText(row).lead} ${day}, ${formatETTime(row.call_at)}`;
 }
+
+// The booking form takes whole hours: an agreed 2:30 PM is not prefilled.
+const offHour = (row) => Number.isFinite(row.minutes) && row.minutes % 60 !== 0;
 
 export default function HeldVisitsStrip({ heldVisits, onBook }) {
   if (!Array.isArray(heldVisits) || heldVisits.length === 0) return null;
   return (
-    <section aria-label="Promised on a call, not booked" className="mb-3 md:mb-4 bg-white border-hairline border-zinc-200 rounded-md">
+    <section aria-label="From calls, not on the calendar" className="mb-3 md:mb-4 bg-white border-hairline border-zinc-200 rounded-md">
       <h2 className="px-4 py-3 border-b border-hairline border-zinc-200 text-14 font-medium text-ink-primary">
-        Promised on a call, not booked
+        From calls, not on the calendar
       </h2>
       <ul className="divide-y divide-zinc-200">
         {heldVisits.map((row) => {
@@ -35,16 +48,21 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
                   <span className="u-nums font-medium">{row.time_label || 'Time not set'}</span>
                   <span className="font-medium">{row.caller_name}</span>
                   <span className="inline-flex items-center border border-dashed border-zinc-400 rounded-xs px-2 text-14 text-ink-secondary">
-                    HELD · not booked
+                    {kindText(row).tag}
                   </span>
                 </div>
                 {(place || row.service) && (
                   <div className="text-ink-secondary">{[place, row.service].filter(Boolean).join(' · ')}</div>
                 )}
                 <div className="text-ink-secondary">
-                  {promisedOn(row.call_at)}
+                  {fromCall(row)}
                   {row.phone ? <> · <span className="u-nums">{row.phone}</span></> : null}
                 </div>
+                {offHour(row) && (
+                  <div className="text-ink-secondary">
+                    The booking form takes whole hours. Set {row.time_label} by hand.
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <Button density="comfortable" onClick={() => onBook?.(row)}>Book it</Button>

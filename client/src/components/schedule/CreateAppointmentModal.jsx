@@ -1493,7 +1493,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -2120,7 +2120,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');
-  const [internalNotes, setInternalNotes] = useState('');
+  // defaultInternalNotes: Dispatch "Book it" on a held visit prefills the call marker here.
+  const [internalNotes, setInternalNotes] = useState(defaultInternalNotes || '');
   const [sendSms, setSendSms] = useState(true);
   // Secure-card / Auto Pay setup text — OFF by default (owner call): the
   // office opts in per booking; server-side policy (payer exemption,

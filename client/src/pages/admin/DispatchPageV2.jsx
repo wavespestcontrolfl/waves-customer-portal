@@ -813,7 +813,7 @@ export default function DispatchPageV2({
     fetchSchedule(date);
   }, [date, fetchSchedule]);
 
-  // "Promised on a call, not booked" strip (GATE_CALL_HELD_VISIT). Fail-soft:
+  // "From calls, not on the calendar" strip (GATE_CALL_HELD_VISIT). Fail-soft:
   // any error or an off gate leaves the list empty and the page unchanged.
   useEffect(() => {
     if (viewMode !== "day" || activeTab !== "board") {
@@ -821,6 +821,9 @@ export default function DispatchPageV2({
       return undefined;
     }
     let cancelled = false;
+    // Rows belong to the date that produced them: drop the last list before the
+    // new request, so a slow response never shows one day's rows under another.
+    setHeldVisits([]);
     (async () => {
       try {
         const res = await adminFetch(`/admin/schedule/held-visits?date=${date}`);
@@ -889,9 +892,11 @@ export default function DispatchPageV2({
   // customer is preloaded only when the call is linked to one; if that lookup
   // fails the modal still opens and the person picks the customer.
   const bookHeldVisit = useCallback(async (row) => {
-    const windowStart = Number.isFinite(row.minutes)
-      ? `${String(Math.floor(row.minutes / 60)).padStart(2, "0")}:${String(row.minutes % 60).padStart(2, "0")}`
-      : undefined;
+    // The form takes whole hours. An off-hour slot (2:30 PM) is left for the
+    // person to set; the strip says so. Prefilling 2:00 would book earlier
+    // than the time agreed on the call.
+    const onTheHour = Number.isFinite(row.minutes) && row.minutes % 60 === 0;
+    const windowStart = onTheHour ? `${String(row.minutes / 60).padStart(2, "0")}:00` : undefined;
     let customer;
     if (row.customer_id) {
       try {
@@ -901,7 +906,10 @@ export default function DispatchPageV2({
         console.error("Failed to preload held-visit customer:", err);
       }
     }
-    setNewApptDefaults({ date: row.date_et, windowStart, customer });
+    // The call marker makes the new visit carry the call under any customer,
+    // so the held row (and the booking-miss bell) clears once it is booked.
+    const internalNotes = row.call_sid ? `Booked from a phone call. Call SID: ${row.call_sid}.` : "";
+    setNewApptDefaults({ date: row.date_et, windowStart, customer, internalNotes });
     setShowNewAppt(true);
   }, []);
 
@@ -1630,6 +1638,7 @@ export default function DispatchPageV2({
           defaultDurationMinutes={newApptDefaults?.durationMinutes}
           defaultTechId={newApptDefaults?.techId}
           defaultCustomer={newApptDefaults?.customer || null}
+          defaultInternalNotes={newApptDefaults?.internalNotes || ""}
           onClose={() => {
             setShowNewAppt(false);
             setNewApptDefaults(null);

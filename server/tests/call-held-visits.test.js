@@ -262,3 +262,16 @@ describe('a hand booking after the call clears the row', () => {
     expect(run([outbound], [visit({ customer_id: 'cust-new', customer_phone: '+19415550100' })])).toHaveLength(1);
   });
 });
+
+describe('the call marker and unit-first addresses', () => {
+  it('clears on the Call SID marker in internal notes ("Book it" prefills it there), under any customer', () => {
+    const booked = visit({ customer_id: 'cust-household', internal_notes: 'Booked from a phone call. Call SID: CAsynthetic001.', sched_date: '2026-10-20' });
+    expect(run([call()], [booked])).toEqual([]);
+    expect(run([call({ ai_extraction_enriched: dayOnly() })], [booked])).toEqual([]);
+    expect(run([call()], [visit({ customer_id: 'cust-household', internal_notes: 'Call SID: CAother.' })])).toHaveLength(1);
+  });
+
+  it('gives the row the call id "Book it" writes', () => {
+    expect(run([call()])[0].call_sid).toBe('CAsynthetic001');
+  });
+});

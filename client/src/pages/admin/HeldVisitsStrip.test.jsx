@@ -20,18 +20,30 @@ const dayOnly = {
 describe('HeldVisitsStrip', () => {
   it('renders each held visit with its time, caller, address, service, call time and phone', () => {
     render(<HeldVisitsStrip heldVisits={[timed]} onBook={() => {}} />);
-    expect(screen.getByText('Promised on a call, not booked')).toBeInTheDocument();
+    expect(screen.getByText('From calls, not on the calendar')).toBeInTheDocument();
     expect(screen.getByText('11:00 AM')).toBeInTheDocument();
     expect(screen.getByText('Pat Sample')).toBeInTheDocument();
     expect(screen.getByText('12 Test Lane, Bradenton · General Pest Control')).toBeInTheDocument();
     expect(screen.getByText(/Promised on a call Monday, 10:30 AM/)).toBeInTheDocument();
     expect(screen.getByText('+19415550100')).toBeInTheDocument();
-    expect(screen.getByText('HELD · not booked')).toBeInTheDocument();
+    expect(screen.getByText('PROMISED · not booked')).toBeInTheDocument();
   });
 
   it('shows "Time not set" for a day-only row', () => {
     render(<HeldVisitsStrip heldVisits={[dayOnly]} onBook={() => {}} />);
     expect(screen.getByText('Time not set')).toBeInTheDocument();
+  });
+
+  it('never calls a day-only row a promise', () => {
+    render(<HeldVisitsStrip heldVisits={[dayOnly]} onBook={() => {}} />);
+    expect(screen.getByText('NOT CONFIRMED · not booked')).toBeInTheDocument();
+    expect(screen.getByText(/Day discussed on a call Monday, 10:30 AM/)).toBeInTheDocument();
+    expect(screen.queryByText(/Promised/)).not.toBeInTheDocument();
+  });
+
+  it('says an off-hour time must be set by hand', () => {
+    render(<HeldVisitsStrip heldVisits={[{ ...timed, minutes: 870, time_label: '2:30 PM' }]} onBook={() => {}} />);
+    expect(screen.getByText('The booking form takes whole hours. Set 2:30 PM by hand.')).toBeInTheDocument();
   });
 
   it('links Open call to the call in Communications', () => {
