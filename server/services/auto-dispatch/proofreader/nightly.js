@@ -221,18 +221,20 @@ const keyFor = (service) => noticeKey(service.id, toDateStr(service.scheduled_da
 // the move the person refused). A notice the system closed (the visit left
 // the placement) carries the resolved title and decides nothing.
 async function personHeld(conn, service, { lock = false } = {}) {
-  const query = conn('notifications');
-  if (lock) query.forShare();
-  const row = await query
+  // The newest row of the key, open or done: with `lock` (the move
+  // transaction) the row is locked FOR SHARE whatever its state, so a Done
+  // cannot land on it before the move commits; the done fields are then
+  // judged here, not in the WHERE that picks the row (pre-push audit r19).
+  const query = conn('notifications')
     .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [keyFor(service)])
-    .whereNotNull('done_at')
-    .whereNot('title', RESOLVED_TITLE)
-    // Done by a person, never by a system close (the gate turned off, the
-    // visit left the placement): notification-service.js's own rule.
-    .whereRaw(require('../../notification-service')._private.PERSON_DONE_BY_SQL)
-    .first('id');
-  return !!row;
+    .orderBy('created_at', 'desc');
+  if (lock) query.forShare();
+  const row = await query.first('id', 'title', 'done_at', 'done_by');
+  // Done by a person, never by a system close (the gate turned off, the
+  // visit left the placement): notification-service.js's own rule.
+  return !!row && row.done_at != null && row.title !== RESOLVED_TITLE
+    && require('../../notification-service')._private.isPersonDoneBy(row.done_by);
 }
 
 // A model call takes up to two minutes: a person can mark the notice done

@@ -7,7 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
   // The store's own "a person closed it" rule, as the hold read uses it.
-  _private: { PERSON_DONE_BY_SQL: 'DONE_BY_A_PERSON' },
+  _private: { isPersonDoneBy: jest.requireActual('../services/notification-service')._private.isPersonDoneBy },
 }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   ...jest.requireActual('../services/auto-dispatch/audit'),
@@ -33,11 +33,11 @@ const RECORD = {
 
 // Technician names, and the notification store as the "did a person mark the
 // notice done" read sees it (`doneNotice`: the row it finds, or an Error).
+const PERSON_DONE = { id: 'n9', title: 'Schedule — check a held move', done_at: '2026-10-12T15:00:00Z', done_by: '7f1c9a52-3b1e-4c1d-9a55-0d6f1f2a3b4c' };
 let doneNotice = null;
-let holdSql = [];
 const conn = () => (table) => {
   const chain = {
-    where: () => chain, whereIn: () => chain, whereRaw: (sql) => { if (table === 'notifications') holdSql.push(sql); return chain; }, whereNotNull: () => chain, whereNot: () => chain,
+    where: () => chain, whereIn: () => chain, whereRaw: () => chain, orderBy: () => chain,
     select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }],
     first: async () => {
       if (table !== 'notifications') return null;
@@ -59,7 +59,6 @@ const check = (run, proofreader) => nightly.checkMove({ service: SERVICE, best: 
 beforeEach(() => {
   jest.clearAllMocks();
   doneNotice = null;
-  holdSql = [];
   audit.ringsLeft.mockResolvedValue(10);
   audit.standingNoticeKeys.mockResolvedValue(new Set());
   notifications.notifyAdmin.mockResolvedValue({ id: 'n1' });
@@ -89,7 +88,7 @@ describe('checkMove', () => {
     // The unit mover's own member read, by how many open members the stop has.
     const stopOf = (count) => (table) => {
       const chain = {
-        where: () => chain, whereIn: () => chain, whereNotIn: () => chain, whereRaw: () => chain, whereNotNull: () => chain, whereNot: () => chain,
+        where: () => chain, whereIn: () => chain, whereNotIn: () => chain, whereRaw: () => chain, orderBy: () => chain,
         first: async () => null,
         select: async () => {
           if (table === 'technicians') return [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }];
@@ -184,16 +183,19 @@ describe('checkMove', () => {
   test('a notice a person marked done holds the visit: nobody is asked, the visit stays', async () => {
     const run = runOf();
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
-    doneNotice = { id: 'n9' };
+    doneNotice = PERSON_DONE;
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD', audit: { why: 'person_held' }, broke: false });
     expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
     expect(run.proofreader).toMatchObject({ calls: 0, personHeld: 1 });
-    // Only a person's done holds: a system close (the gate turned off, the visit left) decides nothing.
-    expect(holdSql).toContain('DONE_BY_A_PERSON');
+    // Only a person's done holds: an open notice, a system close, or a system-resolved row decides nothing.
+    for (const row of [{ ...PERSON_DONE, done_at: null, done_by: null }, { ...PERSON_DONE, done_by: 'auto-dispatch' }, { ...PERSON_DONE, title: nightly.RESOLVED_TITLE }]) {
+      doneNotice = row;
+      expect(await check(runOf(), proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }))).toMatchObject({ allowed: true });
+    }
     // Done lands while the model reads: the allow does not move the visit.
     doneNotice = null;
     const slow = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
-    slow.proofreadMove.mockImplementation(async () => { doneNotice = { id: 'n9' }; return { verdict: 'allow', why: 'nothing_breaks' }; });
+    slow.proofreadMove.mockImplementation(async () => { doneNotice = PERSON_DONE; return { verdict: 'allow', why: 'nothing_breaks' }; });
     expect(await check(run, slow)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD' });
     // The store fails on the read after an allow: a broken check the run reports, not a made-up hold.
     doneNotice = null;
@@ -327,7 +329,7 @@ describe('the write of a checked move', () => {
       const calls = [];
       const trx = (table) => {
         const chain = {
-          where: () => chain, whereRaw: () => chain, whereNotNull: () => chain, whereNot: () => chain,
+          where: () => chain, whereRaw: () => chain, orderBy: () => chain,
           forShare: () => { calls.push(`forShare:${table}`); return chain; },
           first: async () => (table === 'notifications' ? notice : prefsRow),
         };
@@ -361,8 +363,12 @@ describe('the write of a checked move', () => {
     });
 
     test('a person marked the notice done after the last read: superseded', async () => {
-      const err = await guard(trxOf({ notice: { id: 'n9' } })).catch((e) => e);
+      const err = await guard(trxOf({ notice: PERSON_DONE })).catch((e) => e);
       expect(superseded(err)).toMatchObject({ reason_description: 'A person marked the held-move notice done while the move was checked' });
+      // An OPEN notice is locked too (FOR SHARE whatever its state), so a Done cannot land before the move commits.
+      const open = trxOf({ notice: { ...PERSON_DONE, done_at: null, done_by: null } });
+      await expect(guard(open)).resolves.toBeUndefined();
+      expect(open.calls).toContain('forShare:notifications');
     });
 
     test('the customer record is built again on the transaction: a new entry is superseded, the same record passes', async () => {
