@@ -103,10 +103,9 @@ import {
 } from '../../lib/typed-findings-rules';
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
-  SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
+  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, useWriteTracking, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
-import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
 // Kept importable from here (FastCompleteLawnReserviceSheet and the products suite read it from this path).
 export { isSendableRateUnit };
@@ -1806,21 +1805,6 @@ function ReportFlowForm({
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A part of a grouped stop
   // (prepare mode) and a re-service (not in ctx.wrapUp) keep their fixed text.
   const wrapUp = useWrapUp({ gate: ctx.wrapUp, submission, sharedNote, service, request, base, applicationsRecorded: pestSprayEvidence(active, draft), omitAutoTiming: true, noPayLink: isReservice, reviewMarker: isReservice, onChecking: onWrapChecking });
-  // After the note's read: the best tip for the pests the reader heard and the
-  // words of the note. Offered only while the tech has no tip of their own
-  // choosing (or has taken this one); never picked for them.
-  const tipOffer = useMemo(() => {
-    const readPests = draft?.facts?.pests;
-    if (!tips || !draft || form.customTip.trim()) return null;
-    const id = pestSheetTipIds(tips, { // The reader names pests in its own words ("ghost ants"): read as a note is.
-      pests: pestsInNote(Array.isArray(readPests) ? readPests.join('. ') : ''), note: form.note })[0];
-    if (!id || (form.tipId && form.tipId !== id)) return null;
-    const tip = [...(tips.groups || []).flatMap((group) => group.tips || []), ...(tips.more || [])].find((entry) => entry.id === id);
-    return tip ? {
-      library: tips, tip, pressed: form.tipId === id,
-      onPick: () => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' })),
-    } : null;
-  }, [tips, draft, form.note, form.tipId, form.customTip]);
   const [step, setStep] = useState('visit');
   // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL): the products the note names are
   // read when the report is written and land as rows the tech confirms. On a
@@ -2033,7 +2017,6 @@ function ReportFlowForm({
         trace={stepTrace}
         traced={!!(mode ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
         pestHeard={!mode}
-        tipOffer={tipOffer}
         productVoice={productVoice}
         laneCard={recordState.card({ draft, locked, writing })}
         onRetryTrace={trace.failed ? trace.reload : null}
@@ -2143,7 +2126,7 @@ function TraceFooterButtons({ locked, onRetryTrace, onRemoveTrace, removingTrace
 function ReportStep({
   wrapUp, service, report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, tipOffer, reuse = NO_REUSE, onAutoTrace = null,
+  onBackFromPrompt, reuse = NO_REUSE, onAutoTrace = null,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2200,8 +2183,6 @@ function ReportStep({
         {/* Voice fill: the product rows the note filled, each waiting on the tech's
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
-        {/* The note has been read: one tip for what it heard, a tap to add. */}
-        {showDraft && <TipSuggestion {...tipOffer} locked={locked} />}
         {laneCard}
         {showDraft && trace && <TraceSection trace={trace} locked={locked || reuse.reusing} onTrace={onTrace} />}
         {wrapUp.enabled && <fieldset className="tech-visit-form" disabled={locked}><FastCompleteWrapUp wrapUp={wrapUp} /></fieldset>}
