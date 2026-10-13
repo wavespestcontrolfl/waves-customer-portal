@@ -6223,6 +6223,24 @@ async function seriesNextOccurrencesPrice(conn, parentId) {
 }
 
 
+// GET /api/admin/schedule/held-visits?date=YYYY-MM-DD — visits promised to a
+// caller on a recorded call with nothing booked (GATE_CALL_HELD_VISIT). Display
+// only. This strip must never break the Dispatch page: a failed load is an
+// empty list.
+router.get('/held-visits', requireAdmin, async (req, res) => {
+  const date = String(req.query.date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T12:00:00Z`))) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+  try {
+    const heldVisits = await require('../services/call-held-visits').listHeldVisits(date);
+    return res.json({ heldVisits });
+  } catch (err) {
+    logger.warn(`[held-visits] load failed for ${date}: ${err.message}`);
+    return res.json({ heldVisits: [] });
+  }
+});
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {

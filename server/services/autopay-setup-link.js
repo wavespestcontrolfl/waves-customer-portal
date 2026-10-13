@@ -36,7 +36,8 @@ const db = require('../models/db');
 const { isRetiredSetupIntent, isStripeResourceMissing, followReplacementChain } = require('./setup-intent-replacement');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const KIND = 'customer';
 const PURPOSE = 'autopay_setup_link';
@@ -250,26 +251,132 @@ function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 }
 
-// Email delivery: the account holder's own address (the link saves a
-// payment method on THEIR account, so the billing-contact override does
-// not apply), honoring the customer-level email opt-out. The template
-// library owns the audit row, suppressions, and provider retry; an
-// inactive/missing template throws there and is surfaced as a dark lever
-// (same shape as the SMS template lever). Never throws.
-async function emailSetupLink({ customer, customerId, request, secureUrl, trigger }) {
-  const to = String(customer.email || '').trim();
-  if (!isEmailLike(to)) return skip('no_customer_email');
-  // Fail closed: an unreadable preference is not an enabled one (GH Codex
-  // #3867 P2) — an opted-out customer must never get this optional email
-  // because the prefs read blipped. Retryable skip instead.
+// Pre-send checks the delivery paths run before anything is built, shared
+// with autopayDeliveryPreflight so the two can never disagree. Each returns
+// the skip reason, or null when the channel passes.
+//
+// Email: the account holder's own address (the link saves a payment method on
+// THEIR account, so the billing-contact override does not apply), honoring the
+// customer-level email opt-out. Fail closed: an unreadable preference is not
+// an enabled one (GH Codex #3867 P2) — an opted-out customer must never get
+// this optional email because the prefs read blipped. Retryable skip instead.
+async function emailPrecheckReason(customer, customerId) {
+  if (!isEmailLike(String(customer.email || '').trim())) return 'no_customer_email';
   let prefs;
   try {
     prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
   } catch (err) {
     logger.warn(`[autopay-setup-link] notification_prefs lookup failed for customer ${customerId}: ${err.message}`);
-    return skip('email_prefs_check_uncertain');
+    return 'email_prefs_check_uncertain';
   }
-  if (prefs?.email_enabled === false) return skip('email_opted_out');
+  return prefs?.email_enabled === false ? 'email_opted_out' : null;
+}
+
+// SMS: a phone on file, then the third lever, surfaced instead of silently
+// blocked in the pipeline (GH Codex #3726 r1 P1): original_message_type
+// 'autopay_setup_link' classifies as an Auto Pay customer SMS, which
+// sendCustomerMessage refuses unless GATE_AUTOPAY_CUSTOMER_SMS is on.
+function smsPrecheckReason(customer) {
+  if (!customer.phone) return 'no_customer_phone';
+  if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return 'autopay_sms_gate_off';
+  return null;
+}
+
+function setupLinkEmailPayload(customer, secureUrl, expiresAt) {
+  return {
+    first_name: customer.first_name || 'there',
+    secure_link: secureUrl,
+    expires_on: expiresAt
+      ? new Date(expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
+      : '',
+  };
+}
+
+// `expectedRecipient` (opt-in; { phoneLast10 } for sms, { email } for email):
+// the contact the caller's confirm card showed. The service compares it with
+// the customer row IT reads — before anything is minted, and again on a fresh
+// read immediately before the provider call — and a difference is
+// skip('recipient_changed') with nothing sent. An absent pin changes nothing.
+const pinPhone = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+const pinEmail = (value) => String(value || '').trim().toLowerCase();
+function recipientMatchesPin(expected, delivery, row) {
+  if (!expected) return true;
+  if (delivery === 'email') return !!row && pinEmail(row.email) === pinEmail(expected.email) && pinEmail(row.email) !== '';
+  return !!row && pinPhone(row.phone) === String(expected.phoneLast10 || '') && pinPhone(row.phone).length === 10;
+}
+// The row to send to, read fresh: null when the pin no longer holds (or the
+// read fails, which is not a match). Without a pin it is the row already held.
+async function recipientAtSend({ expectedRecipient, delivery, customerId, customer }) {
+  if (!expectedRecipient) return customer;
+  let fresh = null;
+  try {
+    fresh = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] recipient re-read failed for customer ${customerId}: ${err.message}`);
+  }
+  return recipientMatchesPin(expectedRecipient, delivery, fresh) ? fresh : null;
+}
+
+// The pin through the provider request. Both senders' own LOCKED handoffs (the
+// ones the annual rate letter's text and email use) hold the customer-comms lock
+// (+ the phone lock for a text) and the sender runs its remaining guards (annual
+// offer, disclaimed number, window) inside that transaction before the request.
+// The customer ROW is read FOR SHARE in the same transaction and held to commit:
+// a plain write of customers.phone / email needs the row's FOR NO KEY UPDATE
+// lock, so it cannot commit between this re-read and the provider call — it
+// waits for the request, or commits first and the re-read vetoes. The re-read
+// uses the handoff's own transaction (never a second pool connection). Lock
+// order: comms -> phone -> customers row (rows last). Absent pin = no handoff.
+// SMS: the sender allows this handoff only for this entry point (narrow clause in
+// send-customer-message.js smsHandoffAllowed).
+const SMS_PIN_ENTRY_POINT = 'autopay_setup_link_send';
+const lockedRow = (trx, customerId) => trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first();
+function smsLockedPin({ expectedRecipient, customerId, phone }) {
+  if (!expectedRecipient) return {};
+  const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+  return {
+    entryPoint: SMS_PIN_ENTRY_POINT,
+    withSmsHandoff: (dispatch) => withSmsConsentLock(db, { phone, customerId }, async (trx) => (
+      recipientMatchesPin(expectedRecipient, 'sms', await lockedRow(trx, customerId))
+        ? dispatch(trx)
+        : { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false }
+    )),
+  };
+}
+// Email: the library's withProviderHandoff (dispatch(trx)). `state.vetoed` tells a
+// changed recipient from any other abort before the request.
+function emailLockedPin({ expectedRecipient, customerId, to }) {
+  const state = { vetoed: false };
+  if (!expectedRecipient) return { hook: {}, state };
+  const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
+  return {
+    state,
+    hook: {
+      withProviderHandoff: (dispatch) => db.transaction(async (trx) => {
+        await lockCustomerComms(trx, customerId);
+        if (!recipientMatchesPin(expectedRecipient, 'email', await lockedRow(trx, customerId))) {
+          state.vetoed = true;
+          return { ok: false, reason: 'recipient_changed' };
+        }
+        await lockCustomerEmail(trx, to);
+        await dispatch(trx);
+        return { ok: true };
+      }),
+    },
+  };
+}
+
+// Email delivery: the template library owns the audit row, suppressions, and
+// provider retry; an inactive/missing template throws there and is surfaced
+// as a dark lever (same shape as the SMS template lever). Never throws.
+async function emailSetupLink({ customer, customerId, request, secureUrl, trigger, expectedRecipient }) {
+  const precheck = await emailPrecheckReason(customer, customerId);
+  if (precheck) return skip(precheck);
+  // The provider-boundary pin: the address mailed is the one just re-read.
+  const target = await recipientAtSend({ expectedRecipient, delivery: 'email', customerId, customer });
+  if (!target) return skip('recipient_changed');
+  const to = String(target.email || '').trim();
+  const pin = emailLockedPin({ expectedRecipient, customerId, to });
 
   const EmailTemplateLibrary = require('./email-template-library');
   let result;
@@ -277,13 +384,7 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
     result = await EmailTemplateLibrary.sendTemplate({
       templateKey: EMAIL_TEMPLATE_KEY,
       to,
-      payload: {
-        first_name: customer.first_name || 'there',
-        secure_link: secureUrl,
-        expires_on: request.expires_at
-          ? new Date(request.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
-          : '',
-      },
+      payload: setupLinkEmailPayload(customer, secureUrl, request.expires_at),
       recipientType: 'customer',
       recipientId: customerId,
       // Every office click is a deliberate (re)send — a customer who lost the
@@ -297,6 +398,7 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
       categories: ['autopay_setup_link', 'payment_setup'],
       // Provider rejections echo the recipient address — never log them raw.
       suppressProviderErrorLog: true,
+      ...pin.hook,
     });
   } catch (sendErr) {
     if (isTemplateLeverError(sendErr)) return skip('email_template_inactive');
@@ -305,190 +407,432 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
     logger.error(`[autopay-setup-link] email send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
     return skip('send_outcome_uncertain');
   }
+  // The locked handoff's veto is a definite not-sent, reported as the changed contact.
+  if (pin.state.vetoed) return skip('recipient_changed');
   if (!result?.sent) return skip(result?.reason || 'send_blocked');
   return markSent(request, customerId, 'email', trigger);
+}
+
+// A stand-in for the bearer URL in the delivery preflight: it renders the
+// same template as a real send without minting a row (never a real token).
+const PREFLIGHT_LINK_PATH = '/secure/preflight-check';
+
+// The messaging policy's read-only verdict for the setup text: the validators
+// sendCustomerMessage runs before it touches a provider (send window,
+// suppression / STOP, consent for the card_request purpose, contact
+// compliance), on the same input shape, same order, nothing sent or written.
+// Returns the skip reason the send result would carry, or null.
+async function smsPolicyReason({ customer, customerId, trigger }) {
+  const { normalizeRecipient, billingHoldBlock, callbackNumberHoldBlocksSend, CALLBACK_NUMBER_HOLD_BLOCK } = require('./messaging/send-customer-message');
+  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
+  const { checkSendWindow } = require('./messaging/validators/send-window');
+  const { checkContactCompliance } = require('./messaging/compliance-contact-checks');
+  const input = {
+    to: normalizeRecipient(customer.phone),
+    channel: 'sms',
+    audience: 'customer',
+    purpose: 'card_request',
+    customerId,
+    identityTrustLevel: 'phone_matches_customer',
+    ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
+    metadata: { trigger, original_message_type: TEMPLATE_KEY },
+  };
+  const policy = require('./messaging/policy').resolvePolicy(input.audience, input.purpose);
+  let state = await loadContactState(input);
+  state = await loadSuppressionState(input, state);
+  // The send fails open on an unreadable suppression read (the sms_enabled
+  // gate still stands); a preflight that offers a send must not.
+  if (state.lookupFailed || state.suppressionLookupFailed) return 'sms_policy_check_uncertain';
+  for (const check of [checkSendWindow, checkSuppression, checkConsentForPurpose, checkContactCompliance]) {
+    const verdict = await check(input, policy, state);
+    if (verdict.ok) continue;
+    const lookupFailed = verdict.code === 'CONSENT_LOOKUP_FAILED' || verdict.code === 'SUPPRESSION_LOOKUP_FAILED';
+    return lookupFailed ? 'sms_policy_check_uncertain' : (verdict.reason || 'send_blocked');
+  }
+  // The send's own holds, by its own predicates (codex P2 #6318 r2): a
+  // collections hold on a hold-gated notice, and a callback_number_needed hold
+  // on the destination, each stop the text after the link would be minted.
+  const held = await billingHoldBlock(input);
+  if (held) return held.reason || held.code || 'send_blocked';
+  if (await callbackNumberHoldBlocksSend(input)) return CALLBACK_NUMBER_HOLD_BLOCK.reason;
+  return null;
+}
+
+// The CACHED line type only (phone_line_types) — never the paid Twilio Lookup
+// the send's check_line_type makes on a miss. Same gate and same blocked
+// reason as that validator; a miss passes (the send would look it up), an
+// unreadable cache fails closed here where the send fails open.
+async function smsLineTypeReason(phone) {
+  if (!require('../config/feature-gates').isEnabled('proactiveLineTypeLookup')) return null;
+  const { readCachedLineType, NON_SMS_LINE_TYPES, blockResult } = require('./messaging/validators/line-type');
+  const cached = await readCachedLineType(require('./messaging/send-customer-message').normalizeRecipient(phone));
+  if (cached.state === 'error') return 'sms_line_type_check_uncertain';
+  return cached.state === 'hit' && NON_SMS_LINE_TYPES.has(cached.lineType) ? blockResult(cached.lineType).reason : null;
+}
+
+// The rendered text must carry the link (a body saved before the editor's
+// required-placeholder rule, or a variant, might not). The SMS renderer sends
+// links WITHOUT their https:// (sms-link-policy stripSmsUrlScheme), so the
+// link is looked for in that form: it is a substring of the full form too.
+const carriesLink = (body, url) => !!body && body.includes(stripSmsUrlScheme(url));
+
+// The skip for a text the pipeline did not report as sent. A send the provider
+// may have accepted (deliveryOutcome 'uncertain', or no outcome stated) is
+// unknown, not "not sent": the shared reader (classifyDeliveryCertainty, the
+// one the IB send tools and the receipt resend use) decides.
+const smsNotSentSkip = (result, linkMeta) => skip(
+  classifyDeliveryCertainty(result) === 'unknown' ? 'send_outcome_uncertain' : (result?.reason || 'send_blocked'),
+  linkMeta,
+);
+
+// The editor's required-placeholder list for this text, from its one source.
+const requiredTemplateVars = () => require('../routes/admin-sms-templates').REQUIRED_TEMPLATE_PLACEHOLDERS[TEMPLATE_KEY];
+
+// Every body the send could select renders and carries the link: the base row
+// and each active variant with weight (read-only: the same getTemplate the
+// send calls, template-issue audit off, the variant body handed in as a
+// snapshot). A missing, inactive or link-less body is not sendable.
+async function smsTemplatesCarryLink(customer) {
+  const { getTemplate } = require('../routes/admin-sms-templates');
+  const vars = { first_name: customer.first_name || 'there', secure_link: portalUrl(PREFLIGHT_LINK_PATH) };
+  const opts = { audit: false, requiredVars: requiredTemplateVars() };
+  if (!(await getTemplate(TEMPLATE_KEY, vars, {}, { ...opts, noVariants: true }))) return false;
+  const variants = (await require('./sms-template-variants').activeVariants(TEMPLATE_KEY)).filter((v) => Number(v.weight || 0) > 0);
+  for (const variant of variants) {
+    if (!(await getTemplate(TEMPLATE_KEY, vars, {}, { ...opts, templateBody: variant.body }))) return false;
+  }
+  return true;
+}
+
+async function smsDeliveryPreflight({ customer, customerId, trigger }) {
+  const precheck = smsPrecheckReason(customer);
+  if (precheck) return { ok: false, reason: precheck };
+  if (!(await smsTemplatesCarryLink(customer))) return { ok: false, reason: 'template_inactive' };
+  const reason = await smsPolicyReason({ customer, customerId, trigger }) || await smsLineTypeReason(customer.phone);
+  return reason ? { ok: false, reason } : { ok: true };
+}
+
+async function emailDeliveryPreflight({ customer, customerId }) {
+  const precheck = await emailPrecheckReason(customer, customerId);
+  if (precheck) return { ok: false, reason: precheck };
+  // The template library's own no-send guard chain: template + version active,
+  // required variables, and the recipient's email_suppressions on the
+  // template's stream. A thrown error is an unreadable check, not a verdict.
+  let verdict;
+  try {
+    verdict = await require('./email-template-library').preflightTemplateSend({
+      templateKey: EMAIL_TEMPLATE_KEY,
+      to: String(customer.email || '').trim(),
+      payload: setupLinkEmailPayload(customer, portalUrl(PREFLIGHT_LINK_PATH), new Date(Date.now() + LINK_TTL_MS)),
+    });
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] email template preflight failed for customer ${customerId}: ${String(err?.code || err?.name || 'error')}`);
+    return { ok: false, reason: 'email_template_check_uncertain' };
+  }
+  if (verdict.ok) return { ok: true };
+  return { ok: false, reason: isTemplateLeverError({ code: verdict.code, message: verdict.reason }) ? 'email_template_inactive' : (verdict.reason || 'send_blocked') };
+}
+
+/**
+ * Read-only: could `delivery` ('sms' | 'email') deliver the setup link right
+ * now? Returns { ok: true } or { ok: false, reason }, where `reason` is the
+ * skip reason requestAutopaySetupLink returns today for that condition:
+ *   sms   no_customer_phone, autopay_sms_gate_off, template_inactive, the
+ *         messaging pipeline's own reason (STOP / suppression / consent /
+ *         send window / cached landline), sms_policy_check_uncertain,
+ *         sms_line_type_check_uncertain
+ *   email no_customer_email, email_prefs_check_uncertain, email_opted_out,
+ *         email_template_inactive, "Suppressed: ..." (email_suppressions),
+ *         email_template_check_uncertain
+ * 'inline' (and anything else) always passes — it sends nothing. Never mints
+ * a link, sends, writes, or pays for a Twilio Lookup (only the CACHED line
+ * type is read), and never throws: an unreadable check fails closed.
+ * `customer` is optional (loaded by id when omitted); `trigger` mirrors the
+ * request ('admin' = an office click, which the send window exempts).
+ */
+async function autopayDeliveryPreflight({ customerId, customer = null, delivery = 'inline', trigger = 'admin' } = {}) {
+  if (delivery !== 'sms' && delivery !== 'email') return { ok: true };
+  try {
+    const holder = customer || await db('customers').where({ id: customerId }).first();
+    if (!holder || holder.deleted_at) return { ok: false, reason: 'customer_not_found' };
+    return delivery === 'sms'
+      ? await smsDeliveryPreflight({ customer: holder, customerId, trigger })
+      : await emailDeliveryPreflight({ customer: holder, customerId });
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] ${delivery} delivery preflight failed for customer ${customerId}: ${String(err?.code || err?.name || 'error')}`);
+    return { ok: false, reason: `${delivery}_delivery_check_uncertain` };
+  }
+}
+
+// requestAutopaySetupLink's `requireDeliverable` guard: the skip to return
+// before any row is written, or null to carry on (guard off, or inline).
+// Also the expectedRecipient pin against the row this call read.
+async function undeliverableSkip({ requireDeliverable, expectedRecipient, customerId, customer, delivery, trigger }) {
+  if (delivery === 'inline') return null;
+  if (requireDeliverable === true) {
+    const preflight = await autopayDeliveryPreflight({ customerId, customer, delivery, trigger });
+    if (!preflight.ok) return skip(preflight.reason);
+  }
+  return recipientMatchesPin(expectedRecipient, delivery, customer) ? null : skip('recipient_changed');
+}
+
+// The LIVE standalone row — pending OR mid-completion (partial unique index:
+// one live standalone row per customer). The mint's dedup and the read-only
+// setupLinkReuse below both go through this one query.
+const findLiveSetupRequest = (customerId) => db('appointment_card_requests')
+  .where({ customer_id: customerId, kind: KIND })
+  .whereIn('status', ['pending', 'completing'])
+  .first();
+
+// Read-only: what a send would do with the link row, by the mint's own rule.
+// The mint REUSES an unexpired live row as it is (its expiry is NOT extended),
+// retires an expired one and mints a fresh 30-day row, and never touches a row
+// mid-completion. Returns { state: 'new' | 'reuse' | 'completing', expiresAt }
+// (expiresAt only for 'reuse').
+async function setupLinkReuse(customerId) {
+  const existing = await findLiveSetupRequest(customerId);
+  if (!existing) return { state: 'new', expiresAt: null };
+  if (existing.status === 'completing') {
+    // A live claim holds the row even past its expiry; only a stale one retires.
+    const claimAge = existing.updated_at ? Date.now() - new Date(existing.updated_at).getTime() : Infinity;
+    return !isExpired(existing) || claimAge <= STALE_CLAIM_MS ? { state: 'completing', expiresAt: null } : { state: 'new', expiresAt: null };
+  }
+  if (isExpired(existing)) return { state: 'new', expiresAt: null };
+  return { state: 'reuse', expiresAt: existing.expires_at ? new Date(existing.expires_at) : null };
+}
+
+// Read-only: the consented, chargeable saved card the auto-secure step would
+// enroll, or null. An OPT-OUT is sacred: a customer whose latest Auto Pay
+// toggle is a disable is never re-enrolled from an old consent by an office
+// click — they get a fresh link and a fresh checkbox instead
+// (findConsentedChargeableCard already returns null after an opt-out; the
+// explicit check here makes the contract visible — pre-push Codex P0). Shared
+// by requestAutopaySetupLink and the Intelligence Bar's preview so both read
+// the card the same way.
+async function findSavedMethodForAutoSecure(customerId) {
+  const ConsentService = require('./payment-method-consents');
+  const lastToggle = await db('autopay_log')
+    .where({ customer_id: customerId })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .first('event_type');
+  return lastToggle?.event_type === 'autopay_disabled' ? null : ConsentService.findConsentedChargeableCard(customerId);
 }
 
 /**
  * The one entry point (operator surfaces only). Returns
  *   { requested, action: 'link_created' | 'sent' | 'auto_secured' | 'skipped', reason, channel?, secureUrl?, expiresAt? }
  * ('sent' carries channel: 'sms' | 'email'.) Never throws.
+ *
+ * `requireDeliverable` (default false; only `true` opts in): when true and delivery is 'sms' or
+ * 'email', autopayDeliveryPreflight runs after eligibility and the saved-card
+ * auto-secure step and BEFORE any link row is inserted, reused or retired; a
+ * channel that could not deliver returns skip(reason) with NO secureUrl /
+ * expiresAt and nothing written or touched. The default keeps the mint-first
+ * order on purpose: the Customers button shows the returned secureUrl on a
+ * skipped send so the office can copy the link by hand. A caller that never
+ * wants a link without a deliverable channel (an Intelligence Bar confirm
+ * card) opts in.
  */
-async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin' }) {
+// ── requestAutopaySetupLink, as named steps (the order of effects, top to bottom) ──
+
+// What the locked enrollment's refusal reasons mean as skips — the same skips the
+// unlocked eligibility checks would have produced.
+const ENROLLMENT_SKIPS = new Map([
+  ['customer_deleted', 'customer_not_found'],
+  ['autopay_already_active', 'autopay_already_active'],
+  ['lane_changed', 'unsupported_billing_lane'],
+  ['autopay_paused', 'autopay_paused'],
+]);
+// An opt-out that won the race, or no readable consent moment: fall through to a
+// fresh link (fresh checkbox) rather than refusing.
+const ENROLLMENT_FALLS_THROUGH = new Set(['opted_out_after_authorization', 'no_consent_moment']);
+
+// The ORIGINAL consent's moment rides into enrollment (pre-push Codex P0): the
+// unlocked opt-out read can race a disable that commits right after it —
+// enrollConsentedMethod's in-lock guard then refuses opted_out_after_authorization
+// instead of overwriting the opt-out. A valid Date, or null (no readable moment →
+// do not auto-enroll blind; mint a link for a fresh checkbox instead).
+async function consentMoment(customerId, saved) {
+  let authorizedAt = null;
   try {
-    if (!['inline', 'sms', 'email'].includes(delivery)) delivery = 'inline';
+    const consentRow = await db('payment_method_consents')
+      .where({ customer_id: customerId, stripe_payment_method_id: saved.stripe_payment_method_id })
+      .orderBy('created_at', 'desc')
+      .first('created_at');
+    authorizedAt = consentRow?.created_at ? new Date(consentRow.created_at) : null;
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] consent moment lookup failed for customer ${customerId}: ${err.message}`);
+  }
+  if (!(authorizedAt instanceof Date) || Number.isNaN(authorizedAt.getTime())) {
+    logger.info(`[autopay-setup-link] no consent moment for saved pm ${saved.id} — minting a fresh link instead of auto-enrolling`);
+    return null;
+  }
+  return authorizedAt;
+}
+
+// The final result an enrollment outcome stands for, or null to carry on to a link.
+function enrollmentResult(enrollment) {
+  const reason = enrollment?.reason;
+  if (enrollment?.enrolled || reason === 'already_enrolled') return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
+  if (ENROLLMENT_SKIPS.has(reason)) return skip(ENROLLMENT_SKIPS.get(reason));
+  if (ENROLLMENT_FALLS_THROUGH.has(reason)) return null;
+  return skip(`enrollment_refused:${reason || 'unknown'}`);
+}
+
+// Step 2 — the saved card. A consented, chargeable saved card covers the ask:
+// enroll it and send nothing (mirrors the visit lane's auto-secure, minus the row:
+// there is no visit to mark satisfied). An OPT-OUT is sacred (see
+// findSavedMethodForAutoSecure): that customer gets a fresh link and a fresh
+// checkbox instead. allowAutoSecure === false: enrolling turns Auto Pay on for the
+// account (a billing change) — a caller that must never make it gets a skip, before
+// anything is enrolled, minted or sent. Returns a final result, or null (no card, or
+// carry on to a link).
+async function savedCardStep({ customerId, trigger, allowAutoSecure }) {
+  const saved = await findSavedMethodForAutoSecure(customerId);
+  if (!saved) return null;
+  if (allowAutoSecure === false) return skip('saved_method_available');
+  const authorizedAt = await consentMoment(customerId, saved);
+  // Same locked eligibility as capture completion (GH Codex P2): an archive / lane
+  // move / pause that commits after the unlocked checks is judged under the
+  // customer lock before anything enrolls.
+  const enrollment = authorizedAt
+    ? await enrollUnderCustomerLock({ customerId, paymentMethodId: saved.id, details: { via: PURPOSE, trigger }, authorizedAt })
+    : { enrolled: false, reason: 'no_consent_moment' };
+  return enrollmentResult(enrollment);
+}
+
+// An expired live row retires so a fresh link can mint (expiry takes precedence over
+// status, GH Codex #3726 r3 P2): a pending one at once; a COMPLETING one only once
+// its claim is stale (a live claim's worker may still finish or revert). Returns a
+// skip while a live claim holds the row, else null.
+async function retireExpiredRow(existing) {
+  if (existing.status !== 'completing') {
+    await db('appointment_card_requests').where({ id: existing.id, status: 'pending' }).update({ status: 'expired', updated_at: new Date() });
+    return null;
+  }
+  const claimAge = existing.updated_at ? Date.now() - new Date(existing.updated_at).getTime() : Infinity;
+  if (claimAge <= STALE_CLAIM_MS) return skip('completion_in_progress');
+  await db('appointment_card_requests')
+    .where({ id: existing.id, status: 'completing' })
+    .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
+    .update({ status: 'expired', updated_at: new Date() });
+  return null;
+}
+
+async function insertSetupRequest(customerId, trigger) {
+  const token = crypto.randomBytes(16).toString('base64url');
+  try {
+    const rows = await db('appointment_card_requests')
+      .insert({ kind: KIND, customer_id: customerId, status: 'pending', trigger, token, expires_at: new Date(Date.now() + LINK_TTL_MS) })
+      .returning(['id', 'token', 'expires_at']);
+    return rows && rows[0];
+  } catch (insertErr) {
+    // Lost a race to the partial unique — adopt the winner's row.
+    const winner = await findLiveSetupRequest(customerId);
+    if (!winner) throw insertErr;
+    return winner;
+  }
+}
+
+// Step 4 — mint or reuse the row. Dedup on the LIVE row — pending OR mid-completion
+// (partial unique index: one live standalone row per customer; a completing row is a
+// claim that can revert to pending, so it is live too). A completing row is never
+// retired here unless its claim is stale (the completion tail owns it).
+// Returns { request, existing } or { final } (a skip to return).
+async function mintOrReuseRequest({ customerId, trigger }) {
+  const existing = await findLiveSetupRequest(customerId);
+  let request = existing && !isExpired(existing) ? existing : null;
+  if (existing && !request) {
+    const held = await retireExpiredRow(existing);
+    if (held) return { final: held };
+  }
+  if (!request) request = await insertSetupRequest(customerId, trigger);
+  return { request, existing };
+}
+
+// Step 5 — deliver. 'inline' hands the link back; 'email' and 'sms' send it.
+function deliverInline({ request, existing, linkMeta }) {
+  return { requested: true, action: 'link_created', reason: existing && request.id === existing.id ? 'request_exists' : 'created', ...linkMeta };
+}
+
+async function deliverEmail({ customer, customerId, request, secureUrl, trigger, expectedRecipient, linkMeta }) {
+  const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger, expectedRecipient });
+  return { ...emailed, ...linkMeta };
+}
+
+async function deliverSms({ customer, customerId, request, secureUrl, trigger, expectedRecipient, linkMeta }) {
+  const smsPrecheck = smsPrecheckReason(customer);
+  if (smsPrecheck) return skip(smsPrecheck, linkMeta);
+  const { renderTemplate } = require('./appointment-card-request');
+  // requiredVars: the template editor's own rule (REQUIRED_TEMPLATE_PLACEHOLDERS) applied to the
+  // body the send selects (base or variant), so a row saved before that rule never sends a text
+  // without the link; the rendered body must also carry the URL.
+  const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY, { requiredVars: requiredTemplateVars() });
+  if (!carriesLink(body, secureUrl)) return skip('template_inactive', linkMeta);
+  // The provider-boundary pin: the number texted is the one just re-read.
+  const target = await recipientAtSend({ expectedRecipient, delivery: 'sms', customerId, customer });
+  if (!target) return skip('recipient_changed', linkMeta);
+
+  let result;
+  try {
+    result = await sendCustomerMessage({
+      to: target.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'card_request',
+      customerId,
+      identityTrustLevel: 'phone_matches_customer',
+      // Only ever an explicit office click — never automation.
+      ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
+      metadata: { autopay_setup_request_id: request.id, trigger, original_message_type: TEMPLATE_KEY },
+      ...smsLockedPin({ expectedRecipient, customerId, phone: target.phone }),
+    });
+  } catch (sendErr) {
+    // Provider errors can echo the destination number AND the message
+    // body (which carries the bearer URL) — log only the error class/code,
+    // never the message (pre-push Codex P1).
+    logger.error(`[autopay-setup-link] send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
+    return skip('send_outcome_uncertain', linkMeta);
+  }
+  if (!result?.sent) return smsNotSentSkip(result, linkMeta);
+  const sent = await markSent(request, customerId, 'sms', trigger);
+  return { ...sent, ...linkMeta };
+}
+
+const DELIVER = { inline: deliverInline, email: deliverEmail, sms: deliverSms };
+
+async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin', requireDeliverable, allowAutoSecure = true, expectedRecipient = null }) {
+  try {
+    if (!Object.hasOwn(DELIVER, delivery)) delivery = 'inline';
+    // 1. Eligibility.
     const eligibility = await setupLinkIneligibility(customerId);
     if (eligibility.reason) return skip(eligibility.reason);
     const { customer } = eligibility;
-
-    // A consented, chargeable saved card covers the ask — enroll it and
-    // send nothing (mirrors the visit lane's auto-secure, minus the row:
-    // there is no visit to mark satisfied). An OPT-OUT is sacred: a
-    // customer whose latest Auto Pay toggle is a disable is never
-    // re-enrolled from an old consent by an office click — they get a
-    // fresh link and a fresh checkbox instead (findConsentedChargeableCard
-    // already returns null after an opt-out; the explicit check below
-    // makes the contract visible here — pre-push Codex P0).
-    const ConsentService = require('./payment-method-consents');
-    const lastToggle = await db('autopay_log')
-      .where({ customer_id: customerId })
-      .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
-      .orderBy('created_at', 'desc')
-      .first('event_type');
-    const optedOut = lastToggle?.event_type === 'autopay_disabled';
-    const saved = optedOut ? null : await ConsentService.findConsentedChargeableCard(customerId);
-    if (saved) {
-      // The ORIGINAL consent's moment rides into enrollment (pre-push Codex
-      // P0): the unlocked opt-out read above can race a disable that commits
-      // right after it — enrollConsentedMethod's in-lock guard then refuses
-      // opted_out_after_authorization instead of overwriting the opt-out.
-      let authorizedAt = null;
-      try {
-        const consentRow = await db('payment_method_consents')
-          .where({ customer_id: customerId, stripe_payment_method_id: saved.stripe_payment_method_id })
-          .orderBy('created_at', 'desc')
-          .first('created_at');
-        authorizedAt = consentRow?.created_at ? new Date(consentRow.created_at) : null;
-      } catch (err) {
-        logger.warn(`[autopay-setup-link] consent moment lookup failed for customer ${customerId}: ${err.message}`);
-      }
-      // No readable authorization moment → do not auto-enroll blind; mint a
-      // link for a fresh checkbox instead.
-      if (!(authorizedAt instanceof Date) || Number.isNaN(authorizedAt.getTime())) {
-        logger.info(`[autopay-setup-link] no consent moment for saved pm ${saved.id} — minting a fresh link instead of auto-enrolling`);
-      }
-      // Same locked eligibility as capture completion (GH Codex P2): an
-      // archive / lane move / pause that commits after the unlocked checks
-      // above is judged under the customer lock before anything enrolls.
-      const enrollment = authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())
-        ? await enrollUnderCustomerLock({
-          customerId,
-          paymentMethodId: saved.id,
-          details: { via: PURPOSE, trigger },
-          authorizedAt,
-        })
-        : { enrolled: false, reason: 'no_consent_moment' };
-      if (enrollment?.enrolled || enrollment?.reason === 'already_enrolled') {
-        return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
-      }
-      // Locked eligibility refusals are the same skips the unlocked checks
-      // would have produced.
-      if (enrollment?.reason === 'customer_deleted') return skip('customer_not_found');
-      if (enrollment?.reason === 'autopay_already_active') return skip('autopay_already_active');
-      if (enrollment?.reason === 'lane_changed') return skip('unsupported_billing_lane');
-      if (enrollment?.reason === 'autopay_paused') return skip('autopay_paused');
-      // An opt-out that won the race, or no readable consent moment: fall
-      // through to a fresh link (fresh checkbox) rather than refusing.
-      if (enrollment?.reason !== 'opted_out_after_authorization' && enrollment?.reason !== 'no_consent_moment') {
-        return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
-      }
-    }
-
-    // Dedup on the LIVE row — pending OR mid-completion (partial unique
-    // index: one live standalone row per customer; a completing row is a
-    // claim that can revert to pending, so it is live too). An expired
-    // pending row is retired first so a fresh link can mint; a completing
-    // row is never retired here (the completion tail owns it).
-    const existing = await db('appointment_card_requests')
-      .where({ customer_id: customerId, kind: KIND })
-      .whereIn('status', ['pending', 'completing'])
-      .first();
-    // Expiry takes precedence over status (GH Codex #3726 r3 P2): an expired
-    // pending row retires; an expired COMPLETING row retires only once its
-    // claim is stale (a live claim's worker may still finish or revert).
-    let request = existing && !isExpired(existing) ? existing : null;
-    if (existing && !request) {
-      if (existing.status === 'completing') {
-        const claimAge = existing.updated_at ? Date.now() - new Date(existing.updated_at).getTime() : Infinity;
-        if (claimAge <= STALE_CLAIM_MS) return skip('completion_in_progress');
-        await db('appointment_card_requests')
-          .where({ id: existing.id, status: 'completing' })
-          .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
-          .update({ status: 'expired', updated_at: new Date() });
-      } else {
-        await db('appointment_card_requests')
-          .where({ id: existing.id, status: 'pending' })
-          .update({ status: 'expired', updated_at: new Date() });
-      }
-    }
-    if (!request) {
-      const token = crypto.randomBytes(16).toString('base64url');
-      try {
-        const rows = await db('appointment_card_requests')
-          .insert({
-            kind: KIND,
-            customer_id: customerId,
-            status: 'pending',
-            trigger,
-            token,
-            expires_at: new Date(Date.now() + LINK_TTL_MS),
-          })
-          .returning(['id', 'token', 'expires_at']);
-        request = rows && rows[0];
-      } catch (insertErr) {
-        // Lost a race to the partial unique — adopt the winner's row.
-        request = await db('appointment_card_requests')
-          .where({ customer_id: customerId, kind: KIND })
-          .whereIn('status', ['pending', 'completing'])
-          .first();
-        if (!request) throw insertErr;
-      }
-    }
+    // 2. The saved card (auto-secure, or the allowAutoSecure:false skip).
+    const savedCard = await savedCardStep({ customerId, trigger, allowAutoSecure });
+    if (savedCard) return savedCard;
+    // 3. Deliverability gate (requireDeliverable, and expectedRecipient before the mint).
+    const undeliverable = await undeliverableSkip({ requireDeliverable, expectedRecipient, customerId, customer, delivery, trigger });
+    if (undeliverable) return undeliverable;
+    // 4. Mint or reuse the row.
+    const minted = await mintOrReuseRequest({ customerId, trigger });
+    if (minted.final) return minted.final;
+    const { request, existing } = minted;
     // The bearer link goes out UNSHORTENED (same ruling as the visit lane:
     // the generic shortener is too weak a credential for a payment page).
     const secureUrl = portalUrl(`/secure/${request.token}`);
     const linkMeta = { secureUrl, expiresAt: request.expires_at || null };
-
     // A row mid-completion is never handed out, texted or stamped (GH Codex
     // #3726 P2, #3812 r4 P2): the customer is finishing right now, its
     // updated_at is the completion lease token — a stamp here would break
     // the worker's guarded final write — and a copied/inserted link would
     // only be refused at send.
     if (request.status === 'completing') return skip('completion_in_progress', linkMeta);
-
-    if (delivery === 'inline') {
-      return { requested: true, action: 'link_created', reason: existing && request.id === existing.id ? 'request_exists' : 'created', ...linkMeta };
-    }
-
-    if (delivery === 'email') {
-      const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger });
-      return { ...emailed, ...linkMeta };
-    }
-
-    if (!customer.phone) return skip('no_customer_phone', linkMeta);
-    // Third lever, surfaced instead of silently blocked in the pipeline
-    // (GH Codex #3726 r1 P1): original_message_type 'autopay_setup_link'
-    // classifies as an Auto Pay customer SMS, which sendCustomerMessage
-    // refuses unless GATE_AUTOPAY_CUSTOMER_SMS is on.
-    if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return skip('autopay_sms_gate_off', linkMeta);
-    const { renderTemplate } = require('./appointment-card-request');
-    const body = await renderTemplate({ first_name: customer.first_name || 'there', secure_link: secureUrl }, TEMPLATE_KEY);
-    if (!body) return skip('template_inactive', linkMeta);
-
-    let result;
-    try {
-      result = await sendCustomerMessage({
-        to: customer.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'card_request',
-        customerId,
-        identityTrustLevel: 'phone_matches_customer',
-        // Only ever an explicit office click — never automation.
-        ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
-        metadata: { autopay_setup_request_id: request.id, trigger, original_message_type: TEMPLATE_KEY },
-      });
-    } catch (sendErr) {
-      // Provider errors can echo the destination number AND the message
-      // body (which carries the bearer URL) — log only the error class/code,
-      // never the message (pre-push Codex P1).
-      logger.error(`[autopay-setup-link] send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
-      return skip('send_outcome_uncertain', linkMeta);
-    }
-    if (!result?.sent) return skip(result?.reason || 'send_blocked', linkMeta);
-    const sent = await markSent(request, customerId, 'sms', trigger);
-    return { ...sent, ...linkMeta };
+    // 5. Deliver.
+    return await DELIVER[delivery]({ customer, customerId, request, existing, secureUrl, trigger, expectedRecipient, linkMeta });
   } catch (err) {
     logger.error(`[autopay-setup-link] request failed for customer ${customerId}: ${err.message}`);
     return skip('request_failed');
@@ -1293,6 +1637,9 @@ module.exports = {
   isAutopaySetupLinkEnabled,
   setupLinkIneligibility,
   requestAutopaySetupLink,
+  autopayDeliveryPreflight,
+  findSavedMethodForAutoSecure,
+  setupLinkReuse,
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,

@@ -120,6 +120,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
   'resend_receipt',
+  // The confirmed run texts or emails the customer their Auto Pay setup link.
+  'send_autopay_setup_link',
   // The invoice text (one text with the pay link; the bar sends no email).
   'send_invoice',
 ]);

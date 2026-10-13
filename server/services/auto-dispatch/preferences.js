@@ -74,13 +74,16 @@ function normalizePreferences(prefs, serviceType) {
   };
 }
 
-async function getCustomerSchedulingPreferences(customerId, serviceType, conn = db) {
+// `lock`: read the row FOR SHARE on `conn` (a transaction), so it cannot
+// change before that transaction ends (apply.js move guard).
+async function getCustomerSchedulingPreferences(customerId, serviceType, conn = db, { lock = false } = {}) {
   // No try/catch: a real read error must propagate so the orchestrator skips this
   // service (fail closed) rather than silently dropping the customer's HARD
   // blackout constraint. A missing ROW is not an error — .first() returns
   // undefined and normalizePreferences applies service-type defaults.
-  const prefs = await conn('property_preferences')
-    .where('customer_id', customerId)
+  const query = conn('property_preferences').where('customer_id', customerId);
+  if (lock) query.forShare();
+  const prefs = await query
     .first(
       'preferred_day', 'preferred_time', 'contact_preference',
       'blackout_start', 'blackout_end', 'access_notes', 'special_instructions',

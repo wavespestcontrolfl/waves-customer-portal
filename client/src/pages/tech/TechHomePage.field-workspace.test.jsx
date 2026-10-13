@@ -44,11 +44,11 @@ let briefStatus;
 let fetchMock;
 let followThrough;
 
-function mount(path = '/admin/today', { role = 'technician' } = {}) {
+function mount(path = '/admin/today', { role = 'technician', techRole = null } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy, techRole }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -79,6 +79,7 @@ beforeEach(() => {
       data = status === 200 ? { facts: { access: { accessNotes: 'Use the side gate' } } } : { error: status === 404 ? 'Not found' : 'Brief unavailable' };
     }
     if (path.includes('/tech/line')) data = { line: null };
+    if (path.includes('/admin/schedule/held-visits')) data = { heldVisits: [{ call_log_id: 'call-held', kind: 'confirmed', time_label: '11:00 AM', minutes: 660, caller_name: 'Riley Example', address: { line1: '12 Test Lane', city: 'Bradenton' }, service: 'General Pest Control' }] };
     return { ok: status === 200, status, json: async () => data };
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -86,6 +87,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('Tech field workspace uses the existing route workflow', () => {
+  // Held visits (GATE_CALL_HELD_VISIT) belong to no technician: an admin login sees them on
+  // Today, a technician login never asks for them.
+  it('shows visits from calls that are not on the calendar to an admin login only', async () => {
+    const heldReads = () => fetchMock.mock.calls.filter(([path]) => String(path).includes('/held-visits'));
+    mount('/admin/today', { role: 'admin', techRole: 'admin' });
+    expect(await screen.findByText('11:00 AM · Riley Example')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Book in Dispatch' })).toBeInTheDocument();
+    cleanup();
+    fetchMock.mockClear();
+    mount('/admin/today', { role: 'technician', techRole: 'technician' });
+    expect(await screen.findByText('Fixture one')).toBeInTheDocument();
+    expect(heldReads()).toHaveLength(0);
+    expect(screen.queryByText('11:00 AM · Riley Example')).not.toBeInTheDocument();
+  });
+
   it('shows shared callback actions in the field workspace even when its route fails', async () => {
     scheduleFails = true;
     followThrough = { callbacks_enabled: true, commitments: [{ id: 'callback-fixture', kind: 'callback', party: 'waves', customer_first_name: 'Fixture',

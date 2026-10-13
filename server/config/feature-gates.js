@@ -2208,6 +2208,12 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Dispatch "Promised on a call, not booked" strip (owner 2026-10-12): a call
+  // where staff agreed a visit with the caller and nothing is on the calendar
+  // shows as a display-only HELD row on that day, with a Book it button.
+  // Reads call_log, scheduled_services, triage_items; writes nothing.
+  // Off -> the route returns an empty list and the strip never renders.
+  callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
@@ -3575,6 +3581,18 @@ const gates = {
   // switch: unset.
   autoDispatchRoadCheck: gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK'),
 
+  // Auto-dispatch move proofreader (owner 2026-10-09 "proofreader yes";
+  // 2026-10-12 "go with the better agent, and for moves it is unsure of
+  // moving forward create admin notifications"). On, the 04:10 run in apply
+  // mode asks one model (ROUTES.autoDispatchProofreader) about each move
+  // right before it is written: the model reads the customer record and
+  // answers allow / hold / unknown. Only an allow moves the visit, on the
+  // slot the model read. An unknown raises one admin notice for the visit.
+  // It can only stop a move and it sends the customer nothing. OFF in every
+  // environment; auto-dispatch/config.js reads it through gateEnvValue() at
+  // call time (config.proofreaderEnabled). Kill switch: unset.
+  autoDispatchProofreader: gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -4877,6 +4895,18 @@ function contactReportTextLive() {
 // reprice-visits-tools.js): offered and executable only while on. Kill: unset.
 function ibRepriceVisitsLive() {
   return process.env.GATE_IB_REPRICE_VISITS === 'true';
+}
+
+// GATE_IB_TOOL_SEARCH read at CALL time — strict `=== 'true'`, dark. A
+// full-access Intelligence Bar login on an ordinary admin page gets its page's
+// tools up front plus every other allowed tool deferred behind the Anthropic
+// API's tool search (action-registry.js initialTools, scope.toolSearch). Off =
+// the page list plus discover_capabilities for everyone. Has effect only on a
+// model that accepts tool search (models.anthropicSupportsToolSearch) and does
+// not think by default (models.anthropicThinksByDefault); any other model
+// keeps the ordinary list. Kill: unset.
+function ibToolSearchLive() {
+  return process.env.GATE_IB_TOOL_SEARCH === 'true';
 }
 
 // GATE_IB_BILLING_MODE_EDIT read at CALL time — strict `=== 'true'`, dark.
@@ -6596,6 +6626,8 @@ module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
 module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;
 // GATE_IB_REPRICE_VISITS reader, on its own line so gate PRs never conflict.
 module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
+// GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
+module.exports.ibToolSearchLive = ibToolSearchLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.

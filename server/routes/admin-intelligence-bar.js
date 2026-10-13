@@ -62,6 +62,11 @@ const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../se
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
 const { CHOICE_TOOLS, executeChoiceTool, OFFER_CHOICES_TOOL_NAME } = require('../services/intelligence-bar/choice-tools');
+const { ADDRESS_TOOLS, executeAddressTool, CHECK_ADDRESS_TOOL_NAME } = require('../services/intelligence-bar/address-tools');
+// Scope 'none' (they read no customer rows) but their inputs or results can
+// carry a customer's name or street address: treated as PII-bearing for logs
+// and thread redaction, as PII_TOOL_NAMES would if their scope were not 'none'.
+const SCOPE_NONE_PII_TOOL_NAMES = new Set([OFFER_CHOICES_TOOL_NAME, CHECK_ADDRESS_TOOL_NAME]);
 const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
@@ -87,6 +92,7 @@ const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
+const ToolSearch = require('../services/intelligence-bar/tool-search');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -117,9 +123,7 @@ const MAX_TOOL_ROUNDS = 12;
 // found and names what is left, in place of the generic "too many steps" line.
 const FINAL_ROUND_NOTE = '[Step limit reached. Do not call a tool. Answer now: say what you found, what you changed or proposed, and what is still left to do.]';
 function finalRoundMessages(messages) {
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== 'user' || !Array.isArray(last.content)) return messages;
-  return [...messages.slice(0, -1), { ...last, content: [...last.content, { type: 'text', text: FINAL_ROUND_NOTE }] }];
+  return ToolSearch.withTurnEndingText(messages, FINAL_ROUND_NOTE);
 }
 // What the gap collector needs beside a tool result: the round, and whether
 // this call proposed a card or committed an owner-direct write.
@@ -478,6 +482,9 @@ const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
 function withCacheBreakpoint(messages) {
   if (!messages.length) return messages;
   const last = messages[messages.length - 1];
+  // A paused turn (pause_turn) continues from the assistant message: its blocks
+  // (server tool search results) take no breakpoint.
+  if (last.role === 'assistant') return messages;
   let content = last.content;
   if (typeof content === 'string') {
     content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
@@ -975,6 +982,11 @@ const VERIFIED_VERSION_PARAMS = {
   // the card showed; a number changed since is refused at commit
   // (customer-link-tools.js pinnedVersionRefusal).
   create_customer_link: '_verified_link_version',
+  // send_autopay_setup_link binds the customer, the channel and the contact (phone
+  // last ten or email) the card showed; one changed since is refused at commit
+  // (customer-link-tools.js pinnedVersionRefusal), and the service re-checks it
+  // before the provider call (expectedRecipient).
+  send_autopay_setup_link: '_verified_autopay_version',
 };
 
 // The overlapping visits a booking card names, or [] when the lookup fails
@@ -3012,7 +3024,7 @@ const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
 function withEveryPageTools(tools, context, isAdmin) {
   if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
   const present = new Set(tools.map(t => t.name));
-  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS, ...ADDRESS_TOOLS, ...TOOLS, ...COMMS_READ_TOOLS]
     .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
 }
 
@@ -3246,6 +3258,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (toolName === OFFER_CHOICES_TOOL_NAME) {
     return executeChoiceTool(toolName, input);
   }
+  if (toolName === CHECK_ADDRESS_TOOL_NAME) {
+    return executeAddressTool(toolName, input);
+  }
   if (BILLING_READER_TOOL_NAMES.has(toolName)) {
     return executeBillingReaderTool(toolName, input, actionContext);
   }
@@ -3349,6 +3364,7 @@ RULES:
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
 - Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
 - Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values as the operator would say them ("$61.33", not a sentence), then ask the question in your reply text as usual. A button shows the value and a tap sends exactly that value as the operator's next message: treat it as their answer to the question you just asked. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
+- Addresses: before you save or change any street address (add_customer_property, update_customer, update_lead_contact, create_customer, correct_invoice_address), run check_address on it and use Google's spelling, city and ZIP. Never guess a ZIP and never fix a street spelling from memory. If Google's result differs from what the operator said or from a call transcript, show both and ask which is right. If the operator says a spelling is wrong, run check_address again with their words instead of repeating the transcript. If check_address returns not_attempted or api_unavailable, say the address could not be verified and ask the operator for the ZIP. An address change always shows a confirmation card with the exact address, so put Google's version on it.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
@@ -3364,7 +3380,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
-- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. Never say there is no link tool. Auto Pay setup links are the Customers page button; card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
+- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. send_autopay_setup_link texts or emails a customer their Auto Pay setup link behind a confirmation card (it refuses a customer with a saved card: enrolling one is a billing change for the Customers page, and a link-only Auto Pay link is also the Customers page button). Never say there is no link tool. Card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days
@@ -3439,6 +3455,9 @@ async function runQuery(req, res, next) {
     // sees or can invoke one through initialTools/discover/validateInput
     // either, whatever GATE_IB_PLATFORM is set to.
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
+    // GATE_IB_TOOL_SEARCH: a full-access login reaches its non-page tools through
+    // the API's tool search instead of discover_capabilities (tool-search.js).
+    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope, MODEL);
     // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
     // login gets no target refusals, no card on internal edits and short
     // replies. Read from the live request on every run; the isolated tech
@@ -3541,10 +3560,10 @@ async function runQuery(req, res, next) {
     }
     if (platformEnabled) {
       systemPrompt += `\n\nPLATFORM CAPABILITIES:
-The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
+The page ranks useful tools; it does not restrict what you can do. ${ToolSearch.capabilitySearchLine(toolSearch)} Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine({ toolSearch })}`;
     }
     // Offered only while GATE_IB_ACCEPT_ESTIMATE is on (owner ruling
     // 2026-10-07, Q5); appended after the shared blocks so off is
@@ -3583,7 +3602,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Select tools based on context and role (email tools are admin-only).
     // Red-tier tools additionally require full access (owner ruling
     // 2026-09-28) — never a card either way; see getToolsForContext.
-    let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
+    let tools = (platformEnabled ? ActionRegistry.initialTools(context, { ...actionScope, toolSearch })
       : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
@@ -3597,7 +3616,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
     ];
 
-    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...req.ibResumedTask.checkpoint] : messages;
+    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...ToolSearch.stripServerSearchBlocks(req.ibResumedTask.checkpoint)] : messages;
+    // A resumed task never uses tool search: the saved search blocks are
+    // stripped on load and the request runs on the ordinary list (tool-search.js).
+    const searchQueries = new Map();
     if (req.ibResumedTask) {
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
@@ -3612,8 +3634,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
         .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
       const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
-      const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
-        .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
+      const searchedNames = ToolSearch.searchReferencedNames(req.ibResumedTask.checkpoint);
+      const previouslyLoaded = [...invokedNames, ...discoveredNames, ...searchedNames].map(name => ActionRegistry.actions.get(name))
+        .filter(Boolean).filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
     let finalResponse = null;
@@ -3703,6 +3726,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
+      ToolSearch.observeServerToolSearches(response.content, gapCollector, searchQueries);
       // This message's calls that could run direct, judged before any of them
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
@@ -3712,7 +3736,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
-      if (toolUses.length === 0) {
+      if (ToolSearch.finishesTurn(response, toolUses)) {
         finalResponse = textBlocks.map(t => t.text).join('\n');
         // A terminal turn with neither a tool call nor usable text (a
         // thinking-only or refused reply) answers nothing — the `!finalResponse`
@@ -3734,8 +3758,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // in PII_TOOL_NAMES.
         // offer_choices too: its scope is 'none' (it reads no rows), but an
         // option can name a customer the operator is choosing between.
+        // check_address likewise: its input is a customer's street address.
         const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)
-          || toolUse.name === OFFER_CHOICES_TOOL_NAME;
+          || SCOPE_NONE_PII_TOOL_NAMES.has(toolUse.name);
         const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
@@ -3769,9 +3794,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         } else if (platformEnabled && toolUse.name === ActionRegistry.DISCOVERY_TOOL.name) {
           const discovered = ActionRegistry.discover(toolUse.input, actionScope);
           result = discovered.result;
-          const byName = new Map(tools.map(t => [t.name, t]));
-          for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
-          tools = [...byName.values()];
+          tools = ToolSearch.mergeDiscoveredTools(tools, discovered.definitions.map(apiToolDefinition), toolSearch);
           gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
@@ -3942,7 +3965,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         results.push({
           type: 'tool_result',
           tool_use_id: toolUse.id,
-          content: JSON.stringify(result),
+          content: ToolSearch.toolResultContent(toolUse.name, result, tools, toolSearch),
           ...(failed ? { is_error: true } : {}),
         });
 
@@ -3966,11 +3989,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
-      currentMessages = [
-        ...currentMessages,
-        { role: 'assistant', content: response.content },
-        { role: 'user', content: results },
-      ];
+      currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results);
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
     // finalResponse is still null only when every round was tool_use and the
@@ -4020,8 +4039,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
     // offer_choices is scope 'none' too, and the question it rides on can
     // name the customers being chosen between with no PII reader in this turn.
+    // check_address is scope 'none' too; the street address it checked is the
+    // customer's, and the reply that follows repeats it.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name)
-      || c.name === OFFER_CHOICES_TOOL_NAME);
+      || SCOPE_NONE_PII_TOOL_NAMES.has(c.name));
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'
@@ -4423,7 +4444,7 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action) || SCOPE_NONE_PII_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,

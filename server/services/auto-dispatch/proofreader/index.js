@@ -2,9 +2,9 @@
  * MOVE PROOFREADER (owner 2026-10-09, "proofreader yes"): one model reads the
  * customer record before an automatic move and answers allow / hold / unknown.
  *
- * NOT called by the nightly run yet. Step 1 is the replay over past moves
- * (server/scripts/auto-dispatch-proofreader-replay.js); the nightly shadow
- * call and its gate come in a later PR.
+ * Two callers: the nightly run, behind GATE_AUTO_DISPATCH_PROOFREADER
+ * (nightly.js), and the replay over past moves
+ * (server/scripts/auto-dispatch-proofreader-replay.js).
  *
  * The code is the judge of the model's answer:
  *   - a hold counts only when its quote is found word for word in the entry
