@@ -29,18 +29,24 @@ Tool modules live in `server/services/intelligence-bar/{context}-tools.js`,
 one file per context. The `context` parameter drives which tools load and
 which system-prompt extension applies — no page-specific endpoints.
 
-**Full-access exception (owner ruling 2026-10-12).** On the platform path
-(`GATE_IB_PLATFORM`), a full-access login (`ibFullAccess`, the owner) on an
-ordinary admin page does NOT get a page list: `initialTools` returns
-`discover_capabilities` plus every action `allowed()` accepts whose approval
-is not `confirmed_endpoint`, sorted by tool name, so the list is identical
-on every page. The route puts one 1-hour cache breakpoint on the last tool
-(`withToolsCacheBreakpoint`), so that tools prefix is cached once and shared
-across pages; the system prompt still varies by page and keeps its own
-breakpoint. When asking "why did this tool load for the owner?", start
-there, not in the mapping below. Other admins, technicians, the tech
-context and the `agent_estimate` rail still follow the mapping. `discover()`
-remains their way to reach other pages' tools.
+**Full-access exception (owner ruling 2026-10-12, `GATE_IB_TOOL_SEARCH`).**
+On the platform path (`GATE_IB_PLATFORM`) with `GATE_IB_TOOL_SEARCH` on, a
+full-access login (`ibFullAccess`, the owner) on an ordinary admin page keeps
+the page list below as its eager tools (without `discover_capabilities`), gets
+the API's own tool search (`tool_search_tool_bm25_20251119`, no beta header),
+and every other action `allowed()` accepts (not `confirmed_endpoint`) is sent
+with `defer_loading: true`, sorted by name (`initialTools` with
+`scope.toolSearch`, set by `toolSearchWanted` in `tool-search.js`). Anthropic
+documents tool-selection accuracy dropping past 30 to 50 active tools, so the
+owner's active set stays page-sized. Deferred tools are outside the cached
+prefix and carry no `cache_control`. Search blocks (`server_tool_use`,
+`tool_search_tool_result`) are not `tool_use`: the loop never executes them
+and passes the assistant content back unchanged; `pause_turn` continues the
+turn. A resumed task whose saved history holds search blocks keeps this shape
+even if the gate is off by then. Gate off = the page list plus
+`discover_capabilities` for everyone. Other admins, technicians, the tech
+context and the `agent_estimate` rail always follow the mapping below and keep
+`discover()`. Smoke check: `ops/agents/ib-tool-search-smoke.js`.
 
 ## Context → Tools Mapping
 
@@ -83,8 +89,8 @@ a "which value?" question, returned as `choices` (plain strings) on `/query`;
 display only, a tap sends exactly the button text as ordinary operator text
 and never confirms a write). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
-their UI-confirm card. A full-access login gets the whole allowed list, not
-only this core set (see the full-access exception above).
+their UI-confirm card. A full-access login also reaches the rest through the
+API's tool search (see the full-access exception above).
 Tech portal is isolated — no base tools, strictly read-only, lower
 max_tokens for field speed.
 

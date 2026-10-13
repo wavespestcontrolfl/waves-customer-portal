@@ -86,6 +86,7 @@ const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
+const ToolSearch = require('../services/intelligence-bar/tool-search');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -467,36 +468,12 @@ function buildUserMessageContent(prompt, images, pageData) {
 // markers don't accumulate across rounds past the API's 4-breakpoint limit.
 const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
 
-// A full-access login on the platform path is sent every allowed tool on every
-// page (ActionRegistry.initialTools), the same ~178 KB list each time. The
-// prompt cache hashes tools -> system -> messages cumulatively and the system
-// prompt differs per page, so with the only 1h breakpoint on the system block
-// that list was re-written to cache for each page. A breakpoint on the LAST
-// tool caches the tools prefix once, shared by every page; the system block
-// keeps its own breakpoint after it. Rules checked (Anthropic prompt caching):
-//   - at most 4 breakpoints per request: tools (1) + system (1) + the
-//     per-round message breakpoint (1) = 3;
-//   - a longer TTL may not follow a shorter one in prefix order: tools 1h,
-//     system 1h, messages 5 min is in order;
-//   - exactly one breakpoint on tools, always on the last tool of the array
-//     actually sent. This runs on every round and returns a new array, so a
-//     tool a discovery round appended can never leave a stale breakpoint in
-//     the middle, and the registry's cached definitions are never mutated.
-// cache_control is a legal key on a tool definition, and tool-definition.js
-// only drops underscore-prefixed keys, so it is added here, after that step.
-function withToolsCacheBreakpoint(tools, enabled) {
-  if (!enabled || !tools.length) return tools;
-  return [...tools.slice(0, -1), { ...tools[tools.length - 1], cache_control: { type: 'ephemeral', ttl: '1h' } }];
-}
-
-// True when this request carries the shared full-access tool list.
-function fullToolListLoaded(platformEnabled, actionScope) {
-  return platformEnabled === true && actionScope.fullAccess === true;
-}
-
 function withCacheBreakpoint(messages) {
   if (!messages.length) return messages;
   const last = messages[messages.length - 1];
+  // A paused turn (pause_turn) continues from the assistant message: its blocks
+  // (server tool search results) take no breakpoint.
+  if (last.role === 'assistant') return messages;
   let content = last.content;
   if (typeof content === 'string') {
     content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
@@ -3417,6 +3394,9 @@ async function runQuery(req, res, next) {
     // sees or can invoke one through initialTools/discover/validateInput
     // either, whatever GATE_IB_PLATFORM is set to.
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
+    // GATE_IB_TOOL_SEARCH: a full-access login reaches its non-page tools through
+    // the API's tool search instead of discover_capabilities (tool-search.js).
+    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope);
     // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
     // login gets no target refusals, no card on internal edits and short
     // replies. Read from the live request on every run; the isolated tech
@@ -3518,10 +3498,10 @@ async function runQuery(req, res, next) {
     }
     if (platformEnabled) {
       systemPrompt += `\n\nPLATFORM CAPABILITIES:
-The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
+The page ranks useful tools; it does not restrict what you can do. ${ToolSearch.capabilitySearchLine(toolSearch)} Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine({ toolSearch })}`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -3553,7 +3533,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Select tools based on context and role (email tools are admin-only).
     // Red-tier tools additionally require full access (owner ruling
     // 2026-09-28) — never a card either way; see getToolsForContext.
-    let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
+    let tools = (platformEnabled ? ActionRegistry.initialTools(context, { ...actionScope, toolSearch })
       : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
@@ -3657,7 +3637,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // (rounds are seconds apart). Longer-TTL breakpoints must precede
         // shorter-TTL ones — system renders before messages, so this is safe.
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
-        tools: withToolsCacheBreakpoint(tools, fullToolListLoaded(platformEnabled, actionScope)),
+        tools,
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
         messages: withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages),
       }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
@@ -3673,6 +3653,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
+      ToolSearch.observeServerToolSearches(response.content, gapCollector);
       // This message's calls that could run direct, judged before any of them
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
@@ -3682,7 +3663,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
-      if (toolUses.length === 0) {
+      if (ToolSearch.finishesTurn(response, toolUses)) {
         finalResponse = textBlocks.map(t => t.text).join('\n');
         // A terminal turn with neither a tool call nor usable text (a
         // thinking-only or refused reply) answers nothing — the `!finalResponse`
@@ -3936,11 +3917,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
-      currentMessages = [
-        ...currentMessages,
-        { role: 'assistant', content: response.content },
-        { role: 'user', content: results },
-      ];
+      currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results);
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
     // finalResponse is still null only when every round was tool_use and the
@@ -5124,5 +5101,4 @@ module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((too
 // keeps that test tied to the route's own offered-tool list instead of a
 // re-implementation of it.
 module.exports.getToolsForContext = getToolsForContext;
-module.exports.withToolsCacheBreakpoint = withToolsCacheBreakpoint;
 module.exports.confirmationDisplayParams = confirmationDisplayParams;

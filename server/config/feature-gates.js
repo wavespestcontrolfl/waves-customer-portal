@@ -4872,6 +4872,15 @@ function ibRepriceVisitsLive() {
   return process.env.GATE_IB_REPRICE_VISITS === 'true';
 }
 
+// GATE_IB_TOOL_SEARCH read at CALL time — strict `=== 'true'`, dark. A
+// full-access Intelligence Bar login on an ordinary admin page gets its page's
+// tools up front plus every other allowed tool deferred behind the Anthropic
+// API's tool search (action-registry.js initialTools, scope.toolSearch). Off =
+// the page list plus discover_capabilities for everyone. Kill: unset.
+function ibToolSearchLive() {
+  return process.env.GATE_IB_TOOL_SEARCH === 'true';
+}
+
 // GATE_IB_BILLING_MODE_EDIT read at CALL time — strict `=== 'true'`, dark.
 // The Intelligence Bar's update_customer billing type + per-application fee
 // edit (services/intelligence-bar/billing-mode-change.js). Kill: unset.
@@ -6581,6 +6590,8 @@ module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
 module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;
 // GATE_IB_REPRICE_VISITS reader, on its own line so gate PRs never conflict.
 module.exports.ibRepriceVisitsLive = ibRepriceVisitsLive;
+// GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
+module.exports.ibToolSearchLive = ibToolSearchLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.ibBillingModeEditLive = ibBillingModeEditLive;
 // GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.

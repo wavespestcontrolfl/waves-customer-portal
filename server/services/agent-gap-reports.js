@@ -117,9 +117,15 @@ function gapReportsEnabled() {
 const PROMPT_LINE = '\nBefore you tell the operator that something they asked for cannot be done from the bar, '
   + 'call discover_capabilities with a short, general description of it.';
 
-// Appended to the platform prompt; empty while the kill switch is off.
-function gapReportPromptLine() {
-  return gapReportsEnabled() ? PROMPT_LINE : '';
+const TOOL_SEARCH_PROMPT_LINE = '\nBefore you tell the operator that something they asked for cannot be done from the bar, '
+  + 'search with the tool search tool using a short, general description of it.';
+
+// Appended to the platform prompt; empty while the kill switch is off. A
+// request on the API's tool search (GATE_IB_TOOL_SEARCH) has no
+// discover_capabilities tool, so its line names the tool search.
+function gapReportPromptLine({ toolSearch = false } = {}) {
+  if (!gapReportsEnabled()) return '';
+  return toolSearch ? TOOL_SEARCH_PROMPT_LINE : PROMPT_LINE;
 }
 
 // Stored as written (owner 2026-09-28: no name or contact scrubbing in gap

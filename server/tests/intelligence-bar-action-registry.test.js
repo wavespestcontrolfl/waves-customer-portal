@@ -476,67 +476,93 @@ test('a tool in the named domain outranks an equal match from another domain', (
   expect(ids[0]).toBe('switch_appointment_property');
 });
 
-// Owner ruling 2026-10-12: the owner login has every allowed tool on every page.
-describe('full-access login loads every allowed tool', () => {
+// Owner ruling 2026-10-12: the owner login reaches every allowed tool. With
+// GATE_IB_TOOL_SEARCH on (scope.toolSearch) the page list stays eager and the
+// rest is deferred behind the API's tool search.
+describe('full-access login with tool search', () => {
   const { FULL_ACCESS_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
   const names = list => list.map(t => t.name);
-  const fullScope = context => ({ role: 'admin', context, fullAccess: true });
+  const search = context => ({ role: 'admin', context, fullAccess: true, toolSearch: true });
+  const plain = context => ({ role: 'admin', context });
+  const eagerOf = list => list.filter(t => !t.defer_loading && t.name !== registry.TOOL_SEARCH_TOOL.name);
+  const deferredOf = list => list.filter(t => t.defer_loading === true);
 
-  test('the same list, in the same order, on every ordinary admin page', () => {
-    const dashboard = names(registry.initialTools('dashboard', fullScope('dashboard')));
-    for (const context of ['customers', 'comms', 'schedule', 'revenue', 'estimates']) {
-      expect(names(registry.initialTools(context, fullScope(context)))).toEqual(dashboard);
-    }
-    expect(dashboard[0]).toBe('discover_capabilities');
-    // Sorted by name after the discovery tool: a fixed prefix for prompt caching.
-    expect(dashboard.slice(1)).toEqual([...dashboard.slice(1)].sort());
-    expect(new Set(dashboard).size).toBe(dashboard.length);
-  });
-
-  test('holds the booking tool, the call log and an outside-write tool, and no confirmed-endpoint tool', () => {
-    const list = names(registry.initialTools('customers', fullScope('customers')));
-    expect(list).toEqual(expect.arrayContaining(['create_appointment', 'get_call_log', 'get_review_stats']));
-    expect(list.some(name => FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name))).toBe(true);
-    for (const action of registry.actions.values()) {
-      if (action.approval === 'confirmed_endpoint') expect(list).not.toContain(action.id);
-    }
-    // Everything on the list passes allowed(); nothing allowed is left off.
+  test.each(['dashboard', 'customers', 'communications'])('%s: page tools eager, one search tool, everything else deferred once', (context) => {
+    const list = registry.initialTools(context, search(context));
+    const pageList = registry.initialTools(context, plain(context)).filter(t => t.name !== 'discover_capabilities');
+    // Eager = exactly the plain admin page list, in its order, without the discovery tool.
+    expect(names(eagerOf(list))).toEqual(names(pageList));
+    expect(names(list)).not.toContain('discover_capabilities');
+    // Exactly one search tool, typed, never deferred, right after the eager tools.
+    const searchTools = list.filter(t => t.name === 'tool_search_tool_bm25');
+    expect(searchTools).toEqual([{ type: 'tool_search_tool_bm25_20251119', name: 'tool_search_tool_bm25' }]);
+    expect(list[eagerOf(list).length]).toBe(searchTools[0]);
+    // Every other allowed tool once, deferred, sorted by name.
+    const deferred = deferredOf(list);
+    expect(names(deferred)).toEqual([...names(deferred)].sort());
     const expected = [...registry.actions.values()]
-      .filter(a => registry.allowed(a, fullScope('customers')) && a.approval !== 'confirmed_endpoint').map(a => a.id);
-    expect(list.slice(1).sort()).toEqual(expected.sort());
+      .filter(a => registry.allowed(a, search(context)) && a.approval !== 'confirmed_endpoint' && !names(pageList).includes(a.id)).map(a => a.id);
+    expect(names(deferred).sort()).toEqual(expected.sort());
+    expect(new Set(names(list)).size).toBe(list.length);
+    expect(list.some(t => t.cache_control)).toBe(false);
+    expect(eagerOf(list).length).toBeLessThan(60);
   });
 
-  test('gated tools stay behind their own gate, even on the full list', () => {
+  test('the deferred set holds the outside-write and reporting tools and no confirmed-endpoint tool', () => {
+    const deferred = names(deferredOf(registry.initialTools('customers', search('customers'))));
+    expect(deferred).toEqual(expect.arrayContaining(['get_review_stats', 'resolve_sentry_issue']));
+    expect(deferred.some(name => FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name))).toBe(true);
+    for (const action of registry.actions.values()) {
+      if (action.approval === 'confirmed_endpoint') expect(deferred).not.toContain(action.id);
+    }
+  });
+
+  test('building the list does not mutate the registry definitions', () => {
+    registry.initialTools('dashboard', search('dashboard'));
+    for (const action of registry.actions.values()) expect(action.definition.defer_loading).toBeUndefined();
+    const later = registry.initialTools('dashboard', plain('dashboard'));
+    expect(later.some(t => 'defer_loading' in t)).toBe(false);
+    // The deferred copy is a new object with the same definition otherwise.
+    const copy = registry.initialTools('dashboard', search('dashboard')).find(t => t.name === 'get_review_stats');
+    expect(copy).not.toBe(registry.actions.get('get_review_stats').definition);
+    expect({ ...copy, defer_loading: undefined }).toEqual({ ...registry.actions.get('get_review_stats').definition, defer_loading: undefined });
+  });
+
+  test('gated tools stay behind their own gate among the deferred tools', () => {
     const original = process.env.GATE_IB_MERGE_CUSTOMERS;
     try {
       delete process.env.GATE_IB_MERGE_CUSTOMERS;
-      expect(names(registry.initialTools('dashboard', fullScope('dashboard')))).not.toContain('merge_customers');
+      expect(names(registry.initialTools('dashboard', search('dashboard')))).not.toContain('merge_customers');
       process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
-      expect(names(registry.initialTools('dashboard', fullScope('dashboard')))).toContain('merge_customers');
+      expect(names(deferredOf(registry.initialTools('dashboard', search('dashboard'))))).toContain('merge_customers');
     } finally {
       if (original === undefined) delete process.env.GATE_IB_MERGE_CUSTOMERS; else process.env.GATE_IB_MERGE_CUSTOMERS = original;
     }
   });
 
-  test('an admin without full access keeps the page-scoped list', () => {
-    const scope = { role: 'admin', context: 'dashboard' };
-    const list = names(registry.initialTools('dashboard', scope));
-    expect(list).toContain('create_appointment');
-    expect(list).not.toContain('get_review_stats');
-    expect(list.some(name => FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name))).toBe(false);
+  test('without the tool-search flag a full-access login gets today\'s page list and discover_capabilities', () => {
+    for (const context of ['dashboard', 'customers']) {
+      expect(registry.initialTools(context, { ...plain(context), fullAccess: true })).toEqual(registry.initialTools(context, plain(context)));
+    }
+    const list = names(registry.initialTools('dashboard', { ...plain('dashboard'), fullAccess: true }));
+    expect(list[0]).toBe('discover_capabilities');
     expect(list.length).toBeLessThan(60);
-    expect(names(registry.initialTools('dashboard', { ...scope, fullAccess: false }))).toEqual(list);
   });
 
-  test('the technician rail and the estimate rail are unchanged for a full-access login', () => {
-    for (const context of ['tech', 'agent_estimate']) {
-      const withAccess = names(registry.initialTools(context, { role: 'admin', context, fullAccess: true }));
-      expect(withAccess).toEqual(names(registry.initialTools(context, { role: 'admin', context })));
-      expect(withAccess).not.toContain('discover_capabilities');
-      expect(withAccess.length).toBeLessThan(40);
+  test('another admin, a technician, the tech rail and the estimate rail are unchanged with tool search on', () => {
+    for (const context of ['dashboard', 'customers']) {
+      const scope = { ...plain(context), toolSearch: true };
+      expect(registry.initialTools(context, scope)).toEqual(registry.initialTools(context, plain(context)));
+      expect(names(registry.initialTools(context, scope))[0]).toBe('discover_capabilities');
     }
-    const technician = names(registry.initialTools('customers', { role: 'technician', context: 'customers', fullAccess: true }));
-    expect(technician).not.toContain('discover_capabilities');
-    expect(technician.length).toBeLessThan(40);
+    for (const context of ['tech', 'agent_estimate']) {
+      const withSearch = registry.initialTools(context, { role: 'admin', context, fullAccess: true, toolSearch: true });
+      expect(withSearch).toEqual(registry.initialTools(context, { role: 'admin', context }));
+      expect(names(withSearch)).not.toContain('tool_search_tool_bm25');
+      expect(names(withSearch)).not.toContain('discover_capabilities');
+    }
+    const technician = registry.initialTools('customers', { role: 'technician', context: 'customers', fullAccess: true, toolSearch: true });
+    expect(names(technician)).not.toContain('tool_search_tool_bm25');
+    expect(technician.some(t => t.defer_loading)).toBe(false);
   });
 });
