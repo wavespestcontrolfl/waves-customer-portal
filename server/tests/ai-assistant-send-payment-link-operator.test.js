@@ -128,3 +128,32 @@ describe('send_payment_link — sent must reflect actual delivery, never sendRes
     expect(DispatchAlerts.createAlert).toHaveBeenCalledWith(expect.objectContaining({ type: 'collection_hold_invoice_queue_failed' }));
   });
 });
+
+describe('expanded tools — customer scope comes from the caller context only', () => {
+  const db = require('../models/db');
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a customer_id in the tool input that differs from the context customer is refused before any read', async () => {
+    const out = await executeToolCall('get_property_profile', { customer_id: 'cust-2' }, 'cust-1', {});
+    expect(out).toEqual({ error: 'Customer scope mismatch' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('with no customer in context, a customer_id from the tool input selects nobody', async () => {
+    const out = await executeToolCall('get_property_profile', { customer_id: 'cust-2' }, null, {});
+    expect(out).toEqual({ error: 'Customer scope mismatch' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('send_payment_link cannot be aimed at another customer by tool input', async () => {
+    const out = await executeToolCall('send_payment_link', { customer_id: 'cust-2', invoice_id: 'inv-1' }, 'cust-1', { actorTechnicianId: 'staff-1' });
+    expect(out).toEqual({ error: 'Customer scope mismatch' });
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+  });
+
+  test('a customer_id equal to the context customer still runs', async () => {
+    const out = await executeToolCall('send_payment_link', { customer_id: 'cust-1', invoice_id: 'inv-1' }, 'cust-1', {});
+    expect(out.error).toBeUndefined();
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalled();
+  });
+});
