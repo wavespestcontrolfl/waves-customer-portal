@@ -832,26 +832,6 @@ export default function DispatchPageV2({
     return () => { cancelled = true; };
   }, [date, viewMode, activeTab, scheduleRefreshKey]);
 
-  // Book it: open the New appointment modal on the held day and time. The
-  // customer is preloaded only when the call is linked to one; if that lookup
-  // fails the modal still opens and the person picks the customer.
-  const bookHeldVisit = useCallback(async (row) => {
-    const windowStart = Number.isFinite(row.minutes)
-      ? `${String(Math.floor(row.minutes / 60)).padStart(2, "0")}:${String(row.minutes % 60).padStart(2, "0")}`
-      : undefined;
-    let customer;
-    if (row.customer_id) {
-      try {
-        const res = await adminFetch(`/admin/customers/${row.customer_id}`);
-        if (res?.customer?.id) customer = modalCustomerFrom(res.customer);
-      } catch (err) {
-        console.error("Failed to preload held-visit customer:", err);
-      }
-    }
-    setNewApptDefaults({ date: row.date_et, windowStart, customer });
-    setShowNewAppt(true);
-  }, []);
-
   // Auto-Dispatch audit links open the existing appointment detail sheet.
   // Inspecting a move must never enter the completion or new-booking flows.
   useEffect(() => {
@@ -904,6 +884,26 @@ export default function DispatchPageV2({
       cancelled = true;
     };
   }, [searchParams, setSearchParams]);
+
+  // Book it: open the New appointment modal on the held day and time. The
+  // customer is preloaded only when the call is linked to one; if that lookup
+  // fails the modal still opens and the person picks the customer.
+  const bookHeldVisit = useCallback(async (row) => {
+    const windowStart = Number.isFinite(row.minutes)
+      ? `${String(Math.floor(row.minutes / 60)).padStart(2, "0")}:${String(row.minutes % 60).padStart(2, "0")}`
+      : undefined;
+    let customer;
+    if (row.customer_id) {
+      try {
+        const res = await adminFetch(`/admin/customers/${row.customer_id}`);
+        if (res?.customer?.id) customer = modalCustomerFrom(res.customer);
+      } catch (err) {
+        console.error("Failed to preload held-visit customer:", err);
+      }
+    }
+    setNewApptDefaults({ date: row.date_et, windowStart, customer });
+    setShowNewAppt(true);
+  }, []);
 
   // Mobile only exposes Day + Week. Snap back if user loaded with 5day/month.
   useEffect(() => {
