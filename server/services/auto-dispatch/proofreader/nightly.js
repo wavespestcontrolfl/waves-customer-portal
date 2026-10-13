@@ -144,13 +144,15 @@ function stopped(kind, answer) {
   };
 }
 
+const readFailed = (record) => record.unread.some((row) => row.reason === 'read_failed');
+
 // Why no model is asked about a record that was built, or null to ask.
 function notAskable(record, state) {
   // A source the record builder could not query (it lists the source as
   // unread and does not throw): a database fault, not a fact about the
   // customer. A broken check, and no call is spent on an answer that could
   // not be used (Codex #6313 r9).
-  if (record.unread.some((row) => row.reason === 'read_failed')) return { verdict: 'unknown', why: 'check_failed' };
+  if (readFailed(record)) return { verdict: 'unknown', why: 'check_failed' };
   // The reads above can be slow: the deadline is asked again right before the call (r9).
   if (Date.now() >= state.deadlineAt) return { verdict: 'unknown', why: 'deadline' };
   return null;
@@ -194,6 +196,8 @@ async function recordStillAsRead(answer, record, { service, conn, proofreader })
   if (answer.verdict !== 'allow') return answer;
   const again = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
   if (recordPrint(again) === recordPrint(record)) return answer;
+  // The second read itself failed: a broken check, not new words (r11).
+  if (readFailed(again)) return { ...answer, verdict: 'unknown', why: 'check_failed', model_verdict: 'allow' };
   return { ...answer, verdict: 'unknown', why: 'record_changed', model_verdict: 'allow' };
 }
 

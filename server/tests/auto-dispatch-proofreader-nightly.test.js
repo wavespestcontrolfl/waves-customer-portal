@@ -130,6 +130,12 @@ describe('checkMove', () => {
     expect(same.proofreadMove).toHaveBeenCalledTimes(1);
   });
 
+  test('the second record read fails: a broken check the run reports, not "the record changed"', async () => {
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    proofreader.buildCustomerRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce({ ...RECORD, unread: [{ channel: 'text', reason: 'read_failed' }] });
+    expect(await check(runOf(), proofreader)).toMatchObject({ allowed: false, audit: { why: 'check_failed' }, broke: true });
+  });
+
   test('a service changed at the stop while the model read: the allow does not stand', async () => {
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
     proofreader.buildCustomerRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce({ ...RECORD, serviceTypes: ['Lawn Care'] });
