@@ -173,14 +173,15 @@ const SEED_FAILED = Symbol('seed_failed');
 
 // The preview-free half of executesWithoutCard: could this call run direct?
 function mayExecuteWithoutCard(toolName, input = {}) {
-  if (!OWNER_DIRECT_TOOL_NAMES.has(toolName)) return false;
+  // A call that carries address text gets a card anyway (executesWithoutCard), so it never counts toward the direct cap.
+  if (!OWNER_DIRECT_TOOL_NAMES.has(toolName) || changesAddress(toolName, input)) return false;
   if (toolName === 'assign_technician') return Array.isArray(input?.service_ids) && input.service_ids.length === 1;
   if (toolName === 'update_lead_contact' || toolName === 'update_lead_status') return Boolean(input?.lead_id) && !input.lead_name;
   if (toolName === 'add_customer_property' || toolName === 'update_customer_property') return !String(input?.label ?? '').trim();
   if (toolName === 'update_customer') {
+    // An array's keys are indexes, never contact fields, so it falls out below.
     const updates = input?.updates;
-    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
-    const keys = Object.keys(updates);
+    const keys = updates && typeof updates === 'object' ? Object.keys(updates) : [];
     return keys.length > 0 && keys.every(key => DIRECT_CUSTOMER_FIELDS.has(key));
   }
   return true;

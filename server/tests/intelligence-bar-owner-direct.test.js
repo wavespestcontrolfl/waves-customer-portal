@@ -405,6 +405,20 @@ describe('owner-direct limits (owner ruling 2026-10-02)', () => {
     expect(OwnerDirect.cappedTools(new Map(), OwnerDirect.messageDirectPlan([lead(LEAD), lead(LEAD_TWIN)])).size).toBe(0);
   });
 
+  test('a lead edit that carries an address is carded anyway and never counts toward the direct cap', () => {
+    const edit = (extra = {}) => call('update_lead_contact', { lead_id: LEAD, first_name: 'Jay', ...extra });
+    const withAddress = edit({ address: '100 Example Way' });
+    expect(OwnerDirect.mayExecuteWithoutCard('update_lead_contact', withAddress.input)).toBe(false);
+    expect(OwnerDirect.mayExecuteWithoutCard('update_lead_contact', edit().input)).toBe(true);
+    // Two address edits plus one plain edit: only the plain one is a direct candidate, so nothing is capped.
+    const mixed = OwnerDirect.messageDirectPlan([withAddress, edit({ address: '200 Example Way' }), edit()]);
+    expect(mixed.get('update_lead_contact')).toBe(1);
+    expect(OwnerDirect.cappedTools(new Map(), mixed).has('update_lead_contact')).toBe(false);
+    // Three plain edits still hit the cap.
+    const plain = OwnerDirect.messageDirectPlan([edit(), edit(), edit()]);
+    expect(OwnerDirect.cappedTools(new Map(), plain).has('update_lead_contact')).toBe(true);
+  });
+
   test('three eligible calls in one message all hit the cap; carded-anyway, invalid and other-tool calls are not counted', () => {
     const plan = OwnerDirect.messageDirectPlan([lead(LEAD), lead(LEAD_TWIN), lead(MISSING),
       call('update_customer', { customer_id: A, updates: { email: 'x@example.com' } }),

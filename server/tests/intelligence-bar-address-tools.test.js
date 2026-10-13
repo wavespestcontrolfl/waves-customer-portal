@@ -78,6 +78,46 @@ describe('check_address result', () => {
     expect(out.note).toMatch(/unit/);
   });
 
+  describe('a correction beside a unit', () => {
+    // Google says it replaced something, never which component, so a visible
+    // ZIP change cannot clear the unit the operator gave.
+    const corrected = () => validateAddress.mockResolvedValue(google({ status: 'corrected', hasReplaced: true }));
+
+    test('a visible ZIP change plus a unit asks to read both back and does not say to keep the unit', async () => {
+      corrected();
+      const out = await run({ address: '100 Example Way Apt 4', city: 'Sarasota', zip: '34205' });
+      expect(out.changed).toEqual([{ component: 'zip', input: '34205', google: '34236' }]);
+      expect(out.unit_unverified_after_correction).toBe(true);
+      expect(out.note).toMatch(/cannot be told whether the unit "Apt 4" was among the replaced parts/);
+      expect(out.note).toMatch(/read the normalized address AND the unit back/);
+      expect(out.note).not.toMatch(/Save Google's normalized spelling/);
+      expect(out.note).not.toMatch(/keep "Apt 4"/);
+    });
+
+    test('a visible change with no unit keeps the plain save instruction', async () => {
+      corrected();
+      const out = await run({ address: '100 Example Way', city: 'Sarasota', zip: '34205' });
+      expect(out.unit_unverified_after_correction).toBe(false);
+      expect(out.note).toMatch(/Save Google's normalized spelling/);
+      expect(out.note).not.toMatch(/read the normalized address AND the unit/);
+    });
+
+    test('a correction with no visible difference and no unit keeps the opaque warning', async () => {
+      corrected();
+      const out = await run({ address: '100 Example Way, Sarasota, FL 34236' });
+      expect(out.changed).toEqual([]);
+      expect(out.unit_unverified_after_correction).toBe(false);
+      expect(out.note).toMatch(/replaced part of this address but the replaced part cannot be shown here/);
+    });
+
+    test('a confirmed address keeps the unit the operator gave', async () => {
+      validateAddress.mockResolvedValue(google());
+      const out = await run({ address: '100 Example Way Apt 4, Sarasota, FL 34236' });
+      expect(out.unit_unverified_after_correction).toBe(false);
+      expect(out.note).toContain('keep "Apt 4"');
+    });
+  });
+
   test('an address outside the service area says so and saves nothing', async () => {
     validateAddress.mockResolvedValue(google({
       status: 'out_of_service_area', inServiceArea: false, county: 'Lee County',

@@ -61,36 +61,59 @@ const cleanText = value => (typeof value === 'string' ? value.replace(/\s+/g, ' 
 // "Apt 4, 100 Example Way"), so a street word such as "Space" is never taken
 // for a unit and the unit the operator gave is handed back to be saved.
 const TRAILING_STATE = /\s+(fl|florida)$/i;
-function givenParts(input) {
-  const text = cleanText(input.address);
-  // The whole unit is read from the ORIGINAL text first (trailing, its own
-  // comma segment, or unit-first; "Bldg 2 Apt 4" stays whole), then taken
-  // out before the locality parse, which would file "Apt 4" under the city.
-  const rawUnit = unitAnywhereOnLine(text);
-  // Each comma segment that is a whole part of the unit ("Bldg 2", "Apt 4") goes.
+
+// The comma segments of the text with the unit taken out. Each segment that is
+// a whole part of the unit ("Bldg 2", "Apt 4") goes, so the locality parse
+// never files "Apt 4" under the city.
+function segmentsWithoutUnit(text, rawUnit) {
   const unitWords = ` ${rawUnit.toLowerCase()} `;
-  const withoutUnit = (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
+  return (splitUnitFirstLine(text)?.rest || text).split(',').map(cleanText).filter(Boolean)
     .map(segment => splitStreetLineUnit(segment).street || segment)
     .filter(segment => !unitWords.includes(` ${segment.toLowerCase()} `));
-  const parsed = parseRawAddress(withoutUnit.join(', '));
-  // The locality parser files a trailing direction ("100 17th St W") as the
-  // city. A city that is only a direction word is part of the street.
-  const directionAsCity = Boolean(parsed.city) && compareKey(parsed.city) in DIRECTION_KEYS;
-  // A comma-free whole address ("100 Main St Apt 4 Sarasota FL 34236") only
-  // shows its unit once the locality is parsed off the end.
-  const parsedLine = splitStreetLineUnit(cleanText(parsed.line1) || withoutUnit[0] || text);
-  const unitText = rawUnit || parsedLine.unit;
-  const street = [parsedLine.street || cleanText(parsed.line1) || withoutUnit[0] || text, directionAsCity ? cleanText(parsed.city) : ''].filter(Boolean).join(' ');
+}
+
+// The street line and the unit. A comma-free whole address ("100 Main St Apt 4
+// Sarasota FL 34236") only shows its unit once the locality is parsed off the
+// end, so the unit read from the original text wins and the parsed line is the
+// fallback. A trailing direction the locality parser filed as the city
+// ("100 17th St W") is part of the street.
+function streetAndUnit(parsed, segments, text, rawUnit, directionAsCity) {
+  const line = cleanText(parsed.line1) || segments[0] || text;
+  const peeled = splitStreetLineUnit(line);
+  return {
+    street: [peeled.street || line, directionAsCity ? cleanText(parsed.city) : ''].filter(Boolean).join(' '),
+    unit: rawUnit || peeled.unit,
+  };
+}
+
+// City, state and ZIP: what the operator passed explicitly wins over what was
+// parsed out of the address text. A "FL" glued to the city ("Sarasota FL")
+// is the state when the parser found none. Google returns a five-digit ZIP, so
+// a ZIP+4 suffix is reported apart.
+function localityParts(input, parsed, text, directionAsCity) {
   const parsedCity = directionAsCity ? '' : cleanText(parsed.city);
   const stateInCity = !parsed.state && TRAILING_STATE.test(parsedCity);
   return {
-    street: normalizeStreetLine(street),
-    unit: normalizeUnitLine(unitText),
     city: cleanText(input.city) || (stateInCity ? parsedCity.replace(TRAILING_STATE, '') : parsedCity),
     state: normalizeState(cleanText(input.state) || cleanText(parsed.state) || (stateInCity ? 'FL' : '')) || '',
     zip: (cleanText(input.zip) || cleanText(parsed.zip)).slice(0, 5),
-    // Google returns a five-digit ZIP, so a ZIP+4 suffix cannot be checked.
-    zipPlus4: (`${cleanText(input.zip)} ${text}`.match(/\b\d{5}-(\d{4})\b/) || [])[1] || '',
+    zipPlus4: `${cleanText(input.zip)} ${text}`.match(/\b\d{5}-(\d{4})\b/)?.[1] || '',
+  };
+}
+
+function givenParts(input) {
+  const text = cleanText(input.address);
+  // The whole unit is read from the ORIGINAL text first (trailing, its own
+  // comma segment, or unit-first; "Bldg 2 Apt 4" stays whole).
+  const rawUnit = unitAnywhereOnLine(text);
+  const segments = segmentsWithoutUnit(text, rawUnit);
+  const parsed = parseRawAddress(segments.join(', '));
+  const directionAsCity = compareKey(parsed.city) in DIRECTION_KEYS;
+  const { street, unit } = streetAndUnit(parsed, segments, text, rawUnit, directionAsCity);
+  return {
+    street: normalizeStreetLine(street),
+    unit: normalizeUnitLine(unit),
+    ...localityParts(input, parsed, text, directionAsCity),
   };
 }
 
@@ -128,14 +151,22 @@ const VERDICTS = {
   [STATUSES.NOT_ATTEMPTED]: 'Address checking is off, so this address was not verified.',
 };
 
+// Google reports THAT it replaced something (hasReplaced), never WHICH
+// component, so a unit the operator gave cannot be called safe after a correction.
+const unitUnverifiedAfterCorrection = (status, given) => status === STATUSES.CORRECTED && Boolean(given.unit);
+
 function noteFor(status, changed, given, result) {
   if (status === STATUSES.NOT_ATTEMPTED || status === STATUSES.API_UNAVAILABLE) {
     return 'The address could NOT be verified. Say so, and ask the operator for the ZIP and the exact spelling. Do not guess a ZIP or fix the spelling yourself.';
   }
   const usable = status === STATUSES.VALIDATED_ACCEPT || status === STATUSES.CORRECTED;
+  const unitUnverified = unitUnverifiedAfterCorrection(status, given);
   const parts = [];
-  const opaqueCorrection = status === STATUSES.CORRECTED && !changed.some(c => c.input);
-  if (opaqueCorrection) parts.push('Google replaced part of this address but the replaced part cannot be shown here (it may be the unit). Do not save yet: read the normalized address and the unit back to the operator and ask if both are right.');
+  // A visible difference (a ZIP) says nothing about whether Google also
+  // replaced a part the normalized shape does not show (the unit), so a
+  // correction beside a unit is always read back, whatever else changed.
+  if (unitUnverified) parts.push(`Google replaced part of this address, and it cannot be told whether the unit "${given.unit}" was among the replaced parts. Do not save yet: read the normalized address AND the unit back to the operator and ask if both are right before saving.`);
+  else if (status === STATUSES.CORRECTED && !changed.some(c => c.input)) parts.push('Google replaced part of this address but the replaced part cannot be shown here (it may be the unit). Do not save yet: read the normalized address and the unit back to the operator and ask if both are right.');
   else if (usable) parts.push('Save Google\'s normalized spelling, city and ZIP, not the input.');
   else if (status === STATUSES.OUT_OF_SERVICE_AREA) parts.push('Tell the operator it is outside the service area, and save nothing until they decide.');
   else parts.push('Do not save this address yet. Show the operator what Google returned and what is missing or unconfirmed, and ask.');
@@ -146,7 +177,7 @@ function noteFor(status, changed, given, result) {
   // ("Sarasota Flordia"), so the assumption is always stated instead.
   if (!given.state) parts.push(`No state was read from the input, so ${DEFAULT_STATE} was assumed: tell the operator, and ask if any word of the input could be another state.`);
   if (given.zipPlus4) parts.push(`The ZIP+4 suffix "-${given.zipPlus4}" was not checked and is not in the normalized ZIP: save the five-digit ZIP and tell the operator the suffix was left out.`);
-  if (given.unit) parts.push(`Google does not check the unit or apartment number: keep "${given.unit}". Put it in the second address line when the tool has one; otherwise add it at the end of the street line.`);
+  if (given.unit && !unitUnverified) parts.push(`Google does not check the unit or apartment number: keep "${given.unit}". Put it in the second address line when the tool has one; otherwise add it at the end of the street line.`);
   return parts.join(' ');
 }
 
@@ -178,6 +209,7 @@ function shape(providerResult, given) {
     verdict: VERDICTS[status] || 'Google returned a result this tool does not recognize.',
     normalized: n ? { address_line1: n.street_line_1, city: n.city, state: n.state, zip: n.postal_code } : null,
     unit: given.unit || null,
+    unit_unverified_after_correction: unitUnverifiedAfterCorrection(status, given),
     state_assumed: given.state ? null : DEFAULT_STATE,
     zip_plus4_unchecked: given.zipPlus4 || null,
     county: result.county || null,
