@@ -3861,16 +3861,22 @@ const shutdownStampSql = (conn) => conn.raw(
   `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${SHUTDOWN_STAMP_KEY}}', to_jsonb(?::text), true)`,
   [new Date().toISOString()],
 );
+// The V2 verdict that an unknown caller's voicemail asks for a call back: a
+// valid extraction that is not spam and whose disposition is the callback task.
+function voicemailCallbackAsked(v2Result) {
+  const v2 = v2Result?.status === 'valid' ? v2Result.extraction : null;
+  return v2?.recommended_disposition === 'callback_task_created' && v2?.spam_verdict?.spam_kind === 'not_spam';
+}
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
 // row. That silence lost a WDO-closing lead in May 2026 (recovered only by a
 // manual re-key that minted a duplicate account). Returns the notification
 // payload for the customer_voicemail_callback bell, or null when the
-// voicemail carries no workable service signal (plain "call me back" messages
-// stay bell-free). Pure decision core — the caller owns the gate check, the
+// voicemail carries no workable service signal, comes from no known customer
+// and asks for no callback. Pure decision core — the caller owns the gate check, the
 // customer lookup, and the dedupe.
-function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false, knownCustomer = false, transcript = '' } = {}) {
+function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false, knownCustomer = false, transcript = '', callbackAsked = false } = {}) {
   if (!voicemailChannel || voicemailLeadPath) return null;
   // An OUTBOUND call reaching the customer's voicemail records OUR message —
   // a staff recording that names the service would otherwise satisfy the
@@ -3885,9 +3891,13 @@ function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, 
   // stay bell-free. Dead-air recordings ([VOICEMAIL]/[NO SPEECH] markers with
   // no spoken content, e.g. a customer pocket dial) never ring on the
   // known-customer basis.
+  // Owner 2026-10-12 (call audit): an UNKNOWN caller who asks for a callback
+  // rings too. Four such voicemails in 14 days ended with no bell, no card and
+  // no lead. The basis is the V2 verdict (callbackAsked: not spam + a callback
+  // disposition), so a solicitor or robocall voicemail still stays bell-free.
   const workable = hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true });
   const spokenContent = String(transcript || '').replace(/\[(?:VOICEMAIL|NO SPEECH)\]/gi, '').trim();
-  if (!workable && !(knownCustomer && spokenContent)) return null;
+  if (!workable && !((knownCustomer || callbackAsked) && spokenContent)) return null;
   const name = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
     .filter(Boolean)
     .join(' ');
@@ -11811,6 +11821,7 @@ const CallRecordingProcessor = {
             outbound: isOutboundCall(call),
             knownCustomer: Boolean(vmAlertCustomer?.id),
             transcript: transcription,
+            callbackAsked: voicemailCallbackAsked(v2Result),
           });
           if (alertPlan) {
             // One alert per call even across reprocessing (retranscription
@@ -24709,6 +24720,7 @@ CallRecordingProcessor._test = {
   leadContactCompleteness,
   hasWorkableLeadSignal,
   voicemailCallbackAlertPlan,
+  voicemailCallbackAsked,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
   emailCardSignature,
