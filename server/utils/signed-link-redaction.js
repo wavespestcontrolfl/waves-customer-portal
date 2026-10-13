@@ -62,22 +62,30 @@ function looksRandom(segment) {
   return segment.length >= 24 && (!segment.includes('-') || (/[a-z]/.test(segment) && /[A-Z]/.test(segment)));
 }
 
+// Every 16+ character run of [A-Za-z0-9_-] in the path, query and fragment is
+// judged on its own, so punctuation stuck to a token ("…/pay/<uuid>)." in
+// Markdown or at a sentence end) cannot hide it.
+const TOKEN_RUN_RE = /[A-Za-z0-9_-]{16,}/g;
 function isPrivateLink(text) {
   let url;
   try { url = new URL(text); } catch { return true; }
   const segments = url.pathname.split('/').filter(Boolean);
   const publicPage = PUBLIC_CONTENT_SEGMENTS.has((segments[0] || '').toLowerCase());
   const random = candidate => looksRandom(candidate) && !(publicPage && !UUID_RE.test(candidate) && !/^[0-9a-fA-F]{24,}$/.test(candidate));
-  const fragment = new URLSearchParams(url.hash.replace(/^#/, ''));
-  const values = [...url.searchParams.values(), ...fragment.values()];
-  return segments.some(random) || values.some(random);
+  let rest;
+  try { rest = decodeURIComponent(`${url.pathname} ${url.search} ${url.hash}`); } catch { return true; }
+  return (rest.match(TOKEN_RUN_RE) || []).some(random);
 }
 
+// Sentence and Markdown punctuation after a link is not part of it.
+const TRAILING_PUNCTUATION_RE = /[).,;:!?\]}>*_~`'"]+$/;
 function redactString(text, state) {
-  return text.replace(URL_IN_TEXT_RE, (link) => {
-    if (isSignedLink(link)) { state.links += 1; return REDACTED_LINK; }
-    if (isPrivateLink(link)) { state.privateLinks += 1; return REDACTED_PRIVATE_LINK; }
-    return link;
+  return text.replace(URL_IN_TEXT_RE, (match) => {
+    const tail = (match.match(TRAILING_PUNCTUATION_RE) || [''])[0];
+    const link = tail ? match.slice(0, -tail.length) : match;
+    if (isSignedLink(link)) { state.links += 1; return REDACTED_LINK + tail; }
+    if (isPrivateLink(link)) { state.privateLinks += 1; return REDACTED_PRIVATE_LINK + tail; }
+    return match;
   });
 }
 

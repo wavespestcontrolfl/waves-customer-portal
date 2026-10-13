@@ -582,3 +582,22 @@ describe('access', () => {
     expect(action(FIND)).toMatchObject({ kind: 'read', scope: 'none', role: 'admin', approval: null });
   });
 });
+
+// Pre-push audit P1: punctuation stuck to a link hid its token.
+describe('links followed by punctuation', () => {
+  const { redactString, newState } = require('../utils/signed-link-redaction');
+  const UUID = '0b2f6f5e-1c2d-4e3f-8a9b-0c1d2e3f4a5b';
+  test.each([
+    [`[Pay](https://portal.example.test/pay/${UUID})`, '[Pay]([private link removed])'],
+    ['Your estimate: https://portal.example.test/estimate/Ab3dEf6hIj9kLm2nOp5q.', 'Your estimate: [private link removed].'],
+    ['(https://files.example.test/a.png?X-Amz-Signature=abc123).', '([signed link removed]).'],
+  ])('%s is redacted and keeps its punctuation', (text, expected) => {
+    const state = newState();
+    expect(redactString(text, state)).toBe(expected);
+    expect(state.links + state.privateLinks).toBe(1);
+  });
+  test('an ordinary public page link at a sentence end is left alone', () => {
+    const text = 'Read https://example.test/blog/how-to-keep-ants-out-of-your-kitchen.';
+    expect(redactString(text, newState())).toBe(text);
+  });
+});
