@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  safeErrorSummary: jest.requireActual('../services/notification-service').safeErrorSummary,
   // The store's own "a person closed it" rule, as the hold read uses it.
   _private: {
     isPersonDoneBy: jest.requireActual('../services/notification-service')._private.isPersonDoneBy,
@@ -241,6 +242,16 @@ describe('checkMove', () => {
     const run = runOf();
     expect(await check(run, proofreaderOf({ verdict: 'unknown', why }))).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE' });
     expect(run.proofreader.notices.size).toBe(0);
+  });
+
+  test('a failed read logs the error\'s code, never its message (a query error can carry a customer\'s email)', async () => {
+    const logger = require('../services/logger');
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    proofreader.buildCustomerRecord.mockRejectedValue(Object.assign(new Error('select * from emails where to = pat@example.test - timeout'), { code: '57014' }));
+    await check(runOf(), proofreader);
+    const logged = logger.warn.mock.calls.map((call) => call[0]).join(' ');
+    expect(logged).toContain('57014');
+    expect(logged).not.toContain('pat@example.test');
   });
 
   test('a record that cannot be built is never an allow', async () => {

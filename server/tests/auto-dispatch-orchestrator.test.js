@@ -31,7 +31,10 @@ jest.mock('../services/admin-alert-compose', () => {
 });
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  safeErrorSummary: jest.requireActual('../services/notification-service').safeErrorSummary,
+}));
 jest.mock('../services/auto-dispatch/audit', () => ({
   // Real budget helpers and key shape; only the notification-store read is faked.
   ...jest.requireActual('../services/auto-dispatch/audit'),

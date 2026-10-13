@@ -33,6 +33,10 @@
  * Behind GATE_AUTO_DISPATCH_PROOFREADER (config.proofreaderEnabled).
  */
 const logger = require('../../logger');
+// A database error's message can carry the query's bindings (a customer's
+// email address, a phone number): logs get the error's code or name only
+// (notification-service.js safeErrorSummary; Codex #6313 r22).
+const safeError = (err) => require('../../notification-service').safeErrorSummary(err);
 const { toDateStr } = require('../dates');
 
 const KEY_PREFIX = 'auto-dispatch-proofreader:';
@@ -179,7 +183,7 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     return { answer, move, entry: entry || null, recordPrint: recordPrint(record) };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
-    logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
+    logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${safeError(err)}`);
     return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null };
   }
 }
@@ -246,7 +250,7 @@ async function heldSinceAsked(conn, service) {
   try {
     return await personHeld(conn, service);
   } catch (err) {
-    logger.warn(`[auto-dispatch] move proofreader could not re-read the notice of ${service.id}: ${err.message}`);
+    logger.warn(`[auto-dispatch] move proofreader could not re-read the notice of ${service.id}: ${safeError(err)}`);
     return null;
   }
 }
@@ -273,7 +277,7 @@ async function groupedStop(conn, service) {
     if (await personHeld(conn, service)) return { kind: 'personHeld', stop: stopped('person', { verdict: 'unknown', why: 'person_held' }) };
     return null;
   } catch (err) {
-    logger.warn(`[auto-dispatch] move proofreader could not read the stop of ${service.id}: ${err.message}`);
+    logger.warn(`[auto-dispatch] move proofreader could not read the stop of ${service.id}: ${safeError(err)}`);
     return { kind: 'unsure', stop: stopped('unknown', { verdict: 'unknown', why: 'check_failed' }) };
   }
 }
@@ -526,7 +530,7 @@ async function closeResolved(audit, nowDate, enabled) {
     }, nowDate);
     return true;
   } catch (err) {
-    logger.error(`[auto-dispatch] move-check notice close failed: ${err.message}`);
+    logger.error(`[auto-dispatch] move-check notice close failed: ${safeError(err)}`);
     return false;
   }
 }
@@ -546,7 +550,7 @@ async function stillAsChecked(item, conn) {
       // the notice names the one the check read (r20).
       && textOrNull(row.customer_id) === textOrNull(item.customer_id);
   } catch (err) {
-    logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${err.message}`);
+    logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${safeError(err)}`);
     return null;
   }
 }
@@ -585,7 +589,7 @@ async function settleNotices(state, conn) {
       });
   } catch (err) {
     state.noticesFailed += 1;
-    logger.error(`[auto-dispatch] move-check notice settle failed: ${err.message}`);
+    logger.error(`[auto-dispatch] move-check notice settle failed: ${safeError(err)}`);
   }
 }
 
@@ -626,12 +630,12 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
         // A visit held for a person and nobody told: the run reports it
         // (state.noticesFailed, read by index.js; Codex #6313 r8).
         state.noticesFailed += 1;
-        logger.error(`[auto-dispatch] move-check notice failed for ${item.id}: ${err.message}`);
+        logger.error(`[auto-dispatch] move-check notice failed for ${item.id}: ${safeError(err)}`);
       }
     }
   } catch (err) {
     state.noticesFailed += 1;
-    logger.error(`[auto-dispatch] move-check notices failed: ${err.message}`);
+    logger.error(`[auto-dispatch] move-check notices failed: ${safeError(err)}`);
   }
   return rang;
 }

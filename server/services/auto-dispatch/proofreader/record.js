@@ -27,6 +27,10 @@
  * (redactAccessCodes).
  */
 const logger = require('../../logger');
+// A database error's message can carry the query's bindings (a customer's
+// email address, a phone number): logs get the error's code or name only
+// (notification-service.js safeErrorSummary; Codex #6313 r22).
+const safeError = (err) => require('../../notification-service').safeErrorSummary(err);
 const contextAggregator = require('../../context-aggregator');
 
 const { redactAccessCodes } = contextAggregator;
@@ -384,7 +388,7 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
     customer = await conn('customers').where({ id: customerId })
       .first('email', 'crm_notes', 'internal_notes', 'follow_up_notes', 'access_notes');
   } catch (err) {
-    logger.warn(`[auto-dispatch] proofreader could not read the customer file: ${err.message}`);
+    logger.warn(`[auto-dispatch] proofreader could not read the customer file: ${safeError(err)}`);
   }
   // No customer row: its notes and its mail address are both unread.
   if (!customer) unread.push({ channel: 'customer_file_note', reason: 'read_failed' });
@@ -396,7 +400,7 @@ async function buildCustomerRecord(conn, { customerId, serviceId = null, asOf = 
       found.push(...(await read(conn, args, unread)).flat(2));
     } catch (err) {
       unread.push({ channel, reason: 'read_failed' });
-      logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${err.message}`);
+      logger.warn(`[auto-dispatch] proofreader could not read ${channel}: ${safeError(err)}`);
     }
   }
   // Undated notes first, then oldest to newest.
