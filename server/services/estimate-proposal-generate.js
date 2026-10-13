@@ -1117,9 +1117,11 @@ function claimRawTwin(rawPool, item, mappedAmount) {
   // A same-scope twin outranks any same-service row even when the amounts
   // differ (mapped sold nets beside raw gross, codex #6113 r42).
   const sameScope = (e) => soldScopeSignature(e.line) === soldScopeSignature(item);
+  // ...and an exact-amount twin whose STATED scope differs never outranks a
+  // same-scope twin (a cross-price collision, codex #6113 r48).
   const entry = rawPool.find((e) => sameService(e) && sameAmount(e) && sameScope(e))
-    || rawPool.find((e) => sameService(e) && sameAmount(e))
     || rawPool.find((e) => sameService(e) && sameScope(e))
+    || rawPool.find((e) => sameService(e) && sameAmount(e))
     || rawPool.find(sameService);
   if (entry) entry.used = true;
   return entry ? entry.line : null;
