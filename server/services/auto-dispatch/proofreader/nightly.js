@@ -144,22 +144,32 @@ function stopped(kind, answer) {
   };
 }
 
+// Why no model is asked about a record that was built, or null to ask.
+function notAskable(record, state) {
+  // A source the record builder could not query (it lists the source as
+  // unread and does not throw): a database fault, not a fact about the
+  // customer. A broken check, and no call is spent on an answer that could
+  // not be used (Codex #6313 r9).
+  if (record.unread.some((row) => row.reason === 'read_failed')) return { verdict: 'unknown', why: 'check_failed' };
+  // The reads above can be slow: the deadline is asked again right before the call (r9).
+  if (Date.now() >= state.deadlineAt) return { verdict: 'unknown', why: 'deadline' };
+  return null;
+}
+
 async function ask({ service, best }, { conn, proofreader, state }) {
   try {
     const record = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
     const planned = await plannedMove(conn, service, best, record);
     const move = proofreader.moveFacts(planned);
+    const skip = notAskable(record, state);
+    if (skip) return { answer: skip, move: null, entry: null };
     // Only a call that goes to the model spends the run's call limit: a
     // record that cannot be read, or one too long to send, asks nobody
     // (Codex #6313 r2).
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
     const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
-    // A source the record builder could not query (it lists the source as
-    // unread and does not throw) is a broken check too, whatever the verdict:
-    // a database fault, not a fact about the customer.
-    const readFailed = record.unread.some((row) => row.reason === 'read_failed');
-    return { answer: readFailed ? { ...answer, verdict: 'unknown', why: 'check_failed' } : answer, move, entry: entry || null };
+    return { answer, move, entry: entry || null };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
@@ -234,6 +244,10 @@ async function checkMove({ service, best, run }, deps = {}) {
   }
   const asked = await ask({ service, best }, { conn, proofreader: deps.proofreader || require('./index'), state });
   const { answer } = asked;
+  if (answer.why === 'deadline') {
+    state.notAsked += 1;
+    return stopped('not_asked', answer);
+  }
   if (answer.verdict === 'allow') {
     state.allowed += 1;
     return { allowed: true, audit: auditOf(answer) };

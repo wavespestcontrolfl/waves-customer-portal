@@ -193,6 +193,16 @@ describe('checkMove', () => {
     expect(await check(inTime, proofreader)).toMatchObject({ allowed: true });
   });
 
+  test('the deadline is asked again after the record reads, right before the call', async () => {
+    const run = runOf({ proofreader: nightly.newRunState({ startedAt: Date.now(), deadlineSeconds: 300 }) });
+    const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    // The record read is slow: the deadline passes while it runs.
+    proofreader.buildCustomerRecord.mockImplementation(async () => { run.proofreader.deadlineAt = Date.now() - 1; return RECORD; });
+    expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_NOT_ASKED', audit: { why: 'deadline' }, broke: false });
+    expect(proofreader.proofreadMove).not.toHaveBeenCalled();
+    expect(run.proofreader).toMatchObject({ calls: 0, notAsked: 1, unsure: 0 });
+  });
+
   test.each(['model_failed', 'bad_answer'])('a check that broke (%s) is marked so the run cannot end green; an unsure answer is not', async (why) => {
     const run = runOf();
     expect(await check(run, proofreaderOf({ verdict: 'unknown', why }))).toMatchObject({ allowed: false, broke: true });
@@ -203,9 +213,13 @@ describe('checkMove', () => {
   test('a record with a source the database could not read is a broken check: no notice, the run is marked', async () => {
     const run = runOf();
     const partial = { ...RECORD, unread: [{ channel: 'call', reason: 'read_failed' }] };
-    const got = await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, partial));
+    const broken = proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, partial);
+    const got = await check(run, broken);
     expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { why: 'check_failed' }, broke: true });
     expect(run.proofreader.notices.size).toBe(0);
+    // No model is asked for an answer that could not be used, and no call is spent.
+    expect(broken.proofreadMove).not.toHaveBeenCalled();
+    expect(run.proofreader.calls).toBe(0);
     // A record that is incomplete for a reason about the customer (a call with no transcript) is not.
     const noTranscript = { ...RECORD, unread: [{ channel: 'call', reason: 'no_transcript' }] };
     expect(await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, noTranscript))).toMatchObject({ broke: false });
