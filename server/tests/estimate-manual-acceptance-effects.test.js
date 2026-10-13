@@ -951,6 +951,14 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const world = makeWorld({ estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify({ recurring: { services: solo }, one_time: { items: [{ service: 'wasp', name: 'Wasp Nest Removal', price: 100 }], total: 80 } }) } });
     expect(await lineNames(world)).toEqual([['Wasp Nest Removal', 100], ['Discount applied to the one-time total', -20]]);
   });
+  test('round 53: an explicitly taxable setup row puts taxable on the fee line; mirrored setup rows that disagree on taxable refuse', async () => {
+    const world = feeWorld(solo, { items: [roach, { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, taxable: true }] });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.find((e) => e.kind === 'one_time_line' && e.name === 'WaveGuard membership fee')).toMatchObject({ amount: 99, taxable: true });
+    const mixed = feeWorld(solo, { items: [roach, { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, taxable: true }], specItems: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, taxable: false }] });
+    await expect(markEstimateManuallyAccepted(base(mixed, fakeConverter(mixed), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/WaveGuard setup.*taxability/) });
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
@@ -1073,7 +1081,8 @@ describe('round 10, finding 1: a partly itemized one-time total refuses; the mem
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
       { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
-      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand' },
+      // round 53: the fee is taxable on a commercial invoice (the converter taxes the setup line), so the flag rides along.
+      { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand', taxable: true },
     ]);
   });
   test('lines that add up to less than the total refuse, naming the missing amount', async () => {

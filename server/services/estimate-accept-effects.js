@@ -242,17 +242,21 @@ const cachedMembershipFee = (data) => cachedMembershipFees(data)[0] ?? null;
 // is the sold amount (its own net, as the estimate page's normalizer treats
 // it); the cached aggregate fee is read only when no such row exists
 // (codex #6113 r35).
-function membershipFeeLine(data, { applies, explicitFee }) {
+function membershipFeeLine(data, { applies, explicitFee, explicitTaxable, taxabilityMap }) {
   if (!applies) return null;
+  // Taxability rides on the fee line like any other (codex #6113 r53): the
+  // explicit flag the setup rows agree on, else the canonical default.
+  const { commercialTaxableDefault } = require('./estimate-proposal-generate');
+  const tax = commercialTaxableDefault('waveguard_setup', explicitTaxable, { taxabilityMap, oneTime: true }) === true ? { taxable: true } : {};
   // An explicit row at $0 is a WAIVED fee: no fee line, and the cached
   // aggregate fee is not read past it (codex #6113 r45).
   const amount = explicitFee !== undefined ? (explicitFee > 0 ? explicitFee : null) : cachedMembershipFee(data);
-  if (amount != null) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand' };
+  if (amount != null) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand', ...tax };
   // The frozen quote fee is charged beside the one-time total, never
   // inside it, so the total's reconciliation (pooled discount, unitemized
   // refusal) leaves it out.
   const frozen = explicitFee === undefined ? frozenMembershipFeeQuote(data) : null;
-  return frozen == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: frozen, consequence: 'invoice_by_hand', outside_total: true };
+  return frozen == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: frozen, consequence: 'invoice_by_hand', outside_total: true, ...tax };
 }
 // The website quote freezes the disclosed membership fee as
 // setupFeeQuote.amount with no row and no cached fee (the converter's
@@ -277,7 +281,8 @@ function explicitSetupFees(data) {
   const containers = rawRowContainers(data);
   const docs = [data, ...containers.filter((c) => c !== data).map((c) => ({ result: c }))];
   const rows = [...docs.flatMap(mappedSubContainers).flat(), ...containers.flatMap((c) => (Array.isArray(c.lineItems) ? c.lineItems : []))].filter(isSetupFeeRow);
-  return reconciledSetupFees(rows);
+  const flags = [...new Set(rows.map((r) => r.taxable).filter((v) => typeof v === 'boolean'))];
+  return { amounts: reconciledSetupFees(rows), explicitTaxable: flags.length === 1 ? flags[0] : undefined, taxConflict: flags.length > 1 };
 }
 // Mirrored setup rows reconcile the way other one-time work does (codex
 // #6113 r47): an operator-accepted net (manualFinalOneTime) outranks every
@@ -395,7 +400,9 @@ function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard', tax
   const canonical = canonicalOneTimeLines(estimate, data, taxabilityMap);
   if (canonical.refusal) return canonical;
   const applies = setupFeeApplies(data, billingTerm);
-  const explicitFees = explicitSetupFees(data);
+  const setup = explicitSetupFees(data);
+  const explicitFees = setup.amounts;
+  if (applies && setup.taxConflict) return { lines: [], refusal: unrepresentableRefusal('WaveGuard setup has mirrored rows with disagreeing taxability') };
   const cachedFees = applies && !explicitFees.length ? cachedMembershipFees(data) : (applies && explicitFees.length > 1 ? explicitFees : []);
   if (cachedFees.length > 1) {
     return { lines: [], refusal: { statusCode: 409, code: 'membership_fee_conflict', fees: cachedFees, message: `This estimate carries more than one accepted setup fee (${cachedFees.map(money).join(' and ')}), so the bar cannot say what to invoice. Accept it from the estimate page.` } };
@@ -406,7 +413,7 @@ function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard', tax
   }
   const dropped = unrepresentableRow(data, converter, { hasTotal: oneTimeAggregateTotal(estimate) != null });
   if (dropped) return { lines: [], refusal: unrepresentableRefusal(dropped) };
-  const fee = membershipFeeLine(data, { applies, explicitFee: explicitFees[0] });
+  const fee = membershipFeeLine(data, { applies, explicitFee: explicitFees[0], explicitTaxable: setup.explicitTaxable, taxabilityMap });
   const listed = fee ? [...canonical.lines, fee] : canonical.lines;
   const discount = pooledDiscountLine(estimate, listed);
   return { lines: discount ? [...listed, discount] : listed, refusal: null };

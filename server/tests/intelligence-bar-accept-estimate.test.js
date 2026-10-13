@@ -163,7 +163,8 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       'Tier: Bronze → Gold',
       'Bills each service per application at its own visit price (no single account fee)',
       'No setup invoice, no charge and no receipt now',
-      'Visits: books none — book the first visit on the calendar after',
+      // round 53: every new recurring program needs its own first booking.
+      'Visits: books none — book the first visit of each new service on the calendar after (Pest control, Mosquito)',
       'Message: Email "membership started" to l***@example.com right after Confirm: plan, tier, rate and services (sent once per estimate). Not sent if the customer opts out first or the address on file changes',
       'Message: No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it',
     ]));

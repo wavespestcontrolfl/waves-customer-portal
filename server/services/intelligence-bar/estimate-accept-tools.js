@@ -522,11 +522,15 @@ function itemizedOneTimeTotal(effects) {
 // The scheduling instruction, from the one-time lines: a one-time package
 // (visits > 1) is booked by nobody else after this accept, so staff
 // schedule every visit of it, not only the first (codex #6113 r50).
+// Every new recurring program needs its own first booking: scheduling one
+// never seeds another (codex #6113 r53).
 function visitsInstruction(preview) {
   const packages = (preview.one_time_lines || []).filter((l) => Number(l.visits) > 1).map((l) => `${l.name} (all ${l.visits} visits)`);
-  return packages.length
-    ? `book the first visit on the calendar after, and schedule every visit of ${packages.join(', ')}`
+  const programs = (preview.services || []).map((s) => s.service);
+  const first = programs.length > 1
+    ? `book the first visit of each new service on the calendar after (${programs.join(', ')})`
     : 'book the first visit on the calendar after';
+  return packages.length ? `${first}, and schedule every visit of ${packages.join(', ')}` : first;
 }
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({

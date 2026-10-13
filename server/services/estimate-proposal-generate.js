@@ -1398,6 +1398,7 @@ async function deriveProposalDraft(estimate = {}, { database } = {}) {
 }
 
 module.exports = {
+  commercialTaxableDefault,
   mappedSubContainers,
   rawRowContainers,
   explicitZeroNet,
