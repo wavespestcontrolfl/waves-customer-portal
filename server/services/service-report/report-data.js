@@ -2230,6 +2230,7 @@ function stripLiveOnlyScheduleFields(data) {
   // keeps only the instruction as written at the visit.
   if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
     delete data.reportV2.banner.forecastLine;
+    delete data.reportV2.banner.later;
     delete data.reportV2.banner.observedRain;
     // The sprinkler-setup invitation is a link to the portal, so it is
     // live-only too.
@@ -4021,6 +4022,18 @@ function bannerForecastExtras(instruction) {
   return forecastLine ? { forecastLine } : {};
 }
 
+// A visit with a short water-in beside a long one (lawn-watering-instruction.js rule D) froze what the banner
+// says once the short deadline has passed. LIVE VIEW ONLY, like the forecast sentence: the printed record keeps
+// the instruction as written at the visit. A malformed block is dropped (the banner then keeps its lines), and so
+// is one on an instruction that is no longer a water-in (rain has covered it: nothing is left to announce).
+function bannerLaterExtras(instruction) {
+  const later = instruction.later;
+  const ok = ['water_in', 'hold_then_water_in'].includes(instruction.state) && later && typeof later === 'object' && !Number.isNaN(Date.parse(later.at))
+    && ['water_in', 'hold_then_water_in'].includes(later.state)
+    && Array.isArray(later.lines) && later.lines.length > 0 && later.lines.every((line) => typeof line === 'string' && line);
+  return ok ? { later: { at: later.at, state: later.state, lines: later.lines.slice() } } : {};
+}
+
 // The invitation under an amount-only water-in (the instruction was frozen
 // without minutes because no sprinkler setup was on file). Live view only, like
 // the forecast sentence: stripLiveOnlyScheduleFields drops it and it is never
@@ -4069,6 +4082,7 @@ function buildWateringBanner(instruction, weekPlan = null) {
     // never part of `lines`. Gate off = no key.
     ...bannerForecastExtras(instruction),
     ...bannerSetupExtras(instruction),
+    ...bannerLaterExtras(instruction),
   };
 }
 

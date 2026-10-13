@@ -424,6 +424,11 @@ describe('round 1 fixes', () => {
     const plan = lawnWateringSmsPlan(planArgs({ instruction }));
     expect(plan.vars.watering_lines).toBe("Hold off watering until after today's treatment dries.");
   });
+  test('the inch fractions are written 1/2, 1/4, 3/4 so the text stays GSM-7', () => {
+    const instruction = { ...HOLD, lines: ['Today\u2019s treatment needs about ½ inch of water by Wed, Oct 14 at 2 PM.', 'Water in with about ¼ inch, or ¾ inch.'] };
+    const plan = lawnWateringSmsPlan(planArgs({ instruction }));
+    expect(plan.vars.watering_lines).toBe("Today's treatment needs about 1/2 inch of water by Wed, Oct 14 at 2 PM. Water in with about 1/4 inch, or 3/4 inch.");
+  });
   test('freshness is judged against the completion instant, not a later freeze', () => {
     // Completed yesterday 2:40 PM ET; resumed (and frozen) today 10 AM ET.
     expect(lawnWateringSmsPlan(planArgs({ completedAt: '2026-09-30T18:40:00Z', nowMs: Date.parse('2026-10-01T14:00:00Z') })))
