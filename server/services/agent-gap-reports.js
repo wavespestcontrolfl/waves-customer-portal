@@ -536,17 +536,13 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
     return { source, kind: 'missing_capability', summary: `Asked for a tool the bar does not have: ${name}`, closestTool: name };
   }
 
-  // Two queries are the same ask when the word sets behind their dedupe key
-  // (wordKeyOf) share at least two words and at least half of the smaller
-  // set. One shared word is never enough ("payroll export" and "customer
-  // export" are different asks); one-word queries must be equal.
+  // Two queries are the same ask only when their dedupe keys (wordKeyOf: the
+  // normalized word set) are equal. Any looser match loses one part of a
+  // multi-part request ("customer invoice refund" / "customer invoice export");
+  // a duplicate row for one ask in two wordings is the smaller harm.
   function sameAsk(a, b) {
-    const left = new Set(wordKeyOf(a).split(' ').filter(Boolean));
-    const right = new Set(wordKeyOf(b).split(' ').filter(Boolean));
-    const smaller = Math.min(left.size, right.size);
-    const shared = [...left].filter((word) => right.has(word)).length;
-    if (smaller <= 1) return smaller === 1 && left.size === right.size && shared === 1;
-    return shared >= 2 && shared >= smaller / 2;
+    const key = wordKeyOf(a);
+    return key !== '' && key === wordKeyOf(b);
   }
 
   function pendingSignals() {

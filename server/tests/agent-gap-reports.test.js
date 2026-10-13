@@ -472,7 +472,7 @@ describe('agent-gap-reports', () => {
     test('a tool-search miss and a discover_capabilities miss for the same ask are recorded once, from discover', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'instant payout to the bank' }, MISS, { fromToolSearch: true });
+      collector.discovery({ query: 'payout instant request' }, MISS, { fromToolSearch: true });
       collector.discovery({ query: 'request an instant payout' }, MISS);
       await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(1);
@@ -486,6 +486,15 @@ describe('agent-gap-reports', () => {
       collector.discovery({ query: 'refund a card payment' }, MISS);
       await collector.flush({ reply: DECLINE });
       expect(insertedRows.map((row) => row.summary).sort()).toEqual(['export payroll hours', 'refund a card payment']);
+    });
+
+    test('three-word asks that share two words are different asks', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'customer invoice refund' }, MISS, { fromToolSearch: true });
+      collector.discovery({ query: 'customer invoice export' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows.map((row) => row.summary).sort()).toEqual(['customer invoice export', 'customer invoice refund']);
     });
 
     test('two short asks that share one word are different asks', async () => {
