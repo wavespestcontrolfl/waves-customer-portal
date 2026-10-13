@@ -3881,11 +3881,20 @@ async function callerNameIsStaffName(conn, { call, extracted, transcript }) {
     return false;
   }
 }
-// Drops the caller first name from a V2 result in place (and a name_full that is only that name).
+// The caller name a V2 record carries, as the staff-name check reads it. V2 may give only
+// name_full: a one-word name_full with no first or last name IS the first name (adoption
+// derives it the same way), so the check must see it before the record is stored.
+function v2CallerNameParts(caller = {}) {
+  const full = String(caller?.name_full || '').trim();
+  const first = String(caller?.first_name || '').trim() || (!String(caller?.last_name || '').trim() && /^\S+$/.test(full) ? full : '');
+  return { first_name: first || null, last_name: caller?.last_name || null };
+}
+// Drops the caller first name from a V2 result in place, and a name_full that is only that name.
 function clearV2CallerFirstName(v2Result) {
   const caller = v2Result?.extraction?.caller;
   if (!caller) return;
-  if (String(caller.name_full || '').trim().toLowerCase() === String(caller.first_name || '').trim().toLowerCase()) caller.name_full = null;
+  const first = String(v2CallerNameParts(caller).first_name || '').toLowerCase();
+  if (String(caller.name_full || '').trim().toLowerCase() === first) caller.name_full = null;
   caller.first_name = null;
 }
 // A voicemail landing on the TERMINAL skip path despite concrete service
@@ -11282,8 +11291,7 @@ const CallRecordingProcessor = {
         // of it agree with the canonical record (cleared after adoption). Fail-open.
         try {
           if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
-            const v2Caller = v2Result.extraction.caller || {};
-            if (await callerNameIsStaffName(db, { call, extracted: { first_name: v2Caller.first_name, last_name: v2Caller.last_name }, transcript: transcription })) {
+            if (await callerNameIsStaffName(db, { call, extracted: v2CallerNameParts(v2Result.extraction.caller), transcript: transcription })) {
               clearV2CallerFirstName(v2Result);
             }
           }
@@ -24760,6 +24768,7 @@ CallRecordingProcessor._test = {
   answeringStaffName,
   callerNameIsStaffName,
   clearV2CallerFirstName,
+  v2CallerNameParts,
   shouldHoldLeadEmailEnrollment,
   mintEmailReviewCardsFenced,
   emailCardSignature,

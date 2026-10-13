@@ -7,7 +7,7 @@
 const { staffNameSavedAsCaller } = require('../services/call-triage-flags');
 const { _test } = require('../services/call-recording-processor');
 
-const { answeringStaffName, callerNameIsStaffName, clearV2CallerFirstName } = _test;
+const { answeringStaffName, callerNameIsStaffName, clearV2CallerFirstName, v2CallerNameParts } = _test;
 
 // Synthetic names only (AGENTS.md): "Riley" is the staff member, "Morgan" the customer.
 const base = { firstName: 'Riley', lastName: null, staffName: 'Riley' };
@@ -97,6 +97,15 @@ describe('callerNameIsStaffName', () => {
 describe('clearV2CallerFirstName', () => {
   test('drops the first name and a name_full that is only that name', () => {
     const v2 = { status: 'valid', extraction: { caller: { first_name: 'Riley', name_full: 'Riley' } } };
+    clearV2CallerFirstName(v2);
+    expect(v2.extraction.caller).toEqual({ first_name: null, name_full: null });
+  });
+
+  test('a V2 record that carries only a one-word name_full is read and cleared too', () => {
+    expect(v2CallerNameParts({ name_full: 'Riley', first_name: null, last_name: null })).toEqual({ first_name: 'Riley', last_name: null });
+    // A full name is not a first name: nothing to judge.
+    expect(v2CallerNameParts({ name_full: 'Riley Example' })).toEqual({ first_name: null, last_name: null });
+    const v2 = { status: 'valid', extraction: { caller: { first_name: null, name_full: 'Riley' } } };
     clearV2CallerFirstName(v2);
     expect(v2.extraction.caller).toEqual({ first_name: null, name_full: null });
   });
