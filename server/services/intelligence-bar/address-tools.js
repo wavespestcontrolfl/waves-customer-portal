@@ -114,7 +114,9 @@ function noteFor(status, result, hintUsed) {
 function servedHillsborough(result, state) {
   // An explicit non-Florida state from the operator is the provider's veto; keep it.
   if (state && state !== DEFAULT_STATE) return result;
-  if (result.status !== STATUSES.OUT_OF_SERVICE_AREA) return result;
+  // The validator also reads a state written inside the address text; its
+  // state veto (outOfAreaReason 'state') is never overridden by a county rule.
+  if (result.status !== STATUSES.OUT_OF_SERVICE_AREA || result.outOfAreaReason === 'state') return result;
   const n = result.normalized || {};
   if (normalizeState(n.state) !== DEFAULT_STATE) return result;
   if (!servedSouthHillsborough(result.county, { city: n.city, zip: n.postal_code })) return result;

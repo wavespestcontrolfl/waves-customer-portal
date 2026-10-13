@@ -239,6 +239,13 @@ describe('check_address served south-Hillsborough towns', () => {
     expect(out.in_service_area).toBe(false);
   });
 
+  test('a non-Florida state written inside the address keeps the validator state veto', async () => {
+    validateAddress.mockResolvedValue(hills({ outOfAreaReason: 'state' }));
+    const out = await run({ address: '100 Example Way, Ruskin, GA 33570' });
+    expect(out.status).toBe('out_of_service_area');
+    expect(out.in_service_area).toBe(false);
+  });
+
   test('another Hillsborough city stays outside the service area', async () => {
     validateAddress.mockResolvedValue(hills({ normalized: normalized({ city: 'Tampa', postal_code: '33602' }) }));
     const out = await run({ address: '100 Example Way, Tampa, FL 33602' });

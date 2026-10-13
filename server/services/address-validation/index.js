@@ -212,6 +212,9 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     if (statedState && (statedState !== SERVICE_STATE || (providerState && providerState !== statedState))) {
       out.status = STATUSES.OUT_OF_SERVICE_AREA;
       out.inServiceArea = false;
+      // Provenance for consumers that apply a county exception: this
+      // rejection is the STATE veto, not the county rule.
+      out.outOfAreaReason = 'state';
     }
     out.providerResponseId = data.responseId || null;
     return out;
