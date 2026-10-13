@@ -571,7 +571,7 @@ describe('Confirm assessment, then Complete', () => {
     await analyzeOnly();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
     await screen.findByText('Could not save the scores');
-    expect(completeButton().textContent).toBe('Confirm the assessment');
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
     // The bar's Confirm can try again; it is still no completion.
     expect(completeButton().disabled).toBe(false);
     expect(completeCalls()).toHaveLength(0);
@@ -583,7 +583,7 @@ describe('Confirm assessment, then Complete', () => {
     await analyzeOnly();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
     await screen.findByText('The photos did not give a full read. Fill any blank score, or tap Retake and analyze again.');
-    expect(completeButton().textContent).toBe('Confirm the assessment');
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
     expect(completeCalls()).toHaveLength(0);
   });
 
@@ -947,7 +947,8 @@ describe('products', () => {
     expect(screen.queryByRole('button', { name: '+ Other product' })).toBeNull();
     expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
     await analyze();
-    expect(completeButton().textContent).toBe('Products applied required');
+    // The button reads "Confirming..." until the block's progress report reaches the sheet, one render after "Assessment confirmed".
+    await waitFor(() => expect(completeButton().textContent).toBe('Products applied required'));
   });
 
   test('the search sits in the Products section: typing filters the catalog in place and one tap adds the row, with no sheet opened', async () => {
