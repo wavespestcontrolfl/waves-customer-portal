@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
     chain.whereIn = record('whereIn');
     chain.orderBy = record('orderBy');
     chain.forUpdate = record('forUpdate');
+    chain.forShare = record('forShare');
     chain.insert = record('insert');
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
     chain.update = (patch) => {
@@ -41,6 +42,16 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The comms/phone/email locks: each acquisition and the release are logged, in order.
+let mockLockLog = [];
+jest.mock('../utils/customer-comms-lock', () => ({
+  lockCustomerComms: async (_trx, id) => { mockLockLog.push(['comms', id]); },
+  lockCustomerEmail: async (_trx, email) => { mockLockLog.push(['email', email]); },
+  withSmsConsentLock: async (_dbh, { phone, customerId }, fn) => {
+    mockLockLog.push(['comms', customerId], ['phone', phone]);
+    try { return await fn(require('../models/db')); } finally { mockLockLog.push(['released']); }
+  },
+}));
 
 const mockResolveForInvoice = jest.fn(async () => null);
 jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolveForInvoice(...a) }));
@@ -173,6 +184,7 @@ beforeEach(() => {
   gates.proactiveLineTypeLookup = false;
   mockRenderTemplate.mockImplementation(renderWithLink);
   mockActiveVariants.mockResolvedValue([]);
+  mockLockLog = [];
   mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-1', method_type: 'card' });
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
   mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
@@ -810,56 +822,87 @@ describe('autopayDeliveryPreflight — read-only "could this channel deliver" (r
     });
   });
 
-  // The pin at the PROVIDER boundary: the senders' own last-check hooks (the ones the receipt resend uses).
-  describe('requestAutopaySetupLink({ expectedRecipient }) at the provider boundary', () => {
+  // The pin THROUGH the provider request: the senders' own LOCKED handoffs (the annual rate letter's pattern) hold
+  // the comms (+ phone) lock and the customer ROW (FOR SHARE) from the final re-read to the provider call.
+  describe('requestAutopaySetupLink({ expectedRecipient }) through the provider request', () => {
     const PIN_SMS = { phoneLast10: '9415551234' };
     const PIN_EMAIL = { email: 'pat@example.com' };
+    const rowReads = () => touches('customers').filter((c) => c.calls.some((x) => x[0] === 'forShare'));
 
-    it('sms: the pipeline gets a preProviderCheck that re-reads the contact; it passes while the pin holds and vetoes (recipient_changed) when it does not', async () => {
+    it('sms: the pipeline gets the locked handoff (and its entry point); no pin, no handoff — the default send is unchanged', async () => {
       await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
-      const { preProviderCheck } = mockSendCustomerMessage.mock.calls[0][0];
-      expect(typeof preProviderCheck).toBe('function');
-      expect(await preProviderCheck({ channel: 'sms' })).toEqual({ ok: true });
-      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: '+19415550000' }) };
-      expect(await preProviderCheck({ channel: 'sms' })).toEqual({ ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed' });
-      mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
-      expect((await preProviderCheck({ channel: 'sms' })).ok).toBe(false);
+      const sent = mockSendCustomerMessage.mock.calls[0][0];
+      expect(sent).toMatchObject({ entryPoint: 'autopay_setup_link_send', purpose: 'card_request', metadata: expect.objectContaining({ original_message_type: 'autopay_setup_link' }) });
+      expect(typeof sent.withSmsHandoff).toBe('function');
+      expect(sent).not.toHaveProperty('preProviderCheck');
+      mockSendCustomerMessage.mockClear();
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
+      const plain = mockSendCustomerMessage.mock.calls[0][0];
+      for (const key of ['withSmsHandoff', 'entryPoint', 'preProviderCheck']) expect(plain).not.toHaveProperty(key);
     });
 
-    it('sms: a pipeline veto at that boundary reports recipient_changed, nothing is stamped sent', async () => {
+    it('sms: inside the handoff the comms then phone locks are taken, the customer row is re-read FOR SHARE on the handoff handle, and dispatch runs while they are held; they release after', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      const { withSmsHandoff } = mockSendCustomerMessage.mock.calls[0][0];
+      mockLockLog = [];
+      mockDbTouches = [];
+      const dispatch = jest.fn(async (trx) => { mockLockLog.push(['dispatch']); expect(trx).toBeDefined(); return { ok: true }; });
+      expect(await withSmsHandoff(dispatch)).toEqual({ ok: true });
+      expect(mockLockLog).toEqual([['comms', 'cust-1'], ['phone', CUSTOMER.phone], ['dispatch'], ['released']]);
+      expect(rowReads()).toHaveLength(1);
+      expect(touches('customers')[0].calls.map((c) => c[0])).toEqual(expect.arrayContaining(['where', 'whereNull', 'forShare']));
+    });
+
+    it('sms: a number changed since the card vetoes (recipient_changed) without dispatching; a customer gone or an unreadable re-read also refuses; the locks release on every path', async () => {
+      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
+      const { withSmsHandoff } = mockSendCustomerMessage.mock.calls[0][0];
+      const dispatch = jest.fn(async () => ({ ok: true }));
+      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, phone: '+19415550000' }) };
+      mockLockLog = [];
+      expect(await withSmsHandoff(dispatch)).toEqual({ ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false });
+      mockTableHandlers.customers = { first: () => null };
+      expect((await withSmsHandoff(dispatch)).ok).toBe(false);
+      mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
+      await expect(withSmsHandoff(dispatch)).rejects.toThrow('db blip');
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(mockLockLog.filter((e) => e[0] === 'released')).toHaveLength(3);
+    });
+
+    it('sms: the pipeline\'s veto of that handoff reports recipient_changed, nothing is stamped sent', async () => {
       mockSendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECIPIENT_CHANGED', reason: 'recipient_changed' });
       const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms', expectedRecipient: PIN_SMS });
       expect(r).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
       expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
     });
 
-    it('email: the library gets a withProviderHandoff whose boundary check re-reads the contact (passes while the pin holds, refuses with providerBoundaryBlocked when it does not)', async () => {
+    it('email: the library gets a locked withProviderHandoff — comms lock, the row FOR SHARE, the address key, then dispatch(trx) — and none without a pin', async () => {
       await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL });
       const { withProviderHandoff } = mockSendTemplate.mock.calls[0][0];
       expect(typeof withProviderHandoff).toBe('function');
-      let boundary;
-      const dispatch = jest.fn(async (_db, check) => { boundary = check; });
+      mockLockLog = [];
+      mockDbTouches = [];
+      const dispatch = jest.fn(async (trx) => { mockLockLog.push(['dispatch']); expect(trx).toBeDefined(); });
       expect(await withProviderHandoff(dispatch)).toEqual({ ok: true });
-      expect(dispatch).toHaveBeenCalledWith(undefined, expect.any(Function));
-      await expect(boundary()).resolves.toBeUndefined();
-      mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, email: 'moved@example.com' }) };
-      await expect(boundary()).rejects.toMatchObject({ providerBoundaryBlocked: true });
-      mockTableHandlers.customers = { first: () => { throw new Error('db blip'); } };
-      await expect(boundary()).rejects.toMatchObject({ providerBoundaryBlocked: true });
-    });
-
-    it('email: the library\'s boundary veto (or a boundary check that could not run) is recipient_changed — a definite not-sent', async () => {
-      for (const flag of [{ boundaryBlocked: true }, { boundaryCheckFailed: true }]) {
-        mockSendTemplate.mockResolvedValue({ sent: false, aborted: true, reason: 'provider_boundary_blocked', ...flag });
-        expect(await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL })).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
-      }
-    });
-
-    it('no pin: neither sender is given a boundary hook (zero change for existing callers)', async () => {
-      await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'sms' });
-      expect(mockSendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('preProviderCheck');
+      expect(mockLockLog).toEqual([['comms', 'cust-1'], ['email', 'pat@example.com'], ['dispatch']]);
+      expect(rowReads()).toHaveLength(1);
+      mockSendTemplate.mockClear();
       await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
       expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('withProviderHandoff');
+    });
+
+    it('email: an address changed since the card vetoes before dispatch and the send reports recipient_changed', async () => {
+      mockSendTemplate.mockImplementation(async (opts) => {
+        mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, email: 'moved@example.com' }) };
+        const verdict = await opts.withProviderHandoff(async () => { throw new Error('dispatched'); });
+        expect(verdict).toEqual({ ok: false, reason: 'recipient_changed' });
+        return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+      });
+      expect(await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL })).toMatchObject({ action: 'skipped', reason: 'recipient_changed' });
+    });
+
+    it('email: an abort before the request for another reason is not reported as a changed recipient', async () => {
+      mockSendTemplate.mockResolvedValue({ sent: false, aborted: true, reason: 'aborted_before_dispatch' });
+      expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', expectedRecipient: PIN_EMAIL })).reason).toBe('aborted_before_dispatch');
     });
   });
 

@@ -317,36 +317,51 @@ async function recipientAtSend({ expectedRecipient, delivery, customerId, custom
   return recipientMatchesPin(expectedRecipient, delivery, fresh) ? fresh : null;
 }
 
-// The pin at the PROVIDER boundary, through the two senders' own last-check
-// hooks (the same ones the receipt resend uses): the SMS pipeline's
-// preProviderCheck and the email library's withProviderHandoff ->
-// providerBoundaryCheck. Both run after the sender's template, suppression,
-// line-type and audit work, as the last step before the provider request, and
-// refuse with a definite not-sent: the contact is re-read and must still match
-// the pin. Absent pin = no hook.
-const recipientStillHolds = ({ expectedRecipient, delivery, customerId }) => async () => !!(await recipientAtSend({ expectedRecipient, delivery, customerId, customer: null }));
-function smsBoundaryPin({ expectedRecipient, customerId }) {
+// The pin through the provider request. Both senders' own LOCKED handoffs (the
+// ones the annual rate letter's text and email use) hold the customer-comms lock
+// (+ the phone lock for a text) and the sender runs its remaining guards (annual
+// offer, disclaimed number, window) inside that transaction before the request.
+// The customer ROW is read FOR SHARE in the same transaction and held to commit:
+// a plain write of customers.phone / email needs the row's FOR NO KEY UPDATE
+// lock, so it cannot commit between this re-read and the provider call — it
+// waits for the request, or commits first and the re-read vetoes. The re-read
+// uses the handoff's own transaction (never a second pool connection). Lock
+// order: comms -> phone -> customers row (rows last). Absent pin = no handoff.
+// SMS: the sender allows this handoff only for this entry point (narrow clause in
+// send-customer-message.js smsHandoffAllowed).
+const SMS_PIN_ENTRY_POINT = 'autopay_setup_link_send';
+const lockedRow = (trx, customerId) => trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first();
+function smsLockedPin({ expectedRecipient, customerId, phone }) {
   if (!expectedRecipient) return {};
-  const holds = recipientStillHolds({ expectedRecipient, delivery: 'sms', customerId });
+  const { withSmsConsentLock } = require('../utils/customer-comms-lock');
   return {
-    preProviderCheck: async () => ((await holds())
-      ? { ok: true }
-      : { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed' }),
+    entryPoint: SMS_PIN_ENTRY_POINT,
+    withSmsHandoff: (dispatch) => withSmsConsentLock(db, { phone, customerId }, async (trx) => (
+      recipientMatchesPin(expectedRecipient, 'sms', await lockedRow(trx, customerId))
+        ? dispatch(trx)
+        : { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false }
+    )),
   };
 }
-function emailBoundaryPin({ expectedRecipient, customerId }) {
-  if (!expectedRecipient) return {};
-  const holds = recipientStillHolds({ expectedRecipient, delivery: 'email', customerId });
+// Email: the library's withProviderHandoff (dispatch(trx)). `state.vetoed` tells a
+// changed recipient from any other abort before the request.
+function emailLockedPin({ expectedRecipient, customerId, to }) {
+  const state = { vetoed: false };
+  if (!expectedRecipient) return { hook: {}, state };
+  const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
   return {
-    withProviderHandoff: async (dispatch) => {
-      await dispatch(undefined, async () => {
-        if (!(await holds())) {
-          const refusal = new Error('Auto Pay setup email handoff aborted: the recipient changed');
-          refusal.providerBoundaryBlocked = true;
-          throw refusal;
+    state,
+    hook: {
+      withProviderHandoff: (dispatch) => db.transaction(async (trx) => {
+        await lockCustomerComms(trx, customerId);
+        if (!recipientMatchesPin(expectedRecipient, 'email', await lockedRow(trx, customerId))) {
+          state.vetoed = true;
+          return { ok: false, reason: 'recipient_changed' };
         }
-      });
-      return { ok: true };
+        await lockCustomerEmail(trx, to);
+        await dispatch(trx);
+        return { ok: true };
+      }),
     },
   };
 }
@@ -361,6 +376,7 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
   const target = await recipientAtSend({ expectedRecipient, delivery: 'email', customerId, customer });
   if (!target) return skip('recipient_changed');
   const to = String(target.email || '').trim();
+  const pin = emailLockedPin({ expectedRecipient, customerId, to });
 
   const EmailTemplateLibrary = require('./email-template-library');
   let result;
@@ -382,7 +398,7 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
       categories: ['autopay_setup_link', 'payment_setup'],
       // Provider rejections echo the recipient address — never log them raw.
       suppressProviderErrorLog: true,
-      ...emailBoundaryPin({ expectedRecipient, customerId }),
+      ...pin.hook,
     });
   } catch (sendErr) {
     if (isTemplateLeverError(sendErr)) return skip('email_template_inactive');
@@ -391,9 +407,8 @@ async function emailSetupLink({ customer, customerId, request, secureUrl, trigge
     logger.error(`[autopay-setup-link] email send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
     return skip('send_outcome_uncertain');
   }
-  // The boundary pin only exists when a pin was given: its veto (or a check
-  // that could not run) is a definite not-sent, reported as the changed contact.
-  if (result?.boundaryBlocked || result?.boundaryCheckFailed) return skip('recipient_changed');
+  // The locked handoff's veto is a definite not-sent, reported as the changed contact.
+  if (pin.state.vetoed) return skip('recipient_changed');
   if (!result?.sent) return skip(result?.reason || 'send_blocked');
   return markSent(request, customerId, 'email', trigger);
 }
@@ -773,7 +788,7 @@ async function deliverSms({ customer, customerId, request, secureUrl, trigger, e
       // Only ever an explicit office click — never automation.
       ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
       metadata: { autopay_setup_request_id: request.id, trigger, original_message_type: TEMPLATE_KEY },
-      ...smsBoundaryPin({ expectedRecipient, customerId }),
+      ...smsLockedPin({ expectedRecipient, customerId, phone: target.phone }),
     });
   } catch (sendErr) {
     // Provider errors can echo the destination number AND the message
