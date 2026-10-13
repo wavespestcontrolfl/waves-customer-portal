@@ -87,6 +87,8 @@ function givenParts(input) {
     city: cleanText(input.city) || (stateInCity ? parsedCity.replace(TRAILING_STATE, '') : parsedCity),
     state: normalizeState(cleanText(input.state) || cleanText(parsed.state) || (stateInCity ? 'FL' : '')) || '',
     zip: (cleanText(input.zip) || cleanText(parsed.zip)).slice(0, 5),
+    // Google returns a five-digit ZIP, so a ZIP+4 suffix cannot be checked.
+    zipPlus4: (`${cleanText(input.zip)} ${text}`.match(/\b\d{5}-(\d{4})\b/) || [])[1] || '',
   };
 }
 
@@ -138,6 +140,10 @@ function noteFor(status, changed, given, result) {
   if (changed.length) parts.push('Google differs from the input: show the operator both versions and ask before saving (the operator\'s own words, or a call transcript, may be the one that is wrong). If the operator insists their spelling is right, run this check again with their exact words.');
   if (changed.some(c => c.component === 'zip' && !c.input)) parts.push('The ZIP comes from Google, not from the operator: tell them which ZIP you are using.');
   if (!given.city && result.normalized?.city) parts.push('No city was given: confirm Google\'s city with the operator.');
+  // No rule can tell a misspelled state from a city word in free text
+  // ("Sarasota Flordia"), so the assumption is always stated instead.
+  if (!given.state) parts.push(`No state was read from the input, so ${DEFAULT_STATE} was assumed: tell the operator, and ask if any word of the input could be another state.`);
+  if (given.zipPlus4) parts.push(`The ZIP+4 suffix "-${given.zipPlus4}" was not checked and is not in the normalized ZIP: save the five-digit ZIP and tell the operator the suffix was left out.`);
   if (given.unit) parts.push(`Google does not check the unit or apartment number: keep "${given.unit}". Put it in the second address line when the tool has one; otherwise add it at the end of the street line.`);
   return parts.join(' ');
 }
@@ -151,6 +157,8 @@ function shape(result, given) {
     verdict: VERDICTS[status] || 'Google returned a result this tool does not recognize.',
     normalized: n ? { address_line1: n.street_line_1, city: n.city, state: n.state, zip: n.postal_code } : null,
     unit: given.unit || null,
+    state_assumed: given.state ? null : DEFAULT_STATE,
+    zip_plus4_unchecked: given.zipPlus4 || null,
     county: result.county || null,
     in_service_area: typeof result.inServiceArea === 'boolean' ? result.inServiceArea : null,
     changed,

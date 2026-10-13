@@ -276,6 +276,25 @@ describe('check_address round 2 cases', () => {
     expect(out.unit).toBe('Apt 4');
     expect(out.changed).toEqual([]);
   });
+  test('a comma-free address with no readable state says FL was assumed', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way Sarasota Flordia 34236' });
+    expect(out.state_assumed).toBe('FL');
+    expect(out.note).toMatch(/FL was assumed/);
+  });
+  test('a stated state is not reported as assumed', async () => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run({ address: '100 Example Way, Sarasota, FL 34236' });
+    expect(out.state_assumed).toBeNull();
+    expect(out.note).not.toMatch(/assumed/);
+  });
+  test.each([[{ address: '100 Example Way, Sarasota, FL 34236-1234' }], [{ address: '100 Example Way, Sarasota, FL', zip: '34236-1234' }]])('a ZIP+4 suffix is reported, not silently dropped', async (input) => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run(input);
+    expect(out.zip_plus4_unchecked).toBe('1234');
+    expect(out.note).toMatch(/-1234/);
+    expect(out.changed).toEqual([]);
+  });
   test('an unrecognized state written into the address text is refused', async () => {
     const out = await run({ address: '100 Example Way, Sarasota, Flordia 34236' });
     expect(out.status).toBe('invalid_input');
