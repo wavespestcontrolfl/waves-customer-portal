@@ -800,6 +800,75 @@ describe('the server decides every rollover; the palette obeys', () => {
     });
   });
 
+  describe('a failed query (503) for a rolled-over request', () => {
+    const failure = (body) => ({ ok: false, status: 503, json: async () => body });
+    const queryCalls = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => options.body);
+    async function withCardThenFailure(secondAttempt) {
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) {
+          const n = queryCalls().length;
+          if (n === 1) return ok({ response: 'Prepared.', taskId: 'task-old', taskState: 'awaiting_approval', pendingActions: [cardX],
+            conversationHistory: history('Synthetic first ask', 'Prepared.'), threadId: THREAD, threadSeq: 2, threadsEnabled: true });
+          return secondAttempt(n);
+        }
+        if (url.includes('/threads/latest')) return ok({ thread: null });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      await mount();
+      submit('Synthetic first ask');
+      await screen.findByRole('button', { name: 'Confirm', exact: true });
+      submit('Synthetic second ask');
+      await screen.findByText(/Error: /);
+    }
+
+    it('flagged: the old card and task are gone, the error shows, and the retry is byte-identical with the same key; its success holds the new thread', async () => {
+      await withCardThenFailure(n => (n === 2 ? failure({ error: 'Model unavailable', threadRolledOver: true })
+        : ok({ response: 'Recovered.', threadRolledOver: true, pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'Recovered.'),
+          threadId: THREAD_B, threadSeq: 2, threadsEnabled: true })));
+      expect(confirms()).toHaveLength(0);
+      expect(screen.getByText(/Error: Model unavailable/)).toBeInTheDocument();
+      fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
+      await screen.findByText('Recovered.');
+      const [, failed, retry] = queryCalls();
+      expect(retry).toBe(failed);
+      expect(JSON.parse(retry).thread_id).toBe(THREAD);
+      expect(confirms()).toHaveLength(1);
+      submit('Synthetic third ask');
+      await waitFor(() => expect(queryCalls()).toHaveLength(4));
+      expect(JSON.parse(queryCalls()[3]).thread_id).toBe(THREAD_B);
+    });
+
+    it('not flagged: the cards stay as they are today', async () => {
+      await withCardThenFailure(() => failure({ error: 'Model unavailable' }));
+      expect(screen.getByText(/Error: Model unavailable/)).toBeInTheDocument();
+      expect(confirms()).toHaveLength(1);
+    });
+
+    it('a flagged error for a request the operator has since left resets nothing', async () => {
+      const pending = [];
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return new Promise(resolve => pending.push(resolve));
+        if (url.includes('/threads/latest')) return ok({ thread: null });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      useIsMobile.mockReturnValue(true);
+      await mount();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+      submit('Synthetic ask that gets abandoned');
+      await waitFor(() => expect(pending).toHaveLength(1));
+      fireEvent.click(screen.getByLabelText('Conversation options'));
+      fireEvent.click(await screen.findByRole('button', { name: 'New chat' }));
+      submit('Synthetic ask after New chat');
+      await waitFor(() => expect(pending).toHaveLength(2));
+      await act(async () => pending[1](reply({ response: 'Second answer', threadId: THREAD_B, pendingActions: [cardY] })));
+      await screen.findByText('Second answer');
+      await act(async () => pending[0](failure({ error: 'Late failure', threadRolledOver: true })));
+      expect(screen.queryByText(/Late failure/)).not.toBeInTheDocument();
+      expect(screen.getByText('Second answer')).toBeInTheDocument();
+      expect(confirms()).toHaveLength(1);
+    });
+  });
+
   it('a reply without the flag adds to the cards on screen, as before', async () => {
     await sendTwo({ response: 'More.', pendingActions: [cardY], conversationHistory: history('Synthetic second ask', 'More.'),
       threadId: THREAD, threadSeq: 4, threadsEnabled: true });

@@ -105,6 +105,7 @@ function adminFetch(path, options = {}) {
       const body = await r.json().catch(() => ({}));
       const err = new Error(body.message || body.error || `HTTP ${r.status}`);
       err.status = r.status;
+      err.details = body; // the parsed error body (a flagged query error carries threadRolledOver)
       throw err;
     }
     return r.json();
@@ -620,22 +621,41 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   };
 
   // THE one place that starts a new conversation locally: New chat and a reply
-  // the server flagged threadRolledOver both call it, so they cannot drift. It drops the held thread, its history, and everything
-  // that belonged to the old conversation (cards, the open task, answer
-  // buttons, tool activity, knowledge-gap prompts). It does not touch the
-  // typed prompt or the answer on screen (callers decide), and it cancels
-  // nothing on the server: a still-valid card stays in History.
-  const startNewConversation = useCallback(() => {
-    setThreadId(null);
-    threadSeqRef.current = null;
-    threadReopenedRef.current = false;
-    setConversationHistory([]);
+  // the server flagged threadRolledOver both call it, so they cannot drift. It
+  // is two named parts. clearConversationView: what is ON SCREEN from the old
+  // conversation (cards, the open task, answer buttons, tool activity,
+  // knowledge-gap prompts). releaseThread: what a request SERIALIZES (held
+  // thread id and tail seq, the reopened flag, the history). Neither touches the
+  // typed prompt or the answer on screen (callers decide), and neither cancels
+  // anything on the server: a still-valid card stays in History.
+  const clearConversationView = useCallback(() => {
     setPendingActions([]);
     setActiveTask(null);
     setChoices(null);
     setToolActivity([]);
     knowledgeGaps.reset();
   }, []);
+  const releaseThread = useCallback(() => {
+    setThreadId(null);
+    threadSeqRef.current = null;
+    threadReopenedRef.current = false;
+    setConversationHistory([]);
+  }, []);
+  const startNewConversation = useCallback(() => {
+    releaseThread();
+    clearConversationView();
+  }, [releaseThread, clearConversationView]);
+
+  // A failed query shows its error. When the server rolled the request over (the
+  // error body carries threadRolledOver, which this file's adminFetch keeps on err.details)
+  // the old conversation's cards and task go too, but NOTHING a retry serializes
+  // changes (thread, seq, history, reopened flag, prompt, request key), so the
+  // retry is byte for byte the failed request. A successful retry then replays
+  // the flag and the full reset runs.
+  const showQueryError = useCallback((err) => {
+    if (err.details?.threadRolledOver) clearConversationView();
+    setResponse(`Error: ${err.message}`);
+  }, [clearConversationView]);
 
   // Resume the latest server-persisted thread when the palette first opens
   // with no local history. 404 = threads not enabled — quietly stay
@@ -757,7 +777,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           identityRef.current.settle(identity);
           answered = true;
         }
-        if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
+        if (threadEpochRef.current === epoch) showQueryError(err);
       }
       if (threadEpochRef.current === epoch) {
         submittingRef.current = false;
@@ -770,7 +790,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, queryPayloadFor, applyServerReply, holdThread, resetAttachments],
+    [prompt, loading, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
