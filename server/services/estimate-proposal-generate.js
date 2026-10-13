@@ -918,19 +918,37 @@ function oneTimeResultContainers(estimateData) {
 // narrower parallel walk, codex 1A-ii r2/r2b/r3c/r3d/r4b), plus the gated
 // identities read from the UNCOLLAPSED extraction so a dropped mirror's
 // review marker still gates its kept clone (codex 1A-ii r14).
+// The mapped sub-containers one document carries, each its own source: the
+// same arrays estimateOneTimeItemsFromData reads, but UNCOLLAPSED, so the
+// mirror reconciliation (accepted net, sold scope, one-to-one match) sees
+// every copy instead of the converter's first-wins collapse (codex #6113 r39).
+function mappedSubContainers(doc) {
+  const result = doc.result && typeof doc.result === 'object' ? doc.result : doc;
+  const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+  const nested = result.results?.oneTime && typeof result.results.oneTime === 'object' ? result.results.oneTime : {};
+  const keep = (rows) => (Array.isArray(rows) ? rows.filter((item) => item && item.onProg !== true && item.includedOnProgram !== true) : []);
+  return [oneTime.items, oneTime.specItems, nested.items, nested.specItems, result.specItems, doc.one_time?.items, doc.oneTimeItems].map(keep).filter((rows) => rows.length);
+}
 function mappedOneTimeSources(estimateData) {
   const { engineResult, extra } = oneTimeResultContainers(estimateData);
   const docs = [estimateData, { result: engineResult }, ...(extra ? [{ result: extra }] : [])];
-  const sourceLists = docs.map((doc) => estimateOneTimeItemsFromData(doc, { collapseMirrored: true }));
+  const sourceLists = docs.flatMap(mappedSubContainers);
   const gatedIdentities = new Set(docs.flatMap((doc) => estimateOneTimeItemsFromData(doc))
     .filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
   return { sourceLists, gatedIdentities };
 }
 // Raw engine lineItems from BOTH containers (codex 1A-ii r4), with the same
 // clone-marker rule (codex 1A-ii r14).
+// Every persisted container that can carry raw rows, nested results
+// included (result.results, engineResult.results, …), the same set the
+// card's own row scan reads (codex #6113 r39).
+function rawRowContainers(data) {
+  const candidates = [data, data?.result, data?.results, data?.result?.results, data?.result?.result, data?.engineResult, data?.engineResult?.results, data?.engineResult?.result];
+  const seen = new Set();
+  return candidates.filter((c) => c && typeof c === 'object' && !seen.has(c) && seen.add(c));
+}
 function rawLineItemSources(estimateData) {
-  const { engineResult, extra } = oneTimeResultContainers(estimateData);
-  const rawContainers = [engineResult.lineItems, extra?.lineItems].map((rows) => (Array.isArray(rows) ? rows : []));
+  const rawContainers = rawRowContainers(estimateData).map((c) => (Array.isArray(c.lineItems) ? c.lineItems : [])).filter((rows) => rows.length);
   const gatedIdentities = new Set(rawContainers.flat().filter((line) => rowIsReviewGated(line)).map(rawIdentity));
   return { rawContainers, gatedIdentities };
 }

@@ -271,6 +271,9 @@ function canonicalOneTimeLines(estimate, data) {
     consequence: lineConsequence(w.amount),
     ...(w.visits > 1 ? { visits: w.visits } : {}),
     ...(Array.isArray(w.includes) && w.includes.length ? { includes: w.includes.slice() } : {}),
+    // Taxability rides to the card: staff invoicing by hand must know which
+    // lines carry sales tax on a commercial property (codex #6113 r39).
+    ...(w.taxable === true ? { taxable: true } : {}),
   }));
   return { lines, refusal: null };
 }

@@ -502,12 +502,14 @@ const ONE_TIME_LINE_LABELS = {
   schedule_and_invoice_by_hand: (l) => {
     const work = l.visits > 1 ? `schedule all ${l.visits} of its visits` : 'schedule it';
     const scope = Array.isArray(l.includes) && l.includes.length ? ` — sold as: ${l.includes.join('; ')}` : '';
-    return `One-time ${l.name} (${money(l.amount)}${l.visits > 1 ? `, ${l.visits} visits` : ''}): this accept does not schedule or invoice it — ${work} and invoice it by hand${scope}`;
+    return `One-time ${l.name} (${money(l.amount)}${l.visits > 1 ? `, ${l.visits} visits` : ''}): this accept does not schedule or invoice it — ${work} and invoice it by hand${scope}${taxNote(l)}`;
   },
   // A fee is not work: nothing to schedule, only an invoice line.
-  invoice_by_hand: (l) => `${l.name} (${money(l.amount)}): this accept does not invoice it — add it to the first invoice by hand; there is no visit to schedule`,
+  invoice_by_hand: (l) => `${l.name} (${money(l.amount)}): this accept does not invoice it — add it to the first invoice by hand; there is no visit to schedule${taxNote(l)}`,
   subtract_when_invoicing: (l) => `${l.name}: ${money(-l.amount)} off — the one-time service lines on this card are gross; take ${money(-l.amount)} off when invoicing so the total is what the customer accepted`,
 };
+// A taxable line names it: sales tax is charged on a commercial property.
+const taxNote = (l) => (l.taxable ? '; taxable — charge sales tax when the property is commercial' : '');
 function oneTimeLines(preview) {
   return preview.one_time_lines.map((l) => ({
     kind: 'operational',
@@ -603,7 +605,7 @@ function buildPreview({ estimate, estimateData, label, customer, customerId, mon
     services: converts ? startedServices(estimateData, PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate })) : [],
     bill: converts ? billFromEffects(effects) : null,
     lawn_profile: lawnLine(effects),
-    one_time_lines: effectsOfKind(effects, 'one_time_line').map((l) => ({ name: l.name, amount: l.amount, consequence: l.consequence, ...(l.visits ? { visits: l.visits } : {}), ...(l.includes ? { includes: l.includes } : {}) })),
+    one_time_lines: effectsOfKind(effects, 'one_time_line').map((l) => ({ name: l.name, amount: l.amount, consequence: l.consequence, ...(l.visits ? { visits: l.visits } : {}), ...(l.includes ? { includes: l.includes } : {}), ...(l.taxable ? { taxable: true } : {}) })),
     per_application_lane: converts && laneAfter === 'per_application',
     billing_lane: { before: laneBefore && laneLabel(laneBefore), after: laneAfter && laneLabel(laneAfter) },
     tier: { before: before.waveguard_tier ?? null, after: after.waveguard_tier ?? null },

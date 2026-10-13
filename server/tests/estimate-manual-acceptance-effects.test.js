@@ -394,7 +394,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
-      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
     ]);
   });
   test('round 21: a gross price with an amountAfterDiscount net lists the net, with no aggregate to reconcile against', async () => {
@@ -422,7 +422,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
-      { kind: 'one_time_line', name: 'Flea Package', amount: 300, consequence: 'schedule_and_invoice_by_hand', visits: 3, includes: ['3 visits, 2 weeks apart'] },
+      { kind: 'one_time_line', name: 'Flea Package', amount: 300, consequence: 'schedule_and_invoice_by_hand', visits: 3, includes: ['3 visits, 2 weeks apart'], taxable: true },
     ]);
   });
   test('round 22: a one-cent gap between the lines and the total is a mismatch, not a rounding tolerance', async () => {
@@ -778,6 +778,32 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.visits])).toEqual([['Flea Package', 3]]);
   });
+  test('round 39: mirrors inside ONE result (oneTime.items vs oneTime.specItems) that sell a different scope refuse, never the first copy', async () => {
+    const row = (detail, visits) => ({ service: 'bed_bug', name: 'Bed Bug Treatment', price: 300, visits, detail });
+    const world = feeWorld(solo, { items: [row('Kitchen', 1)], specItems: [row('Whole home', 3)] });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Bed Bug Treatment.*disagreeing amounts/) });
+  });
+  test('round 39: a raw one-time row nested under result.results.lineItems is listed', async () => {
+    const world = makeWorld({
+      estimateOverrides: {
+        onetime_total: null,
+        estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] },
+          result: { results: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', price: 150, billingCadence: 'one_time' }] } },
+        }),
+      },
+    });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount])).toEqual([['Wasp Nest Removal', 150]]);
+  });
+  test('round 39: a taxable one-time line carries taxable onto the effect', async () => {
+    const world = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, taxable: true, billingCadence: 'one_time' }]);
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([expect.objectContaining({ name: 'Wasp Nest Removal', amount: 100, taxable: true })]);
+    const plain = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, taxable: false, billingCadence: 'one_time' }]);
+    expect((await markEstimateManuallyAccepted(base(plain, fakeConverter(plain), { dryRun: true }))).effects.find((e) => e.kind === 'one_time_line')).not.toHaveProperty('taxable');
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
@@ -899,7 +925,7 @@ describe('round 10, finding 1: a partly itemized one-time total refuses; the mem
     const world = withFee([{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }]);
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
-      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
       { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: 99, consequence: 'invoice_by_hand' },
     ]);
   });
@@ -989,7 +1015,7 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
     });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
-      { kind: 'one_time_line', name: 'Rodent Exclusion', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+      { kind: 'one_time_line', name: 'Rodent Exclusion', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
       { kind: 'one_time_line', name: 'Discount applied to the one-time total', amount: -50, consequence: 'subtract_when_invoicing' },
     ]);
   });
@@ -1034,7 +1060,7 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       });
       const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
       expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
-        { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+        { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
       ]);
     }
   });
@@ -1058,7 +1084,7 @@ describe('finding 5 (round 6): the one-time amount is what the customer pays', (
       const world = makeWorld({ estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify(estimate_data) } });
       const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
       expect(effects.filter((e) => e.kind === 'one_time_line')).toEqual([
-        { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand' },
+        { kind: 'one_time_line', name: 'German Roach Cleanout', amount: 350, consequence: 'schedule_and_invoice_by_hand', taxable: true },
       ]);
     }
   });
