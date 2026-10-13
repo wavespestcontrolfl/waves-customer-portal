@@ -992,6 +992,23 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(buildWateringBanner(hold)).toEqual({
       state: 'hold', lines: hold.lines, holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: null, expiresAt: '2026-10-01T19:00:00.000Z', ruleSource: 'label',
     });
+    // A short water-in beside a 14-day one: the frozen later phase rides to the live banner and is dropped from a
+    // printed record (the record keeps the instruction as written). A malformed block never reaches the payload.
+    const twoWindows = buildWateringInstruction({
+      rules: [WATER_IN_RULE, { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 336, source: 'label' }],
+      completedAt: COMPLETED,
+    });
+    const twoWindowBanner = buildWateringBanner(twoWindows);
+    expect(twoWindowBanner.later).toEqual(twoWindows.later);
+    expect(twoWindowBanner.later.at).toBe(twoWindows.waterInBy);
+    expect(Date.parse(twoWindowBanner.expiresAt)).toBeGreaterThan(Date.parse(twoWindowBanner.later.at));
+    const { stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+    const printed = stripLiveOnlyScheduleFields({ reportV2: { banner: { ...twoWindowBanner } } });
+    expect(printed.reportV2.banner).not.toHaveProperty('later');
+    expect(printed.reportV2.banner.lines).toEqual(twoWindowBanner.lines);
+    expect(buildWateringBanner({ ...twoWindows, later: { at: 'not a date', state: 'water_in', lines: ['x'] } })).not.toHaveProperty('later');
+    expect(buildWateringBanner({ ...twoWindows, later: { at: twoWindows.waterInBy, state: 'water_in', lines: [] } })).not.toHaveProperty('later');
+    expect(buildWateringBanner(hold)).not.toHaveProperty('later');
     const mixed = buildWateringInstruction({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
     expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-03T18:00:00.000Z' });
     // A hold that reaches the water-in deadline is followed by the water-in from the hold end (owner 2026-10-09).

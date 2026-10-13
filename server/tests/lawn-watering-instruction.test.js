@@ -313,6 +313,34 @@ describe('rule D: a pre-emergent window over 7 days follows the label (owner 202
     expect(plain.lines[1]).toBe('After that, water in today’s treatment with about ¼ inch by Fri 3 PM.');
   });
 
+  test('a short water-in beside the 14-day one: from the short deadline the banner says only the long line (codex P1 #6259)', () => {
+    const LONG_ONLY = [
+      'Today’s treatment needs about ½ inch of water by Wed, Oct 14 at 2 PM.',
+      'Rain and your regular watering both count.',
+    ];
+    // No hold, and a timed hold (over before the short deadline): the long line as on a long-only visit.
+    expect(build([ARENA(), PRE_EM()], ROTOR).later).toEqual({ at: '2026-10-01T18:00:00.000Z', state: 'water_in', lines: LONG_ONLY });
+    const timed = build([HOLD(24), ARENA(), PRE_EM()], ROTOR);
+    expect(timed.later).toEqual({ at: timed.waterInBy, state: 'water_in', lines: LONG_ONLY });
+    expect(Date.parse(timed.later.at)).toBeGreaterThanOrEqual(Date.parse(timed.holdUntil));
+    // A hold that waits for drying has no clock end: its line stays, without the clock time that has passed.
+    const dry = build([CELSIUS(), ARENA(), PRE_EM()], ROTOR);
+    expect(dry.later).toEqual({
+      at: '2026-10-02T19:00:00.000Z',
+      state: 'hold_then_water_in',
+      lines: [
+        'Skip your turf watering until today’s treatment has dried.',
+        'Today’s treatment then needs about ½ inch of water by Wed, Oct 14 at 2 PM.',
+        'Rain and your regular watering both count.',
+      ],
+    });
+    expect(dry.later.lines.join(' ')).not.toMatch(/minutes|usual day|Fri 3 PM|Thu 3 PM/);
+    // One water-in only (short or long): nothing changes part-way, so there is no later phase.
+    expect(build([ARENA()], ROTOR)).not.toHaveProperty('later');
+    expect(build([PRE_EM()], ROTOR)).not.toHaveProperty('later');
+    expect(build([CELSIUS(), PRE_EM()], ROTOR)).not.toHaveProperty('later');
+  });
+
   test('a window of 7 days or less is still a short water-in', () => {
     const r = build([WATER_IN({ water_in_inches: 0.5, water_in_by_hours: 168 })], ROTOR);
     expect(r).not.toHaveProperty('longWindow');

@@ -177,6 +177,16 @@ test('a water-in window may run to the 14-day pre-emergent label window; a hold 
   expect(validateRule({ mode: 'hold', hold_hours: 336, source: 'label' }).valid).toBe(false);
 });
 
+test('"the same day" on a window of more than 7 days is refused: the long-window line has no same-day cutoff (codex P2 #6259)', () => {
+  const sameDay = (hours) => validateRule({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: hours, water_in_same_day: true, source: 'label' });
+  expect(sameDay(336)).toMatchObject({ valid: false, rule: null });
+  expect(sameDay(336).errors).toEqual(['water_in_same_day cannot be true when water_in_by_hours is more than 168']);
+  expect(sameDay(169).valid).toBe(false);
+  expect(sameDay(168).valid).toBe(true);
+  expect(sameDay(24)).toMatchObject({ valid: true, rule: { water_in_same_day: true } });
+  expect(validateRule({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 336, water_in_same_day: false, source: 'label' }).valid).toBe(true);
+});
+
 describe('resolveWateringRule', () => {
   const celsius = { name: 'Celsius WG', category: 'herbicide', formulation: 'WG', irrigation_required: false, rainfast_minutes: 60 };
 
