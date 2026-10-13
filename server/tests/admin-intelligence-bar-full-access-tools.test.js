@@ -26,7 +26,8 @@ jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   })),
 }));
 jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: jest.fn() }));
-jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
+// The real thinks-by-default predicate, so a test can pick a thinking model by id.
+jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model', anthropicThinksByDefault: jest.requireActual('../config/models').anthropicThinksByDefault }));
 // The platform path starts a durable task per request; keep it off the database.
 jest.mock('../services/intelligence-bar/tasks', () => ({
   begin: jest.fn(async () => ({ task: { id: 'task-1', state: 'running', checkpoint: [] }, created: true })),
@@ -68,10 +69,10 @@ const names = list => list.map(t => t.name);
 // The platform path stores the reply payload on the task.
 const repliedText = () => IbTasks.checkpoint.mock.calls.map(call => call[2].response?.response).filter(Boolean).pop();
 
-async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path = '/query', body: requestBody, status = 200 } = {}) {
+async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path = '/query', body: requestBody, status = 200, router = intelligenceRouter } = {}) {
   const app = express();
   app.use(express.json());
-  app.use('/admin/intelligence-bar', intelligenceRouter);
+  app.use('/admin/intelligence-bar', router);
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message, stack: err.stack }));
   const server = app.listen(0);
   try {
@@ -369,26 +370,6 @@ describe('a resumed task runs on the ordinary tool list', () => {
     expect(request.tools.find(t => t.name === 'get_review_stats').defer_loading).toBeUndefined();
   });
 
-  test('a thinking + search + card-tool turn is flattened: no thinking, no tool_use for it, the tool still loaded, the receipts turn once', async () => {
-    const thinking = { type: 'thinking', thinking: 'plan', signature: 'sig' };
-    resumeWith([
-      { role: 'user', content: 'block that sender' },
-      { role: 'assistant', content: [thinking, searchUse('srvtoolu_t'), searchResult('srvtoolu_t', ['block_sender']), { type: 'text', text: 'Blocking it.' },
-        { type: 'tool_use', id: 'toolu_t', name: 'block_sender', input: { sender: 'a@example.test' } }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_t', content: '{"status":"pending_confirmation"}' }] },
-    ]);
-    const { requests } = await resume('owner');
-    const request = requests[0];
-    expectOrdinaryResume(request);
-    const blocks = blocksOf(request.messages);
-    expect(blocks.some(b => ['thinking', 'redacted_thinking', 'tool_use', 'tool_result'].includes(b.type))).toBe(false);
-    expect(JSON.stringify(request.messages)).toContain('[Called block_sender with');
-    expect(JSON.stringify(request.messages)).toContain('[Result of block_sender: ');
-    expect(JSON.stringify(request.messages)).not.toContain('toolu_t');
-    // The called tool is still restored (from the flattened line), once.
-    expect(request.tools.filter(t => t.name === 'block_sender')).toHaveLength(1);
-  });
-
   test('interrupted after discover, before any call: the discovered tool is loaded once, eagerly', async () => {
     resumeWith([
       { role: 'user', content: 'review numbers' },
@@ -442,5 +423,32 @@ describe('a resumed task runs on the ordinary tool list', () => {
   test('a fresh request after the same gate still gets tool search (only a resume is ordinary)', async () => {
     const { requests } = await ask('owner', 'dashboard');
     expect(requests[0].tools.some(t => t.name === 'tool_search_tool_bm25')).toBe(true);
+  });
+});
+
+// GATE_IB_TOOL_SEARCH has effect only on a model that does not think by default: a thinking
+// model returns thinking blocks, which a rewritten resume history could not keep.
+describe('GATE_IB_TOOL_SEARCH with a model that thinks by default', () => {
+  const routerFor = (model) => {
+    let router;
+    process.env.INTELLIGENCE_BAR_MODEL = model;
+    jest.isolateModules(() => { router = require('../routes/admin-intelligence-bar'); });
+    delete process.env.INTELLIGENCE_BAR_MODEL;
+    return router;
+  };
+  beforeEach(() => { process.env.GATE_IB_TOOL_SEARCH = 'true'; });
+  afterEach(() => { delete process.env.GATE_IB_TOOL_SEARCH; delete process.env.INTELLIGENCE_BAR_MODEL; });
+
+  test('the owner keeps the ordinary page list and the discover prompt line', async () => {
+    const { requests: [request] } = await ask('owner', 'dashboard', undefined, { router: routerFor('claude-opus-5-5') });
+    expect(names(request.tools)).toEqual(pageToolNames('dashboard'));
+    expect(request.tools.some(t => t.defer_loading || t.type)).toBe(false);
+    expect(systemText(request)).toContain(ToolSearch.DISCOVER_LINE);
+    expect(systemText(request)).not.toContain(ToolSearch.SEARCH_LINE);
+  });
+
+  test('a model that does not think by default gets tool search with the same gate', async () => {
+    const { requests: [request] } = await ask('owner', 'dashboard', undefined, { router: routerFor('claude-opus-4-8') });
+    expect(request.tools.some(t => t.name === 'tool_search_tool_bm25')).toBe(true);
   });
 });

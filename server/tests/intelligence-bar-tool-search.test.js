@@ -23,6 +23,15 @@ describe('toolSearchWanted', () => {
     expect(ToolSearch.toolSearchWanted({}, true, { ...owner, fullAccess: false })).toBe(false);
   });
 
+  test('a model that thinks by default never uses tool search; the current flagship does', () => {
+    process.env.GATE_IB_TOOL_SEARCH = 'true';
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-opus-4-8')).toBe(true);
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-opus-5-5')).toBe(false);
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-sonnet-5')).toBe(false);
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-fable-5-1')).toBe(false);
+    expect(ToolSearch.toolSearchWanted({}, true, owner, 'claude-sonnet-4-6')).toBe(true);
+  });
+
   test('a resumed task never uses tool search, whatever its history holds and the gate reads', () => {
     process.env.GATE_IB_TOOL_SEARCH = 'true';
     expect(ToolSearch.toolSearchWanted(resumed([]), true, owner)).toBe(false);
@@ -159,79 +168,48 @@ describe('mergeDiscoveredTools (off the search path only)', () => {
   });
 });
 
-// Codex round 8: a signed thinking block inside a rewritten assistant turn is rejected.
-describe('stripServerSearchBlocks and thinking blocks', () => {
+// A history never holds search blocks AND thinking blocks (toolSearchWanted is off for a
+// model that thinks by default); if one does, it is not rewritten and the resume is refused.
+describe('search blocks and thinking blocks', () => {
   const search = [
     { type: 'server_tool_use', id: 'srvtoolu_t1', name: 'tool_search_tool_bm25', input: { query: 'x' } },
     { type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_t1', content: { type: 'tool_search_tool_search_result', tool_references: [] } },
   ];
   const thinking = { type: 'thinking', thinking: 'plan', signature: 'sig' };
-  const redacted = { type: 'redacted_thinking', data: 'opaque' };
-  const call = { type: 'tool_use', id: 'toolu_c1', name: 'block_sender', input: { sender: 'a@example.test' } };
-  const answer = (content = '{"status":"pending_confirmation"}') => ({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_c1', content }] });
-  const allBlocks = out => out.flatMap(m => (Array.isArray(m.content) ? m.content : []));
+  const call = { type: 'tool_use', id: 'toolu_c1', name: 'block_sender', input: {} };
 
-  test('thinking and no tool call: the thinking is dropped with the search blocks, the text stays', () => {
-    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, redacted, ...search, { type: 'text', text: 'answer' }] }];
-    const out = ToolSearch.stripServerSearchBlocks(messages);
-    expect(out[1].content).toEqual([{ type: 'text', text: 'answer' }]);
-    expect(messages[1].content).toHaveLength(5);
+  test('hasSearchAndThinking: only an assistant turn holding both', () => {
+    expect(ToolSearch.hasSearchAndThinking([{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search] }])).toBe(true);
+    expect(ToolSearch.hasSearchAndThinking([{ role: 'user', content: 'q' }, { role: 'assistant', content: [...search, call] }])).toBe(false);
+    expect(ToolSearch.hasSearchAndThinking([{ role: 'assistant', content: [thinking, call] }])).toBe(false);
+    expect(ToolSearch.hasSearchAndThinking(undefined)).toBe(false);
   });
 
-  test('thinking + search + a client tool call + its result: both turns are flattened to text, ids gone', () => {
-    const messages = [{ role: 'user', content: 'q' },
-      { role: 'assistant', content: [thinking, ...search, { type: 'text', text: 'Blocking.' }, call] }, answer()];
-    const before = JSON.stringify(messages);
-    const out = ToolSearch.stripServerSearchBlocks(messages);
-    expect(JSON.stringify(messages)).toBe(before);
-    expect(out[1].content).toEqual([{ type: 'text', text: 'Blocking.' },
-      { type: 'text', text: '[Called block_sender with {"sender":"a@example.test"}]' }]);
-    expect(out[2].content).toEqual([{ type: 'text', text: '[Result of block_sender: {"status":"pending_confirmation"}]' }]);
-    const blocks = allBlocks(out);
-    expect(blocks.some(b => ['thinking', 'redacted_thinking', 'tool_use', 'tool_result', 'server_tool_use', 'tool_search_tool_result'].includes(b.type))).toBe(false);
-    expect(JSON.stringify(out)).not.toContain('toolu_c1');
-    expect(out.map(m => m.role)).toEqual(['user', 'assistant', 'user']);
+  test('the strip does not rewrite a history that holds both: the same array comes back', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search, { type: 'text', text: 'a' }] }];
+    expect(ToolSearch.stripServerSearchBlocks(messages)).toBe(messages);
   });
 
-  test('long inputs and results are clipped, and an error result says so', () => {
-    const big = { ...call, input: { text: 'x'.repeat(900) } };
-    const out = ToolSearch.stripServerSearchBlocks([{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search, big] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_c1', is_error: true, content: 'y'.repeat(3000) }] }]);
-    expect(out[1].content[0].text.length).toBeLessThan(560);
-    expect(out[2].content[0].text.startsWith('[Result of block_sender (error): ')).toBe(true);
-    expect(out[2].content[0].text.length).toBeLessThan(1600);
+  test('a thinking-only history (no search blocks) resumes untouched: same array identity', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, call] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_c1', content: '{}' }] }];
+    expect(ToolSearch.stripServerSearchBlocks(messages)).toBe(messages);
   });
 
-  test('a message with search blocks and NO thinking keeps its tool blocks and their results', () => {
-    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [...search, call] }, answer()];
-    const out = ToolSearch.stripServerSearchBlocks(messages);
+  test('a turn with search blocks and no thinking keeps its tool blocks and their results', () => {
+    const answer = { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_c1', content: '{}' }] };
+    const out = ToolSearch.stripServerSearchBlocks([{ role: 'user', content: 'q' }, { role: 'assistant', content: [...search, call] }, answer]);
     expect(out[1].content).toEqual([call]);
-    expect(out[2]).toBe(messages[2]);
+    expect(out[2]).toBe(answer);
   });
 
-  test('an untouched assistant message keeps its thinking and tool blocks, by identity', () => {
-    const untouched = { role: 'assistant', content: [thinking, { type: 'tool_use', id: 'toolu_1', name: 'a', input: {} }] };
-    const messages = [
-      { role: 'user', content: 'q' }, untouched,
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] },
-      { role: 'assistant', content: [...search, { type: 'text', text: 'done' }] },
-    ];
-    expect(ToolSearch.stripServerSearchBlocks(messages)[1]).toBe(untouched);
-  });
-
-  test('a message that held only thinking and search blocks is dropped', () => {
-    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search] }, { role: 'user', content: 'more' }];
-    const out = ToolSearch.stripServerSearchBlocks(messages);
-    expect(out).toHaveLength(1);
-    expect(out[0].role).toBe('user');
-  });
-
-  test('calledToolNames reads tool_use blocks and the lines a flattened turn left behind', () => {
-    const out = ToolSearch.stripServerSearchBlocks([{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search, call] }, answer(),
-      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_k', name: 'get_review_stats', input: {} }] }]);
-    const names = ToolSearch.calledToolNames(out.flatMap(m => (Array.isArray(m.content) ? m.content : [])));
-    expect(names.sort()).toEqual(['block_sender', 'get_review_stats']);
-    expect(ToolSearch.calledToolNames([{ type: 'text', text: 'Please [Called x with y]' }])).toEqual([]);
+  test('the resume is refused with the not_resumable shape, before any claim', () => {
+    const { continuationError } = require('../services/intelligence-bar/tasks');
+    const task = { state: 'awaiting_approval', request: {}, checkpoint: [{ role: 'assistant', content: [thinking, ...search] }] };
+    expect(continuationError(task, [{ outcome: 'completed' }])).toEqual({
+      error: 'This saved request cannot be continued after a model change. Start the request again.', code: 'not_resumable' });
+    const fine = { ...task, checkpoint: [{ role: 'assistant', content: search }] };
+    expect(continuationError(fine, [{ outcome: 'completed' }])).toBeNull();
   });
 });
 

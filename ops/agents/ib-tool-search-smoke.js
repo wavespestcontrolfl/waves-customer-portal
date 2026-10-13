@@ -33,12 +33,16 @@
  * (stripServerSearchBlocks), a plain user text turn, and the ordinary tools
  * list (no search tool, no defer_loading). Both requests are synthetic text.
  *   railway run node ops/agents/ib-tool-search-smoke.js --execute --discover-shape
- * --discover-shape is a different two-request run: call 1 forces
- * discover_capabilities; call 2 answers it with the tool_result the ROUTE would
+ * --discover-shape is a different two-request run: call 1 asks the model to call
+ * discover_capabilities (tool_choice stays auto, as in the live bar; a run where
+ * it does not is reported INCONCLUSIVE and exits 3); call 2 answers it with the
+ * tool_result the ROUTE would
  * build (toolResultContent: tool_reference blocks ONLY, up to 5, for the found
  * tools that are deferred in the list; the JSON string when the result also
  * holds an owner-workflow action), with the same tools and no tool_choice.
  * It prints whether the model then called or named that tool.
+ * On a model that thinks by default tool search is off (toolSearchWanted), so
+ * every --execute mode prints that and exits 0 without calling the API.
  * Without --execute it prints the tools shape (counts, no API call).
  */
 const Anthropic = require('@anthropic-ai/sdk');
@@ -108,7 +112,7 @@ function resumeRequest(first) {
   return { tools, messages };
 }
 
-const DISCOVER_PROMPT = 'Find the tool that lists review stats. Use discover_capabilities.';
+const DISCOVER_PROMPT = "Call discover_capabilities with the query 'review stats' now. Do not use any other tool.";
 const DISCOVER_QUERY = 'review stats';
 const DISCOVER_TARGET = 'get_review_stats';
 
@@ -130,13 +134,12 @@ function discoverRequest(first, tools) {
 }
 
 async function discoverShape(client, model, source, tools) {
-  const first = await send(client, 'call 1 (forced discover)', model, source, {
-    tools, tool_choice: { type: 'tool', name: 'discover_capabilities' }, messages: [{ role: 'user', content: DISCOVER_PROMPT }],
-  });
+  // tool_choice is left on auto, as in the live bar (some models reject forced tool use).
+  const first = await send(client, 'call 1 (discover prompt)', model, source, { tools, messages: [{ role: 'user', content: DISCOVER_PROMPT }] });
   if (!first) return 1;
   if (!first.content.some((block) => block.type === 'tool_use' && block.name === 'discover_capabilities')) {
-    console.log('call 2 skipped: call 1 did not call discover_capabilities.');
-    return 1;
+    console.log('INCONCLUSIVE: the model answered without calling discover_capabilities, so the answer shape was not exercised. Run it again.');
+    return 3;
   }
   const second = await send(client, 'call 2 (discover answer)', model, source, discoverRequest(first, tools));
   if (!second) return 1;
@@ -159,6 +162,11 @@ async function main() {
     return 2;
   }
   const { model, source } = resolveModel();
+  // Tool search is off for a model that thinks by default (toolSearchWanted).
+  if (MODELS.anthropicThinksByDefault(model)) {
+    console.log(`tool search is off for this model (${model}, from ${source}) because it thinks by default; nothing to check. No API call made.`);
+    return 0;
+  }
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (process.argv.includes('--discover-shape')) return discoverShape(client, model, source, tools);
   const first = await send(client, 'call 1', model, source, { tools, messages: [{ role: 'user', content: PROMPT }] });

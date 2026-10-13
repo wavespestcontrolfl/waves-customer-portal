@@ -3409,7 +3409,7 @@ async function runQuery(req, res, next) {
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
     // GATE_IB_TOOL_SEARCH: a full-access login reaches its non-page tools through
     // the API's tool search instead of discover_capabilities (tool-search.js).
-    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope);
+    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope, MODEL);
     // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
     // login gets no target refusals, no card on internal edits and short
     // replies. Read from the live request on every run; the isolated tech
@@ -3578,7 +3578,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const discoveredNames = blocks.filter(block => block.type === 'tool_result' && discoveryIds.has(block.tool_use_id))
         .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
         .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
-      const invokedNames = ToolSearch.calledToolNames(blocks);
+      const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
       const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
         .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];

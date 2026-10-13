@@ -37,7 +37,10 @@ once. With the gate off, the owner follows the mapping too.
 
 The search path is one login and one kind of request: a full-access login
 (`ibFullAccess`, the owner) on an ordinary admin page, on the platform path
-(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a FRESH request. A
+(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a model that does NOT
+think by default (`MODELS.anthropicThinksByDefault`; with a thinking model the
+bar keeps the ordinary list, as with the gate off, because a history with search
+blocks and thinking blocks cannot be rewritten), on a FRESH request. A
 resumed task (`/tasks/:id/resume`, `/tasks/:id/select-target`) always runs on
 the ordinary list. On the search path `initialTools` (with `scope.toolSearch`,
 set by `toolSearchWanted` in `tool-search.js`) keeps the page list as the eager
@@ -61,12 +64,13 @@ owner-workflow action, it is the plain JSON string instead.
 When a task continues after a card or an interruption, `stripServerSearchBlocks`
 rewrites the saved checkpoint as it is loaded: search blocks and
 `tool_reference` blocks are removed (a references-only result becomes the JSON a
-plain discover result has), and an assistant turn that held thinking blocks is
-flattened to text, calls and results included, because a rewritten turn cannot
-keep its thinking and a tool call without it. The resumed request keeps
-`discover_capabilities`, and `calledToolNames` plus the discovered-names reader
-load the tools the history called or discovered. Live shape checks:
-`ops/agents/ib-tool-search-smoke.js` (`--resume-shape`, `--discover-shape`).
+plain discover result has, so a tool found just before an interruption is
+restored). The resumed request keeps `discover_capabilities`, and the existing
+restoration loads the tools the history called or discovered. A history that
+somehow holds search blocks AND thinking blocks (a model change between the
+request and the resume) is not rewritten: `continuationError` refuses the resume
+with `not_resumable`. Live shape checks: `ops/agents/ib-tool-search-smoke.js`
+(`--resume-shape`, `--discover-shape`).
 
 ## Context → Tools Mapping
 

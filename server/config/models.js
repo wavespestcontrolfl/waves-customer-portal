@@ -125,6 +125,13 @@ function anthropicAcceptsEffort(model, level) {
 // take the floor like Opus 5.5.
 const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5(?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
+// Does `model` think by default (so its replies can carry thinking blocks even
+// when the caller sends no `thinking` parameter)? The one predicate over the
+// floor list above; the Intelligence Bar's tool search reads it.
+function anthropicThinksByDefault(model) {
+  return ANTHROPIC_THINKING_FLOOR_RE.test(String(model || ''));
+}
+
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
 // `thinking: { type: 'disabled' }` — the voice-relay override tests and the
@@ -759,6 +766,7 @@ module.exports = {
   ANTHROPIC_EFFORT_CAPABLE_RE,
   anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
+  anthropicThinksByDefault,
   ANTHROPIC_THINKING_REQUIRED_RE,
   anthropicThinkingAlwaysOn,
   DEEP,
