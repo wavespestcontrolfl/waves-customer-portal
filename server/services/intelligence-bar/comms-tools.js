@@ -1532,8 +1532,16 @@ async function linkOwnerCheck({ body, customerId, email, usDestination, recipien
     ? { error: 'A customer link in this text belongs to a different customer than the recipient — remove it; build the link for this customer instead. Nothing was sent.', code: 'customer_link_owner_mismatch' }
     : null;
 }
-async function bearerSeamCheck({ body, toLast10, customerId, usDestination }) {
-  const bearer = await links().bearerLinkSendCheck(body, toLast10, { trustedCustomerId: customerId, usDestination });
+// A customer attached only because the typed number matched them is not a
+// trusted recipient for the seam either (appointment, report and receipt links
+// carry no owner for linkOwnerCheck to judge): unless that number names one
+// account, the seam runs its own phone-only ambiguity checks, as the composer
+// does for an unpicked number.
+async function bearerSeamCheck({ body, toLast10, customerId, usDestination, recipientSelected }) {
+  // A text with no owned link has nothing for the seam to bind: no count is read for it.
+  const inferredWithLink = recipientSelected === false && links().nestedOwnedLinkRuns(body).length > 0;
+  const trusted = inferredWithLink && !(await numberNamesOneAccount(toLast10)) ? null : customerId;
+  const bearer = await links().bearerLinkSendCheck(body, toLast10, { trustedCustomerId: trusted, usDestination });
   if (!bearer.ok) return { error: `${bearer.error} Nothing was sent.`, code: 'customer_link_refused' };
   const composerRecorded = bearer.cards || bearer.contracts || bearer.statements || bearer.preps || bearer.projectReports || bearer.consultationLeadId;
   return composerRecorded ? { error: COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;

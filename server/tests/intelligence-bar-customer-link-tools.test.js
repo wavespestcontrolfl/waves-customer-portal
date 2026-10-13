@@ -299,6 +299,32 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
       expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
     });
 
+    test('an appointment, report or receipt link (no owner to judge): the seam gets the inferred customer only when the number names one account', async () => {
+      links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [] });
+      const VISIT = 'Your visit: portal.wavespestcontrol.com/appointment/abc';
+      const trustedArg = () => links.bearerLinkSendCheck.mock.calls.at(-1)[2].trustedCustomerId;
+
+      wireNumber(() => [MINE, THEIRS]);
+      await customerLinkSendRefusal(VISIT, '+19415550123', CUSTOMER_ID, { recipientSelected: false });
+      expect(trustedArg()).toBeNull();
+      wireNumber(() => { throw new Error('db down'); });
+      await customerLinkSendRefusal(VISIT, '+19415550123', CUSTOMER_ID, { recipientSelected: false });
+      expect(trustedArg()).toBeNull();
+
+      wireNumber(() => [MINE]);
+      await customerLinkSendRefusal(VISIT, '+19415550123', CUSTOMER_ID, { recipientSelected: false });
+      expect(trustedArg()).toBe(CUSTOMER_ID);
+      // A selected customer is trusted without a count.
+      wireNumber(() => [MINE, THEIRS]);
+      await customerLinkSendRefusal(VISIT, '+19415550123', CUSTOMER_ID);
+      expect(trustedArg()).toBe(CUSTOMER_ID);
+      expect(numberQueries).toBe(0);
+      // The seam's own refusal for an unpicked shared number reaches the caller.
+      links.bearerLinkSendCheck.mockResolvedValue({ ok: false, error: 'Pick the customer first.' });
+      expect(await customerLinkSendRefusal(VISIT, '+19415550123', CUSTOMER_ID, { recipientSelected: false }))
+        .toMatchObject({ blocked: true, code: 'customer_link_refused' });
+    });
+
     test('one account on the number (even as two rows) passes; a selected customer is never counted; a plain text is never affected', async () => {
       for (const phase of ['proposal', 'commit']) {
         wireNumber(() => [MINE]);
