@@ -36,7 +36,7 @@ describe('TechHeldVisits', () => {
     expect(screen.getByText('Time not set · asked for the morning · Morgan Example')).toBeInTheDocument();
     expect(screen.getByText('NOT CONFIRMED · not booked')).toBeInTheDocument();
     expect(screen.getByText('From the call: Can meet after 10:30.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Book in Dispatch' })).toHaveAttribute('href', `/admin/dispatch?date=${etDateString()}`);
+    expect(screen.getByRole('link', { name: 'Book in Dispatch' })).toHaveAttribute('href', `/admin/dispatch?tab=schedule&date=${etDateString()}`);
   });
 
   it.each([
@@ -48,6 +48,15 @@ describe('TechHeldVisits', () => {
     await waitFor(() => expect(fetcher).toHaveBeenCalled());
     await new Promise((resolve) => { setTimeout(resolve, 20); });
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('drops the rows when a later read fails, so stale rows never stay on screen', async () => {
+    const fetcher = stubHeld({ ok: true, json: async () => ({ heldVisits: [ROW] }) });
+    const { container } = renderCard();
+    expect(await screen.findByText('11:00 AM · Riley Example')).toBeInTheDocument();
+    fetcher.mockImplementation(async () => ({ ok: false, status: 401, json: async () => ({}) }));
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
   });
 
   it('renders nothing when the phone has no connection', async () => {

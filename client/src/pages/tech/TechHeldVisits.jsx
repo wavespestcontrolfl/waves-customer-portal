@@ -9,7 +9,7 @@ import { fromCall, heldWhen, kindText } from '../admin/HeldVisitsStrip';
 // calendar carries. The same rows as the Dispatch strip, display only. Mounted for an admin
 // login only: a held row belongs to no technician, and a technician login sees its own
 // assigned visits and nothing else (the server route is admin-only for the same reason).
-// Booking happens in Dispatch; this card links there.
+// Booking happens in Dispatch; this card links to its Schedule tab on today.
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -36,8 +36,10 @@ export default function TechHeldVisits() {
       const rows = await readHeldVisits(date);
       if (mounted.current && latest.current === mine) setState({ date, rows });
     } catch {
-      // No connection or a server fault: keep what is on screen. This card never
-      // stands in the way of the route.
+      // No connection, a refused login or a server fault: show nothing. Rows that could not
+      // be re-read may be yesterday's or already booked. This card never stands in the way
+      // of the route.
+      if (mounted.current && latest.current === mine) setState({ date, rows: [] });
     }
   }, []);
   useEffect(() => {
@@ -62,7 +64,7 @@ export default function TechHeldVisits() {
           </div>
         );
       })}
-      <div className="tf-actions"><Link className="tf-button" to={`/admin/dispatch?date=${state.date}`}>Book in Dispatch</Link></div>
+      <div className="tf-actions"><Link className="tf-button" to={`/admin/dispatch?tab=schedule&date=${state.date}`}>Book in Dispatch</Link></div>
     </section>
   );
 }
