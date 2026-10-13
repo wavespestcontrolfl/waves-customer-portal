@@ -970,6 +970,11 @@ const VERIFIED_VERSION_PARAMS = {
   // the card showed; a number changed since is refused at commit
   // (customer-link-tools.js pinnedVersionRefusal).
   create_customer_link: '_verified_link_version',
+  // send_autopay_setup_link binds the customer, the channel and the contact (phone
+  // last ten or email) the card showed; one changed since is refused at commit
+  // (customer-link-tools.js pinnedVersionRefusal), and the service re-checks it
+  // before the provider call (expectedRecipient).
+  send_autopay_setup_link: '_verified_autopay_version',
 };
 
 // The overlapping visits a booking card names, or [] when the lookup fails
@@ -3359,7 +3364,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
-- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. Never say there is no link tool. Auto Pay setup links are the Customers page button; card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
+- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. send_autopay_setup_link texts or emails a customer their Auto Pay setup link behind a confirmation card (it refuses a customer with a saved card: enrolling one is a billing change for the Customers page, and a link-only Auto Pay link is also the Customers page button). Never say there is no link tool. Card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days

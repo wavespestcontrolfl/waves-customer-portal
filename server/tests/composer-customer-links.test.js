@@ -3355,6 +3355,13 @@ describe('nestedOwnedLinkRuns', () => {
     ['with a zero-width joiner and a word joiner', `https://evil.example/?next=por\u200Dtal.wavespestcontrol\u2060.com/receipt/${T}`],
     ['with a variation selector and a BOM', `https://evil.example/?next=portal\uFE0F.wavespestcontrol.c\uFEFFom/receipt/${T}`],
     ['with a percent-encoded soft hyphen', `https://evil.example/?next=port%C2%ADal.wavespestcontrol.com/receipt/${T}`],
+    // The URL parser drops TAB, CR and LF: encoded, doubly encoded, or left raw in a text the email path has not split.
+    ['with a percent-encoded tab in the host', `https://evil.example/?next=https://port%09al.wavespestcontrol.com/receipt/${T}`],
+    ['with a percent-encoded newline in the host', `https://evil.example/?next=https://port%0Aal.wavespestcontrol.com/receipt/${T}`],
+    ['with a percent-encoded carriage return in the host', `https://evil.example/?next=https://portal.waves%0Dpestcontrol.com/receipt/${T}`],
+    ['with a double-encoded tab in the host', `https://evil.example/?next=https://port%2509al.wavespestcontrol.com/receipt/${T}`],
+    ['with a raw tab in the host', `https://evil.example/?next=https://port\tal.wavespestcontrol.com/receipt/${T}`],
+    ['with a raw newline in the host', `https://evil.example/?next=https://portal.wavespestcontrol.com\n/receipt/${T}`],
   ])('finds the owned link nested %s', (_label, text) => {
     expect(nestedOwnedLinkRuns(text).map((run) => run.replace(/\\/g, '/').toLowerCase())).toContain(OWNED.toLowerCase());
   });
@@ -3406,6 +3413,15 @@ test('wrappedOwnedLinkIn: an IDNA-variant portal host inside a foreign URL is wr
 
 describe('wrappedOwnedLinkIn', () => {
   const T = 'AbCdEfGhIjKlMnOpQrSt';
+
+  // Bodies split on whitespace before a token is scanned: the ENCODED tab / newline forms stay inside one token and are refused.
+  test.each([
+    ['%09', 'port%09al'], ['%0A', 'port%0Aal'], ['%0D', 'por%0Dtal'], ['a double-encoded %2509', 'port%2509al'],
+  ])('a portal host broken by %s inside a foreign URL is wrapped; as the whole link it does not parse and is refused', (_label, host) => {
+    expect(wrappedOwnedLinkIn(`See https://evil.example/?next=https://${host}.wavespestcontrol.com/pay/${T} ok`)).toBe(true);
+    expect(wrappedOwnedLinkIn(`Pay: https://${host}.wavespestcontrol.com/pay/${T}`)).toBe(true);
+    expect(linkTextUnstable(`See https://evil.example/?next=https://${host}.wavespestcontrol.com/pay/${T}`)).toBe(false);
+  });
 
   test.each([
     ['owned link in the userinfo of a foreign host', `https://portal.wavespestcontrol.com%2Fpay%2F${T}@evil.example/`],
