@@ -1428,7 +1428,9 @@ async function runAutoDispatch(opts = {}) {
     // GATE_AUTO_DISPATCH_PROOFREADER: this run's move-check tally and the
     // notices it raises at its end (null = off; a dry run moves nothing).
     proofreader: config.proofreaderEnabled === true && config.mode === 'apply'
-      ? moveCheck.newRunState({ deadlineSeconds: config.proofreaderDeadlineSeconds }) : null,
+      // The deadline counts from the run's entry (nowDate), not from here:
+      // the start-up writes above already ran under the writer lock.
+      ? moveCheck.newRunState({ startedAt: nowDate.getTime(), deadlineSeconds: config.proofreaderDeadlineSeconds }) : null,
   };
 
   try {

@@ -336,7 +336,9 @@ function writeOptions(checked, fallback) {
 // stop of two or more is not moved (see isGroupedStop). The next run sees
 // the stop and leaves it.
 function assertNotGrouped(members, proofread, refuse, primaryId) {
-  if (proofread === true && (members || []).length > 1) throw refuse(primaryId, 'joined a grouped stop after the move was checked');
+  if (proofread !== true || (members || []).length < 2) return;
+  // Marked so the run reads it as a change during the check, not a failed write.
+  throw Object.assign(refuse(primaryId, 'joined a grouped stop after the move was checked'), { joinedStopAfterCheck: true });
 }
 
 // The approved slot was taken between the check and the write. Nothing
@@ -348,10 +350,11 @@ function assertNotGrouped(members, proofread, refuse, primaryId) {
 const NOT_A_FAILURE = {
   SLOT_TAKEN: ['APPROVED_SLOT_TAKEN', 'The slot the move proofreader approved was taken before the move; the next run tries again'],
   STALE_PLACEMENT: ['SUPERSEDED_DURING_RUN', 'Superseded by an operator while the move was checked'],
+  JOINED_STOP: ['SUPERSEDED_DURING_RUN', 'The visit joined a grouped stop while the move was checked'],
 };
 function approvedSlotTaken(checked, err) {
   const nothingMoved = !!(checked && err) && !err.movedCount && !(Array.isArray(err.failedMembers) && err.failedMembers.length);
-  const reason = nothingMoved ? NOT_A_FAILURE[err.code] : null;
+  const reason = nothingMoved ? NOT_A_FAILURE[err.joinedStopAfterCheck ? 'JOINED_STOP' : err.code] : null;
   return reason ? { reason_code: reason[0], reason_description: reason[1] } : null;
 }
 

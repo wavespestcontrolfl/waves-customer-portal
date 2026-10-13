@@ -330,6 +330,10 @@ describe('the write of a checked move', () => {
     expect(nightly.approvedSlotTaken({ allowed: true }, err('SLOT_TAKEN', { movedCount: 1 }))).toBeNull();
     expect(nightly.approvedSlotTaken({ allowed: true }, err('STALE_PLACEMENT', { failedMembers: ['s2'] }))).toBeNull();
     expect(nightly.approvedSlotTaken({ allowed: true }, err('VISIT_MEMBER_AUTO_DISPATCH_GUARD'))).toBeNull();
+    // The check's own refusal of a visit that joined a stop meanwhile: a change during the check.
+    let joined;
+    try { nightly.assertNotGrouped([{ id: 's1' }, { id: 's2' }], true, (id, why) => err('VISIT_MEMBER_AUTO_DISPATCH_GUARD', { message: `${id} ${why}` }), 's1'); } catch (e) { joined = e; }
+    expect(nightly.approvedSlotTaken({ allowed: true }, joined)).toMatchObject({ reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The visit joined a grouped stop while the move was checked' });
   });
 });
 

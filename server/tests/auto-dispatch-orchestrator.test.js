@@ -1688,6 +1688,8 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
       expect(service.id).toBe('s1');
       expect(best).toMatchObject({ date: CAND_BIG.date, start_time: CAND_BIG.start_time });
       expect(run.proofreader).toMatchObject({ calls: 0 });
+      // The deadline counts from the run's entry, 300 seconds by default.
+      expect(run.proofreader.deadlineAt).toBe(run.nowDate.getTime() + 300000);
       const options = apply.applyAutoDispatchMove.mock.calls[0][3];
       expect(options.alternateCandidates).toEqual([]);
       expect(options.rescore).toBeUndefined();
