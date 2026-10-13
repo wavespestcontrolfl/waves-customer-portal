@@ -1048,6 +1048,13 @@ describe('propertyIdForStatedAddress', () => {
     expect(propertyIdForStatedAddress(properties, '40 Sample Road, Unit 2')).toBe('');
     expect(propertyIdForStatedAddress(properties, '40 Sample Road')).toBe('');
   });
+  it('a bare second line is the unit: 4 is not 9', () => {
+    const bare = [{ id: 'p-a', is_primary: true, address_line1: '40 Sample Rd', address_line2: '4' }, { id: 'p-b', address_line1: '7 Other St' }];
+    expect(propertyIdForStatedAddress(bare, '40 Sample Road', '9')).toBe('');
+    expect(propertyIdForStatedAddress(bare, '40 Sample Road', '4')).toBe('p-a');
+    expect(propertyIdForStatedAddress(bare, '40 Sample Road', 'Unit 4')).toBe('p-a');
+  });
+
   it('returns nothing for no match, two matches, or a line that is not a numbered street', () => {
     expect(propertyIdForStatedAddress(properties, '77 Other Road')).toBe('');
     expect(propertyIdForStatedAddress([...properties, { id: 'p-dup', address_line1: '100 Example Loop' }], '100 Example Loop')).toBe('');

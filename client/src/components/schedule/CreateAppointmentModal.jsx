@@ -586,7 +586,9 @@ const STREET_WORDS = {
 const UNIT_RE = /(?:\b(?:apt|apartment|unit|suite|ste|lot|bldg|building)\b\.?\s*|#\s*)([a-z0-9-]+)/;
 function streetAndUnit(line1, line2 = '') {
   const text = `${line1 || ''} ${line2 || ''}`.toLowerCase();
-  const unit = (text.match(UNIT_RE) || [])[1] || '';
+  // A second line with no unit word ("4", "B") is still the unit: it is kept whole, so a
+  // bare "4" never matches a bare "9".
+  const unit = (text.match(UNIT_RE) || [])[1] || String(line2 || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const words = String(line1 || '').toLowerCase().replace(UNIT_RE, ' ').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
   return { street: words.map((w) => STREET_WORDS[w] || w).join(' '), unit, numbered: /^\d/.test(words[0] || '') };
 }
