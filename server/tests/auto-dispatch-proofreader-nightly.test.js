@@ -142,6 +142,14 @@ describe('checkMove', () => {
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { why: 'check_failed' } });
     expect(proofreader.proofreadMove).not.toHaveBeenCalled();
     expect(run.proofreader.notices.size).toBe(0);
+    // No model was asked: the call limit is not spent.
+    expect(run.proofreader.calls).toBe(0);
+  });
+
+  test('a record too long to send spends no call either', async () => {
+    const run = runOf();
+    await check(run, proofreaderOf({ verdict: 'unknown', why: 'record_too_long' }, { ...RECORD, tooLong: true }));
+    expect(run.proofreader).toMatchObject({ calls: 0, unsure: 1 });
   });
 
   test('past the call limit a move is held without a call', async () => {
@@ -260,6 +268,41 @@ describe('raiseNotices', () => {
     expect(detail.length).toBeLessThan(2000);
     expect(detail).toContain('“never on Thursdays and more words');
     expect(detail.endsWith('mark this done and the visit stays.')).toBe(true);
+  });
+
+  test('a grouped stop whose other member changed since the check raises nothing', async () => {
+    const members = [
+      { id: 's1', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
+      { id: 's2', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
+    ];
+    const stopConn = (rows) => (table) => {
+      const chain = {
+        where: () => chain, whereIn: () => chain, whereNotIn: () => chain,
+        select: async () => (table === 'technicians' ? [] : rows),
+        first: async () => (table === 'service_visits' ? { window_start: '09:00' } : { status: 'confirmed', ...rows[0] }),
+      };
+      return chain;
+    };
+    const collect = async () => {
+      const run = runOf();
+      await nightly.checkMove({ service: { ...SERVICE, visit_id: 'v1' }, best: BEST, run }, { conn: stopConn(members), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
+      return run.proofreader;
+    };
+    expect(await nightly.raiseNotices(await collect(), { conn: stopConn(members) })).toBe(1);
+    notifications.notifyAdmin.mockClear();
+    const retimed = [members[0], { ...members[1], window_start: '15:00' }];
+    expect(await nightly.raiseNotices(await collect(), { conn: stopConn(retimed) })).toBe(0);
+    expect(await nightly.raiseNotices(await collect(), { conn: stopConn([members[0]]) })).toBe(0);
+    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the check turned off: the next run closes every open notice', async () => {
+    await nightly.closeNotices(new Date(), { enabled: false });
+    const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
+    const [spec] = audit.retireResolvedNotices.mock.calls[0];
+    spec.stillOpen(q);
+    expect(q.whereRaw).toHaveBeenCalledWith('1 = 0');
+    expect(spec.resolution).toBe('The move check is turned off');
   });
 
   test('the close keeps a notice open only while the visit is on the placement the check read', async () => {

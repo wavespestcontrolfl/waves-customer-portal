@@ -81,13 +81,22 @@ async function technicianNames(conn, ids) {
 // members that move with the visit, each with the start it has and the one
 // it would get. A stop whose plan cannot be made throws: the caller then
 // never allows the move.
-async function otherServicesOf(conn, service, best) {
-  if (!service.visit_id) return [];
-  const { predictMemberWindows } = require('../../visit-groups');
+function openMembers(conn, visitId) {
   const { TERMINAL_ROW_STATUSES } = require('../../visit-context/statuses');
-  const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
+  return conn('scheduled_services').where({ visit_id: visitId })
     .whereNotIn('status', TERMINAL_ROW_STATUSES)
     .select('id', 'service_type', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+}
+
+// Who is at the stop and where each member sits, as one comparable string.
+function stopSignature(members) {
+  return members
+    .map((m) => [m.id, toDateStr(m.scheduled_date), textOrNull(m.window_start), textOrNull(m.technician_id)].join('|'))
+    .sort().join(';');
+}
+
+async function otherServicesOf(conn, service, best, members) {
+  const { predictMemberWindows } = require('../../visit-groups');
   if (members.length < 2) return [];
   const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
   const predicted = predictMemberWindows({
@@ -107,8 +116,11 @@ async function plannedMove(conn, service, best, record) {
   const names = await technicianNames(conn, [service.technician_id, best.technician_id]);
   const tech = (id) => (id ? names.get(String(id)) || null : null);
   const services = record.serviceTypes || [];
+  const members = service.visit_id ? await openMembers(conn, service.visit_id) : [];
   return {
-    otherServices: await otherServicesOf(conn, service, best),
+    // The stop as the model was told it, for the run-end re-read (stillAsChecked).
+    stop: members.length > 1 ? stopSignature(members) : null,
+    otherServices: await otherServicesOf(conn, service, best, members),
     serviceType: services.length > 1 ? services.join(' + ') : (services[0] || service.service_type),
     from: {
       date: toDateStr(service.scheduled_date), windowStart: service.window_start, windowEnd: service.window_end, technician: tech(service.technician_id),
@@ -139,21 +151,26 @@ function stopped(kind, answer) {
   };
 }
 
-async function ask({ service, best }, { conn, proofreader }) {
+async function ask({ service, best }, { conn, proofreader, state }) {
   try {
     const record = await proofreader.buildCustomerRecord(conn, { customerId: service.customer_id, serviceId: service.id, asOf: new Date() });
-    const move = proofreader.moveFacts(await plannedMove(conn, service, best, record));
+    const planned = await plannedMove(conn, service, best, record);
+    const move = proofreader.moveFacts(planned);
+    // Only a call that goes to the model spends the run's call limit: a
+    // record or a stop that cannot be read, or a record too long to send,
+    // asks nobody (Codex #6313 r2).
+    if (!record.tooLong) state.calls += 1;
     const answer = await proofreader.proofreadMove({ move, record });
     const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
-    return { answer, move, entry: entry || null };
+    return { answer, move, entry: entry || null, stop: planned.stop };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
-    return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null };
+    return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null, stop: null };
   }
 }
 
-function collectNotice(state, service, { answer, move, entry }) {
+function collectNotice(state, service, { answer, move, entry, stop }) {
   if (!move || !PERSON_SETTLES[answer.why]) return;
   const date = toDateStr(service.scheduled_date);
   const key = noticeKey(service.id, date);
@@ -161,6 +178,7 @@ function collectNotice(state, service, { answer, move, entry }) {
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
     window_start: textOrNull(service.window_start), technician_id: textOrNull(service.technician_id),
+    visit_id: service.visit_id || null, stop,
     quote: answer.quote || null, reason: answer.reason || null, entry: entry ? { channel: entry.channel, from: entry.from, at: entry.at } : null,
   });
 }
@@ -177,9 +195,8 @@ async function checkMove({ service, best, run }, deps = {}) {
     state.notAsked += 1;
     return stopped('not_asked', { verdict: 'unknown', why: 'call_limit' });
   }
-  state.calls += 1;
   const asked = await ask({ service, best }, {
-    conn: deps.conn || require('../../../models/db'), proofreader: deps.proofreader || require('./index'),
+    conn: deps.conn || require('../../../models/db'), proofreader: deps.proofreader || require('./index'), state,
   });
   const { answer } = asked;
   if (answer.verdict === 'allow') {
@@ -264,41 +281,48 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
 // A notice stays open while its visit is still open on the placement the
 // notice is about. A person who gives the visit a new time or technician on
 // the same date has decided (Codex #6313 r1).
-async function closeResolved(audit, nowDate) {
+// With the check turned off nothing holds a move any more, so no notice
+// stays open: a rollback leaves none standing (Codex #6313 r2).
+async function closeResolved(audit, nowDate, enabled) {
   try {
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
-        q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
+        if (enabled) q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
+        else q.whereRaw('1 = 0');
       },
       resolvedTitle: RESOLVED_TITLE,
-      resolution: 'The visit moved or is no longer open',
-      body: 'This visit moved, was done or is no longer on that date.',
+      resolution: enabled ? 'The visit moved or is no longer open' : 'The move check is turned off',
+      body: enabled ? 'This visit moved, was done or is no longer on that date.' : 'The move check is off; auto-dispatch no longer holds this move.',
     }, nowDate);
   } catch (err) {
     logger.error(`[auto-dispatch] move-check notice close failed: ${err.message}`);
   }
 }
 
-// The visit is still open on the placement the check read. A person can move
+// The visit (and, for a grouped stop, every member) is still open on the placement the check read. A person can move
 // or cancel it between the check and the run's end; that notice would be
 // stale at once and would spend a ring (Codex #6313 r1). An unreadable visit
 // raises nothing: the next run asks again.
 async function stillAsChecked(item, conn) {
   try {
     const row = await conn('scheduled_services').where({ id: item.id }).first('status', 'scheduled_date', 'window_start', 'technician_id');
-    return !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
+    const same = !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
       && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id;
+    // A grouped stop: the notice describes every member, so a member that
+    // left, joined or moved since the check makes it stale too (r2).
+    if (!same || !item.stop) return same;
+    return stopSignature(await openMembers(conn, item.visit_id)) === item.stop;
   } catch (err) {
     logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${err.message}`);
     return false;
   }
 }
 
-// Run end, in every run (a gate turned off must leave none standing): close
-// the notices that no longer apply. Never throws.
-async function closeNotices(nowDate = new Date()) {
-  await closeResolved(require('../audit'), nowDate);
+// Run end, in every run: close the notices that no longer apply; all of them
+// when the check is off (config.proofreaderEnabled). Never throws.
+async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
+  await closeResolved(require('../audit'), nowDate, enabled);
 }
 
 /**

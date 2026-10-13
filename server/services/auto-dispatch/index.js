@@ -1459,7 +1459,7 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
-  await moveCheck.closeNotices(run.nowDate);
+  await moveCheck.closeNotices(run.nowDate, { enabled: config.proofreaderEnabled === true });
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   await moveCheck.raiseNotices(run.proofreader);
