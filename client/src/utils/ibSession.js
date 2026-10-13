@@ -55,5 +55,9 @@ export function createRequestIdentity(sessionId = ibSessionId()) {
       return { session_id: sessionId, request_key: pending.request_key };
     },
     settle(identity) { if (pending && identity?.request_key === pending.request_key) pending = null; },
+    // True while a request is unresolved (sent, no answer recorded). With a
+    // serialized request: true only when that is the unresolved request itself,
+    // i.e. sending it now is a retry that reuses the key.
+    isPending(request) { return !!pending && (request === undefined || pending.request === request); },
   };
 }

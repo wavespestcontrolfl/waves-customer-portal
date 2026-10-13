@@ -62,3 +62,16 @@ it('formats cryptographic fallback bytes with UUID v4 version and variant bits',
   expect(createRequestIdentity('existing-session').begin('{}').request_key).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff');
   expect(getRandomValues).toHaveBeenCalledOnce();
 });
+
+it('reports an unresolved request, and whether a serialized request is that one', async () => {
+  const { createRequestIdentity } = await import('./ibSession');
+  const identity = createRequestIdentity('existing-session');
+  expect(identity.isPending()).toBe(false);
+  const first = identity.begin('{"prompt":"a"}');
+  expect(identity.isPending()).toBe(true);
+  expect(identity.isPending('{"prompt":"a"}')).toBe(true);
+  expect(identity.isPending('{"prompt":"b"}')).toBe(false);
+  identity.settle(first);
+  expect(identity.isPending()).toBe(false);
+  expect(identity.isPending('{"prompt":"a"}')).toBe(false);
+});

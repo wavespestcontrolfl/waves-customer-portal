@@ -821,6 +821,68 @@ describe('idle conversations start fresh', () => {
     expect(first.thread_id).toBe(THREAD);
   });
 
+  describe('a request whose response was lost', () => {
+    const lostResponse = () => ({ ok: false, status: 503, json: async () => ({ error: 'Gateway timeout' }) });
+    const queryCalls = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => options.body);
+
+    async function loseSecondQuery() {
+      const ref = await firstExchange();
+      let mode = 'lost';
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return mode === 'lost' ? lostResponse() : reply({ response: 'Recovered answer', threadSeq: 4 });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      skewMs = 3.9 * 3600000;
+      submit('Synthetic ask whose answer is lost');
+      await screen.findByText(/Error: /);
+      expect(queryCalls()).toHaveLength(2);
+      return { ref, recover: () => { mode = 'ok'; } };
+    }
+
+    it('retrying across the deadline sends the identical body and the same request key, and shows the recovered answer', async () => {
+      const { ref, recover } = await loseSecondQuery();
+      // The deadline passes, the palette is closed and reopened (the open-time reset must not touch it).
+      skewMs = 4.6 * 3600000;
+      act(() => ref.current.close());
+      act(() => ref.current.open());
+      await screen.findByPlaceholderText(/Ask anything/);
+      recover();
+      fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
+      expect(await screen.findByText('Recovered answer')).toBeInTheDocument();
+      const [, lost, retry] = queryCalls();
+      expect(retry).toBe(lost);
+      const body = JSON.parse(retry);
+      expect(body.request_key).toBe(JSON.parse(lost).request_key);
+      expect(body.thread_id).toBe(THREAD);
+      expect(body.conversationHistory).toHaveLength(2);
+    });
+
+    it('once it resolves, the next new question starts a fresh conversation', async () => {
+      const { recover } = await loseSecondQuery();
+      skewMs = 4.6 * 3600000;
+      recover();
+      fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
+      await screen.findByText('Recovered answer');
+      skewMs = 4.6 * 3600000 + 5 * 3600000;
+      submit('Synthetic brand new question');
+      await waitFor(() => expect(queryCalls()).toHaveLength(4));
+      const fresh = JSON.parse(queryCalls()[3]);
+      expect(fresh.thread_id).toBeUndefined();
+      expect(fresh.conversationHistory).toEqual([]);
+    });
+
+    it('editing the prompt into a different request is a new request: the idle rule applies to it', async () => {
+      await loseSecondQuery();
+      skewMs = 4.6 * 3600000;
+      submit('Synthetic different question');
+      await waitFor(() => expect(queryCalls()).toHaveLength(3));
+      const edited = JSON.parse(queryCalls()[2]);
+      expect(edited.thread_id).toBeUndefined();
+      expect(edited.conversationHistory).toEqual([]);
+      expect(edited.request_key).not.toBe(JSON.parse(queryCalls()[1]).request_key);
+    });
+  });
+
   it('a thread opened by hand from History is not idle-limited, however old it is', async () => {
     fetchMock.mockImplementation(async url => {
       if (url.endsWith('/query')) return reply({ threadSeq: 6 });

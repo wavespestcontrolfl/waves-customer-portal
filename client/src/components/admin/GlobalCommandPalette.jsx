@@ -656,27 +656,33 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
 
   // The thread id and history a query sends: none of either when the held
   // thread is idle past the limit (it is detached here).
-  // threadFields: the request fields that name the thread. thread_reopened
-  // marks a deliberate History open, so the server's idle rule lets it through.
-  const resolveSendState = useCallback(() => {
-    if (threadIsIdle()) {
-      detachThread();
-      return { sentThreadId: null, sentHistory: [], threadFields: {} };
-    }
+  // Builds the query's request from the held thread. thread_reopened marks a
+  // deliberate History open, so the server's idle rule lets it through. The
+  // idle rule applies to a NEW request only: when the request built from the
+  // held thread is the unresolved one (a retry that reuses its request key),
+  // it goes out exactly as first sent, whatever the clock says. Otherwise a
+  // held thread idle past the limit is dropped and the request is rebuilt with
+  // no thread and no history (the old thread stays in History).
+  const resolveSendState = useCallback((build) => {
     const threadFields = threadId ? {
       thread_id: threadId,
       ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
       ...(threadReopenedRef.current ? { thread_reopened: true } : {}),
     } : {};
-    return { sentThreadId: threadId, sentHistory: conversationHistory, threadFields };
+    const request = build(conversationHistory, threadFields);
+    if (identityRef.current.isPending(JSON.stringify(request)) || !threadIsIdle()) return { request, sentThreadId: threadId };
+    detachThread();
+    return { request: build([], {}), sentThreadId: null };
   }, [threadIsIdle, detachThread, threadId, conversationHistory]);
 
   // A palette left mounted past the idle limit opens as a new conversation.
-  // Never while a query is in flight: bumping the epoch then would strand the
-  // query's cleanup (loading and the submit guard would stay set). The check
-  // runs again when the query settles (next effect) and on the next open.
+  // Never while a request is unresolved (in flight, or sent with no answer
+  // recorded and kept for a retry): bumping the epoch would strand the query's
+  // cleanup, and changing the thread or history would change the retry's
+  // request, so the client would issue a new request key and the server would
+  // run a second task. It applies again once the request resolves.
   useEffect(() => {
-    if (!open || loading || submittingRef.current || !threadIsIdle()) return;
+    if (!open || loading || submittingRef.current || identityRef.current.isPending() || !threadIsIdle()) return;
     threadEpochRef.current += 1; // invalidate any inflight thread resume
     detachThread();
     setResponse(null);
@@ -687,21 +693,24 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     knowledgeGaps.reset();
   }, [open]);
 
-  // A query that settles while the palette is open and the held thread has
-  // gone idle (a failed query leaves the clock where it was) drops the thread
-  // so the next question starts fresh. The shown answer or error stays.
-  useEffect(() => {
-    if (open && !loading && !submittingRef.current && threadIsIdle()) detachThread();
-  }, [loading]);
-
   const submit = useCallback(
     async (text, selectedTarget) => {
       const q = (text || prompt).trim();
       if (!q || loading || submittingRef.current || attachmentsLoadingRef.current || dictationPendingRef.current) return;
       submittingRef.current = true;
-      // A held thread idle past the server's limit is not continued: this
-      // question starts a new conversation (old one stays in History).
-      const { sentThreadId, sentHistory, threadFields } = resolveSendState();
+      // A NEW question on a thread idle past the server's limit starts a new
+      // conversation; the unresolved request being retried never does.
+      const { request, sentThreadId } = resolveSendState((sentHistory, threadFields) => ({
+        prompt: q,
+        conversationHistory: sentHistory,
+        context,
+        ...(selectedTarget ? { selected_target: selectedTarget } : {}),
+        ...threadFields,
+        pageData: { ...ibPageData, route: location.pathname, search: location.search },
+        ...(attachments.length
+          ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+          : {}),
+      }));
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
@@ -713,17 +722,6 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       saveRecent(q);
       setRecents(loadRecents());
 
-      const request = {
-        prompt: q,
-        conversationHistory: sentHistory,
-        context,
-        ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-        ...threadFields,
-        pageData: { ...ibPageData, route: location.pathname, search: location.search },
-        ...(attachments.length
-          ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
-          : {}),
-      };
       // The request key outlives a dropped response: the same request
       // resubmitted replays the saved task instead of running it again.
       let answered = false;
