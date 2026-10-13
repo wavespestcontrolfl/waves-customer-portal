@@ -3437,4 +3437,33 @@ describe('defaultAddressLine1 / defaultAddressLine2', () => {
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(schedulePosts(fetcher)[0][1].body).toContain('prop-unit');
   });
+
+  it('one saved property that is not the stated address: the person must confirm the saved address', async () => {
+    const { fetcher } = installModalFetch({ properties: [PROPERTIES[0]] });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00"
+      defaultAddressLine1="40 Sample Road" defaultAddressLine2="Unit 4"
+      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />);
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(await screen.findByText(/\(40 Sample Road, Unit 4\) is not this customer's saved address/)).toBeTruthy();
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Book at the saved address' }));
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+  });
+
+  it('one saved property that IS the stated address needs no confirmation', async () => {
+    installModalFetch({ properties: [PROPERTIES[0]] });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" defaultAddressLine1="100 Example Loop"
+      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />);
+    await addOneSeasonalService();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+    expect(screen.queryByText(/is not this customer's saved address/)).toBeNull();
+  });
 });

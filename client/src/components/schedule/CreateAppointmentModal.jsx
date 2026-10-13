@@ -1900,6 +1900,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           setSelectedPropertyId(named || (mustChoose ? '' : defaultBookingPropertyId(complete)));
           setBookingPropertyState('ready');
         } else {
+          // No picker (one saved property, or the address picker is off): the stated address
+          // is still checked. When it is not that one property, the person must say so
+          // before the form can be saved (the notice below has the button).
+          setAddressChoiceNeeded(!!String(defaultAddressLine1 || '').trim()
+            && !propertyIdForStatedAddress(all, defaultAddressLine1, defaultAddressLine2));
           setBookingPropertyState('hidden');
         }
       })
@@ -5242,6 +5247,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {selectedCustomer && partialCommitLocked && (
             <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
               Part of this booking is already saved for this customer. Close and start a new appointment to change customers.
+            </div>
+          )}
+          {selectedCustomer && !propertyPickerActive && addressChoiceNeeded && (
+            <div role="status" style={{ margin: '14px 0 0', padding: 12, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, color: D.text }}>
+              <div style={{ marginBottom: 8 }}>
+                The address stated on the call ({[defaultAddressLine1, defaultAddressLine2].filter(Boolean).join(', ')}) is not this customer's saved address. This visit will be booked at the saved address. Add the property to the customer first if the visit is for another address.
+              </div>
+              <button type="button" onClick={() => setAddressChoiceNeeded(false)} style={{ ...inputStyle, width: 'auto', cursor: 'pointer', minHeight: 44 }}>
+                Book at the saved address
+              </button>
             </div>
           )}
           {selectedCustomer && propertyPickerActive && (
