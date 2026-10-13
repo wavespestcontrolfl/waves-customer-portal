@@ -1247,6 +1247,15 @@ async function applyPlannedMove(pm, run, attempt) {
     });
   }
   attempt.checked = checked;
+  // A model call takes up to two minutes: the customer's stored day, time and
+  // blackout preferences are hard rules, so they are read again before the
+  // write. Changed: the visit stays, and the next run scores it on the new ones.
+  if (checked && await preferencesChanged(pm)) {
+    noteUnmoved(run, pm.service, 'SUPERSEDED_DURING_RUN');
+    return audit.logDecision(runId, {
+      action: 'no_change', service: pm.service, reason_code: 'SUPERSEDED_DURING_RUN', reason_description: 'The customer\'s scheduling preferences changed while the move was checked', ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
+    });
+  }
 
   // Next-best still-scored candidates (GATE_AUTO_DISPATCH_SHARED_MODEL) —
   // apply falls back to one of these on a SLOT_TAKEN refusal instead of
@@ -1299,6 +1308,13 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
   try {
     await audit.logDecision(run.runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...failedPlacementAudit(fresh, pm, run.lockBoundary, applyErr), error: applyErr.message });
   } catch (_) { /* swallow */ }
+}
+
+// The customer's scheduling preferences as they stand now differ from the
+// ones this move was scored on. A read error throws: the move fails closed.
+async function preferencesChanged(pm) {
+  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type);
+  return JSON.stringify(now) !== JSON.stringify(pm.prefs);
 }
 
 // A proofread move that the write refused for an ordinary reason: the one

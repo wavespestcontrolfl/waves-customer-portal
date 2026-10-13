@@ -1734,6 +1734,22 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
+  test('the customer changed a stored preference while the model read: the visit stays and the next run rescores it', async () => {
+    await applyMode(async () => {
+      const preferences = require('../services/auto-dispatch/preferences');
+      const before = await preferences.getCustomerSchedulingPreferences();
+      checkMove.mockImplementation(async () => {
+        preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
+        return ALLOW;
+      });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe('SUPERSEDED_DURING_RUN');
+      expect(row.reason_description).toMatch(/preferences changed/);
+    });
+  });
+
   test('a visit a person changed while the model read is superseded, not a failed run', async () => {
     await applyMode(async () => {
       checkMove.mockResolvedValue(ALLOW);
