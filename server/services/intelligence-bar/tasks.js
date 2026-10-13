@@ -24,11 +24,14 @@ function withoutImages(messages) {
     : message.content }));
 }
 
-async function begin({ actorId, sessionId, requestKey, request, pageContext }) {
+// identityRequest: what the request key is matched against, when it differs
+// from the stored request (the idle-thread rollover stores the rolled-over
+// request but a retry still sends the original). Defaults to `request`.
+async function begin({ actorId, sessionId, requestKey, request, identityRequest = request, pageContext }) {
   if (!actorId || !UUID_RE.test(sessionId || '') || !REQUEST_KEY_RE.test(requestKey || '')) {
     return { error: 'A valid session and request key are required', code: 'invalid_request_identity' };
   }
-  const hash = requestHash(request);
+  const hash = requestHash(identityRequest);
   // Images remain ephemeral, as in threads. Their hash still participates in
   // request identity so swapping an attachment cannot replay an old response.
   const { images, ...persistedRequest } = request;
@@ -112,7 +115,10 @@ async function snapshot(task, actorId) {
       expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     });
   }
-  return { ...(task.response || {}), taskId: task.id, taskState: exposedTaskState(task, receipts),
+  // A request rolled over to a new conversation (idle thread) replays that first
+  // decision; the key is always present so the /query reply flag does not add its own.
+  return { ...(task.response || {}), threadRolledOver: task.request?.thread_rolled_over ? true : undefined,
+    taskId: task.id, taskState: exposedTaskState(task, receipts),
     taskTarget: task.target?.target || null, pendingActions, receipts,
     canContinue: !continuationError(task, receipts),
     response: task.response?.response || (task.request?.had_images ? ATTACHMENTS_LOST

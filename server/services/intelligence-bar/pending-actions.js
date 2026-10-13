@@ -14,7 +14,58 @@ const logger = require('../logger');
 const { executionOutcome } = require('./outcomes');
 const { phoneMatchDigits } = require('../../utils/phone');
 
+// How long a confirm card stays open. The card's life is NOT what makes a
+// commit safe: /confirm-action re-checks the target at Confirm and refuses
+// with preview_changed on drift. The short life only matters for cards whose
+// commit cannot detect that the world moved (a message approved an hour late
+// is a different message), so those keep TTL_MINUTES.
 const TTL_MINUTES = 10;
+
+// Owner 2026-10-12: the operator missed cards inside 10 minutes more than
+// once (and typed "Confirmed" in chat instead). These tools get 60 minutes
+// because each one re-checks at commit, sends nothing to a customer, moves no
+// money and deletes nothing. Every other tool stays at TTL_MINUTES. Evidence,
+// per tool, in /confirm-action (routes/admin-intelligence-bar.js):
+//  - two-step tools (add/update_customer_property, set_primary_property,
+//    update_property_access, create_customer, update_lead_contact,
+//    adjust_stock, create/update_restock_request): the live preview is re-run
+//    and its fingerprint must equal the card's, else preview_changed; property,
+//    inventory and lead executors also re-assert the pinned version/values
+//    under their own locks (_verified_property_version,
+//    _verified_inventory_version, _approved_changes).
+//  - update_lead_status: the executor refuses unless the lead still has the
+//    pinned _expected_status and _expected_updated_at.
+//  - toggle_estimate_v2_view / toggle_show_one_time_option: the estimate
+//    fingerprint is re-read and the write is conditional on the pinned
+//    _expected_flag_value.
+// Left at 10 on purpose: customer messages and money (send_sms, reply_via_sms,
+// send_email_reply, send_invoice, resend_receipt, trigger_review_request,
+// submit_review_reply, approve_price, cancel_plan, remove_saved_payment_method
+// ...), deletes and merges, schedule and booking changes (create/reschedule/
+// cancel_appointment, route and stop moves), every legacy bare write without a
+// commit-time pin (update_customer, bulk_update_customers, bulk_update_leads,
+// block_sender, create_pending_estimate, run_price_lookup, run_tax_advisor)
+// and every outside-service write.
+const LONG_TTL_MINUTES = 60;
+const LONG_TTL_TOOL_NAMES = new Set([
+  'add_customer_property',
+  'update_customer_property',
+  'set_primary_property',
+  'update_property_access',
+  'create_customer',
+  'update_lead_contact',
+  'adjust_stock',
+  'create_restock_request',
+  'update_restock_request',
+  'update_lead_status',
+  'toggle_estimate_v2_view',
+  'toggle_show_one_time_option',
+]);
+
+// Minutes a card for this tool stays open.
+function ttlMinutesFor(toolName) {
+  return LONG_TTL_TOOL_NAMES.has(toolName) ? LONG_TTL_MINUTES : TTL_MINUTES;
+}
 
 // Deterministic stringify (sorted keys, recursively) so the hash is stable
 // across JSON property ordering.
@@ -193,9 +244,9 @@ const intentLock = (actor, toolName, key) => `ib-supersede:${actor}:${toolName}:
 //     absorbs clock skew between the app (which stamps the start) and the
 //     database (which stamps created_at).
 //   OLDER siblings (cards this one replaces or repeats): created within
-//     TTL_MINUTES before this card. Pending cards expire after TTL_MINUTES, so
-//     nothing older is a live proposal, and an older confirmed card only counts
-//     as "already booked" within one card lifetime.
+//     this tool's card life (ttlMinutesFor) before this card. Pending cards
+//     expire after that, so nothing older is a live proposal, and an older
+//     confirmed card only counts as "already booked" within one card lifetime.
 const STAMP_OF = alias => `COALESCE(NULLIF(${alias}.params->>'${REQUEST_STAMP}', '')::timestamptz, ${alias}.created_at)`;
 const IS_NEWER = `(${STAMP_OF('pa')}, pa.created_at, pa.id::text) > (${STAMP_OF('o')}, o.created_at, o.id::text)`;
 async function intentSiblings(q, ownId, toolName, key) {
@@ -207,7 +258,7 @@ async function intentSiblings(q, ownId, toolName, key) {
     .whereRaw('pa.tool_name = o.tool_name')
     .where(function () {
       this.whereRaw(`${IS_NEWER} AND pa.created_at >= ${STAMP_OF('o')} - interval '1 minute'`)
-        .orWhereRaw(`NOT (${IS_NEWER}) AND pa.created_at >= o.created_at - make_interval(mins => ${Number(TTL_MINUTES)})`);
+        .orWhereRaw(`NOT (${IS_NEWER}) AND pa.created_at >= o.created_at - make_interval(mins => ${Number(ttlMinutesFor(toolName))})`);
     })
     .select('pa.id', 'pa.params', 'pa.status', 'pa.result', 'pa.expires_at', q.raw(`${IS_NEWER} AS newer`));
   return rows.filter(row => rule.key(paramsOf(row)) === key).map(row => ({ ...row, params: paramsOf(row) }));
@@ -302,7 +353,7 @@ async function insertPendingRow(trx, { toolName, params, summary, requestedBy, c
     requested_by: String(requestedBy),
     context: context || null,
     status: 'pending',
-    expires_at: new Date(Date.now() + TTL_MINUTES * 60 * 1000),
+    expires_at: new Date(Date.now() + ttlMinutesFor(toolName) * 60 * 1000),
     // W0B authorization contract: the structured effect set the card shows;
     // its hash is what the operator's Confirm must echo.
     contract: contract ? JSON.stringify(contract) : null,
@@ -582,6 +633,9 @@ module.exports = {
   approvedCardParams,
   actionReceipt,
   TTL_MINUTES,
+  LONG_TTL_MINUTES,
+  LONG_TTL_TOOL_NAMES,
+  ttlMinutesFor,
   paramsHash,
   stepKey,
   stableStringify,

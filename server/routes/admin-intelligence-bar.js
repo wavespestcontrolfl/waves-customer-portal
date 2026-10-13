@@ -3347,6 +3347,14 @@ Use the request-time Eastern date provided on the current turn.`;
 
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
 
+// The shape /query accepts for conversationHistory: an array of user and
+// assistant text turns. runQuery answers 400 otherwise, and the idle rollover
+// never touches a body that fails it, so the request reaches runQuery unchanged.
+function isValidConversationHistory(history) {
+  return Array.isArray(history)
+    && history.every(turn => turn && ['user', 'assistant'].includes(turn.role) && typeof turn.content === 'string');
+}
+
 async function runQuery(req, res, next) {
   // A resumed task keeps its original start, so a late card is not ordered as the newest.
   const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
@@ -3370,8 +3378,7 @@ async function runQuery(req, res, next) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-    if (!Array.isArray(conversationHistory) || conversationHistory.some(turn =>
-      !turn || !['user', 'assistant'].includes(turn.role) || typeof turn.content !== 'string')) {
+    if (!isValidConversationHistory(conversationHistory)) {
       return res.status(400).json({ error: 'Conversation history must contain user and assistant text turns' });
     }
     // Role guards run on the REQUESTED context so a technician asking for a
@@ -3415,12 +3422,13 @@ async function runQuery(req, res, next) {
     const ownerDirectCommits = ownerDirect && platformEnabled;
     let taskContext = null;
     if (platformEnabled) {
+      const taskRequest = { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
+        conversationHistory: conversationHistory.slice(-10),
+        thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
+        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
-        request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
-          conversationHistory: conversationHistory.slice(-10),
-          thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
-          thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null },
+        ...taskRequestsFor(req, taskRequest),
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -4149,7 +4157,65 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
   }
 }
 
-router.post('/query', runQuery);
+// The server is the only authority on starting a new conversation. An explicit
+// thread_id whose thread is idle past IB_THREAD_IDLE_HOURS starts a NEW
+// conversation (no thread id, no client history, so the model never sees the old
+// customer) unless the client says the operator reopened it on purpose from
+// History or a restored saved task (thread_reopened: true). Every JSON reply to
+// that request then carries threadRolledOver: true (whether or not a new thread
+// id could be created), and never otherwise; the palette holds the thread it
+// has and obeys the flag. Direct /query only: a saved task resumed through
+// /tasks/:id/* keeps its own thread. Fails open (the request runs unchanged)
+// when the lookup throws.
+//
+// The rollover must not change the request's identity: a retry of the same
+// request key (lost response, failed run) is recognised by the hash of what the
+// client sent, so taskRequestsFor hands IbTasks.begin the original thread fields
+// to hash while the saved task keeps the rolled-over ones plus the decision
+// (thread_rolled_over), which the snapshot a retry gets back replays.
+function taskRequestsFor(req, taskRequest) {
+  const original = req.ibThreadRollover;
+  if (!original) return { request: taskRequest };
+  return {
+    request: { ...taskRequest, thread_rolled_over: true },
+    identityRequest: { ...taskRequest, conversationHistory: original.conversationHistory.slice(-10),
+      thread_id: original.thread_id, thread_seq: original.thread_seq },
+  };
+}
+
+// Marks every JSON object body of this response, unless the body already states
+// the flag itself (a stored task snapshot replays its own first decision).
+function flagRolledOverReplies(res) {
+  const json = res.json.bind(res);
+  res.json = (body) => json(body && typeof body === 'object' && !Array.isArray(body) && !('threadRolledOver' in body)
+    ? { ...body, threadRolledOver: true } : body);
+}
+
+async function startFreshWhenThreadIdle(req, res, next) {
+  try {
+    const body = req.body || {};
+    const eligible = [IbThreads.threadsEnabled(), req.techRole === 'admin', body.thread_reopened !== true,
+      UUID_RE.test(String(body.thread_id || '')),
+      // A malformed history is left for runQuery to refuse with its 400.
+      body.conversationHistory === undefined || isValidConversationHistory(body.conversationHistory)].every(Boolean);
+    if (eligible && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
+      req.ibThreadRollover = {
+        thread_id: body.thread_id,
+        thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+        conversationHistory: Array.isArray(body.conversationHistory) ? body.conversationHistory : [],
+      };
+      delete body.thread_id;
+      delete body.thread_seq;
+      body.conversationHistory = [];
+      flagRolledOverReplies(res);
+    }
+  } catch (err) {
+    logger.warn(`[intelligence-bar] idle thread check failed (code=${err?.code || 'unknown'})`);
+  }
+  next();
+}
+
+router.post('/query', startFreshWhenThreadIdle, runQuery);
 
 // Operator-chosen knowledge gap: the client offers this after a knowledge
 // search came back empty, with the search text in an editable box. Nothing
@@ -5066,6 +5132,8 @@ function threadsGuard(req, res) {
 router.get('/threads/latest', async (req, res, next) => {
   try {
     if (!threadsGuard(req, res)) return;
+    // null = nothing to resume: no thread, or the newest is idle past the
+    // limit (the server decides: a new conversation starts).
     const thread = await IbThreads.latestThread(getAdminActorId(req));
     res.json({ thread: thread || null });
   } catch (err) {
@@ -5103,6 +5171,9 @@ module.exports = router;
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
+// Exposed for the idle-thread rollover identity test.
+module.exports.taskRequestsFor = taskRequestsFor;
+module.exports.startFreshWhenThreadIdle = startFreshWhenThreadIdle;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
 // Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
 // keeps that test tied to the route's own offered-tool list instead of a
