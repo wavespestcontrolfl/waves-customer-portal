@@ -204,11 +204,12 @@ function frozenFeeNoteForRow(request) {
   return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free${stickyClause}.`;
 }
 
-async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
+// opts: getTemplate's own options (e.g. requiredVars), passed through untouched.
+async function renderTemplate(vars, templateKey = TEMPLATE_KEY, opts = undefined) {
   try {
     const smsTemplatesRouter = require('../routes/admin-sms-templates');
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = opts ? await smsTemplatesRouter.getTemplate(templateKey, vars, {}, opts) : await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch (err) {

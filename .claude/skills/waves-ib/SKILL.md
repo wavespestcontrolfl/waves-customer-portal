@@ -117,8 +117,8 @@ their UI-confirm card. A full-access login also reaches the rest through the
 API's tool search (see the full-access exception above).
 Customer links ride every admin context too (`customer-link-tools.js`,
 admin-only, carded): `create_customer_link` builds any kind the composer's
-Insert Link sheet offers (except review request, Auto Pay, which stays on the
-Customers page button and the composer, the card request link, which stays
+Insert Link sheet offers (except review request, Auto Pay, which has its own tool
+(`send_autopay_setup_link`, below), the card request link, which stays
 on the composer / visit card because it can enroll a saved card for Auto Pay, the payer
 statement, which needs the payer's AP phone, and contract signing, whose send
 needs the composer's own Insert Link state) through the SAME exported route handlers
@@ -129,6 +129,16 @@ claim, contract activation, prep/statement marks, project claim,
 consultation lead), so `comms-tools` `customerLinkSendRefusal` makes
 `send_sms` / `reply_via_sms` refuse a body carrying one of those or an Auto
 Pay link — never re-implement that bookkeeping in a tool.
+`send_autopay_setup_link` (same file, admin-only, carded) texts or emails one
+customer their 30-day Auto Pay setup link through `autopay-setup-link.js`: the
+preview and commit use the service's OWN functions (`setupLinkIneligibility`,
+`findSavedMethodForAutoSecure`, `autopayDeliveryPreflight`), never a copy of
+their checks, and the commit is one `requestAutopaySetupLink` call with
+`requireDeliverable: true`, `allowAutoSecure: false` and the `expectedRecipient`
+the card showed. It refuses a customer with a saved card (enrolling one turns
+Auto Pay on: a billing change for the Customers page), sends no `inline` link
+(a link-only Auto Pay link stays on the Customers page button), and never
+returns the bearer link.
 Tech portal is isolated — no base tools, strictly read-only, lower
 max_tokens for field speed.
 
