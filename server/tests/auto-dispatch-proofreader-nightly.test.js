@@ -206,6 +206,24 @@ describe('the write of a checked move', () => {
   });
 });
 
+// The notification store as the close reads it: `standing` open grouped-stop
+// notices, and each stop's open members by visit id.
+const storeOf = (standing, membersByVisit = {}) => (table) => {
+  let visit = null;
+  const chain = {
+    where: (cond) => { if (cond && cond.visit_id) visit = cond.visit_id; return chain; },
+    whereNot: () => chain, whereRaw: () => chain, whereNotIn: () => chain,
+    select: async () => {
+      if (table === 'notifications') return standing;
+      const rows = membersByVisit[visit];
+      if (rows instanceof Error) throw rows;
+      return rows || [];
+    },
+  };
+  return chain;
+};
+const noStanding = storeOf([]);
+
 describe('raiseNotices', () => {
   // The run-end re-read of each visit: by default it is still as the check read it.
   let visitRow;
@@ -329,6 +347,24 @@ describe('raiseNotices', () => {
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('the close also retires a grouped-stop notice whose other member changed while the tapped visit stayed', async () => {
+    const members = [
+      { id: 's1', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
+      { id: 's2', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
+    ];
+    const notice = (id, visitId) => ({ metadata: { scheduledServiceId: id, visitId, stop: nightly.stopSignature(members) } });
+    const store = storeOf([notice('s1', 'same'), notice('a1', 'retimed'), notice('b1', 'left'), notice('c1', 'unreadable')], {
+      same: members,
+      retimed: [members[0], { ...members[1], window_start: '15:00' }],
+      left: [members[0]],
+      unreadable: new Error('db down'),
+    });
+    await nightly.closeNotices(new Date(), { conn: store });
+    const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
+    audit.retireResolvedNotices.mock.calls[0][0].stillOpen(q);
+    expect(q.whereNotIn).toHaveBeenCalledWith('s.id', ['a1', 'b1']);
+  });
+
   test('the check turned off: the next run closes every open notice', async () => {
     await nightly.closeNotices(new Date(), { enabled: false });
     const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
@@ -339,7 +375,7 @@ describe('raiseNotices', () => {
   });
 
   test('the close keeps a notice open only while the visit is on the placement the check read', async () => {
-    await nightly.closeNotices();
+    await nightly.closeNotices(new Date(), { conn: noStanding });
     const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
     audit.retireResolvedNotices.mock.calls[0][0].stillOpen(q);
     const sql = q.whereRaw.mock.calls[0][0];
@@ -357,7 +393,7 @@ describe('raiseNotices', () => {
 
   test('every run closes the notices whose visit moved or is no longer open, the check off included', async () => {
     expect(await nightly.raiseNotices(null)).toBe(0);
-    await nightly.closeNotices(new Date('2026-10-12T08:10:00Z'));
+    await nightly.closeNotices(new Date('2026-10-12T08:10:00Z'), { conn: noStanding });
     expect(audit.retireResolvedNotices).toHaveBeenCalledTimes(1);
     const [spec] = audit.retireResolvedNotices.mock.calls[0];
     expect(spec).toMatchObject({ keyPattern: 'auto-dispatch-proofreader:%', resolvedTitle: 'Move check alert resolved' });
@@ -368,7 +404,7 @@ describe('raiseNotices', () => {
     const state = await unsure({ why: 'model_unsure' });
     notifications.notifyAdmin.mockRejectedValue(new Error('store down'));
     audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
-    await expect(nightly.closeNotices()).resolves.toBeUndefined();
+    await expect(nightly.closeNotices(new Date(), { conn: noStanding })).resolves.toBeUndefined();
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
   });
 });

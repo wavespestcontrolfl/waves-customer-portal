@@ -289,6 +289,8 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
     detail: detailFor(item, names),
     metadata: {
       scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, windowStart: item.window_start, technicianId: item.technician_id,
+      // A grouped stop as the model was told it, for the close (staleStopVisits).
+      ...(item.stop ? { visitId: item.visit_id, stop: item.stop } : {}),
       kind: item.why, proposedDate: item.move.to.date,
     },
   });
@@ -297,15 +299,42 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
 // A notice stays open while its visit is still open on the placement the
 // notice is about. A person who gives the visit a new time or technician on
 // the same date has decided (Codex #6313 r1).
+// The visits of open grouped-stop notices whose stop is no longer the one
+// the notice describes: a member left, joined or moved while the tapped visit
+// stayed. The stop is compared here, with the same signature the raise uses,
+// because the close's SQL sees the tapped visit alone. A stop that cannot be
+// read keeps its notice.
+async function staleStopVisits(conn) {
+  const rows = await conn('notifications')
+    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+    .whereNot('title', RESOLVED_TITLE)
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${KEY_PREFIX}%`])
+    .whereRaw("metadata->>'stop' IS NOT NULL")
+    .select('metadata');
+  const stale = [];
+  for (const row of rows) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (!meta.stop || !meta.visitId) continue;
+    try {
+      if (stopSignature(await openMembers(conn, meta.visitId)) !== meta.stop) stale.push(String(meta.scheduledServiceId));
+    } catch (err) {
+      logger.warn(`[auto-dispatch] move-check notice stop ${meta.visitId} could not be re-read: ${err.message}`);
+    }
+  }
+  return stale;
+}
+
 // With the check turned off nothing holds a move any more, so no notice
 // stays open: a rollback leaves none standing (Codex #6313 r2).
-async function closeResolved(audit, nowDate, enabled) {
+async function closeResolved(audit, nowDate, enabled, conn) {
   try {
+    const stale = enabled ? await staleStopVisits(conn) : [];
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
         if (enabled) q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
         else q.whereRaw('1 = 0');
+        if (stale.length) q.whereNotIn('s.id', stale);
       },
       resolvedTitle: RESOLVED_TITLE,
       resolution: enabled ? 'The visit moved or is no longer open' : 'The move check is turned off',
@@ -337,8 +366,8 @@ async function stillAsChecked(item, conn) {
 
 // Run end, in every run: close the notices that no longer apply; all of them
 // when the check is off (config.proofreaderEnabled). Never throws.
-async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
-  await closeResolved(require('../audit'), nowDate, enabled);
+async function closeNotices(nowDate = new Date(), { enabled = true, conn = require('../../../models/db') } = {}) {
+  await closeResolved(require('../audit'), nowDate, enabled, conn);
 }
 
 /**
