@@ -201,7 +201,7 @@ async function checkMove({ service, best, run }, deps = {}) {
   const { answer } = asked;
   if (answer.verdict === 'allow') {
     state.allowed += 1;
-    return { allowed: true, audit: auditOf(answer) };
+    return { allowed: true, audit: auditOf(answer), stop: asked.stop };
   }
   if (answer.verdict === 'hold') {
     state.held += 1;
@@ -214,9 +214,23 @@ async function checkMove({ service, best, run }, deps = {}) {
 
 // The write options of an approved move: the slot the model read and no
 // other. The SLOT_TAKEN fallback would land a slot nobody checked, so a
-// checked move has none; a taken slot waits for the next run.
+// checked move has none; a taken slot waits for the next run. `approvedStop`
+// is the grouped stop as the model was told it (null = the visit was alone):
+// the unit mover's member guard compares it under the stop lock
+// (assertApprovedStop).
 function writeOptions(checked, fallback) {
-  return checked ? { alternateCandidates: [] } : fallback;
+  return checked ? { alternateCandidates: [], approvedStop: checked.stop ?? null } : fallback;
+}
+
+// apply.js makeMemberGuard, under the unit mover's stop lock and before any
+// write: the members the mover is about to move are the ones the model read,
+// each on the placement it read. A member that joined, left or moved while
+// the model worked refuses the move; the next run asks again. `approved`
+// undefined = the move was not proofread.
+function assertApprovedStop(members, approved, refuse, primaryId) {
+  if (approved === undefined) return;
+  const now = (members || []).length > 1 ? stopSignature(members) : null;
+  if (now !== approved) throw refuse(primaryId, 'changed since the move was checked');
 }
 
 // The approved slot was taken between the check and the write. Nothing
@@ -362,6 +376,6 @@ function tallyOf(state) {
 }
 
 module.exports = {
-  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, approvedSlotTaken, closeNotices, raiseNotices, tallyOf,
+  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertApprovedStop, stopSignature, approvedSlotTaken, closeNotices, raiseNotices, tallyOf,
   _internals: { whyFor, detailFor, plannedMove },
 };

@@ -490,6 +490,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId, isOperational: true },
   );
   return async ({ trx, members, targets }) => {
+    // GATE_AUTO_DISPATCH_PROOFREADER: the stop is the one the model read.
+    require('./proofreader/nightly').assertApprovedStop(members, config.approvedStop, refuse, service.id);
     const siblings = (members || []).filter((m) => String(m.id) !== String(service.id));
     if (!siblings.length) return;
     checkMemberStatusAndTiming(siblings, targets, config, refuse);

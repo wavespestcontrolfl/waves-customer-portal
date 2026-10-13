@@ -107,7 +107,7 @@ describe('checkMove', () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks', reason: 'Nothing limits the day.' }));
     expect(got).toEqual({
-      allowed: true, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
+      allowed: true, stop: null, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
     });
     expect(run.proofreader).toMatchObject({ calls: 1, allowed: 1, held: 0, unsure: 0 });
     expect(run.proofreader.notices.size).toBe(0);
@@ -165,7 +165,33 @@ describe('checkMove', () => {
 describe('the write of a checked move', () => {
   const fallback = { alternateCandidates: ['a', 'b'], rescore: () => {} };
   test('a checked move lands on the approved slot only: no alternates, no re-evaluation', () => {
-    expect(nightly.writeOptions({ allowed: true }, fallback)).toEqual({ alternateCandidates: [] });
+    expect(nightly.writeOptions({ allowed: true, stop: null }, fallback)).toEqual({ alternateCandidates: [], approvedStop: null });
+    expect(nightly.writeOptions({ allowed: true, stop: 'a;b' }, fallback)).toMatchObject({ approvedStop: 'a;b' });
+  });
+
+  describe('the grouped stop at the write is the one the model read', () => {
+    const refuse = (id, why) => new Error(`${id} ${why}`);
+    const members = [
+      { id: 's1', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
+      { id: 's2', scheduled_date: new Date('2026-10-20T00:00:00Z'), window_start: '10:00', technician_id: 't1' },
+    ];
+    const approved = nightly.stopSignature(members);
+    test('the same members on the same placements pass, in any order', () => {
+      expect(() => nightly.assertApprovedStop([members[1], members[0]], approved, refuse, 's1')).not.toThrow();
+    });
+    test.each([
+      ['a member that moved', [members[0], { ...members[1], window_start: '15:00' }]],
+      ['a member that left', [members[0]]],
+      ['a member that joined', [...members, { id: 's3', scheduled_date: '2026-10-20', window_start: '11:00', technician_id: 't1' }]],
+    ])('%s refuses the move', (_name, now) => {
+      expect(() => nightly.assertApprovedStop(now, approved, refuse, 's1')).toThrow('s1 changed since the move was checked');
+    });
+    test('a visit approved alone that gained a member is refused', () => {
+      expect(() => nightly.assertApprovedStop(members, null, refuse, 's1')).toThrow('changed since the move was checked');
+    });
+    test('a move that was not proofread is not compared', () => {
+      expect(() => nightly.assertApprovedStop(members, undefined, refuse, 's1')).not.toThrow();
+    });
   });
   test('check off: the fallback is unchanged', () => {
     expect(nightly.writeOptions(null, fallback)).toBe(fallback);
