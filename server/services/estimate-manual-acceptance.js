@@ -578,6 +578,14 @@ const CARD_PIN_CHECKS = [
     key: 'lawnProfile',
     holds: async ({ trx, estimate, expected }) => (await lawnProfilePin(trx, estimate.customer_id)) === expected.lawnProfile,
   },
+  // The service address the card showed (the linked property's row, else the
+  // estimate's own snapshot): an address edit between the card and the
+  // accept refuses (codex #6113 r58).
+  {
+    phase: 'customer',
+    key: 'propertyPin',
+    holds: async ({ trx, estimate, expected }) => (await propertyPin(trx, estimate)) === expected.propertyPin,
+  },
   // Still no visit linked to the estimate (the reservation path the card cannot show).
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
 ];
@@ -585,6 +593,17 @@ const CARD_PIN_CHECKS = [
 // The lawn profile values the accept's lawn writes read (customer_turf_profiles
 // grass type and lawn size, the primary property's size), as one string.
 // Exported for the Intelligence Bar card, which pins it.
+// The linked property's address as the card shows it (id + address fields +
+// updated_at), else the estimate's own address snapshot. Exported for the
+// Intelligence Bar card, which pins it.
+async function propertyPin(conn, estimate) {
+  const property = estimate?.property_id ? await conn('customer_properties').where({ id: estimate.property_id }).first() : null;
+  if (property) {
+    return ['property', property.id, property.address_line1, property.address_line2, property.city, property.state, property.zip, versionText(property.updated_at)]
+      .map((v) => (v == null ? '' : String(v))).join('|');
+  }
+  return ['estimate', String(estimate?.address || estimate?.service_address || '').trim()].join('|');
+}
 async function lawnProfilePin(conn, customerId) {
   const turf = await conn('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'lawn_sqft');
   const primary = await conn('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first('id', 'property_sqft');
@@ -1312,7 +1331,7 @@ async function markEstimateManuallyAccepted({
   bookedAppointmentIds = [],
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
   // customerId, customerVersion, customerBilling, ledgerPin, planRows,
-  // noLinkedVisits, effectsKey, membershipEmail }); null for every other
+  // lawnProfile, propertyPin, noLinkedVisits, effectsKey, membershipEmail }); null for every other
   // caller. effectsKey is the fingerprint of the approved effect list: the
   // accept builds its own list under the locks and refuses (preview_changed)
   // when it differs. membershipEmail ('send' | 'skip') is the approved email
@@ -1350,6 +1369,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   estimateLinkedVisitsQuery,
   customerBillingPin,
   lawnProfilePin,
+  propertyPin,
   oneTapPurchaseRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,

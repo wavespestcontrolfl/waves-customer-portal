@@ -372,9 +372,22 @@ function perApplicationLine({ conv, cust, monthlyRate, laneAfter }) {
 // written row never goes unmentioned.
 const COVERED_TABLES = new Set(['estimates', 'customers', 'customer_plan_rates', 'customer_turf_profiles', 'customer_properties', 'activity_log']);
 const TABLE_LABELS = { consultation_outcomes: 'consultation records', customer_credit_ledger: 'account credit entries', scheduled_services: 'scheduled visits' };
+// A service_area_measurements change whose lawn area is gone after.
+const measurementCleared = (change) => {
+  if (Array.isArray(change.changed_keys)) return change.changed_keys.includes('areas');
+  const lawnOf = (v) => v && typeof v === 'object' && v.areas && typeof v.areas === 'object' ? v.areas.lawn : undefined;
+  return lawnOf(change.before) !== undefined && lawnOf(change.after) === undefined;
+};
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 function rowChangeNote(e) {
+  // The lawn-size sync drops the technician's saved lawn measurement on the
+  // primary property (lawn-size-sync syncLawnSqftMirrors): a deletion the
+  // lawn profile line does not word, so it is said here (codex #6113 r58).
+  if (e.table === 'customer_properties') {
+    const cleared = e.changed.filter((c) => c.columns?.service_area_measurements && measurementCleared(c.columns.service_area_measurements)).length;
+    return cleared ? `Clears the saved lawn measurement on ${plural(cleared, 'property', 'properties')} (the accepted lawn size replaces it)` : null;
+  }
   if (COVERED_TABLES.has(e.table)) return null;
   if (e.table === 'consultation_outcomes') {
     const won = e.changed.filter((c) => c.columns?.outcome?.after === 'won').length;
@@ -613,6 +626,8 @@ async function cardPins({ estimate, customer, converts }) {
     ledger: bill?.ledger ?? null,
     lawn_profile: bill?.lawn_profile ?? null,
     plan_rows: bill?.plan_rows ?? null,
+    // The service address the card shows, re-checked under the accept's locks (codex #6113 r58).
+    property: await Manual.propertyPin(db, estimate),
     no_linked_visits: true,
     grouped: false,
   };
@@ -721,6 +736,7 @@ function expectedFrom(approved) {
     ledgerPin: approved.pins.ledger,
     lawnProfile: approved.pins.lawn_profile,
     planRows: approved.pins.plan_rows,
+    propertyPin: approved.pins.property,
     noLinkedVisits: approved.pins.no_linked_visits === true,
     ungrouped: approved.pins.grouped === false,
     // The approved effect list and the approved email decision: the accept

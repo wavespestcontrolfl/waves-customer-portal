@@ -236,6 +236,20 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(result).toMatchObject({ code: 'recurring_unnamed' });
     expect(result.error).toMatch(/names no recurring service/);
   });
+  test('round 58: the service address is pinned (linked property row, else the estimate snapshot) and rides to the accept as propertyPin', async () => {
+    seed({ estimate: { address: '12 Synthetic Lane, Venice, FL 34285', property_id: 'prop-7' } });
+    tables.customer_properties = [{ id: 'prop-7', customer_id: CUSTOMER_ID, active: true, is_primary: true, address_line1: '7 Other Court', city: 'Nokomis', state: 'FL', zip: '34275', updated_at: '2026-10-01T00:00:00.000Z' }];
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(preview.pins.property).toBe('property|prop-7|7 Other Court||Nokomis|FL|34275|2026-10-01T00:00:00.000Z');
+    tables.customer_properties = [];
+    seed({ estimate: { address: '12 Synthetic Lane, Venice, FL 34285' } });
+    expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).pins.property).toBe('estimate|12 Synthetic Lane, Venice, FL 34285');
+  });
+  test('round 58: clearing the saved lawn measurement on the primary property is said on the card', async () => {
+    dryEffects = () => addOnEffects({ extra: [{ kind: 'table_changes', table: 'customer_properties', added: [], removed: [], changed: [{ key: { id: 'prop-1' }, columns: { service_area_measurements: { before: { areas: { lawn: { sqft: 5000 } } }, after: { areas: {} } }, property_sqft: { before: 5000, after: 6500 } } }] }] });
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(labels(card(preview))).toContain('Clears the saved lawn measurement on 1 property (the accepted lawn size replaces it)');
+  });
   test('round 44: with no persisted aggregate the headline one-time total is the sum of the itemized lines, never $0', async () => {
     seed({ estimate: { monthly_total: 0, onetime_total: null, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
     dryEffects = () => [
@@ -711,6 +725,7 @@ describe('Confirm', () => {
         customerBilling: 'per_application||Bronze|active_customer|',
         planRows: '',
         lawnProfile: '|||',
+        propertyPin: 'estimate|',
         noLinkedVisits: true,
         ungrouped: true,
         effectsKey: approved.effects_key,
