@@ -33,6 +33,7 @@ const {
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
+const { trackTextCoveredByDay } = require('./one-text-per-day');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -467,7 +468,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
       smsOutcome = visitClaim === 'error' ? 'claim_error' : 'claim_in_flight';
     }
   }
-  const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
+  const mayText = [null, 'owner', 'detached'].includes(visitClaim);
   if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route', claimToken))) {
     // Our own lease expired before we could send (a stalled process): a
     // reclaim may own the notice now — never send twice (codex r9).
@@ -478,6 +479,13 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
   // as covered afterwards (visit-groups.fanOutLiveTransition).
   if (!opts.suppressCustomerSms && mayText && guardOpen && smsOutcome !== 'lease_expired') {
     try {
+      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: the customer was already told today
+      // that this technician is on the way to this address. Stamps this row's
+      // guard and audits it; false (send) with the gate off or on any error.
+      if (await trackTextCoveredByDay(svc, 'en_route', { fence: attemptFence })) {
+        smsOutcome = 'covered';
+        return { smsSent, smsOutcome, visitClaim, claimToken };
+      }
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')
         : null;
@@ -958,6 +966,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   }
   const claimed = await claimQuery.update({ arrival_sms_sent_at: claimStamp });
   if (!claimed) return 'not_claimed';
+
+  // GATE_ONE_TEXT_PER_CUSTOMER_DAY: an arrived text already went today for this
+  // address and technician. The claim above stands as "handled".
+  if (await trackTextCoveredByDay(svc, 'arrived')) return 'covered';
 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
   if (!isEnabled('techArrivedSms')) return 'gate_off';

@@ -1,0 +1,110 @@
+/**
+ * The pure rule and the fail-open edges of one-text-per-day.js
+ * (GATE_ONE_TEXT_PER_CUSTOMER_DAY). The SQL paths are covered against a real
+ * schema in one-text-per-customer-day-postgres.test.js.
+ */
+jest.mock('../models/db', () => jest.fn(() => { throw new Error('db down'); }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
+
+const db = require('../models/db');
+const logger = require('../services/logger');
+const { sameTextDay, dayOf, closeCoveredReminderTiers, trackTextCoveredByDay } = require('../services/one-text-per-day');
+
+const base = { customer_id: 'c1', property_id: 'p1', technician_id: 't1', day: '2026-10-14' };
+
+describe('sameTextDay', () => {
+  test('same customer, address and ET day', () => {
+    expect(sameTextDay(base, { ...base })).toBe(true);
+  });
+
+  test('different address is a different text', () => {
+    expect(sameTextDay(base, { ...base, property_id: 'p2' })).toBe(false);
+  });
+
+  test('different customer is a different text', () => {
+    expect(sameTextDay(base, { ...base, customer_id: 'c2' })).toBe(false);
+  });
+
+  test('an unknown address never matches, even another unknown one', () => {
+    expect(sameTextDay({ ...base, property_id: null }, { ...base, property_id: null })).toBe(false);
+    expect(sameTextDay(base, { ...base, property_id: null })).toBe(false);
+  });
+
+  test('different day is a different text', () => {
+    expect(sameTextDay(base, { ...base, day: '2026-10-15' })).toBe(false);
+  });
+
+  test('the ET midnight boundary, not UTC, decides the day', () => {
+    // 23:30 ET on 10-14 is 03:30Z on 10-15; 00:30 ET on 10-15 is 04:30Z on 10-15.
+    const late = { ...base, day: undefined, appointment_time: new Date('2026-10-15T03:30:00Z') };
+    const early = { ...base, day: undefined, appointment_time: new Date('2026-10-15T04:30:00Z') };
+    expect(dayOf(late)).toBe('2026-10-14');
+    expect(dayOf(early)).toBe('2026-10-15');
+    expect(sameTextDay(late, early)).toBe(false);
+    // 09:00 ET and 10:00 ET the same day are one text
+    const nine = { ...base, day: undefined, appointment_time: new Date('2026-10-14T13:00:00Z') };
+    const ten = { ...base, day: undefined, appointment_time: new Date('2026-10-14T14:00:00Z') };
+    expect(sameTextDay(nine, ten)).toBe(true);
+  });
+
+  test('technician only matters when asked (tracker texts name the technician)', () => {
+    const other = { ...base, technician_id: 't2' };
+    expect(sameTextDay(base, other)).toBe(true);
+    expect(sameTextDay(base, other, { sameTechnician: true })).toBe(false);
+    expect(sameTextDay(base, { ...base }, { sameTechnician: true })).toBe(true);
+  });
+
+  test('two unassigned visits count as the same technician', () => {
+    const none = { ...base, technician_id: null };
+    expect(sameTextDay(none, { ...none }, { sameTechnician: true })).toBe(true);
+  });
+});
+
+describe('fail open and gate off', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
+  });
+  afterEach(() => { delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY; });
+
+  test('gate off: no query, nothing closed, nothing covered', async () => {
+    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h')).toBe(0);
+    expect(await trackTextCoveredByDay({ id: 's1', property_id: 'p1' }, 'en_route')).toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('gate on, database error: the siblings stay armed and the tracker text goes out', async () => {
+    process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
+    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h')).toBe(0);
+    expect(await trackTextCoveredByDay({ id: 's1', property_id: 'p1' }, 'arrived')).toBe(false);
+    expect(logger.error).toHaveBeenCalledTimes(2);
+  });
+
+  test('a delivery that did not happen closes nothing', async () => {
+    process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
+    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h', false)).toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a visit with no saved address is never covered', async () => {
+    process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
+    expect(await trackTextCoveredByDay({ id: 's1', property_id: null }, 'en_route')).toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
+
+describe('gate reader', () => {
+  const { oneTextPerCustomerDayLive } = require('../config/feature-gates');
+  afterEach(() => { delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY; });
+
+  test('on only for exactly "true", read at call time', () => {
+    expect(oneTextPerCustomerDayLive()).toBe(false);
+    for (const v of ['1', 'TRUE', 'yes', '']) {
+      process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = v;
+      expect(oneTextPerCustomerDayLive()).toBe(false);
+    }
+    process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
+    expect(oneTextPerCustomerDayLive()).toBe(true);
+  });
+});
