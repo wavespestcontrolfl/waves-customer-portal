@@ -1142,9 +1142,23 @@ function claimRawTwin(rawPool, item, mappedAmount) {
 }
 // The unused same-service raw twin that carries a positive operator-accepted
 // net, consumed; null when there is none.
+// The twin is claimed one-to-one by gross and sold scope, never any
+// same-service manual row (codex #6113 r38): a comped mapped row beside a
+// separate $80 manual row keeps its own $0 twin.
 function claimManualNetTwin(rawPool, item) {
   const service = String(item.service || item.name || '').toLowerCase();
-  const entry = rawPool.find((e) => !e.used && String(e.line.service || e.line.name || '').toLowerCase() === service && num(e.line.manualFinalOneTime) > 0);
+  const sameGross = (e) => grossOf(item) == null || grossOf(e.line) == null || roundCents(grossOf(e.line)) === roundCents(grossOf(item));
+  const entry = rawPool.find((e) => !e.used && String(e.line.service || e.line.name || '').toLowerCase() === service
+    && num(e.line.manualFinalOneTime) > 0 && sameGross(e) && scopeCompatible(item, e.line));
+  if (entry) entry.used = true;
+  return entry ? entry.line : null;
+}
+// A comped mapped row's OWN raw twin: the same service with an explicit
+// accepted zero and a compatible scope. Claimed before any manual-net row.
+function claimExactZeroTwin(rawPool, item) {
+  const service = String(item.service || item.name || '').toLowerCase();
+  const entry = rawPool.find((e) => !e.used && String(e.line.service || e.line.name || '').toLowerCase() === service
+    && explicitZeroNetRaw(e.line) && scopeCompatible(item, e.line));
   if (entry) entry.used = true;
   return entry ? entry.line : null;
 }
@@ -1190,6 +1204,7 @@ function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap,
     // its raw twin carries the operator-accepted net, which outranks the
     // mapped row's lower alias (codex #6113 r37): that net is the line.
     if (explicitZeroNet(item)) {
+      if (claimExactZeroTwin(rawPool, item)) { out.comped.push(label); continue; }
       const twin = claimManualNetTwin(rawPool, item);
       if (!twin) { out.comped.push(label); continue; }
       if (twinIsGated(rawPool, twin)) { pushGated(out, label); continue; }
