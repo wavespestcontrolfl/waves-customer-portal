@@ -20,7 +20,12 @@
  * date, any customer), the call's customer has a live visit that day, a
  * namesake account booked the confirmed slot after the call (watchdog rule),
  * a day-only call's customer got any live visit after the call, or the office
- * closed the call's triage cards. Dates come from to_char in SQL, never a JS
+ * closed the call's triage cards. A visit the office books by hand carries no
+ * call reference, and an unlinked call has no customer to match, so one more rule
+ * covers the normal hand booking (and "Book it"): a live visit CREATED AFTER the
+ * call clears the row when its customer carries the caller's phone number, or
+ * when its address is the address stated on the call (house number and street).
+ * Dates come from to_char in SQL, never a JS
  * Date round-trip. Dark behind GATE_CALL_HELD_VISIT; read-only.
  */
 
@@ -35,6 +40,8 @@ const {
 } = require('./call-booking-miss-watchdog');
 const { etDateString } = require('../utils/datetime-et');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { phoneIdentityKey, phoneMatchDigits } = require('../utils/phone');
+const { sameHouseNumberStreet } = require('./call-triage-flags');
 
 const LOOKBACK_DAYS = 30;
 const NOTES_MAX_CHARS = 200;
@@ -51,6 +58,23 @@ function parseExtraction(raw) {
   } catch {
     return null;
   }
+}
+
+const externalPhone = (call) => (String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone) || null;
+
+// The office booked this caller after the call: a live visit created after it, under a
+// customer who carries the caller's number, or at the address stated on the call. `row`
+// carries customer_phone, customer_secondary_phone and visit_address (the visit's own
+// service address, else the customer's).
+function bookedForCallerAfterCall(row, call, extraction) {
+  if (INACTIVE_STATUSES.has(row.status)) return false;
+  const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
+  const callAt = call.created_at ? new Date(call.created_at).getTime() : NaN;
+  if (!Number.isFinite(rowAt) || !Number.isFinite(callAt) || rowAt <= callAt) return false;
+  const callerKey = phoneIdentityKey(externalPhone(call));
+  if (callerKey && [row.customer_phone, row.customer_secondary_phone].some((p) => p && phoneIdentityKey(p) === callerKey)) return true;
+  const stated = String(extraction?.property?.service_address?.street_line_1 || '').trim();
+  return !!stated && !!row.visit_address && sameHouseNumberStreet(stated, row.visit_address);
 }
 
 function timeLabel(minutes) {
@@ -100,7 +124,8 @@ function heldCandidates(calls, dateET, now = new Date()) {
 // direction, created_at, from_phone, to_phone, answered_by, processing_status,
 // v2_extraction_status, ai_extraction_enriched }); `bookedRows` are
 // scheduled_services rows ({ customer_id, status, sched_date ('YYYY-MM-DD'),
-// window_start, created_at, source_call_log_id, notes }); `triageRows` are
+// window_start, created_at, source_call_log_id, notes, customer_phone,
+// customer_secondary_phone, visit_address }); `triageRows` are
 // triage_items ({ call_log_id, status, resolution_source }). `namesakes` is
 // the watchdog's call id -> Set(customer id) map; `customerNames` maps a
 // customer id to "First Last".
@@ -117,11 +142,11 @@ function computeHeldVisits(calls, bookedRows, triageRows, {
       || (own(row) && row.sched_date === dateET)
       || (kind === 'confirmed' && !!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot))
       || (kind === 'day_only' && own(row) && new Date(row.created_at).getTime() > callAt)
+      || bookedForCallerAfterCall(row, call, extraction)
     ));
     if (cleared) continue;
     if (officeClosedCall(triageRows.filter((r) => r.call_log_id === call.id))) continue;
 
-    const outbound = String(call.direction || '').startsWith('outbound');
     const svc = extraction.property?.service_address || {};
     const caller = extraction.caller || {};
     const spokenName = caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' ');
@@ -133,7 +158,7 @@ function computeHeldVisits(calls, bookedRows, triageRows, {
       minutes,
       time_label: timeLabel(minutes),
       caller_name: (call.customer_id && customerNames.get(call.customer_id)) || spokenName || 'Unknown caller',
-      phone: (outbound ? call.to_phone : call.from_phone) || null,
+      phone: externalPhone(call),
       address: { line1: svc.street_line_1 || null, city: svc.city || null, zip: svc.postal_code || null },
       service: extraction.service_request?.specific_service_name
         || extraction.service_request?.primary_service_category
@@ -184,23 +209,45 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
   const sidPatterns = candidates.map((c) => c.call.twilio_call_sid).filter(Boolean).map((sid) => `%Call SID: ${sid}%`);
   const earliestCall = new Date(Math.min(...candidates.map((c) => new Date(c.call.created_at).getTime())));
 
-  const bookedRows = await db('scheduled_services')
+  // Hand bookings carry no call reference: also read live visits created after the earliest
+  // candidate call whose customer carries a caller's number or whose address starts with a
+  // stated house number. The pure function decides the exact match per call.
+  const phoneForms = [...new Set(candidates.flatMap((c) => phoneMatchDigits(externalPhone(c.call) || '')))];
+  const houseNumbers = [...new Set(candidates
+    .map((c) => (String(c.extraction?.property?.service_address?.street_line_1 || '').trim().match(/^\d+/) || [])[0])
+    .filter(Boolean))].map((n) => `${n} %`);
+  const digits = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
+  const visitAddress = "COALESCE(NULLIF(btrim(ss.service_address_line1), ''), cu.address_line1)";
+  const bookedRows = await db('scheduled_services as ss')
+    .leftJoin('customers as cu', 'cu.id', 'ss.customer_id')
     .where(function heldEvidence() {
-      this.whereIn('source_call_log_id', callIds);
-      if (sidPatterns.length) this.orWhereRaw('notes LIKE ANY(?)', [sidPatterns]);
+      this.whereIn('ss.source_call_log_id', callIds);
+      if (sidPatterns.length) this.orWhereRaw('ss.notes LIKE ANY(?)', [sidPatterns]);
       if (customerIds.length) {
         this.orWhere(function ownOrNamesake() {
-          this.whereIn('customer_id', customerIds)
+          this.whereIn('ss.customer_id', customerIds)
             .andWhere(function onDateOrAfterCall() {
-              this.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [dateET])
-                .orWhere('created_at', '>=', earliestCall);
+              this.whereRaw("to_char(ss.scheduled_date, 'YYYY-MM-DD') = ?", [dateET])
+                .orWhere('ss.created_at', '>=', earliestCall);
             });
+        });
+      }
+      if (phoneForms.length || houseNumbers.length) {
+        this.orWhere(function handBookedAfterCall() {
+          this.where('ss.created_at', '>=', earliestCall).andWhere(function callerOrAddress() {
+            if (phoneForms.length) {
+              this.whereRaw(`${digits('cu.phone')} = ANY(?)`, [phoneForms]).orWhereRaw(`${digits('cu.secondary_phone')} = ANY(?)`, [phoneForms]);
+            }
+            if (houseNumbers.length) this.orWhereRaw(`${visitAddress} LIKE ANY(?)`, [houseNumbers]);
+          });
         });
       }
     })
     .select(
-      'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes',
-      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
+      'ss.customer_id', 'ss.status', 'ss.window_start', 'ss.created_at', 'ss.source_call_log_id', 'ss.notes',
+      'cu.phone as customer_phone', 'cu.secondary_phone as customer_secondary_phone',
+      db.raw(`${visitAddress} AS visit_address`),
+      db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
   const triageRows = await db('triage_items').whereIn('call_log_id', callIds).select('call_log_id', 'status', 'resolution_source');
   const linkedIds = [...new Set(candidates.map((c) => c.call.customer_id).filter(Boolean))];
@@ -212,4 +259,4 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
   return computeHeldVisits(calls, bookedRows, triageRows, { dateET, namesakes, customerNames, now });
 }
 
-module.exports = { computeHeldVisits, listHeldVisits, heldCandidates };
+module.exports = { computeHeldVisits, listHeldVisits, heldCandidates, bookedForCallerAfterCall };

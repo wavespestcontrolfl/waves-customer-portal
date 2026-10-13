@@ -211,3 +211,35 @@ describe('order and gate', () => {
     expect(db).not.toHaveBeenCalled();
   });
 });
+
+// A visit the office books by hand (or through "Book it") carries no call reference, and an
+// unlinked call has no customer to match: the caller's number or the stated address clears it.
+describe('a hand booking after the call clears the row', () => {
+  const unlinkedDayOnly = () => call({ ai_extraction_enriched: dayOnly() });
+
+  it('clears on a later visit under a customer who carries the caller number, any date', () => {
+    const booked = visit({ customer_id: 'cust-new', customer_phone: '(941) 555-0100', sched_date: '2026-10-16' });
+    expect(run([unlinkedDayOnly()], [booked])).toEqual([]);
+    expect(run([call()], [booked])).toEqual([]); // a confirmed slot too
+    expect(run([unlinkedDayOnly()], [visit({ customer_id: 'cust-new', customer_secondary_phone: '+19415550100' })])).toEqual([]);
+  });
+
+  it('clears on a later visit at the stated address', () => {
+    expect(run([unlinkedDayOnly()], [visit({ customer_id: 'cust-new', visit_address: '12 Test Ln' })])).toEqual([]);
+  });
+
+  it('does not clear on another number and address, an older visit, or a cancelled one', () => {
+    const other = visit({ customer_id: 'cust-x', customer_phone: '+19415550199', visit_address: '99 Other Road' });
+    expect(run([unlinkedDayOnly()], [other])).toHaveLength(1);
+    const older = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', created_at: '2026-10-12T14:00:00Z' });
+    expect(run([unlinkedDayOnly()], [older])).toHaveLength(1);
+    const cancelled = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', status: 'cancelled' });
+    expect(run([unlinkedDayOnly()], [cancelled])).toHaveLength(1);
+  });
+
+  it('an outbound call matches on the number Waves dialed', () => {
+    const outbound = call({ direction: 'outbound-api', ai_extraction_enriched: dayOnly() });
+    expect(run([outbound], [visit({ customer_id: 'cust-new', customer_phone: '+19415550111' })])).toEqual([]);
+    expect(run([outbound], [visit({ customer_id: 'cust-new', customer_phone: '+19415550100' })])).toHaveLength(1);
+  });
+});
