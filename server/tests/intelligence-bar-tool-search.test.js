@@ -148,3 +148,84 @@ describe('dropMissingToolReferences', () => {
     expect(out[1].content[3]).toBe(messages[1].content[3]);
   });
 });
+
+describe('round 5 helpers', () => {
+  const use = (id, query = 'q') => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query } });
+  const res = (id, names = []) => ({ type: 'tool_search_tool_result', tool_use_id: id,
+    content: { type: 'tool_search_tool_search_result', tool_references: names.map(tool_name => ({ type: 'tool_reference', tool_name })) } });
+
+  test('pendingServerToolIds: a call stays open until a result with its id appears, in any later message', () => {
+    const messages = [{ role: 'assistant', content: [use('s1'), use('s2'), res('s2')] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 's1', content: '{}' }] }];
+    expect([...ToolSearch.pendingServerToolIds(messages)]).toEqual(['s1']);
+    expect(ToolSearch.pendingServerToolIds([...messages, { role: 'assistant', content: [res('s1')] }]).size).toBe(0);
+  });
+
+  test('1: a terminal response that resolves an open search is kept; any other terminal response is not', () => {
+    const history = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [use('s1'), { type: 'tool_use', id: 't1', name: 'x', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: '{}' }] }];
+    const closing = { content: [res('s1'), { type: 'text', text: 'ok' }] };
+    expect(ToolSearch.withTerminalResponse(history, closing, true)).toEqual([...history, { role: 'assistant', content: closing.content }]);
+    expect(ToolSearch.withTerminalResponse(history, closing, false)).toBe(history);
+    expect(ToolSearch.withTerminalResponse(history, { content: [{ type: 'text', text: 'ok' }] }, true)).toBe(history);
+    expect(ToolSearch.withTerminalResponse([{ role: 'user', content: 'q' }], closing, true).length).toBe(1);
+  });
+
+  test('2: queries live across responses: a result in a later response reports the right query, an empty one too', () => {
+    const collector = { discovery: jest.fn() };
+    const queries = new Map();
+    ToolSearch.observeServerToolSearches([use('s1', 'timesheets for the crew'), { type: 'tool_use', id: 't1', name: 'x', input: {} }], collector, queries);
+    expect(collector.discovery).not.toHaveBeenCalled();
+    ToolSearch.observeServerToolSearches([res('s1'), { type: 'text', text: 'none' }], collector, queries);
+    expect(collector.discovery).toHaveBeenCalledWith({ query: 'timesheets for the crew' }, { status: 'capability_unimplemented', capabilities: [] });
+  });
+
+  test('2: the queries are seeded from a saved history on resume', () => {
+    const task = { checkpoint: [{ role: 'assistant', content: [use('s9', 'old question')] }] };
+    expect(ToolSearch.seedSearchQueries(task).get('s9')).toBe('old question');
+    expect(ToolSearch.seedSearchQueries(undefined).size).toBe(0);
+  });
+
+  test('3: on the search path the restored tools never replace the array', () => {
+    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
+    expect(ToolSearch.mergeRestoredTools(tools, [{ name: 'b' }], true)).toBe(tools);
+    expect(ToolSearch.mergeRestoredTools(tools, [{ name: 'b' }], false)).toEqual([{ name: 'a' }, { name: 'b' }]);
+  });
+
+  test('4: a saved search task is refused for a login without full access, and only then', () => {
+    const task = { checkpoint: [{ role: 'assistant', content: [use('s1'), res('s1')] }] };
+    expect(ToolSearch.resumeAccessRefusal(task, false)).toMatchObject({ code: 'access_changed' });
+    expect(ToolSearch.resumeAccessRefusal(task, true)).toBeNull();
+    expect(ToolSearch.resumeAccessRefusal({ checkpoint: [{ role: 'user', content: 'hi' }] }, false)).toBeNull();
+    expect(ToolSearch.resumeAccessRefusal(null, false)).toBeNull();
+  });
+
+  test('6: a paused history is kept as is and the turn held; other histories get the turn', () => {
+    const paused = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [use('s1')] }];
+    const held = { turn: null };
+    expect(ToolSearch.withResumeTurn(paused, 'CONTINUE', true, held)).toBe(paused);
+    expect(held.turn).toBe('CONTINUE');
+    const other = { turn: null };
+    expect(ToolSearch.withResumeTurn(paused, 'CONTINUE', false, other)).toEqual([...paused, { role: 'user', content: 'CONTINUE' }]);
+    const done = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [use('s1'), res('s1')] }];
+    expect(ToolSearch.withResumeTurn(done, 'CONTINUE', true, other)).toEqual([...done, { role: 'user', content: 'CONTINUE' }]);
+    expect(other.turn).toBeNull();
+  });
+
+  test('6: a held turn is released behind the tool results once nothing is unresolved, not before', () => {
+    const paused = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [use('s1')] }];
+    const held = { turn: 'CONTINUE' };
+    const results = [{ type: 'tool_result', tool_use_id: 't1', content: '{}' }];
+    // Still unresolved (another call in the response): results only.
+    const stillOpen = { content: [use('s2'), { type: 'tool_use', id: 't1', name: 'x', input: {} }] };
+    expect(ToolSearch.appendRoundMessages(paused, stillOpen, results, held).slice(-1)[0].content).toEqual(results);
+    expect(held.turn).toBe('CONTINUE');
+    // A paused response with no results keeps holding.
+    expect(ToolSearch.appendRoundMessages(paused, { content: [res('s1')] }, [], held).length).toBe(3);
+    expect(held.turn).toBe('CONTINUE');
+    // Resolved with results: the turn rides behind them as text, once.
+    const resolved = { content: [res('s1'), { type: 'tool_use', id: 't1', name: 'x', input: {} }] };
+    const out = ToolSearch.appendRoundMessages(paused, resolved, results, held);
+    expect(out[out.length - 1].content).toEqual([...results, { type: 'text', text: 'CONTINUE' }]);
+    expect(held.turn).toBeNull();
+  });
+});

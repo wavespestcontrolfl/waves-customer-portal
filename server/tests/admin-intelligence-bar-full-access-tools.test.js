@@ -68,7 +68,7 @@ const names = list => list.map(t => t.name);
 // The platform path stores the reply payload on the task.
 const repliedText = () => IbTasks.checkpoint.mock.calls.map(call => call[2].response?.response).filter(Boolean).pop();
 
-async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path = '/query', body: requestBody } = {}) {
+async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path = '/query', body: requestBody, status = 200 } = {}) {
   const app = express();
   app.use(express.json());
   app.use('/admin/intelligence-bar', intelligenceRouter);
@@ -84,7 +84,7 @@ async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'o
       body: JSON.stringify(requestBody || { prompt: 'anything', context }),
     });
     const body = await res.json();
-    expect({ status: res.status, error: body.error, stack: body.stack }).toEqual({ status: 200, error: undefined, stack: undefined });
+    expect({ status: res.status, error: body.error, stack: body.stack }).toEqual(status === 200 ? { status: 200, error: undefined, stack: undefined } : { status, error: body.error, stack: undefined });
     return { body, reply: repliedText(), requests: mockMessagesCreate.mock.calls.map(([request]) => request) };
   } finally {
     await new Promise(resolve => server.close(resolve));
@@ -265,5 +265,105 @@ describe('a resumed task whose saved search names a tool that is no longer avail
     const refusal = requests[1].messages[requests[1].messages.length - 1].content.find(b => b.type === 'tool_result');
     expect(refusal.is_error).toBe(true);
     expect(refusal.content).toMatch(/permission_denied|capability_not_loaded/);
+  });
+});
+
+// ─── Round 5: split server-tool responses and saved-task resume ─────────────
+describe('tool search: split responses and resume', () => {
+  const RESUME = '/tasks/7e1c2f7a-1111-2222-3333-deadbeef0009/resume';
+  const SESSION = '7e1c2f7a-1111-2222-3333-deadbeef0008';
+  const taskWith = (checkpoint) => ({
+    id: '7e1c2f7a-1111-2222-3333-deadbeef0009', state: 'awaiting_approval', session_id: SESSION,
+    request_key: 'resume-key-0002', runner_token: '7e1c2f7a-1111-2222-3333-deadbeef0007',
+    request: { prompt: 'look up the numbers', context: 'dashboard', pageData: {} },
+    checkpoint: JSON.parse(JSON.stringify(checkpoint)), target: null, response: null,
+  });
+  const resumeWith = (checkpoint, receipts = []) => {
+    IbTasks.claimResume.mockReset();
+    IbTasks.claimResume.mockResolvedValue({ task: taskWith(checkpoint), receipts });
+    IbTasks.get.mockReset();
+    IbTasks.get.mockResolvedValue(taskWith(checkpoint));
+  };
+  const searchUse = id => ({ type: 'server_tool_use', id, name: 'tool_search_tool_bm25', input: { query: 'review numbers' } });
+  const searchResult = (id, names = []) => ({ type: 'tool_search_tool_result', tool_use_id: id,
+    content: { type: 'tool_search_tool_search_result', tool_references: names.map(tool_name => ({ type: 'tool_reference', tool_name })) } });
+  const lastCheckpointMessages = () => IbTasks.checkpoint.mock.calls.map(call => call[2].messages).filter(Boolean).pop();
+  const blocksOf = messages => messages.flatMap(m => (Array.isArray(m.content) ? m.content : []));
+
+  beforeEach(() => { process.env.GATE_IB_TOOL_SEARCH = 'true'; delete process.env.GATE_IB_MERGE_CUSTOMERS; });
+  afterEach(() => { delete process.env.GATE_IB_TOOL_SEARCH; });
+
+  test('1: a result that arrives in the next response is saved, and the resume sends the paired result', async () => {
+    const first = [searchUse('srvtoolu_a'), { type: 'tool_use', id: 'toolu_a', name: 'offer_choices', input: { options: ['One', 'Two'] } }];
+    const second = [searchResult('srvtoolu_a'), { type: 'text', text: 'Pick one.' }];
+    await ask('owner', 'dashboard', [{ content: first, usage: {}, stop_reason: 'tool_use' }, { content: second, usage: {}, stop_reason: 'end_turn' }]);
+    const saved = lastCheckpointMessages();
+    // The saved history holds the call, its tool_result turn and the next response (with the result).
+    expect(saved[saved.length - 1]).toEqual({ role: 'assistant', content: second });
+    expect(saved[saved.length - 3]).toEqual({ role: 'assistant', content: first });
+    // Resume: the request carries the call and its paired result before the continuation turn.
+    resumeWith(saved);
+    const { requests } = await ask('owner', 'dashboard', [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path: RESUME, body: { session_id: SESSION } });
+    const sent = requests[0].messages;
+    const kinds = blocksOf(sent).map(b => `${b.type}:${b.id || b.tool_use_id || ''}`);
+    expect(kinds.indexOf('server_tool_use:srvtoolu_a')).toBeGreaterThan(-1);
+    expect(kinds.indexOf('tool_search_tool_result:srvtoolu_a')).toBeGreaterThan(kinds.indexOf('server_tool_use:srvtoolu_a'));
+    expect(sent[sent.length - 1].role).toBe('user');
+    expect(sent[sent.length - 2]).toEqual({ role: 'assistant', content: second });
+  });
+
+  test('3: a resumed task that used a deferred tool sends it still deferred, once, in the same array', async () => {
+    const history = [
+      { role: 'user', content: 'review numbers please' },
+      { role: 'assistant', content: [searchUse('srvtoolu_b'), searchResult('srvtoolu_b', ['get_review_stats']),
+        { type: 'tool_use', id: 'toolu_b', name: 'get_review_stats', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: '{}' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Here.' }] },
+    ];
+    delete process.env.GATE_IB_TOOL_SEARCH; // saved search blocks keep the shape
+    resumeWith(history);
+    const { requests } = await ask('owner', 'dashboard', [{ content: [{ type: 'text', text: 'ok' }], usage: {} }], { path: RESUME, body: { session_id: SESSION } });
+    const tools = requests[0].tools;
+    expect(tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
+    expect(tools.find(t => t.name === 'get_review_stats').defer_loading).toBe(true);
+    expect(tools).toEqual(registry.initialTools('dashboard', { role: 'admin', context: 'dashboard', fullAccess: true, toolSearch: true }).map(apiToolDefinition));
+  });
+
+  test('4: a login that lost full access cannot resume a saved search task: 409, no model call, task not claimed', async () => {
+    resumeWith([{ role: 'user', content: 'x' }, { role: 'assistant', content: [searchUse('srvtoolu_c'), searchResult('srvtoolu_c')] }]);
+    const { body, requests } = await ask('otheradmin', 'dashboard', [], { path: RESUME, body: { session_id: SESSION }, status: 409 });
+    expect(body.code).toBe('access_changed');
+    expect(body.error).toMatch(/owner-only tools/);
+    expect(requests).toHaveLength(0);
+    expect(IbTasks.claimResume).not.toHaveBeenCalled();
+  });
+
+  test('6: a saved paused turn is re-sent as is, and the receipts turn waits until the call is resolved', async () => {
+    const paused = [{ type: 'text', text: 'Searching.' }, searchUse('srvtoolu_d')];
+    resumeWith([{ role: 'user', content: 'look up the numbers' }, { role: 'assistant', content: paused }], [{ tool: 'update_customer', outcome: 'completed' }]);
+    const turns = [
+      { content: [searchResult('srvtoolu_d', ['get_review_stats']), { type: 'tool_use', id: 'toolu_d', name: 'offer_choices', input: { options: ['A', 'B'] } }], usage: {}, stop_reason: 'tool_use' },
+      { content: [{ type: 'text', text: 'Done.' }], usage: {} },
+    ];
+    const { requests } = await ask('owner', 'dashboard', turns, { path: RESUME, body: { session_id: SESSION } });
+    // Request 1 ends with the paused assistant message: no user turn after it.
+    const first = requests[0].messages;
+    expect(first[first.length - 1]).toEqual({ role: 'assistant', content: paused });
+    // Request 2: the result is in, the tool_result comes first, and the receipts turn follows as text.
+    const second = requests[1].messages;
+    const last = second[second.length - 1];
+    expect(last.role).toBe('user');
+    expect(last.content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'toolu_d' });
+    expect(last.content[last.content.length - 1].type).toBe('text');
+    expect(last.content[last.content.length - 1].text).toContain('Continue the original request');
+    expect(last.content[last.content.length - 1].text).toContain('"outcome":"completed"');
+  });
+
+  test('6: a saved history with every search resolved still gets the ordinary continuation turn', async () => {
+    resumeWith([{ role: 'user', content: 'x' }, { role: 'assistant', content: [searchUse('srvtoolu_e'), searchResult('srvtoolu_e'), { type: 'text', text: 'Nothing.' }] }]);
+    const { requests } = await ask('owner', 'dashboard', undefined, { path: RESUME, body: { session_id: SESSION } });
+    const sent = requests[0].messages;
+    expect(sent[sent.length - 1].role).toBe('user');
+    expect(JSON.stringify(sent[sent.length - 1].content)).toContain('Continue the original request');
   });
 });

@@ -57,21 +57,109 @@ function finishesTurn(response, toolUses) {
   return toolUses.length === 0 && response.stop_reason !== 'pause_turn';
 }
 
+// Server tool calls (server_tool_use) with no result block yet, across the
+// whole history. Doc (server-tools, "Mixing server tools and client tools in
+// one turn"): "Detect the state by looking for a `server_tool_use` block whose
+// `id` has no matching result block". A result pairs with its call by
+// tool_use_id, and it may sit in a LATER assistant message.
+function pendingServerToolIds(messages) {
+  const open = new Set();
+  for (const message of messages) {
+    for (const block of Array.isArray(message.content) ? message.content : []) {
+      if (block.type === 'server_tool_use') open.add(block.id);
+      else if (block.type !== 'tool_result' && block.tool_use_id) open.delete(block.tool_use_id);
+    }
+  }
+  return open;
+}
+
+// Item 1. Doc: "A `server_tool_use` block and its result block pair up by
+// `tool_use_id`, not by position: in this flow they arrive in two different
+// responses, and the `server_tool_use` block is not repeated in the second
+// one. On later requests, keep the whole exchange in your `messages` array in
+// order: ... and then the next response as another `assistant` message."
+// A terminal response (no client tool call) that carries the result of a
+// search still open in the history is therefore kept in the messages that get
+// checkpointed; otherwise the saved history holds a call with no result and a
+// resume is rejected. Any other terminal response is not stored, as before.
+function withTerminalResponse(messages, response, toolSearch) {
+  if (!toolSearch) return messages;
+  const open = pendingServerToolIds(messages);
+  const resolves = response.content.some(block => block.type === 'tool_search_tool_result' && open.has(block.tool_use_id));
+  return resolves ? [...messages, { role: 'assistant', content: response.content }] : messages;
+}
+
+// Item 6. Doc (server-tools, "The server-side loop and pause_turn"): "Pass the
+// paused response back as-is in a subsequent request"; and (mixing section)
+// "The follow-up user message must contain nothing except `tool_result`
+// blocks. A block added after the results, such as text, tells the API that
+// the assistant turn is over", which fails with a 400 for an unresolved server
+// tool call. So a saved history that ends with an assistant message holding an
+// unresolved server tool call (a paused turn) is sent unchanged, and the
+// resume's continuation turn (it carries the Confirm receipts, so it cannot be
+// dropped) is held in `held.turn` until a response has resolved the call. The
+// round after that adds it as a text block behind the client tool results
+// (text after tool_result blocks is ordinary tool use). Any other history gets
+// the continuation as a normal user message.
+function withResumeTurn(messages, turn, toolSearch, held) {
+  const last = messages[messages.length - 1];
+  if (toolSearch && last?.role === 'assistant' && pendingServerToolIds(messages).size > 0) {
+    held.turn = turn;
+    return messages;
+  }
+  return [...messages, { role: 'user', content: turn }];
+}
+
 // The messages after a round: the assistant content unchanged, then the
 // client tool results. A round with no client tool call (a paused turn) has
-// no results message; an empty user message would be rejected.
-function appendRoundMessages(messages, response, results) {
-  const assistant = { role: 'assistant', content: response.content };
-  return results.length ? [...messages, assistant, { role: 'user', content: results }] : [...messages, assistant];
+// no results message; an empty user message would be rejected. A held resume
+// turn (above) rides behind the results once nothing is left unresolved.
+function appendRoundMessages(messages, response, results, held = {}) {
+  const withAssistant = [...messages, { role: 'assistant', content: response.content }];
+  if (held.turn && results.length && pendingServerToolIds(withAssistant).size === 0) {
+    const turn = held.turn;
+    held.turn = null;
+    return [...withAssistant, { role: 'user', content: [...results, { type: 'text', text: turn }] }];
+  }
+  return results.length ? [...withAssistant, { role: 'user', content: results }] : withAssistant;
+}
+
+// Item 3. Doc (tool-search, "Continuing the conversation"): "send the same
+// `tools` array: the search tool plus every deferred definition." The tools
+// array on the search path is exactly what initialTools returns; the history's
+// tool_reference blocks expand the tools. The generic resume restoration
+// (re-adding definitions of tools the saved history used) would overwrite a
+// deferred entry with a non-deferred copy, so it is skipped here.
+function mergeRestoredTools(tools, restored, toolSearch) {
+  return toolSearch ? tools : [...new Map([...tools, ...restored].map(tool => [tool.name, tool])).values()];
+}
+
+// Item 2. A search's result can arrive in a later response than its call
+// (item 1), so the queries live in one map for the whole request, seeded from
+// the saved history on resume.
+function seedSearchQueries(resumedTask) {
+  return new Map(savedBlocks(resumedTask).filter(block => block.type === 'server_tool_use').map(block => [block.id, block.input?.query]));
+}
+
+// Item 4. A saved task whose history holds search blocks needs the tool-search
+// tools to continue. A login that no longer has full access cannot get them
+// and the API cannot expand the history, so the resume ends here with a plain
+// refusal in the same { error, code } shape claimResume uses (409), before the
+// task is claimed and before any model call.
+const ACCESS_CHANGED = 'This saved request used owner-only tools and this login no longer has them. Start the request again.';
+function resumeAccessRefusal(task, fullAccess) {
+  if (fullAccess === true || !savedBlocks(task).some(block => SEARCH_BLOCK_TYPES.has(block.type))) return null;
+  return { error: ACCESS_CHANGED, code: 'access_changed' };
 }
 
 // Feeds the gap collector from the server-side search, in the shape its
 // discovery() hook already reads for discover_capabilities: found = the
 // referenced tools, nothing found = capability_unimplemented. An error result
-// records nothing.
-function observeServerToolSearches(content, gapCollector) {
+// records nothing. `queries` maps a search call id to its query for the whole
+// request (items 1 and 2).
+function observeServerToolSearches(content, gapCollector, queries = new Map()) {
   if (!gapCollector) return;
-  const queries = new Map(content.filter(block => block.type === 'server_tool_use').map(block => [block.id, block.input?.query]));
+  for (const block of content) if (block.type === 'server_tool_use') queries.set(block.id, block.input?.query);
   for (const block of content) {
     const references = block.type === 'tool_search_tool_result' ? block.content?.tool_references : null;
     if (!Array.isArray(references)) continue;
@@ -115,4 +203,4 @@ function dropMissingToolReferences(messages, tools) {
   return changed ? result : messages;
 }
 
-module.exports = { dropMissingToolReferences, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, SEARCH_LINE, DISCOVER_LINE };
+module.exports = { pendingServerToolIds, withTerminalResponse, withResumeTurn, mergeRestoredTools, seedSearchQueries, resumeAccessRefusal, dropMissingToolReferences, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, SEARCH_LINE, DISCOVER_LINE };

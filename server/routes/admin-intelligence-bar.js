@@ -3548,8 +3548,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     ];
 
     let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...req.ibResumedTask.checkpoint] : messages;
+    // A resume's continuation turn (item 6 in tool-search.js may hold it behind a paused turn).
+    const heldResumeTurn = { turn: null };
+    const searchQueries = ToolSearch.seedSearchQueries(req.ibResumedTask);
     if (req.ibResumedTask) {
-      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+      currentMessages = ToolSearch.withResumeTurn(currentMessages, `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}`, toolSearch, heldResumeTurn);
     }
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
@@ -3564,7 +3567,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
       const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
         .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
-      tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
+      tools = ToolSearch.mergeRestoredTools(tools, previouslyLoaded, toolSearch);
     }
     let finalResponse = null;
     const toolCalls = [];
@@ -3653,7 +3656,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
-      ToolSearch.observeServerToolSearches(response.content, gapCollector);
+      ToolSearch.observeServerToolSearches(response.content, gapCollector, searchQueries);
       // This message's calls that could run direct, judged before any of them
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
@@ -3664,6 +3667,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
       if (ToolSearch.finishesTurn(response, toolUses)) {
+        currentMessages = ToolSearch.withTerminalResponse(currentMessages, response, toolSearch);
         finalResponse = textBlocks.map(t => t.text).join('\n');
         // A terminal turn with neither a tool call nor usable text (a
         // thinking-only or refused reply) answers nothing — the `!finalResponse`
@@ -3917,7 +3921,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
-      currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results);
+      currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results, heldResumeTurn);
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
     // finalResponse is still null only when every round was tool_use and the
@@ -4196,6 +4200,8 @@ router.post('/tasks/:id/select-target', async (req, res, next) => {
     const task = await IbTasks.get(req.params.id, getAdminActorId(req), req.body.session_id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     if (task.state !== 'needs_information') return res.status(409).json({ error: 'This task is not awaiting a target choice' });
+    const revoked = ToolSearch.resumeAccessRefusal(task, ibFullAccess(req));
+    if (revoked) return res.status(409).json(revoked);
     const customerId = req.body.customer_id;
     if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'A valid customer is required' });
     const selectedTarget = { customer_id: customerId };
@@ -4216,6 +4222,9 @@ router.post('/tasks/:id/resume', async (req, res, next) => {
   if (!gateEnvValue('GATE_IB_PLATFORM')) return res.status(404).json({ error: 'Not found' });
   if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
   try {
+    const saved = await IbTasks.get(req.params.id, getAdminActorId(req), req.body.session_id);
+    const revoked = ToolSearch.resumeAccessRefusal(saved, ibFullAccess(req));
+    if (revoked) return res.status(409).json(revoked);
     const claimed = await IbTasks.claimResume(req.params.id, getAdminActorId(req), req.body.session_id);
     if (claimed.error) return res.status(claimed.code === 'not_found' ? 404 : 409).json(claimed);
     req.ibResumedTask = claimed.task;

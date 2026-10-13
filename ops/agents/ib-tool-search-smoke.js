@@ -9,8 +9,9 @@
  *
  * It builds the real full-access tools array for the dashboard page (page tools
  * eager, the API's tool search tool, every other allowed tool with
- * defer_loading), sends one non-streaming messages.create with MODELS.FLAGSHIP
- * and a fixed synthetic prompt, and prints:
+ * defer_loading), sends one non-streaming messages.create with the model the
+ * Intelligence Bar uses (INTELLIGENCE_BAR_MODEL, else MODELS.FLAGSHIP) and a
+ * fixed synthetic prompt, and prints:
  *   - success, or the API error message (a 400 means the request shape is wrong);
  *   - stop_reason and the block types in the response;
  *   - the search queries and the tool_references the search returned;
@@ -33,6 +34,15 @@ const MODELS = require('../../server/config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../../server/services/llm/anthropic-wire');
 const ActionRegistry = require('../../server/services/intelligence-bar/action-registry');
 const apiToolDefinition = require('../../server/services/intelligence-bar/tool-definition');
+
+// The model is resolved exactly as the route does (the `MODEL` constant in
+// server/routes/admin-intelligence-bar.js, not exported):
+//   const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
+function resolveModel() {
+  return process.env.INTELLIGENCE_BAR_MODEL
+    ? { model: process.env.INTELLIGENCE_BAR_MODEL, source: 'INTELLIGENCE_BAR_MODEL' }
+    : { model: MODELS.FLAGSHIP, source: 'MODELS.FLAGSHIP' };
+}
 
 const PROMPT = "Which tool would list the technicians' timesheets? Search for it and name it; do not call it.";
 
@@ -60,7 +70,7 @@ async function main() {
     console.error('ANTHROPIC_API_KEY is not set (run under `railway run`).');
     return 2;
   }
-  const model = MODELS.FLAGSHIP;
+  const { model, source } = resolveModel();
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   try {
     const response = await client.messages.create({
@@ -72,7 +82,7 @@ async function main() {
     });
     const { types, searches, references } = describeContent(response.content);
     const usage = response.usage || {};
-    console.log(`result: success (model ${model})`);
+    console.log(`result: success (model ${model}, from ${source})`);
     console.log(`stop_reason: ${response.stop_reason}`);
     console.log(`block types: ${types.join(', ')}`);
     console.log(`search queries: ${JSON.stringify(searches)}`);
