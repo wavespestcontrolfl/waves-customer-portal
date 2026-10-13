@@ -187,7 +187,9 @@ function noteFor(status, changed, given, result) {
 // inspection route: Hillsborough County AND a served town, named by Google's
 // city or by Google's ZIP. The status is re-derived the way the provider
 // derives it for an in-area address.
-function servedHillsborough(result) {
+function servedHillsborough(result, given) {
+  // An explicit non-Florida state from the operator is the provider's veto; keep it.
+  if (given.state && given.state !== DEFAULT_STATE) return result;
   if (result.status !== STATUSES.OUT_OF_SERVICE_AREA || !/^hillsborough\b/i.test(cleanText(result.county))) return result;
   const n = result.normalized || {};
   if (normalizeState(n.state) !== DEFAULT_STATE) return result;
@@ -200,7 +202,7 @@ function servedHillsborough(result) {
 }
 
 function shape(providerResult, given) {
-  const result = servedHillsborough(providerResult);
+  const result = servedHillsborough(providerResult, given);
   const n = result.normalized;
   const changed = changedParts(given, n);
   const status = result.status;
@@ -232,7 +234,6 @@ function shape(providerResult, given) {
 // model to run it first.
 const WRITE_ADDRESS_FIELDS = {
   add_customer_property: input => input,
-  update_customer_property: input => input,
   create_customer: input => input,
   correct_invoice_address: input => input,
   update_customer: input => input.updates,

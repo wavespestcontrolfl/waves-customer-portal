@@ -87,7 +87,7 @@ const OWNER_DIRECT_CONDITIONS = {
   update_lead_contact: 'lead_id alone',
   update_customer: 'only name, phone, lead source and note fields (notes only over empty notes)',
   add_customer_property: 'no label and no address field',
-  update_customer_property: 'no label and no address field',
+  update_customer_property: 'no label',
   reschedule_appointment: 'the pinned visit is ungrouped',
 };
 
@@ -124,9 +124,10 @@ function ownerGateOnCell(ownerDirect, tool) {
 //     direct; the merged policy keeps a card (a property move on a grouped
 //     visit relocates every service line sharing it; the estimate writers are
 //     money)
-//   - add_customer_property, update_customer_property: direct only with no
-//     label and no address field (#6297: address text always keeps its card),
-//     so W4's own "label it rental" request keeps its card
+//   - update_customer_property: direct only with no label, so W4's own
+//     "label it rental" request keeps its card (its schema takes no address)
+//   - add_customer_property: direct only with no label and no address field
+//     (#6297: address text always keeps its card)
 //   - update_customer: direct only for name, phone, lead source and note
 //     fields, notes only over empty notes; email, pipeline stage and (#6297)
 //     every address field keep the card (the scope named name, phone and address)
