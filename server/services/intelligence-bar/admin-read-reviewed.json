@@ -1,5 +1,5 @@
 {
-  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params declares the kind of EVERY path parameter: \"uuid\" (a record id), \"int\" (a serial id) or \"text\" (free text, up to 120 characters). Only a text parameter can spell a route segment, so only text parameters feed the committed blockedRoutes list. query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the module-scope constants declared in the same file as a followed function and referenced by it (transitively within that file), and the import statement text of each imported binding; never the content of an imported file and never anything under server/config/. freeText maps each response field that holds unrestricted text to a kind. \"note\" = text staff or customers typed about a record (notes, reasons, instructions, details): the run-time read WITHHOLDS its value (only its length is shown), because people paste passwords and links into notes. \"content\" = business-authored reference text that is the point of the read (scripts, label text, offer copy, templates): returned, and still passed through link redaction and the secret scrubber. Declaring every free-text field a response returns is a review duty.",
+  "_note": "Hand-reviewed admission list for the Intelligence Bar general admin read (owner ruling 2026-10-12). An endpoint is in the catalog ONLY when it has a row here. A row says what a person read: the handler and every function the scan followed, end to end. It carries the scan fingerprint it was reviewed against: the signals, the unresolved callees, and a hash of the handler text and of every followed function body. Any edit to that chain (including inside a named callback or helper) changes the hash and drops the endpoint from the catalog until it is reviewed again. The scan stays as a second lock: a write, an outside call, DDL, a signed-URL or credential signal, or a file response leaves a reviewed endpoint out. exclude = a reviewer keeps a route out for a reason the scan cannot see. Each row also states scope: \"customer\" (scopeParam names the parameter, in the path or the query, that carries the customer id), \"invoice\" (scopeParam carries the invoice id) or \"broad\" (lists or reads across customers). The Intelligence Bar checks a customer or invoice id against the task customer before the read; a broad read is refused inside a task for one customer. params declares the kind of EVERY path parameter: \"uuid\" (a record id), \"int\" (a serial id) or \"text\" (free text, up to 120 characters). Only a text parameter can spell a route segment, so only text parameters feed the committed blockedRoutes list. query lists the only query keys read_admin_data forwards for the endpoint (a row with no list forwards none); the generator fails the build when a listed key is not read by the handler chain. The hash also covers the module-scope constants declared in the same file as a followed function and referenced by it (transitively within that file), and the import statement text of each imported binding; never the content of an imported file and never anything under server/config/. freeText maps each response field that holds unrestricted text to a kind. \"note\" = text staff or customers typed about a record (notes, reasons, instructions, details): the run-time read WITHHOLDS its value (only its length is shown), because people paste passwords and links into notes. \"content\" = business-authored reference text that is the point of the read (scripts, label text, offer copy, templates): returned, and still passed through link redaction and the secret scrubber. A key is the RESPONSE key (what the handler returns after any alias, rename or nesting), not the table column. Declaring every free-text field a response returns is a review duty.",
   "exclude": [],
   "reviewed": [
     {
@@ -49,7 +49,7 @@
         "id": "uuid"
       },
       "freeText": {
-        "autopay_pause_reason": "note",
+        "pause_reason": "note",
         "details": "note"
       },
       "signals": [],
@@ -105,7 +105,8 @@
       "freeText": {
         "compatibility_notes": "content",
         "mixing_instructions": "content",
-        "ppe_text": "content"
+        "ppe_text": "content",
+        "pollinator_precautions": "content"
       },
       "signals": [],
       "unresolved": [],
@@ -317,7 +318,8 @@
         "service_type"
       ],
       "freeText": {
-        "notes": "content"
+        "notes": "content",
+        "checklist_items": "content"
       },
       "signals": [],
       "unresolved": [],

@@ -41,7 +41,12 @@ admin_notes, reason, instructions, details): its value is NOT read. The answer s
 note exists and how long it is; the operator reads it on the record. The match is by key name at any depth in
 that endpoint's response, before the answer is cut to size. **`content`** is business-authored reference text
 that is the point of the read (protocol scripts, product label and mixing text, offer copy, job-form templates, message
-templates): it is returned, and still passes link redaction and the secret scrubber. The reviewer owns one duty
+templates): it is returned, and still passes link redaction and the secret scrubber. A `freeText` key is the RESPONSE key, not the table column: the name
+the endpoint returns after any `select a as b`, renamed key in a `.map`, camelCase conversion or nesting
+(`autopay-state` returns `pause_reason`, though the column is `autopay_pause_reason`; a key that matches no
+response key withholds nothing). Withholding matches response keys at any depth. Check each key against the
+handler line that builds the response, and add a fixture for it in `ib-admin-read-free-text-shapes.test.js`
+(it fails when a declared key is missing from the fixture or a note value is not withheld). The reviewer owns one duty
 that no tool can prove: when a response has a free-text field, the row must declare it. An undeclared
 field is only scrubbed. Credential query keys in a link (`session`, `sid`, `nonce`, `otp`, `auth_token`,
 `ticket`, `passcode`, `password`, `pwd`, `bearer`, ...) come from the same name list as the credential
