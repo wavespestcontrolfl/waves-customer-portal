@@ -471,6 +471,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "send_autopay_setup_link": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "remove_customer_property": {
     "module": "property-tools.js",
     "domain": "customers",

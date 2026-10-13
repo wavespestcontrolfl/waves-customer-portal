@@ -2801,3 +2801,15 @@ describe('the page replays a SUCCEEDED capture as a saved-method panel; the mint
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 });
+
+describe('renderTemplate options', () => {
+  const { renderTemplate } = require('../services/appointment-card-request');
+
+  test('getTemplate options (e.g. requiredVars) pass through untouched; without them the call is exactly as before', async () => {
+    mockGetTemplate.mockClear();
+    await renderTemplate({ secure_link: 'https://wvs.link/x' }, 'autopay_setup_link', { requiredVars: ['secure_link'] });
+    expect(mockGetTemplate).toHaveBeenLastCalledWith('autopay_setup_link', { secure_link: 'https://wvs.link/x' }, {}, { requiredVars: ['secure_link'] });
+    await renderTemplate({ secure_link: 'https://wvs.link/x' }, 'autopay_setup_link');
+    expect(mockGetTemplate).toHaveBeenLastCalledWith('autopay_setup_link', { secure_link: 'https://wvs.link/x' });
+  });
+});

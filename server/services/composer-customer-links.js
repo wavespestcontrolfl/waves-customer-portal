@@ -960,7 +960,14 @@ const IDNA_DOTS_RE = /[\u3002\uFF0E\uFF61]/g;
 // space / joiners, word joiner, variation selectors, BOM): "port\u00ADal.…"
 // opens the portal too. The whole Unicode class goes, not a list of them.
 const IDNA_IGNORED_RE = /\p{Default_Ignorable_Code_Point}/gu;
-const asciiHostText = (text) => text.normalize('NFKC').replace(IDNA_IGNORED_RE, '').replace(IDNA_DOTS_RE, '.');
+// The WHATWG URL parser also drops TAB, CR and LF anywhere in its input, so
+// "port%09al.…" (and a raw tab or newline left in a host) opens the portal too;
+// removed in every decode pass, the percent-encoded forms arriving as late as
+// the last one. (Bodies are split on whitespace BEFORE the SMS checks scan a
+// token, so a RAW tab there ends the token — no client links across it; only
+// the encoded forms reach this scan inside one token.)
+const URL_DROPPED_RE = /[\t\r\n]/g;
+const asciiHostText = (text) => text.normalize('NFKC').replace(IDNA_IGNORED_RE, '').replace(URL_DROPPED_RE, '').replace(IDNA_DOTS_RE, '.');
 function scanNestedOwnedLinks(text) {
   const hostAlt = ownedPortalHosts().map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const hostRe = new RegExp(`(?<![A-Za-z0-9.-])(?:${hostAlt})(?![A-Za-z0-9-]|\\.[A-Za-z0-9-])\\.?(?::\\d+)?(?:[/?#][^\\s"'<>]*)?`, 'gi');

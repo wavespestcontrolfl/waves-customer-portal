@@ -660,6 +660,14 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(pestPrimary({ trx, technicianId: 't1', service: { id: 's2', service_type: 'Lawn Fertilization' } })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
   });
 
+  test('a proofread move is refused under the stop lock when the visit is in a grouped stop', async () => {
+    const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: { proofread: true }, techChanged: false });
+    const trx = jest.fn();
+    await expect(guard({ trx, members: [{ id: SERVICE.id, scheduled_date: '2026-08-04', window_start: '09:00', technician_id: 't1' }, { id: 'sib', scheduled_date: '2026-08-04', window_start: '10:00', technician_id: 't1' }], targets: [] }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD' });
+    expect(trx).not.toHaveBeenCalled();
+  });
+
   test('no siblings ⇒ nothing to check; a non-live sibling (customer reschedule request) refuses', async () => {
     const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
     const trx = fakeTrx();
