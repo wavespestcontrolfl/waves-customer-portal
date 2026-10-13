@@ -347,7 +347,8 @@ const SCOPE_SNAPSHOT = {
     // resend_receipt's invoice_id (or invoice_number, bound by validateRecordTarget) is the invoice record.
     // remove_saved_payment_method / correct_invoice_address carry customer_id / invoice_id (validateRecordTarget
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
-    'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address',
+    // accept_estimate carries estimate_id + customer_id (validateRecordTarget binds the estimate to that customer).
+    'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate',
     // create_customer_link carries customer_id: the link is that customer's own.
     'create_customer_link', 'send_autopay_setup_link',
     // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).

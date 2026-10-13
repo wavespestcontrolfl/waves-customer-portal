@@ -80,6 +80,7 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
@@ -87,6 +88,7 @@ beforeAll(() => {
 afterAll(() => {
   delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -171,6 +173,7 @@ const WRITE_TWO_STEP = [
   'send_autopay_setup_link',
   'remove_saved_payment_method',
   'correct_invoice_address',
+  'accept_estimate',
   'send_invoice',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
@@ -711,6 +714,19 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }],
     }],
+    // accept_estimate's preview reads the estimate, the customer, the bill and
+    // any visits booked from the estimate; it may not write without confirmed.
+    ['estimate-accept-tools', 'executeEstimateAcceptTool', 'accept_estimate', {
+      estimate_id: '00000000-0000-0000-0000-00000000e001', customer_id: '00000000-0000-0000-0000-00000000e002',
+    }, {
+      estimates: [{
+        id: '00000000-0000-0000-0000-00000000e001', token: 'acceptfixture1', status: 'sent', customer_id: '00000000-0000-0000-0000-00000000e002',
+        monthly_total: 49, onetime_total: 0, waveguard_tier: 'Bronze', updated_at: '2026-10-01T00:00:00Z',
+        estimate_data: { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] } },
+      }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Accept', last_name: 'Fixture', email: 'accept@example.com', pipeline_stage: 'lead', monthly_rate: 0 }],
+      scheduled_services: [],
+    }],
     // send_invoice reads the invoice, the hold, the payer ownership and the recipients (the route helpers
     // are spied below — their own paths are covered by intelligence-bar-invoice-actions.test.js). It writes nothing.
     ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
@@ -918,6 +934,21 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
+    // accept_estimate's card is the accept run as a dry run (rolled back in its
+    // own transaction); the page handler's own run is covered by
+    // estimate-manual-acceptance-effects.test.js. Here the tool itself must
+    // write nothing, so the dry run answers a canned effect list.
+    const acceptDryRun = toolName === 'accept_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'markEstimateAcceptedAsStaff').mockResolvedValue({
+        status: 200,
+        json: {
+          success: true, dryRun: true, alreadyAccepted: false,
+          effects: [
+            { kind: 'estimate', action: 'mark_accepted', from_status: 'sent', locks_price: true },
+            { kind: 'post_commit', plan: [{ step: 'lead_won' }] },
+          ],
+        },
+      }) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -972,6 +1003,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       invoiceActionSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
+      acceptDryRun?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {

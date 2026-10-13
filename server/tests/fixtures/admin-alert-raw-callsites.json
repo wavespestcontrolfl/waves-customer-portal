@@ -58,7 +58,7 @@
   "services/estimate-clarify-asks.js": 3,
   "services/estimate-converter.js": 5,
   "services/estimate-hot-view-alert.js": 1,
-  "services/estimate-manual-acceptance.js": 4,
+  "services/estimate-manual-acceptance.js": 0,
   "services/estimate-measurement-review.js": 1,
   "services/estimator-engine/index.js": 1,
   "services/first-application-sibling-split.js": 1,

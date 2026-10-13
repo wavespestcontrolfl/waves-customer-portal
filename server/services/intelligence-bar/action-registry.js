@@ -12,6 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
+const { ibAcceptEstimateLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive } = require('./admin-read-tools');
@@ -68,6 +69,7 @@ const MODULES = [
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
+  ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
@@ -131,6 +133,7 @@ const GATED_ACTIONS = {
   merge_customers: () => mergeCustomersEnabled(),
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
+  accept_estimate: () => ibAcceptEstimateLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
 };
@@ -234,6 +237,10 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'find_admin_reads', 'read_admin_data',
 ]);
 
+// Page-specific additions beyond a page's own domain (owner ruling 2026-10-07
+// Q5: "he accepted" is said on the Customers page and the dashboard too).
+const PAGE_EXTRA_TOOL_NAMES = Object.freeze({ customers: ['accept_estimate'], dashboard: ['accept_estimate'] });
+
 // An ordinary admin page: not the technician rail and not the dedicated
 // estimate-drafting rail, both of which keep their own narrow tool lists.
 function isOrdinaryAdminPage(context, scope) {
@@ -244,7 +251,7 @@ function isOrdinaryAdminPage(context, scope) {
 // without the discovery tool.
 function pageTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
-  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
+  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES, ...(PAGE_EXTRA_TOOL_NAMES[context] || [])]);
   // send_invoice (domain customers) also rides the Invoices / Revenue page and dashboard (owner 2026-10-07).
   if (context === 'revenue' || context === 'dashboard') common.add('send_invoice');
   // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
