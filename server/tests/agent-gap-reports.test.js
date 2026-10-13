@@ -469,6 +469,25 @@ describe('agent-gap-reports', () => {
     const MISS = { status: 'capability_unimplemented', capabilities: [] };
     const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map((id) => ({ id, domain: 'customers' })) });
 
+    test('a tool-search miss and a discover_capabilities miss for the same ask are recorded once, from discover', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'instant payout to the bank' }, MISS, { fromToolSearch: true });
+      collector.discovery({ query: 'request an instant payout' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].summary).toBe('request an instant payout');
+    });
+
+    test('with no discover_capabilities search, the tool-search miss is recorded', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'instant payout to the bank' }, MISS, { fromToolSearch: true });
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].summary).toBe('instant payout to the bank');
+    });
+
     test('records nothing unless the reply declined', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });

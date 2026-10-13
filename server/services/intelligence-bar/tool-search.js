@@ -42,7 +42,7 @@ function toolSearchWanted(req, platformEnabled, actionScope) {
 // Deterministic for the same page + login + gate state: the prompt is part of
 // the cached prefix.
 const DISCOVER_LINE = 'Use discover_capabilities to load tools from any other domain before saying a capability is unavailable.';
-const SEARCH_LINE = 'Every admin capability is available to you through the tool search tool: customers and properties, schedule and dispatch, estimates, invoices and billing, leads, texts, calls and email, inventory, reviews, dashboards and reports, SEO and content, banking and tax, and outside services. Search with a short description of what you need before saying a capability is unavailable.';
+const SEARCH_LINE = 'Every admin capability is available to you through the tool search tool: customers and properties, schedule and dispatch, estimates, invoices and billing, leads, texts, calls and email, inventory, reviews, dashboards and reports, SEO and content, banking and tax, and outside services. Search with a short description of what you need. If the search finds nothing, call discover_capabilities once before saying a capability is unavailable: it also knows owner-workflow actions that are not tools.';
 function capabilitySearchLine(toolSearch) {
   return toolSearch ? SEARCH_LINE : DISCOVER_LINE;
 }
@@ -51,6 +51,20 @@ function capabilitySearchLine(toolSearch) {
 // the loop continues with the assistant content as is.
 function finishesTurn(response, toolUses) {
   return toolUses.length === 0 && response.stop_reason !== 'pause_turn';
+}
+
+// discover_capabilities stays eager on the search path (the route to actions
+// that are not callable tools, such as owner-workflow ones). When it returns a
+// tool that is already in `tools` (a deferred definition), that tool must NOT
+// get a second, non-deferred copy: a tool name may appear once. Only names not
+// yet present are appended.
+function mergeDiscoveredTools(tools, definitions) {
+  const present = new Set(tools.map(tool => tool.name));
+  const added = [];
+  for (const definition of definitions) {
+    if (!present.has(definition.name)) { present.add(definition.name); added.push(definition); }
+  }
+  return added.length ? [...tools, ...added] : tools;
 }
 
 // The messages after a round: the assistant content unchanged, then the
@@ -78,7 +92,7 @@ function observeServerToolSearches(content, gapCollector, queries = new Map()) {
     const capabilities = references.map(reference => ActionRegistry.actions.get(reference?.tool_name)).filter(Boolean)
       .map(action => ({ id: action.id, domain: action.domain }));
     gapCollector.discovery({ query: queries.get(block.tool_use_id) },
-      { status: capabilities.length ? 'capabilities_found' : 'capability_unimplemented', capabilities });
+      { status: capabilities.length ? 'capabilities_found' : 'capability_unimplemented', capabilities }, { fromToolSearch: true });
   }
 }
 
@@ -108,4 +122,4 @@ function stripServerSearchBlocks(messages) {
   return kept;
 }
 
-module.exports = { toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, SEARCH_LINE, DISCOVER_LINE };
+module.exports = { toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };

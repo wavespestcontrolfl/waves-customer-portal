@@ -51,10 +51,11 @@ describe('round helpers', () => {
   test('the prompt line names the areas for tool search and the gap line stops naming discover_capabilities', () => {
     expect(ToolSearch.capabilitySearchLine(true)).toBe(ToolSearch.SEARCH_LINE);
     expect(ToolSearch.capabilitySearchLine(false)).toBe(ToolSearch.DISCOVER_LINE);
-    expect(ToolSearch.SEARCH_LINE).not.toContain('discover_capabilities');
+    expect(ToolSearch.SEARCH_LINE).toContain('call discover_capabilities once');
+    expect(ToolSearch.SEARCH_LINE).not.toContain(ToolSearch.DISCOVER_LINE);
     expect(gapReportPromptLine()).toContain('discover_capabilities');
-    expect(gapReportPromptLine({ toolSearch: true })).not.toContain('discover_capabilities');
     expect(gapReportPromptLine({ toolSearch: true })).toContain('tool search');
+    expect(gapReportPromptLine({ toolSearch: true })).toContain('discover_capabilities once');
   });
 });
 
@@ -68,8 +69,8 @@ describe('observeServerToolSearches feeds the gap collector', () => {
     ToolSearch.observeServerToolSearches([query('s1', 'review numbers'), found('s1', ['get_review_stats', 'not_a_tool']),
       query('s2', 'frobnicate'), found('s2', [])], collector);
     expect(collector.discovery).toHaveBeenNthCalledWith(1, { query: 'review numbers' },
-      { status: 'capabilities_found', capabilities: [{ id: 'get_review_stats', domain: 'review' }] });
-    expect(collector.discovery).toHaveBeenNthCalledWith(2, { query: 'frobnicate' }, { status: 'capability_unimplemented', capabilities: [] });
+      { status: 'capabilities_found', capabilities: [{ id: 'get_review_stats', domain: 'review' }] }, { fromToolSearch: true });
+    expect(collector.discovery).toHaveBeenNthCalledWith(2, { query: 'frobnicate' }, { status: 'capability_unimplemented', capabilities: [] }, { fromToolSearch: true });
   });
 
   test('an error result, plain text and a missing collector record nothing and do not throw', () => {
@@ -145,5 +146,20 @@ describe('stripServerSearchBlocks', () => {
     expect(JSON.stringify(messages)).toBe(before);
     expect(out[0]).toBe(plain);
     expect(out).not.toBe(messages);
+  });
+});
+
+describe('mergeDiscoveredTools', () => {
+  test('only names not yet present are appended; a deferred tool gets no second copy', () => {
+    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
+    const out = ToolSearch.mergeDiscoveredTools(tools, [{ name: 'b' }, { name: 'c' }, { name: 'c' }]);
+    expect(out).toEqual([{ name: 'a' }, { name: 'b', defer_loading: true }, { name: 'c' }]);
+    expect(tools).toEqual([{ name: 'a' }, { name: 'b', defer_loading: true }]);
+  });
+
+  test('nothing new: the same array comes back', () => {
+    const tools = [{ name: 'a' }, { name: 'b', defer_loading: true }];
+    expect(ToolSearch.mergeDiscoveredTools(tools, [{ name: 'b' }])).toBe(tools);
+    expect(ToolSearch.mergeDiscoveredTools(tools, [])).toBe(tools);
   });
 });

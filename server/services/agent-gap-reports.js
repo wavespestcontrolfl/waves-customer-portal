@@ -118,11 +118,12 @@ const PROMPT_LINE = '\nBefore you tell the operator that something they asked fo
   + 'call discover_capabilities with a short, general description of it.';
 
 const TOOL_SEARCH_PROMPT_LINE = '\nBefore you tell the operator that something they asked for cannot be done from the bar, '
-  + 'search with the tool search tool using a short, general description of it.';
+  + 'search with the tool search tool using a short, general description of it. If that finds nothing, '
+  + 'call discover_capabilities once with the same description.';
 
 // Appended to the platform prompt; empty while the kill switch is off. A
-// request on the API's tool search (GATE_IB_TOOL_SEARCH) has no
-// discover_capabilities tool, so its line names the tool search.
+// request on the API's tool search (GATE_IB_TOOL_SEARCH) names the tool search
+// first and discover_capabilities as the fallback.
 function gapReportPromptLine({ toolSearch = false } = {}) {
   if (!gapReportsEnabled()) return '';
   return toolSearch ? TOOL_SEARCH_PROMPT_LINE : PROMPT_LINE;
@@ -479,11 +480,17 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
   const refusedCases = new Map(); // registered tool -> its own unsupported-case message
   let toolBroke = false; // a genuine tool failure this request (Tool Health's, not a gap)
 
-  function discovery(input, result) {
+  // `fromToolSearch` marks a search the API's tool search ran (GATE_IB_TOOL_SEARCH).
+  // The prompt sends the model on to discover_capabilities when that search finds
+  // nothing, so one missing capability would otherwise be recorded twice, under
+  // two different query wordings. When any discover_capabilities search ran, the
+  // tool-search ones are left out of the record.
+  function discovery(input, result, { fromToolSearch = false } = {}) {
     const status = result?.status;
     if (status !== 'capability_unimplemented' && status !== 'capabilities_found') return;
     const capabilities = Array.isArray(result.capabilities) ? result.capabilities : [];
     searches.push({
+      fromToolSearch,
       query: input?.query,
       domain: input?.domain || capabilities[0]?.domain,
       closestTool: capabilities[0]?.id || null,
@@ -530,7 +537,8 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
   }
 
   function pendingSignals() {
-    const signals = searches.map((search) => ({
+    const discovered = searches.filter((search) => !search.fromToolSearch);
+    const signals = (discovered.length ? discovered : searches).map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
     }));

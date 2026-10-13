@@ -489,10 +489,11 @@ describe('full-access login with tool search', () => {
 
   test.each(['dashboard', 'customers', 'communications'])('%s: page tools eager, one search tool, everything else deferred once', (context) => {
     const list = registry.initialTools(context, search(context));
-    const pageList = registry.initialTools(context, plain(context)).filter(t => t.name !== 'discover_capabilities');
-    // Eager = exactly the plain admin page list, in its order, without the discovery tool.
+    const pageList = registry.initialTools(context, plain(context));
+    // Eager = exactly the plain admin page list, in its order, discover_capabilities included (once).
     expect(names(eagerOf(list))).toEqual(names(pageList));
-    expect(names(list)).not.toContain('discover_capabilities');
+    expect(names(list).filter(name => name === 'discover_capabilities')).toHaveLength(1);
+    expect(list.find(t => t.name === 'discover_capabilities').defer_loading).toBeUndefined();
     // Exactly one search tool, typed, never deferred, right after the eager tools.
     const searchTools = list.filter(t => t.name === 'tool_search_tool_bm25');
     expect(searchTools).toEqual([{ type: 'tool_search_tool_bm25_20251119', name: 'tool_search_tool_bm25' }]);

@@ -241,15 +241,16 @@ const TOOL_SEARCH_TOOL = Object.freeze({ type: 'tool_search_tool_bm25_20251119',
 // Owner ruling 2026-10-12 (the bar must reach everything on the owner login),
 // shaped for tool selection: Anthropic documents accuracy degrading past 30 to
 // 50 active tools, so the owner keeps exactly the page list a plain admin gets
-// (eager, no discover_capabilities), plus the API's tool search, plus every
-// other allowed tool with defer_loading true, sorted by name. Deferred tools
-// sit outside the cached prefix and a discovered one is appended inline, so
-// the cache is untouched. The deferred copies are NEW objects: the registry's
-// own definitions stay non-deferred for every other request. allowed() still
-// decides every entry (gated tools, FULL_ACCESS_TWO_STEP tools) and
-// confirmed_endpoint tools are never loaded.
+// (eager, INCLUDING discover_capabilities: it is the route to actions that are
+// not callable tools, such as owner-workflow ones), plus the API's tool search,
+// plus every other allowed tool with defer_loading true, sorted by name.
+// Deferred tools sit outside the cached prefix and a discovered one is appended
+// inline, so the cache is untouched. The deferred copies are NEW objects: the
+// registry's own definitions stay non-deferred for every other request.
+// allowed() still decides every entry (gated tools, FULL_ACCESS_TWO_STEP tools)
+// and confirmed_endpoint tools are never loaded.
 function toolSearchTools(context, scope) {
-  const eager = pageTools(context, { ...scope, fullAccess: false });
+  const eager = [DISCOVERY_TOOL, ...pageTools(context, { ...scope, fullAccess: false })];
   const eagerNames = new Set(eager.map(tool => tool.name));
   const deferred = [...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && !eagerNames.has(a.id))

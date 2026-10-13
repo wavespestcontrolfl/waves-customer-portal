@@ -92,7 +92,7 @@ async function ask(token, context, turns = [{ content: [{ type: 'text', text: 'o
 }
 
 const systemText = request => request.system.map(block => block.text).join('\n');
-const pageToolNames = context => names(registry.initialTools(context, { role: 'admin', context })).filter(name => name !== 'discover_capabilities');
+const pageToolNames = context => names(registry.initialTools(context, { role: 'admin', context }));
 
 describe('GATE_IB_TOOL_SEARCH on', () => {
   beforeEach(() => { process.env.GATE_IB_TOOL_SEARCH = 'true'; });
@@ -105,27 +105,28 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
       const expected = registry.initialTools(context, { role: 'admin', context, fullAccess: true, toolSearch: true }).map(apiToolDefinition);
       expect(tools).toEqual(expected);
       expect(names(tools.filter(t => !t.defer_loading))).toEqual([...pageToolNames(context), 'tool_search_tool_bm25']);
+      expect(names(tools).filter(name => name === 'discover_capabilities')).toHaveLength(1);
       expect(tools.filter(t => t.type === 'tool_search_tool_bm25_20251119')).toHaveLength(1);
       expect(new Set(names(tools)).size).toBe(tools.length);
       expect(tools.some(t => t.cache_control)).toBe(false);
       expect(tools.filter(t => t.defer_loading).length).toBeGreaterThan(150);
-      expect(names(tools)).not.toContain('discover_capabilities');
     }
   });
 
-  test('the system prompt names the searchable areas, not discover_capabilities, and is the same on repeat', async () => {
+  test('the system prompt names the searchable areas, keeps discover_capabilities as the fallback, and is the same on repeat', async () => {
     const first = (await ask('owner', 'dashboard')).requests[0];
     const again = (await ask('owner', 'dashboard')).requests[0];
     expect(systemText(first)).toBe(systemText(again));
     expect(systemText(first)).toContain(ToolSearch.SEARCH_LINE);
     expect(systemText(first)).toContain('banking and tax, and outside services');
-    expect(systemText(first)).not.toContain('discover_capabilities');
+    expect(systemText(first)).toContain('call discover_capabilities once');
+    expect(systemText(first)).not.toContain(ToolSearch.DISCOVER_LINE);
     expect(first.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
   test('another admin keeps the page list, discover_capabilities and the old prompt line', async () => {
     const { requests: [request] } = await ask('otheradmin', 'dashboard');
-    expect(names(request.tools)).toEqual(['discover_capabilities', ...pageToolNames('dashboard')]);
+    expect(names(request.tools)).toEqual(pageToolNames('dashboard'));
     expect(request.tools.some(t => t.defer_loading || t.type)).toBe(false);
     expect(systemText(request)).toContain(ToolSearch.DISCOVER_LINE);
   });
@@ -150,6 +151,30 @@ describe('GATE_IB_TOOL_SEARCH on', () => {
     expect(results[0].content).not.toContain('permission_denied');
     // Same tools array on the next request.
     expect(requests[1].tools).toEqual(requests[0].tools);
+  });
+
+  const discoverTurns = (query, domain) => [
+    { content: [{ type: 'tool_use', id: 'toolu_disc', name: 'discover_capabilities', input: domain ? { query, domain } : { query } }], usage: {}, stop_reason: 'tool_use' },
+    { content: [{ type: 'text', text: 'ok' }], usage: {} },
+  ];
+  const discoverResult = requests => JSON.parse(requests[1].messages[requests[1].messages.length - 1].content
+    .find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_disc').content);
+
+  test('discover_capabilities on the search path still reports an owner-workflow action, and adds no tool', async () => {
+    const { requests } = await ask('owner', 'dashboard', discoverTurns('request instant payout', 'banking'));
+    const payout = discoverResult(requests).capabilities.find(c => c.id === 'request_instant_payout');
+    expect(payout).toMatchObject({ approval: 'confirmed_endpoint', availability: 'requires_existing_owner_workflow' });
+    expect(requests[1].tools).toEqual(requests[0].tools);
+  });
+
+  test('discover_capabilities returning an already-deferred tool leaves one deferred definition and the same tools', async () => {
+    const { requests } = await ask('owner', 'dashboard', discoverTurns('review stats'));
+    expect(discoverResult(requests).capabilities.map(c => c.id)).toContain('get_review_stats');
+    const copies = requests[1].tools.filter(t => t.name === 'get_review_stats');
+    expect(copies).toHaveLength(1);
+    expect(copies[0].defer_loading).toBe(true);
+    expect(requests[1].tools).toEqual(requests[0].tools);
+    expect(new Set(names(requests[1].tools)).size).toBe(requests[1].tools.length);
   });
 
   test('a search error block does not crash the request', async () => {
@@ -193,7 +218,7 @@ describe('GATE_IB_TOOL_SEARCH off', () => {
   test('the owner gets today\'s page list with discover_capabilities, same as another admin', async () => {
     const owner = (await ask('owner', 'dashboard')).requests[0];
     const other = (await ask('otheradmin', 'dashboard')).requests[0];
-    expect(names(owner.tools)).toEqual(['discover_capabilities', ...pageToolNames('dashboard')]);
+    expect(names(owner.tools)).toEqual(pageToolNames('dashboard'));
     expect(owner.tools).toEqual(other.tools);
     expect(systemText(owner)).toContain(ToolSearch.DISCOVER_LINE);
     expect(owner.tools.some(t => t.defer_loading || t.cache_control)).toBe(false);

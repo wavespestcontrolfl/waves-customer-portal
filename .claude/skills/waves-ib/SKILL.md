@@ -32,7 +32,8 @@ which system-prompt extension applies — no page-specific endpoints.
 **Full-access exception (owner ruling 2026-10-12, `GATE_IB_TOOL_SEARCH`).**
 On the platform path (`GATE_IB_PLATFORM`) with `GATE_IB_TOOL_SEARCH` on, a
 full-access login (`ibFullAccess`, the owner) on an ordinary admin page keeps
-the page list below as its eager tools (without `discover_capabilities`), gets
+the page list below as its eager tools (`discover_capabilities` stays in it, as the
+route to owner-workflow actions that are not tools), gets
 the API's own tool search (`tool_search_tool_bm25_20251119`, no beta header),
 and every other action `allowed()` accepts (not `confirmed_endpoint`) is sent
 with `defer_loading: true`, sorted by name (`initialTools` with
