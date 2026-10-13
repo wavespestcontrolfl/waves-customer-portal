@@ -16,6 +16,8 @@
  */
 
 const { validateAddress, STATUSES } = require('../address-validation');
+const { SOUTH_HILLSBOROUGH_CITIES } = require('../../config/locations');
+const { zipToCity } = require('../../utils/zip-to-city');
 const {
   parseRawAddress, normalizeStreetLine, normalizeState, splitStreetLineUnit, splitUnitFirstLine, unitAnywhereOnLine, normalizeUnitLine,
 } = require('../../utils/address-normalizer');
@@ -30,7 +32,7 @@ const ADDRESS_TOOLS = [
   {
     name: CHECK_ADDRESS_TOOL_NAME,
     description: `Check a street address with Google (Address Validation). Returns Google's spelling of the street, the city, state, ZIP and county, whether it is inside the service area, the unit or apartment the operator gave (Google does not check it), and a plain verdict. Read only: it saves nothing and looks up no customer.
-Run it BEFORE you save or change any street address (add_customer_property, update_customer, update_customer_property, update_lead_contact, create_customer, create_appointment with an address), and whenever the operator asks whether an address or its spelling is right. Pass the address exactly as heard or typed: the street line alone, or the whole address. Add city, state or zip only when the operator gave them. Never guess a ZIP: use the zip from this tool. If status is not_attempted or api_unavailable, Google could not check it: say so and ask the operator for the ZIP.
+Run it BEFORE you save or change any street address (add_customer_property, update_customer, update_lead_contact, create_customer, correct_invoice_address), and whenever the operator asks whether an address or its spelling is right. Pass the address exactly as heard or typed: the street line alone, or the whole address. Add city, state or zip only when the operator gave them. Never guess a ZIP: use the zip from this tool. If status is not_attempted or api_unavailable, Google could not check it: say so and ask the operator for the ZIP.
 Use for: "add 100 Example Way to this customer", "is that street spelled right?", "fix the address using Google", "what ZIP is that?"`,
     input_schema: {
       type: 'object',
@@ -148,7 +150,26 @@ function noteFor(status, changed, given, result) {
   return parts.join(' ');
 }
 
-function shape(result, given) {
+// The provider's county rule knows Manatee, Sarasota and Charlotte only, so it
+// reports the six served south-Hillsborough towns as outside the service area.
+// Same exception as the call pipeline (call-recording-processor.js) and the
+// inspection route: Hillsborough County AND a served town, named by Google's
+// city or by Google's ZIP. The status is re-derived the way the provider
+// derives it for an in-area address.
+function servedHillsborough(result) {
+  if (result.status !== STATUSES.OUT_OF_SERVICE_AREA || !/^hillsborough\b/i.test(cleanText(result.county))) return result;
+  const n = result.normalized || {};
+  if (normalizeState(n.state) !== DEFAULT_STATE) return result;
+  const towns = [cleanText(n.city).toLowerCase(), cleanText(zipToCity(cleanText(n.postal_code).slice(0, 5)) || '').toLowerCase()];
+  if (!towns.some(town => town && SOUTH_HILLSBOROUGH_CITIES.includes(town))) return result;
+  let status = STATUSES.VALIDATED_ACCEPT;
+  if (result.hasUnconfirmed) status = STATUSES.CONFIRM_NEEDED;
+  else if (result.hasReplaced) status = STATUSES.CORRECTED;
+  return { ...result, status, inServiceArea: true };
+}
+
+function shape(providerResult, given) {
+  const result = servedHillsborough(providerResult);
   const n = result.normalized;
   const changed = changedParts(given, n);
   const status = result.status;

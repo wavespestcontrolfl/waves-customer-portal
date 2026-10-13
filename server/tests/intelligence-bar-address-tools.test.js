@@ -276,6 +276,38 @@ describe('check_address round 2 cases', () => {
     expect(out.unit).toBe('Apt 4');
     expect(out.changed).toEqual([]);
   });
+  describe('served south-Hillsborough towns', () => {
+    const hills = (overrides = {}) => google({
+      status: 'out_of_service_area', inServiceArea: false, county: 'Hillsborough County',
+      normalized: { street_line_1: '100 Example Way', city: 'Ruskin', state: 'FL', postal_code: '33570' },
+      ...overrides,
+    });
+    test('a served town is inside the service area', async () => {
+      validateAddress.mockResolvedValue(hills());
+      const out = await run({ address: '100 Example Way, Ruskin, FL 33570' });
+      expect(out.status).toBe('validated_accept');
+      expect(out.in_service_area).toBe(true);
+      expect(out.note).not.toMatch(/outside the service area/);
+    });
+    test('an unconfirmed part still asks for confirmation', async () => {
+      validateAddress.mockResolvedValue(hills({ hasUnconfirmed: true }));
+      expect((await run({ address: '100 Example Way, Ruskin, FL 33570' })).status).toBe('confirm_needed');
+    });
+    test('another Hillsborough city stays outside the service area', async () => {
+      validateAddress.mockResolvedValue(hills({ normalized: { street_line_1: '100 Example Way', city: 'Tampa', state: 'FL', postal_code: '33602' } }));
+      const out = await run({ address: '100 Example Way, Tampa, FL 33602' });
+      expect(out.status).toBe('out_of_service_area');
+      expect(out.in_service_area).toBe(false);
+    });
+    test('a served town name in another county stays outside', async () => {
+      validateAddress.mockResolvedValue(hills({ county: 'Polk County' }));
+      expect((await run({ address: '100 Example Way, Ruskin, FL 33570' })).status).toBe('out_of_service_area');
+    });
+  });
+  test('the tool description names only tools that accept an address', () => {
+    const text = ADDRESS_TOOLS[0].description;
+    expect(text).not.toMatch(/update_customer_property|create_appointment/);
+  });
   test('a comma-free address with no readable state says FL was assumed', async () => {
     validateAddress.mockResolvedValue(google());
     const out = await run({ address: '100 Example Way Sarasota Flordia 34236' });
