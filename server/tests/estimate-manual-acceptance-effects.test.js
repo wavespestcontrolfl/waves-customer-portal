@@ -853,6 +853,17 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.visits, e.includes])).toEqual([['Flea Package', 300, 3, ['Whole home']]]);
   });
+  test('round 43: mapped work nested under result.result.oneTime.items (and engineResult.result) is listed', async () => {
+    for (const data of [{ result: { result: { oneTime: { items: [roach] } } } }, { engineResult: { result: { oneTime: { items: [roach] } } } }]) {
+      const world = makeWorld({
+        estimateOverrides: {
+          onetime_total: null,
+          estimate_data: JSON.stringify({ recurring: { services: solo }, ...data }),
+        },
+      });
+      expect(await lineNames(world)).toEqual([['German Roach Cleanout', 350]]);
+    }
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

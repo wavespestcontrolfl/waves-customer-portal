@@ -943,9 +943,12 @@ function mappedSubContainers(doc) {
   const keep = (rows) => (Array.isArray(rows) ? rows.filter((item) => item && item.onProg !== true && item.includedOnProgram !== true) : []);
   return [oneTime.items, oneTime.specItems, nested.items, nested.specItems, result.specItems, doc.one_time?.items, doc.oneTimeItems].map(keep).filter((rows) => rows.length);
 }
+// Every persisted wrapper the card's own scan reads (result, results,
+// result.results, result.result, engineResult and its nests) is a document
+// here, so mapped work under e.g. result.result.oneTime.items is read
+// (codex #6113 r43); shared arrays dedupe by object in the collapse.
 function mappedOneTimeSources(estimateData) {
-  const { engineResult, extra } = oneTimeResultContainers(estimateData);
-  const docs = [estimateData, { result: engineResult }, ...(extra ? [{ result: extra }] : [])];
+  const docs = [estimateData, ...rawRowContainers(estimateData).filter((c) => c !== estimateData).map((c) => ({ result: c }))];
   const sourceLists = docs.flatMap(mappedSubContainers);
   const gatedIdentities = new Set(docs.flatMap((doc) => estimateOneTimeItemsFromData(doc))
     .filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
