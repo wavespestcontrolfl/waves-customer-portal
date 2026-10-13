@@ -509,11 +509,11 @@ const OUR_NUMBER = '+19415550100';
       expect(await sweepPromiseChasers()).toBe(0);
     });
 
-    test('a call whose extraction retries are exhausted is settled and rings (Codex #5019 r20 P2)', async () => {
+    test.each(['extraction_failed', 'no_transcription'])('a call whose %s retries are exhausted is settled and rings (Codex #5019 r20 P2; #6271 r51)', async (status) => {
       const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);
-      const exhausted = callRow(12, { processing_status: 'extraction_failed', extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS });
+      const exhausted = callRow(12, { processing_status: status, extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS });
       await mockConn('call_log').insert([earlier, exhausted]);
       await mockConn('call_commitments').insert(commitment);
 

@@ -846,6 +846,16 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
           .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', resolved_at: new Date(), resolution_note: supersededNote });
+        // ...and a card the callback-spam sweep auto-resolved on the OLD audio:
+        // the sweep reads the parent unlocked, so one that committed just
+        // before this swap closed a card about audio this call no longer has.
+        // Marked superseded here (rule cleared), so a later correction, keyed
+        // on the rule, never reopens it (codex #6271 r46 P2).
+        await trx('triage_items')
+          .where({ call_log_id: call.id, status: 'resolved', resolution_rule: 'callback_spam' })
+          .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+          .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
+          .update({ resolved_at: new Date(), resolution_note: supersededNote, resolution_rule: null });
       }
       return n;
     });
