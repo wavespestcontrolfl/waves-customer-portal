@@ -278,10 +278,13 @@ async function shapeResponse(response, entry, authorization) {
   const status = response.status;
   const type = String(response.headers?.get?.('content-type') || '').toLowerCase();
   const length = Number(response.headers?.get?.('content-length') || 0);
-  if (status >= 300 && status < 400) return { status, endpoint: entry.endpoint, note: 'The endpoint redirected; redirects are not followed. This is not a JSON data read.' };
+  // A redirect or a non-JSON 2xx gave no usable data: a failed read (an error
+  // with no refusal code), so /execute does not report success and the breaker
+  // counts it.
+  if (status >= 300 && status < 400) return { status, endpoint: entry.endpoint, error: 'The endpoint redirected; redirects are not followed. This is not a JSON data read.' };
   if (!type.includes('application/json')) {
     if (status >= 400) return rejected(status, entry, `The admin endpoint answered HTTP ${status}`);
-    return { status, endpoint: entry.endpoint, note: 'not a JSON data read' };
+    return { status, endpoint: entry.endpoint, error: 'The endpoint did not answer with JSON; this is not a JSON data read.' };
   }
   if (length > MAX_BODY_BYTES) return { status, endpoint: entry.endpoint, error: 'The response is too large to read. Narrow it with query filters.', code: 'response_too_large' };
   let parsed;

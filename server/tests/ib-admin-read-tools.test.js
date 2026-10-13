@@ -266,11 +266,11 @@ describe('the answer', () => {
   test('a non-JSON answer returns no body', async () => {
     global.fetch.mockResolvedValueOnce(jsonResponse(200, '<html>secret page</html>', { 'content-type': 'text/html' }));
     const result = await read({ endpoint: NO_PARAM.endpoint });
-    expect(result).toEqual({ status: 200, endpoint: NO_PARAM.endpoint, note: 'not a JSON data read' });
+    expect(result).toEqual({ status: 200, endpoint: NO_PARAM.endpoint, error: 'The endpoint did not answer with JSON; this is not a JSON data read.' });
     global.fetch.mockResolvedValueOnce(jsonResponse(200, 'a,b\n1,2', { 'content-type': 'text/csv' }));
-    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ note: 'not a JSON data read' });
+    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ error: 'The endpoint did not answer with JSON; this is not a JSON data read.' });
     global.fetch.mockResolvedValueOnce(jsonResponse(200, 'x', {}));
-    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ note: 'not a JSON data read' });
+    expect(await read({ endpoint: NO_PARAM.endpoint })).toMatchObject({ error: 'The endpoint did not answer with JSON; this is not a JSON data read.' });
   });
 
   test('a redirect is not followed', async () => {
@@ -844,6 +844,8 @@ describe('endpoint rejections and the circuit breaker', () => {
     ['a 429', () => jsonResponse(429, { error: 'slow down' })],
     ['a 408', () => jsonResponse(408, { error: 'request timeout' })],
     ['unreadable JSON', () => jsonResponse(200, '{not json')],
+    ['a non-JSON 200 page', () => jsonResponse(200, '<html>page</html>', { 'content-type': 'text/html' })],
+    ['a redirect', () => jsonResponse(302, '', { location: '/login' })],
   ])('%s stays a fault and counts against the breaker', async (_label, make) => {
     const result = await answer(make());
     expect(result.code).toBeUndefined();
