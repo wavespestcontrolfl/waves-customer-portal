@@ -353,6 +353,10 @@ describe('the customer record', () => {
   test('a source that cannot be read is listed as unread and the rest is still built', async () => {
     const record = await buildCustomerRecord(fakeConn(TABLES, { fail: ['sms_log', 'call_log'] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(record.unread).toEqual(expect.arrayContaining([{ channel: 'text', reason: 'read_failed' }, { channel: 'call', reason: 'read_failed' }]));
+    // The log names the source and the error's kind, never the error's message (it can carry query bindings).
+    const logged = require('../services/logger').warn.mock.calls.map((call) => call[0]).join(' ');
+    expect(logged).toContain('could not read text: Error');
+    expect(logged).not.toContain('sms_log down');
     expect(record.entries.some((e) => e.channel === 'email')).toBe(true);
     const noFile = await buildCustomerRecord(fakeConn(TABLES, { fail: ['customers'] }), { customerId: 'c1', serviceId: 's1', asOf: AS_OF });
     expect(noFile.unread).toEqual(expect.arrayContaining([{ channel: 'customer_file_note', reason: 'read_failed' }]));
