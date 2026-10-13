@@ -1119,9 +1119,13 @@ function claimRawTwin(rawPool, item, mappedAmount) {
   const sameScope = (e) => soldScopeSignature(e.line) === soldScopeSignature(item);
   // ...and an exact-amount twin whose STATED scope differs never outranks a
   // same-scope twin (a cross-price collision, codex #6113 r48).
+  // ...and a same-GROSS twin (a mapped net beside its raw gross, no scope
+  // on the mapped side) before any same-service row (codex #6113 r51).
+  const sameGross = (e) => grossOf(item) != null && roundCents(grossOf(e.line)) === roundCents(grossOf(item));
   const entry = rawPool.find((e) => sameService(e) && sameAmount(e) && sameScope(e))
     || rawPool.find((e) => sameService(e) && sameScope(e))
     || rawPool.find((e) => sameService(e) && sameAmount(e))
+    || rawPool.find((e) => sameService(e) && sameGross(e))
     || rawPool.find(sameService);
   if (entry) entry.used = true;
   return entry ? entry.line : null;
@@ -1163,6 +1167,7 @@ function rawWorkLine(line, amount, taxabilityMap) {
 // item whose claimed twin is gated is gated too.
 const twinIsGated = (rawPool, twin) => !!twin && rawPool.some((e) => e.line === twin && e.gated);
 const pushGated = (out, label) => { if (!out.gated.includes(label)) out.gated.push(label); };
+const pushMapped = (out, item, line) => { out.work.push(line); out.lineByItem.set(item, line); };
 function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap, out) {
   for (const item of fromOneTime) {
     const label = String(item.label || item.name || item.service || 'item');
@@ -1183,7 +1188,7 @@ function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap,
       // net is a conflict, never an override (codex #6113 r50).
       const manualZero = zeroInFirstAlias(item, ['manualFinalOneTime']);
       if (manualZero || twinScopeConflicts(item, twin) || twinTaxabilityConflicts(item, twin)) { out.conflicted.push(label); continue; }
-      out.work.push(mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
+      pushMapped(out, item, mappedWorkLine(item, label, { amount: num(twin.manualFinalOneTime), explicitTaxable: explicitTaxableOf(item, twin) }, twin, taxabilityMap));
       continue;
     }
     const mappedAmount = mappedResolvedAmount(item);
@@ -1192,7 +1197,7 @@ function mappedItemsToWork(fromOneTime, gatedIdentities, rawPool, taxabilityMap,
     if (twinIsGated(rawPool, twin)) { pushGated(out, label); continue; }
     const merged = twin ? mergeMappedTwin(item, mappedAmount, twin) : { amount: mappedAmount, explicitTaxable: (item.taxable === true || item.taxable === false) ? item.taxable : undefined };
     if (merged.verdict) { out[merged.verdict].push(label); continue; }
-    if (merged.amount > 0) out.work.push(mappedWorkLine(item, label, merged, twin, taxabilityMap));
+    if (merged.amount > 0) pushMapped(out, item, mappedWorkLine(item, label, merged, twin, taxabilityMap));
   }
 }
 function rawRowsToWork(rawPool, taxabilityMap, out) {
@@ -1219,13 +1224,27 @@ function installationMirror(pool, line, rounded) {
     return /install/.test(label) && programFamilyForService(item.service || item.name) === lineFamily;
   });
 }
+// The mapped installation copy already listed and its raw installation
+// mirror reconcile taxability like any twin (codex #6113 r51): contradictory
+// explicit booleans conflict; an explicit boolean only the raw side states
+// rides onto the listed line instead of the family default.
+function reconcileInstallationTaxability(out, item, line, taxabilityMap) {
+  const listed = out.lineByItem.get(item);
+  const rawExplicit = typeof line.installation?.taxable === 'boolean' ? line.installation.taxable : (typeof line.taxable === 'boolean' ? line.taxable : undefined);
+  if (!listed || rawExplicit === undefined) return;
+  if (typeof item.taxable === 'boolean') {
+    if (item.taxable !== rawExplicit) { out.work.splice(out.work.indexOf(listed), 1); out.conflicted.push(listed.label); }
+    return;
+  }
+  listed.taxable = commercialTaxableDefault(item.service || item.name, rawExplicit, { taxabilityMap, oneTime: true });
+}
 function installationRowsToWork(installationRows, fromOneTime, taxabilityMap, out) {
   const pool = fromOneTime.map((item) => ({ item, amount: mappedResolvedAmount(item), used: false }));
   for (const line of installationRows) {
     const amount = num(line.installation?.price);
     const rounded = Math.round(amount * 100) / 100;
     const mirror = installationMirror(pool, line, rounded);
-    if (mirror) { mirror.used = true; continue; }
+    if (mirror) { mirror.used = true; reconcileInstallationTaxability(out, mirror.item, line, taxabilityMap); continue; }
     out.work.push({
       label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
       amount: rounded,
@@ -1248,7 +1267,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null,
   const rawCollapse = collapseMirroredRows(raw.rawContainers, {
     identity: rawIdentity, amount: rawResolvedAmount, compatible: scopeCompatible, merge: mergeMirrorFacts, net: rawNetShape, label: (line) => rawLineLabel(line, 'item'),
   });
-  const out = { work: [], gated: [], comped: [], conflicted: [...mappedCollapse.conflicted, ...rawCollapse.conflicted] };
+  const out = { work: [], gated: [], comped: [], conflicted: [...mappedCollapse.conflicted, ...rawCollapse.conflicted], lineByItem: new Map() };
   const rawGated = (line) => rowIsReviewGated(line) || raw.gatedIdentities.has(rawIdentity(line));
   for (const line of rawCollapse.rows.filter(rawGated)) out.gated.push(rawLineLabel(line, 'item'));
   const rawPool = rawCollapse.rows.filter(rawRowIsOneTimeWork).map((line) => ({ line, used: false, gated: rawGated(line) }));
@@ -1261,6 +1280,12 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null,
     };
   }
   installationRowsToWork(rawCollapse.rows.filter(carriesInstallationCharge), mappedCollapse.rows, taxabilityMap, out);
+  if (out.conflicted.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${out.conflicted.join(', ')} has mirrored rows with disagreeing amounts, scope or taxability and no accepted price — verify the price and author the corrective work manually.`,
+    };
+  }
   return finishCorrectiveWork(out.work, { gated: out.gated, comped: out.comped, storedOneTime: num(estimate.onetime_total) });
 }
 

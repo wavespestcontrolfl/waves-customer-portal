@@ -923,6 +923,23 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*disagreeing/) });
   });
+  test('round 51: a raw installation taxable:false rides onto its silent mapped copy (no tax note); contradictory explicit booleans refuse', async () => {
+    const recurring = (taxable) => ({ service: 'termite_bait', label: 'Termite Bait Stations', monthly: 50, visitsPerYear: 4, installation: { price: 800, taxable } });
+    const mapped = (extra = {}) => ({ service: 'termite_bait', name: 'Termite Bait Installation', price: 800, ...extra });
+    const silent = rawOnly([recurring(false)], { result: { oneTime: { items: [mapped()] }, lineItems: [recurring(false)] } });
+    const { effects } = await markEstimateManuallyAccepted(base(silent, fakeConverter(silent), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.taxable])).toEqual([['Termite Bait Installation', 800, undefined]]);
+    const contradicting = rawOnly([recurring(false)], { result: { oneTime: { items: [mapped({ taxable: true })] }, lineItems: [recurring(false)] } });
+    await expect(markEstimateManuallyAccepted(base(contradicting, fakeConverter(contradicting), { dryRun: true })))
+      .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Termite Bait Installation.*disagreeing/) });
+  });
+  test('round 51: a mapped net with no scope ($80 from $100) and a Garage net ($70 from $90) meet reversed raw gross twins by gross, not by the first same-service row', async () => {
+    const mapped = (price, net, detail) => ({ service: 'bed_bug', name: 'Bed Bug Treatment', price, amountAfterDiscount: net, ...(detail ? { detail } : {}) });
+    const raw = (price, detail) => ({ service: 'bed_bug', label: 'Bed Bug Treatment', price, ...(detail ? { detail } : {}), billingCadence: 'one_time' });
+    const world = rawOnly([raw(90, 'Garage'), raw(100)], { result: { oneTime: { items: [mapped(100, 80), mapped(90, 70, 'Garage')] }, lineItems: [raw(90, 'Garage'), raw(100)] } });
+    const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.amount, e.includes])).toEqual([[80, undefined], [70, ['Garage']]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
