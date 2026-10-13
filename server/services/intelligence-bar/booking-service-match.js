@@ -20,9 +20,12 @@
 //   4. Generic words (a, the, service, treatment, visit, job, appointment,
 //      for, at, today ...) are ignored on both sides.
 //   5. Several rows fit: return them as choices. One row fits: it resolves
-//      unless the row's name carries a cadence the operator did not say
-//      ("pest control" must not become the one-time service, "lawn care"
-//      not the bi-monthly one); then the call returns nothing.
+//      unless the service's FULL identity carries a cadence the operator did
+//      not say ("pest control" must not become the one-time service, "a lawn
+//      care treatment" not the bi-monthly one); then the call returns
+//      nothing. The identity is the union of the cadence words in the name,
+//      in the short name and in the services.frequency column, whichever
+//      alias the operator's words matched.
 //
 // "Defining" words are found from the catalog by the fit itself, with no list:
 // a word the operator said that a row lacks puts that row out, and the rows
@@ -61,6 +64,7 @@ const CADENCE_PATTERNS = [
 // Long cadence words a dictation may misspell by one letter ("quartely").
 const MISSPELLABLE_CADENCE = ['quarterly', 'bimonthly', 'biweekly', 'semiannual', 'annually'];
 
+const ONE_TIME_CADENCE = 'cad:onetime';
 const isCadence = (token) => token.startsWith('cad:');
 
 function repairCadenceSpelling(text) {
@@ -127,6 +131,20 @@ function rowUnsaid(searchTokens, row) {
   return fits.length ? fits.reduce((best, words) => (words.length < best.length ? words : best)) : null;
 }
 
+// The cadences a service is sold at: the cadence words of its name and short
+// name, plus the services.frequency column ("quarterly", "every_6_weeks").
+// "one_time" in the column adds nothing (a slab pre-treat has no cadence to
+// omit); a One-Time in the NAME is a cadence the operator must have said.
+function identityCadences(row) {
+  const fromColumn = row.frequency ? phraseTokens(String(row.frequency).replace(/_/g, ' ')).filter((t) => t !== ONE_TIME_CADENCE) : [];
+  return new Set([row.name, row.short_name].flatMap(phraseTokens).concat(fromColumn).filter(isCadence));
+}
+
+// True when the service is sold at a cadence the operator did not say.
+function hasUnsaidCadence(searchTokens, row) {
+  return [...identityCadences(row)].some((t) => !searchTokens.includes(t));
+}
+
 // Returns { row } for one safe match, { candidates: [row, ...] } when several
 // services fit what was said, or { row: null } when none does.
 function resolveCloseCatalogService(services, serviceType) {
@@ -137,7 +155,7 @@ function resolveCloseCatalogService(services, serviceType) {
     .filter((fit) => fit.unsaid !== null)
     .sort((a, b) => a.unsaid.length - b.unsaid.length || String(a.row.name).localeCompare(String(b.row.name)));
   if (fits.length > 1) return { candidates: fits.slice(0, MAX_CANDIDATES).map((fit) => fit.row) };
-  return fits.length === 1 && !fits[0].unsaid.some(isCadence) ? { row: fits[0].row } : { row: null };
+  return fits.length === 1 && !hasUnsaidCadence(search, fits[0].row) ? { row: fits[0].row } : { row: null };
 }
 
 module.exports = { resolveCloseCatalogService, phraseTokens, MAX_CANDIDATES, MIN_FUZZY_LENGTH };

@@ -3079,7 +3079,7 @@ function bookedServiceTypeFor(booking, serviceType) {
 
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
   const services = await conn('services').where({ is_active: true })
-    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'frequency');
   const match = resolveBookingCatalogRowWithClose(Array.isArray(services) ? services : [], serviceType);
   if (match.ambiguous) {
     const names = match.ambiguous.map((r) => r.name).join(', ');

@@ -88,4 +88,38 @@ describe('resolveCloseCatalogService', () => {
   test('an empty catalog resolves nothing', () => {
     expect(resolveCloseCatalogService([], 'pre-slab termite treatment')).toEqual({ row: null });
   });
+  describe('the cadence of the FULL identity blocks a lone pick, whichever alias matched', () => {
+    const BIMONTHLY_LAWN = { id: 'svc-bl', name: 'Bi-Monthly Lawn Care Service', short_name: 'Lawn Care' };
+    const QUARTERLY_LAWN = { id: 'svc-ql', name: 'Quarterly Lawn Care Service', short_name: 'Lawn Care' };
+
+    test('a lone row whose short name hides its cadence never resolves from words that match only the short name', () => {
+      expect(resolveCloseCatalogService([BIMONTHLY_LAWN], 'a lawn care treatment')).toEqual({ row: null });
+      expect(resolveCloseCatalogService([BIMONTHLY_LAWN, SLAB], 'lawn care')).toEqual({ row: null });
+    });
+
+    test('two cadences of lawn care come back as choices', () => {
+      const result = resolveCloseCatalogService([BIMONTHLY_LAWN, QUARTERLY_LAWN], 'a lawn care treatment');
+      expect(names(result.candidates)).toEqual([BIMONTHLY_LAWN.name, QUARTERLY_LAWN.name].sort());
+    });
+
+    test('saying the cadence still resolves it, and a short name that carries the cadence behaves as before', () => {
+      expect(resolveCloseCatalogService([BIMONTHLY_LAWN], 'bi-monthly lawn care')).toEqual({ row: BIMONTHLY_LAWN });
+      const carried = { id: 'svc-q', name: 'Quarterly Pest Control Service', short_name: 'Quarterly Pest' };
+      expect(resolveCloseCatalogService([carried], 'quarterly pest')).toEqual({ row: carried });
+      expect(resolveCloseCatalogService([carried], 'pest')).toEqual({ row: null });
+    });
+
+    test('a row with no cadence anywhere still resolves, even with a one_time frequency column', () => {
+      expect(resolveCloseCatalogService([SLAB], 'pre-slab termite treatment')).toEqual({ row: SLAB });
+      const oneOff = { ...SLAB, frequency: 'one_time' };
+      expect(resolveCloseCatalogService([oneOff], 'pre-slab termite treatment')).toEqual({ row: oneOff });
+    });
+
+    test('the services.frequency column counts as identity when the name says nothing', () => {
+      const hidden = { id: 'svc-h', name: 'Rodent Bait Station Service', short_name: null, frequency: 'monthly' };
+      expect(resolveCloseCatalogService([hidden], 'rodent bait station')).toEqual({ row: null });
+      const everySix = { id: 'svc-e', name: 'Rodent Bait Station Service', short_name: null, frequency: 'every_6_weeks' };
+      expect(resolveCloseCatalogService([everySix], 'rodent bait station')).toEqual({ row: null });
+    });
+  });
 });
