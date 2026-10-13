@@ -14,6 +14,11 @@
  *     holds the access  ->  "[private link removed]". A readable content slug
  *     ("pest-control-services") and a slug under a public content path
  *     (/blog/..., /services/...) stay. Bare id fields are not URLs and stay.
+ *     Two rules do not depend on length: a link on one of the business's own
+ *     hosts (wavespestcontrol.com and subdomains, and the hosts the app builds
+ *     links with) is private when its path has any non-marketing segment, and a
+ *     relative path under a public token route (/l/<code>, /pay/<token>, ...)
+ *     is private whatever the code looks like.
  *     The same two checks cover a link with no scheme (www.example.test/pay/<token>,
  *     example.test/pay/<token>), a relative path in text (/pay/<token>,
  *     /portal/<token>) and a bare query string that carries a credential
@@ -42,6 +47,64 @@ const STORAGE_HOST_RE = /(^|\.)(amazonaws\.com|r2\.cloudflarestorage\.com|r2\.de
 const URL_IN_TEXT_RE = /https?:\/\/[^\s"'<>\\]+/gi;
 // A first path segment that marks an ordinary public content page.
 const PUBLIC_CONTENT_SEGMENTS = new Set(['blog', 'services', 'service', 'service-area', 'service-areas', 'areas', 'locations', 'about', 'contact', 'faq', 'resources']);
+// OWN-DOMAIN RULE. The business's own hosts: the literal domain (and every
+// subdomain) plus every host the app builds customer links with. The set is
+// read from the same environment values the link builders read:
+//   - server/utils/portal-url.js (the canonical builder):
+//     PUBLIC_PORTAL_URL, PORTAL_URL, CLIENT_URL, PORTAL_DOMAIN
+//   - server/services/short-url.js baseUrl(): SHORTLINK_BASE_URL
+//   - other link bases in the services and routes: ADMIN_PORTAL_URL,
+//     PORTAL_BASE_URL, PUBLIC_URL, SERVER_DOMAIN, RAILWAY_PUBLIC_DOMAIN,
+//     WAVES_SITE_URL, ASTRO_HUB_ORIGIN
+//   - the production default of all of them, portal.wavespestcontrol.com
+const OWN_DOMAIN = 'wavespestcontrol.com';
+const OWN_HOST_ENV_NAMES = Object.freeze([
+  'PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'SHORTLINK_BASE_URL', 'ADMIN_PORTAL_URL',
+  'PORTAL_BASE_URL', 'PUBLIC_URL', 'SERVER_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'WAVES_SITE_URL', 'ASTRO_HUB_ORIGIN',
+]);
+
+function hostOf(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  try { return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`).hostname.toLowerCase(); } catch { return null; }
+}
+
+// Read when a string is judged, so a changed environment value is seen at once.
+function ownHosts() {
+  const hosts = new Set([OWN_DOMAIN]);
+  for (const name of OWN_HOST_ENV_NAMES) {
+    const host = hostOf(process.env[name]);
+    if (host) hosts.add(host.replace(/^www\./, ''));
+  }
+  return hosts;
+}
+
+function isOwnHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return [...ownHosts()].some(own => host === own || host.endsWith(`.${own}`));
+}
+
+// PUBLIC-TOKEN-ROUTE RULE. First path segments under which the app serves a
+// page or redirect addressed by a code or token, whatever its length. Sources:
+//   client/src/App.jsx public routes whose param is a token or code:
+//     appointment, book, card, careers (careers/interview/:token), contract,
+//     estimate, inspection, lawn-report, pay (pay/:token, pay/statement/:token),
+//     pest-report, prep, price-change, rate, recap, receipt, report
+//     (report/:token, report/project/:token), reschedule, reservice, review,
+//     secure, service-outlines, track, visit
+//   server/index.js public mounts: /l (routes/public-shortlinks.js GET /:code,
+//     the 10-character codes, the readable invoice codes and the legacy 1-7
+//     character codes), /r (routes/referral-links.js GET /:code), /go
+//     (routes/outbound-redirect.js GET /:code), /estimate/:token (app.get),
+//     /og (routes/og-preview.js, report preview images named by report token)
+// server/tests/ib-admin-read-tools.test.js reads those two files and fails when
+// a public token route there is missing from this list.
+const PUBLIC_TOKEN_ROUTE_SEGMENTS = Object.freeze([
+  'appointment', 'book', 'card', 'careers', 'contract', 'estimate', 'go', 'inspection', 'l', 'lawn-report', 'og', 'pay',
+  'pest-report', 'prep', 'price-change', 'r', 'rate', 'recap', 'receipt', 'report', 'reschedule', 'reservice', 'review',
+  'secure', 'service-outlines', 'track', 'visit',
+]);
+const PUBLIC_TOKEN_ROUTES = new Set(PUBLIC_TOKEN_ROUTE_SEGMENTS);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_DEPTH = 40;
 
@@ -112,6 +175,8 @@ function relativeLinkVerdict(link) {
   try { url = new URL(link, 'https://relative.invalid'); } catch { return null; }
   if (carriesCredential(url.search) || carriesCredential(url.hash.replace(/^#/, ''))) return REDACTED_LINK;
   const segments = url.pathname.split('/').filter(Boolean);
+  // A route that serves a page by code or token: any non-empty segment after it is the code.
+  if (segments.length > 1 && PUBLIC_TOKEN_ROUTES.has(segments[0].toLowerCase())) return REDACTED_PRIVATE_LINK;
   const publicPage = PUBLIC_CONTENT_SEGMENTS.has((segments[0] || '').toLowerCase());
   let rest;
   try { rest = decodeURIComponent(`${url.pathname} ${url.search} ${url.hash}`); } catch { return REDACTED_PRIVATE_LINK; }
@@ -124,22 +189,39 @@ function relativeLinkVerdict(link) {
   return (rest.match(TOKEN_RUN_RE) || []).some(run => random(run, segments.findIndex(segment => segment.includes(run)))) ? REDACTED_PRIVATE_LINK : null;
 }
 
+// A link on one of the business's own hosts is private whenever its path has a
+// segment that is not ordinary public content, whatever that segment looks like
+// ("/l/abc234def5" is a short link). A marketing page ("/blog/...", "/services/...")
+// stays when it has no query string; a bare host or "/" stays.
+function isOwnPrivateLink(url) {
+  if (!isOwnHost(url.hostname)) return false;
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (!segments.length) return false;
+  return !(PUBLIC_CONTENT_SEGMENTS.has(segments[0].toLowerCase()) && !url.search);
+}
+
+// The verdict for an absolute link (href with a scheme), or null to leave it.
+function absoluteLinkVerdict(href) {
+  if (isSignedLink(href)) return REDACTED_LINK;
+  let url;
+  try { url = new URL(href); } catch { return REDACTED_LINK; }
+  return isOwnPrivateLink(url) || isPrivateLink(href) ? REDACTED_PRIVATE_LINK : null;
+}
+
 function redactString(text, state) {
   const count = (verdict) => { if (verdict === REDACTED_LINK) state.links += 1; else state.privateLinks += 1; return verdict; };
   const absolute = text.replace(URL_IN_TEXT_RE, (match) => {
     const { link, tail } = splitTail(match);
-    if (isSignedLink(link)) return count(REDACTED_LINK) + tail;
-    if (isPrivateLink(link)) return count(REDACTED_PRIVATE_LINK) + tail;
-    return match;
+    const verdict = absoluteLinkVerdict(link);
+    return verdict ? count(verdict) + tail : match;
   });
   const hosted = absolute.replace(HOST_LINK_RE, (match) => {
     const { link, tail } = splitTail(match);
     if (!/[/?#]/.test(link) && !/^www\./i.test(link)) return match;
     let candidate;
     try { candidate = new URL(`https://${link}`); } catch { return match; }
-    if (isSignedLink(candidate.href)) return count(REDACTED_LINK) + tail;
-    if (isPrivateLink(candidate.href)) return count(REDACTED_PRIVATE_LINK) + tail;
-    return match;
+    const verdict = absoluteLinkVerdict(candidate.href);
+    return verdict ? count(verdict) + tail : match;
   });
   const relative = hosted.replace(RELATIVE_LINK_RE, (match) => {
     const { link, tail } = splitTail(match);
@@ -173,5 +255,5 @@ function redactSecrets(value, state, depth = 0) {
 }
 
 module.exports = {
-  REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
+  REDACTED_LINK, REDACTED_PRIVATE_LINK, REDACTED_FIELD, PUBLIC_TOKEN_ROUTE_SEGMENTS, OWN_DOMAIN, ownHosts, isOwnHost, newState, redactSecrets, redactString, isSignedLink, isPrivateLink, looksRandom,
 };

@@ -686,3 +686,81 @@ describe('free-text path parameters', () => {
     }
   });
 });
+
+// Pre-push audit P1: the portal's own short links (10-character codes) are
+// shorter than any token-length rule. Two rules that do not look at length.
+describe('own-domain links and public token routes', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { redactString, newState, PUBLIC_TOKEN_ROUTE_SEGMENTS, ownHosts } = require('../utils/signed-link-redaction');
+  const run = (text) => { const state = newState(); return { out: redactString(text, state), removed: state.links + state.privateLinks }; };
+
+  test.each([
+    ['Pay here https://portal.wavespestcontrol.com/l/abc234def5 please', 'Pay here [private link removed] please'],
+    ['Pay here /l/abc234def5.', 'Pay here [private link removed].'],
+    ['Old code /l/k3j9x, thanks', 'Old code [private link removed], thanks'],
+    ['Readable code /l/wpc-2026-0042-0507-k3j9;', 'Readable code [private link removed];'],
+    ['Own host, short opaque segment: https://portal.wavespestcontrol.com/x/qr7.', 'Own host, short opaque segment: [private link removed].'],
+    ['[Pay](https://portal.wavespestcontrol.com/pay/ab12)', '[Pay]([private link removed])'],
+    ['[Pay](portal.wavespestcontrol.com/x/qr7)', '[Pay]([private link removed])'],
+    ['Call back via (www.wavespestcontrol.com/pay/xy9).', 'Call back via ([private link removed]).'],
+    ['Billing page https://pay.wavespestcontrol.com/a!', 'Billing page [private link removed]!'],
+    ['Marketing page with a query https://wavespestcontrol.com/blog/ants?utm=x.', 'Marketing page with a query [private link removed].'],
+    ['Referral /r/ab3, Receipt /receipt/9, Review /review/q', 'Referral [private link removed], Receipt [private link removed], Review [private link removed]'],
+  ])('%s', (text, expected) => {
+    const { out, removed } = run(text);
+    expect(out).toBe(expected);
+    expect(removed).toBeGreaterThan(0);
+  });
+
+  test.each([
+    'https://wavespestcontrol.com/',
+    'https://wavespestcontrol.com',
+    'https://www.wavespestcontrol.com',
+    'https://wavespestcontrol.com/services/pest-control',
+    'Read www.wavespestcontrol.com/blog/ants-in-the-kitchen.',
+    'https://example.test/a/b',
+    'example.test/a/b and https://notwavespestcontrol.com/a/b',
+    'The /l route and /pay page are described in the manual.',
+    'Use /l/ or /pay alone',
+    'Go to /admin/customers/list and ?page=2',
+  ])('stays: %s', (text) => {
+    expect(run(text)).toEqual({ out: text, removed: 0 });
+  });
+
+  test('the own hosts include the literal domain and the hosts the app builds links with', () => {
+    expect([...ownHosts()]).toContain('wavespestcontrol.com');
+    const before = process.env.SHORTLINK_BASE_URL;
+    process.env.SHORTLINK_BASE_URL = 'https://go.synthetic-brand.test';
+    try {
+      expect([...ownHosts()]).toContain('go.synthetic-brand.test');
+      expect(run('Short https://go.synthetic-brand.test/q9').out).toBe('Short [private link removed]');
+      expect(run('Short https://other.synthetic-brand.test/q9').out).toBe('Short https://other.synthetic-brand.test/q9');
+    } finally {
+      if (before === undefined) delete process.env.SHORTLINK_BASE_URL; else process.env.SHORTLINK_BASE_URL = before;
+    }
+  });
+
+  // The route list is derived from the code, so a new public token route
+  // fails here until it is added to PUBLIC_TOKEN_ROUTE_SEGMENTS.
+  test('every public token route in the client router and server/index.js is in the list', () => {
+    const root = path.resolve(__dirname, '..', '..');
+    const app = fs.readFileSync(path.join(root, 'client/src/App.jsx'), 'utf8');
+    const index = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
+    const first = route => route.split('/').filter(Boolean)[0];
+    const fromClient = [...app.matchAll(/path="(\/[^"]*:[A-Za-z]*(?:[Tt]oken|[Cc]ode)[A-Za-z]*[^"]*)"/g)].map(m => first(m[1]));
+    const fromServerGet = [...index.matchAll(/app\.get\(\s*'(\/[^']*:(?:token|code)[^']*)'/g)].map(m => first(m[1]));
+    const fromServerMounts = [...index.matchAll(/app\.use\(\s*'(\/[a-z][a-z-]*)',\s*require\('\.\/routes\/([a-z-]+)'\)/g)]
+      .filter(([, , file]) => /router\.get\(\s*'\/:(?:token|code)'/.test(fs.readFileSync(path.join(root, 'server/routes', `${file}.js`), 'utf8')))
+      .map(m => first(m[1]));
+    const derived = [...new Set([...fromClient, ...fromServerGet, ...fromServerMounts])].sort();
+    expect(derived.length).toBeGreaterThan(15);
+    expect(derived.filter(segment => !PUBLIC_TOKEN_ROUTE_SEGMENTS.includes(segment))).toEqual([]);
+    // The server mounts named in short-url.js / the redirect routers are there.
+    for (const segment of ['l', 'r', 'go', 'estimate', 'pay', 'report', 'review', 'receipt', 'track']) expect(PUBLIC_TOKEN_ROUTE_SEGMENTS).toContain(segment);
+    // Nothing in the list is invented: each entry is derived, or is the one hand-added preview mount.
+    const handAdded = new Set(['og']);
+    expect(PUBLIC_TOKEN_ROUTE_SEGMENTS.filter(segment => !derived.includes(segment) && !handAdded.has(segment))).toEqual([]);
+    expect(index).toContain("app.use('/og'");
+  });
+});
