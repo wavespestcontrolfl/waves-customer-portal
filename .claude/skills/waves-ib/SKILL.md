@@ -30,30 +30,43 @@ one file per context. The `context` parameter drives which tools load and
 which system-prompt extension applies — no page-specific endpoints.
 
 **Full-access exception (owner ruling 2026-10-12, `GATE_IB_TOOL_SEARCH`).**
-On the platform path (`GATE_IB_PLATFORM`) with `GATE_IB_TOOL_SEARCH` on, a
-full-access login (`ibFullAccess`, the owner) on an ordinary admin page keeps
-the page list below as its eager tools (`discover_capabilities` stays in it, as the
-route to owner-workflow actions that are not tools), gets
-the API's own tool search (`tool_search_tool_bm25_20251119`, no beta header),
-and every other action `allowed()` accepts (not `confirmed_endpoint`) is sent
-with `defer_loading: true`, sorted by name (`initialTools` with
-`scope.toolSearch`, set by `toolSearchWanted` in `tool-search.js`, never on a resumed task). Anthropic
-documents tool-selection accuracy dropping past 30 to 50 active tools, so the
-owner's active set stays page-sized. Deferred tools are outside the cached
-prefix and carry no `cache_control`. Search blocks (`server_tool_use`,
-`tool_search_tool_result`) are not `tool_use`: the loop never executes them
-and passes the assistant content back unchanged; `pause_turn` continues the
-turn. A request that continues after a card or an interruption continues on
-the ordinary tool list: `stripServerSearchBlocks` removes the saved search
-blocks when the checkpoint is loaded, and the resumed request keeps
-`discover_capabilities`. Gate off = the page list plus
-`discover_capabilities` for everyone. Other admins, technicians, the tech
-context and the `agent_estimate` rail always follow the mapping below and keep
-On this path `tools` never changes during a request: a
-`discover_capabilities` result is `tool_reference` blocks only (max 5, never mixed
-with text; the plain JSON when it also holds an owner-workflow action) and the API
-expands them (`toolResultContent`); off the path it
-still merges the found definitions at once. `discover()`. Smoke check: `ops/agents/ib-tool-search-smoke.js`.
+Other admins, technicians, the tech context and the `agent_estimate` rail
+follow the mapping below: the page list plus `discover_capabilities`, and a
+`discover_capabilities` result merges the definitions it found into `tools` at
+once. With the gate off, the owner follows the mapping too.
+
+The search path is one login and one kind of request: a full-access login
+(`ibFullAccess`, the owner) on an ordinary admin page, on the platform path
+(`GATE_IB_PLATFORM`), with `GATE_IB_TOOL_SEARCH` on, on a FRESH request. A
+resumed task (`/tasks/:id/resume`, `/tasks/:id/select-target`) always runs on
+the ordinary list. On the search path `initialTools` (with `scope.toolSearch`,
+set by `toolSearchWanted` in `tool-search.js`) keeps the page list as the eager
+tools, with `discover_capabilities` still in it as the route to owner-workflow
+actions that are not tools. It adds the API's own tool search
+(`tool_search_tool_bm25_20251119`, no beta header) and sends every other action
+`allowed()` accepts (not `confirmed_endpoint`) with `defer_loading: true`,
+sorted by name. Anthropic documents tool-selection accuracy dropping past 30 to
+50 active tools, so the owner's active set stays page-sized. Deferred tools sit
+outside the cached prefix and carry no `cache_control`.
+
+Inside one live request `tools` never changes. Search blocks
+(`server_tool_use`, `tool_search_tool_result`) are not `tool_use`: the loop
+never executes them and passes the assistant content back unchanged;
+`pause_turn` continues the turn. A `discover_capabilities` result
+(`toolResultContent`) is `tool_reference` blocks only, at most 5, never mixed
+with other content (the API rejects that with a 400), and the API expands them
+from the deferred definitions already in `tools`. When the result also holds an
+owner-workflow action, it is the plain JSON string instead.
+
+When a task continues after a card or an interruption, `stripServerSearchBlocks`
+rewrites the saved checkpoint as it is loaded: search blocks and
+`tool_reference` blocks are removed (a references-only result becomes the JSON a
+plain discover result has), and an assistant turn that held thinking blocks is
+flattened to text, calls and results included, because a rewritten turn cannot
+keep its thinking and a tool call without it. The resumed request keeps
+`discover_capabilities`, and `calledToolNames` plus the discovered-names reader
+load the tools the history called or discovered. Live shape checks:
+`ops/agents/ib-tool-search-smoke.js` (`--resume-shape`, `--discover-shape`).
 
 ## Context → Tools Mapping
 

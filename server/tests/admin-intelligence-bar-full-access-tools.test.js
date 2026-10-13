@@ -351,7 +351,7 @@ describe('a resumed task runs on the ordinary tool list', () => {
   });
 
   test('(d) a saved discover result with tool_reference blocks: references stripped, the called tool loaded once', async () => {
-    const found = 'Tools found: get_review_stats.';
+    const found = JSON.stringify({ status: 'capabilities_found', capabilities: [{ id: 'get_review_stats', availability: 'loaded' }] });
     resumeWith([
       { role: 'user', content: 'review numbers please' },
       { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_d1', name: 'discover_capabilities', input: { query: 'review stats' } }] },
@@ -367,6 +367,57 @@ describe('a resumed task runs on the ordinary tool list', () => {
     expect(discoverResult.content).toBe(found);
     expect(request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);
     expect(request.tools.find(t => t.name === 'get_review_stats').defer_loading).toBeUndefined();
+  });
+
+  test('a thinking + search + card-tool turn is flattened: no thinking, no tool_use for it, the tool still loaded, the receipts turn once', async () => {
+    const thinking = { type: 'thinking', thinking: 'plan', signature: 'sig' };
+    resumeWith([
+      { role: 'user', content: 'block that sender' },
+      { role: 'assistant', content: [thinking, searchUse('srvtoolu_t'), searchResult('srvtoolu_t', ['block_sender']), { type: 'text', text: 'Blocking it.' },
+        { type: 'tool_use', id: 'toolu_t', name: 'block_sender', input: { sender: 'a@example.test' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_t', content: '{"status":"pending_confirmation"}' }] },
+    ]);
+    const { requests } = await resume('owner');
+    const request = requests[0];
+    expectOrdinaryResume(request);
+    const blocks = blocksOf(request.messages);
+    expect(blocks.some(b => ['thinking', 'redacted_thinking', 'tool_use', 'tool_result'].includes(b.type))).toBe(false);
+    expect(JSON.stringify(request.messages)).toContain('[Called block_sender with');
+    expect(JSON.stringify(request.messages)).toContain('[Result of block_sender: ');
+    expect(JSON.stringify(request.messages)).not.toContain('toolu_t');
+    // The called tool is still restored (from the flattened line), once.
+    expect(request.tools.filter(t => t.name === 'block_sender')).toHaveLength(1);
+  });
+
+  test('interrupted after discover, before any call: the discovered tool is loaded once, eagerly', async () => {
+    resumeWith([
+      { role: 'user', content: 'review numbers' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_i', name: 'discover_capabilities', input: { query: 'review stats' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_i', content: [{ type: 'tool_reference', tool_name: 'get_review_stats' }] }] },
+    ]);
+    const { requests } = await resume('owner');
+    expectOrdinaryResume(requests[0]);
+    expect(JSON.stringify(requests[0].messages)).not.toContain('tool_reference');
+    const copies = requests[0].tools.filter(t => t.name === 'get_review_stats');
+    expect(copies).toHaveLength(1);
+    expect(copies[0].defer_loading).toBeUndefined();
+  });
+
+  test('a discovered tool the login may not use is not loaded, and calling it is refused by the existing guard', async () => {
+    resumeWith([
+      { role: 'user', content: 'resolve that issue' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_j', name: 'discover_capabilities', input: { query: 'sentry' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_j', content: [{ type: 'tool_reference', tool_name: 'resolve_sentry_issue' }] }] },
+    ]);
+    const turns = [
+      { content: [{ type: 'tool_use', id: 'toolu_j2', name: 'resolve_sentry_issue', input: { issue_short_id: 'WAVES-PORTAL-1A' } }], usage: {}, stop_reason: 'tool_use' },
+      { content: [{ type: 'text', text: 'Cannot do that.' }], usage: {} },
+    ];
+    const { requests } = await resume('otheradmin', turns);
+    expect(names(requests[0].tools)).not.toContain('resolve_sentry_issue');
+    const refusal = requests[1].messages[requests[1].messages.length - 1].content.find(b => b.type === 'tool_result' && b.tool_use_id === 'toolu_j2');
+    expect(refusal.is_error).toBe(true);
+    expect(refusal.content).toMatch(/permission_denied|capability_not_loaded/);
   });
 
   test('a login that lost full access resumes on the ordinary list, and an owner-only tool call is refused by the existing guard', async () => {

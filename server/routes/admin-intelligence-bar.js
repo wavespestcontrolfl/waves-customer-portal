@@ -3570,7 +3570,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const discoveredNames = blocks.filter(block => block.type === 'tool_result' && discoveryIds.has(block.tool_use_id))
         .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
         .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
-      const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
+      const invokedNames = ToolSearch.calledToolNames(blocks);
       const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
         .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];

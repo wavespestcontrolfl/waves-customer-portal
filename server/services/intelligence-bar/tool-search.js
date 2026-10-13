@@ -115,34 +115,85 @@ const asBlocks = content => (typeof content === 'string' ? [{ type: 'text', text
 // resume code, exactly as for a task that never searched. Never mutates its
 // input; the same array comes back when there is nothing to strip.
 //
-// An assistant turn that holds `thinking` / `redacted_thinking` blocks must go
-// back to the API unchanged, or not carry them: a signed thinking block inside
-// a modified turn is rejected (400). So every assistant message this function
-// REWRITES (blocks removed, or merged with a neighbor) also loses its thinking
-// blocks. Messages it does not touch keep theirs. User messages hold no
-// thinking blocks, so rewriting them needs no such rule.
+// THINKING. Docs (extended thinking, "Preserving thinking blocks"): "Pass every
+// `thinking` block back to the API complete and unmodified, alongside the
+// `tool_use` block it accompanied." And: "It is only strictly necessary to send
+// back thinking blocks when using tools with thinking. Otherwise you can omit
+// thinking blocks from previous turns." So an assistant message this function
+// must rewrite (it holds search blocks) AND that holds thinking blocks cannot
+// keep ANY structured tool block: removing its search blocks modifies the turn,
+// and a tool_use without its thinking is rejected too. That whole turn is
+// FLATTENED to text: its text blocks, plus one `[Called <name> with <input>]`
+// line per client tool_use; the tool_result blocks answering those calls (in
+// the following user message) become `[Result of <name>: <text>]` text blocks.
+// No thinking, no server blocks, no tool_use and no orphan tool_result remain.
+// An assistant message without thinking blocks keeps its tool_use blocks.
+// calledToolNames reads these `[Called …]` lines so a resume still loads the
+// tools the turn called.
 const isThinkingBlock = block => block?.type === 'thinking' || block?.type === 'redacted_thinking';
 const withoutThinking = content => asBlocks(content).filter(block => !isThinkingBlock(block));
+const isFlattenedTurn = message => hasSearchBlock(message) && message.content.some(isThinkingBlock);
+const clip = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
+const FLATTENED_CALL_RE = /^\[Called ([a-z0-9_]+) with /;
+
+// tool_use id -> tool name, for the client calls of every flattened turn.
+function flattenedCalls(messages) {
+  const calls = new Map();
+  for (const message of messages.filter(isFlattenedTurn)) {
+    for (const block of message.content) if (block.type === 'tool_use') calls.set(block.id, block.name);
+  }
+  return calls;
+}
+
+function flattenedTurn(content) {
+  return content.flatMap((block) => {
+    if (block.type === 'text') return [block];
+    if (block.type !== 'tool_use') return [];
+    return [{ type: 'text', text: `[Called ${block.name} with ${clip(JSON.stringify(block.input ?? {}), 500)}]` }];
+  });
+}
+
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  return (Array.isArray(content) ? content : []).map(part => (part.type === 'text' ? part.text : part.tool_name || '')).filter(Boolean).join(' ');
+}
+
+function flattenedResult(block, calls) {
+  if (block?.type !== 'tool_result' || !calls.has(block.tool_use_id)) return block;
+  const label = `${calls.get(block.tool_use_id)}${block.is_error ? ' (error)' : ''}`;
+  return { type: 'text', text: `[Result of ${label}: ${clip(resultText(block.content), 1500)}]` };
+}
 
 // A tool_result on the search path holds tool_reference blocks ONLY (never
 // mixed with other content, see toolResultContent). On a resume the references
-// cannot stay (the resumed list is the ordinary one), so the result becomes a
-// short text naming what was found, so the resumed model still knows. The
-// resume code that reads discovered names from a discover result does a
-// JSON.parse inside a try, so this text is skipped by it without throwing; the
-// tools the history CALLED are loaded from the tool_use blocks.
+// cannot stay (the resumed list is the ordinary one), so the result becomes the
+// JSON a plain discover_capabilities result has, listing what was found as
+// loaded. The resume code reads discovered tool names from exactly that shape
+// (JSON.parse of `capabilities` with availability 'loaded'), so a tool found
+// just before an interruption is still restored (when the login may use it).
 const NO_RESULT_TEXT = 'The saved result had no text.';
 function withoutReferences(block) {
   if (block?.type !== 'tool_result' || !Array.isArray(block.content) || !block.content.some(isReference)) return block;
   const rest = block.content.filter(part => !isReference(part));
   const names = block.content.filter(isReference).map(part => part.tool_name).filter(Boolean);
-  if (rest.length === 0) return { ...block, content: names.length ? `Tools found: ${names.join(', ')}.` : NO_RESULT_TEXT };
+  if (rest.length === 0) {
+    const found = { status: 'capabilities_found', capabilities: names.map(id => ({ id, availability: 'loaded' })) };
+    return { ...block, content: names.length ? JSON.stringify(found) : NO_RESULT_TEXT };
+  }
   return { ...block, content: rest.length === 1 && rest[0].type === 'text' ? rest[0].text : rest };
 }
 
-function strippedContent(message) {
-  if (hasSearchBlock(message)) return message.content.filter(block => !isSearchBlock(block) && !isThinkingBlock(block));
-  return hasReferenceResult(message) ? message.content.map(withoutReferences) : message.content;
+const answersFlattenedCall = (message, calls) => message.role === 'user' && Array.isArray(message.content)
+  && message.content.some(block => block?.type === 'tool_result' && calls.has(block.tool_use_id));
+
+function strippedContent(message, calls) {
+  if (hasSearchBlock(message)) {
+    return isFlattenedTurn(message) ? flattenedTurn(message.content) : message.content.filter(block => !isSearchBlock(block));
+  }
+  if (hasReferenceResult(message) || answersFlattenedCall(message, calls)) {
+    return message.content.map(block => flattenedResult(withoutReferences(block), calls));
+  }
+  return message.content;
 }
 
 function mergedContent(previous, content, role) {
@@ -152,15 +203,26 @@ function mergedContent(previous, content, role) {
 
 function stripServerSearchBlocks(messages) {
   if (!messages.some(needsStrip)) return messages;
+  const calls = flattenedCalls(messages);
   const kept = [];
   for (const message of messages) {
-    const content = strippedContent(message);
+    const content = strippedContent(message, calls);
     if (Array.isArray(content) && content.length === 0) continue;
     const previous = kept[kept.length - 1];
     if (previous?.role === message.role) kept[kept.length - 1] = { ...previous, content: mergedContent(previous, content, message.role) };
     else kept.push(content === message.content ? message : { ...message, content });
   }
   return kept;
+}
+
+// The names of the tools a history called, for the resume restoration: every
+// client tool_use, plus the `[Called <name> with …]` lines a flattened turn
+// left behind (so a second resume still sees them).
+function calledToolNames(blocks) {
+  const fromCalls = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
+  const fromLines = blocks.filter(block => block.type === 'text' && typeof block.text === 'string')
+    .map(block => FLATTENED_CALL_RE.exec(block.text)?.[1]).filter(Boolean);
+  return [...fromCalls, ...fromLines];
 }
 
 // A tool search (server_tool_use) that has no result yet anywhere in the
@@ -226,4 +288,4 @@ function withTurnEndingText(messages, text) {
 }
 
 module.exports = {
-  withTurnEndingText, hasPendingServerSearch, toolResultContent, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };
+  calledToolNames, withTurnEndingText, hasPendingServerSearch, toolResultContent, toolSearchWanted, capabilitySearchLine, finishesTurn, appendRoundMessages, observeServerToolSearches, stripServerSearchBlocks, mergeDiscoveredTools, SEARCH_LINE, DISCOVER_LINE };
