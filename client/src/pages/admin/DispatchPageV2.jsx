@@ -1642,8 +1642,6 @@ export default function DispatchPageV2({
           defaultCustomer={newApptDefaults?.customer || null}
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
-          defaultAddressLine1={newApptDefaults?.addressLine1 || ""}
-          defaultAddressLine2={newApptDefaults?.addressLine2 || ""}
           onClose={() => {
             setShowNewAppt(false);
             setNewApptDefaults(null);

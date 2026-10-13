@@ -80,7 +80,7 @@ describe('HeldVisitsStrip', () => {
 describe('heldVisitFormDefaults (what Book it opens the form on)', () => {
   it('a whole-hour confirmed slot: the time, the call marker and the stated address', () => {
     expect(heldVisitFormDefaults(timed)).toEqual({
-      date: '2026-10-14', windowStart: '11:00', requireTimeChoice: false, addressLine1: '12 Test Lane', addressLine2: '',
+      date: '2026-10-14', windowStart: '11:00', requireTimeChoice: false,
       internalNotes: 'Booked from a phone call. Call ID: call-1. Address stated on the call: 12 Test Lane, Bradenton, 34205.',
     });
   });
@@ -90,7 +90,8 @@ describe('heldVisitFormDefaults (what Book it opens the form on)', () => {
     expect(offHour).toMatchObject({ windowStart: undefined, requireTimeChoice: true });
     expect(offHour.internalNotes).toContain('Time agreed on the call: 2:30 PM.');
     const day = heldVisitFormDefaults({ ...dayOnly, daypart: 'morning', address: { line1: '40 Sample Rd', line2: 'Unit 4', city: 'Bradenton', zip: '34205' } });
-    expect(day).toMatchObject({ windowStart: undefined, requireTimeChoice: true, addressLine1: '40 Sample Rd', addressLine2: 'Unit 4' });
+    expect(day).toMatchObject({ windowStart: undefined, requireTimeChoice: true });
+    expect(day).not.toHaveProperty('addressLine1');
     expect(day.internalNotes).toBe('Booked from a phone call. Call ID: call-2. The caller asked for the morning. Address stated on the call: 40 Sample Rd, Unit 4, Bradenton, 34205.');
   });
 });

@@ -27,7 +27,6 @@ import {
   mosquitoSubmitGate,
   MANUAL_SERVICE_ENTRY_LABEL,
   pickAutoScheduleEstimate,
-  propertyIdForStatedAddress,
   plannedRecurringCount,
   quickAddConfirmFlags,
   quickAddConflictFromError,
@@ -1026,40 +1025,5 @@ describe('lineIsRetiredSale (codex r35 on #4786)', () => {
     // camelCase still wins when both are present and only one names the retired key.
     expect(lineIsRetiredSale({ serviceKey: 'tree_shrub_quarterly', service_key: 'tree_shrub_program', name: 'Anything', cadence: 'one_time' })).toBe(true);
     expect(lineIsRetiredSale({ service_key: 'tree_shrub_program', name: 'Bi-Monthly Tree & Shrub Care', cadence: 'bimonthly' })).toBe(false);
-  });
-});
-
-// Dispatch "Book it" on a held visit: land on the property the caller named.
-describe('propertyIdForStatedAddress', () => {
-  const properties = [
-    { id: 'p-primary', is_primary: true, address_line1: '100 Example Loop' },
-    { id: 'p-second', address_line1: '12 N Test Ln' },
-    { id: 'p-unit', address_line1: '40 Sample Rd', address_line2: 'Unit 4' },
-  ];
-  it('finds the one saved property with the same whole street, folding case, punctuation and abbreviations', () => {
-    expect(propertyIdForStatedAddress(properties, '12 North TEST Lane')).toBe('p-second');
-    expect(propertyIdForStatedAddress(properties, '100 example loop.')).toBe('p-primary');
-    expect(propertyIdForStatedAddress(properties, '40 Sample Road, Unit 4')).toBe('p-unit');
-    expect(propertyIdForStatedAddress(properties, '40 Sample Road', 'Apt 4')).toBe('p-unit');
-  });
-  it('a different street word or a different unit is another property: nothing is selected', () => {
-    expect(propertyIdForStatedAddress(properties, '12 North Pine Lane')).toBe('');
-    expect(propertyIdForStatedAddress(properties, '12 South Test Lane')).toBe('');
-    expect(propertyIdForStatedAddress(properties, '40 Sample Road, Unit 2')).toBe('');
-    expect(propertyIdForStatedAddress(properties, '40 Sample Road')).toBe('');
-  });
-  it('a bare second line is the unit: 4 is not 9', () => {
-    const bare = [{ id: 'p-a', is_primary: true, address_line1: '40 Sample Rd', address_line2: '4' }, { id: 'p-b', address_line1: '7 Other St' }];
-    expect(propertyIdForStatedAddress(bare, '40 Sample Road', '9')).toBe('');
-    expect(propertyIdForStatedAddress(bare, '40 Sample Road', '4')).toBe('p-a');
-    expect(propertyIdForStatedAddress(bare, '40 Sample Road', 'Unit 4')).toBe('p-a');
-  });
-
-  it('returns nothing for no match, two matches, or a line that is not a numbered street', () => {
-    expect(propertyIdForStatedAddress(properties, '77 Other Road')).toBe('');
-    expect(propertyIdForStatedAddress([...properties, { id: 'p-dup', address_line1: '100 Example Loop' }], '100 Example Loop')).toBe('');
-    expect(propertyIdForStatedAddress(properties, '')).toBe('');
-    expect(propertyIdForStatedAddress(properties, 'Test Lane')).toBe('');
-    expect(propertyIdForStatedAddress(properties, '100')).toBe('');
   });
 });

@@ -67,10 +67,6 @@ const PREPAY_PREVIEW = {
 };
 
 function installModalFetch({
-  // The customer's saved properties; 2+ complete rows open the property picker.
-  properties = [],
-  // The properties request fails (a 500).
-  propertiesFail = false,
   firstScheduleRequest,
   secondScheduleRequest,
   submitAddressRequest,
@@ -178,8 +174,7 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({ id: 'unexpected-later-appointment' }));
     }
     if (url.includes('/properties?context=appointment_address')) {
-      if (propertiesFail) return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
-      return Promise.resolve(jsonResponse({ properties, canChangeAppointmentAddress: properties.length > 1 }));
+      return Promise.resolve(jsonResponse({ properties: [], canChangeAppointmentAddress: false }));
     }
     if (url.includes('/schedule-source')) {
       const match = url.match(/\/admin\/estimates\/([^/?]+)\/schedule-source/);
@@ -3385,103 +3380,5 @@ describe('requireTimeChoice', () => {
     await addOneSeasonalService();
     expect(screen.queryByRole('option', { name: 'Choose a time' })).toBeNull();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
-  });
-});
-
-// Dispatch "Book it" on a held visit for a customer with several saved properties.
-describe('defaultAddressLine1 / defaultAddressLine2', () => {
-  const PROPERTIES = [
-    { id: 'prop-primary', is_primary: true, address_line1: '100 Example Loop', city: 'Bradenton', state: 'FL', zip: '34205' },
-    { id: 'prop-unit', address_line1: '40 Sample Rd', address_line2: 'Unit 4', city: 'Bradenton', state: 'FL', zip: '34205' },
-  ];
-  const book = async (address) => {
-    const { fetcher } = installModalFetch({ properties: PROPERTIES });
-    render(<CreateAppointmentModal
-      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" {...address}
-      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
-    />);
-    await addOneSeasonalService();
-    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
-    await waitFor(() => expect(submit.disabled).toBe(false));
-    fireEvent.click(submit);
-    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
-    return JSON.parse(schedulePosts(fetcher)[0][1].body);
-  };
-
-  it('books the secondary unit the caller named, not the primary', async () => {
-    const body = await book({ defaultAddressLine1: '40 Sample Road', defaultAddressLine2: 'Unit 4' });
-    expect(JSON.stringify(body)).toContain('prop-unit');
-    expect(JSON.stringify(body)).not.toContain('prop-primary');
-  });
-
-  it('keeps the usual default when no address is passed', async () => {
-    expect(JSON.stringify(await book({}))).toContain('prop-primary');
-  });
-
-  it('a stated address that matches no single saved property must be chosen before the form can be saved', async () => {
-    const { fetcher } = installModalFetch({ properties: PROPERTIES });
-    render(<CreateAppointmentModal
-      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00"
-      defaultAddressLine1="40 Sample Road" defaultAddressLine2="Unit 9"
-      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
-    />);
-    await addOneSeasonalService();
-    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
-    expect(await screen.findByText(/matches no single saved property \(40 Sample Road, Unit 9\)/)).toBeTruthy();
-    const radios = screen.getAllByRole('radio').filter((r) => r.name === 'booking-property');
-    expect(radios.some((r) => r.checked)).toBe(false);
-    await new Promise((resolve) => { setTimeout(resolve, 50); });
-    expect(submit.disabled).toBe(true);
-
-    fireEvent.click(radios.find((r) => r.value === 'prop-unit'));
-    expect(screen.queryByText(/matches no single saved property/)).toBeNull();
-    await waitFor(() => expect(submit.disabled).toBe(false));
-    fireEvent.click(submit);
-    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
-    expect(schedulePosts(fetcher)[0][1].body).toContain('prop-unit');
-  });
-
-  it('one saved property that is not the stated address: the person must confirm the saved address', async () => {
-    const { fetcher } = installModalFetch({ properties: [PROPERTIES[0]] });
-    render(<CreateAppointmentModal
-      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00"
-      defaultAddressLine1="40 Sample Road" defaultAddressLine2="Unit 4"
-      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
-    />);
-    await addOneSeasonalService();
-    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
-    expect(await screen.findByText(/\(40 Sample Road, Unit 4\) is not this customer's saved address/)).toBeTruthy();
-    await new Promise((resolve) => { setTimeout(resolve, 50); });
-    expect(submit.disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Book at the saved address' }));
-    await waitFor(() => expect(submit.disabled).toBe(false));
-    fireEvent.click(submit);
-    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
-  });
-
-  it('one saved property that IS the stated address needs no confirmation', async () => {
-    installModalFetch({ properties: [PROPERTIES[0]] });
-    render(<CreateAppointmentModal
-      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" defaultAddressLine1="100 Example Loop"
-      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
-    />);
-    await addOneSeasonalService();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
-    expect(screen.queryByText(/is not this customer's saved address/)).toBeNull();
-  });
-
-  it('a failed property load still asks for the confirmation when the call stated an address', async () => {
-    installModalFetch({ propertiesFail: true });
-    render(<CreateAppointmentModal
-      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" defaultAddressLine1="40 Sample Road"
-      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
-    />);
-    await addOneSeasonalService();
-    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
-    expect(await screen.findByRole('button', { name: 'Book at the saved address' })).toBeTruthy();
-    await new Promise((resolve) => { setTimeout(resolve, 50); });
-    expect(submit.disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Book at the saved address' }));
-    await waitFor(() => expect(submit.disabled).toBe(false));
   });
 });

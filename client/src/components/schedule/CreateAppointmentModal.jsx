@@ -573,36 +573,6 @@ export function customerPropertyCountLabel(propertyCount) {
   return `${n} properties`;
 }
 
-// The saved property a stated street line names. The WHOLE street must agree (house number
-// and every street word, with the usual suffix and direction abbreviations folded: "12 N Oak
-// Rd" is "12 North Oak Road", never "12 North Pine Road"), and so must the unit: both none,
-// or the same. Exactly one match, else '' (the usual default stands and the person chooses).
-// Dispatch "Book it" passes the address stated on the call (defaultAddressLine1).
-const STREET_WORDS = {
-  st: 'street', str: 'street', rd: 'road', dr: 'drive', ln: 'lane', ave: 'avenue', av: 'avenue', blvd: 'boulevard',
-  ct: 'court', cir: 'circle', pl: 'place', ter: 'terrace', terr: 'terrace', trl: 'trail', pkwy: 'parkway', hwy: 'highway',
-  n: 'north', s: 'south', e: 'east', w: 'west', ne: 'northeast', nw: 'northwest', se: 'southeast', sw: 'southwest',
-};
-const UNIT_RE = /(?:\b(?:apt|apartment|unit|suite|ste|lot|bldg|building)\b\.?\s*|#\s*)([a-z0-9-]+)/;
-function streetAndUnit(line1, line2 = '') {
-  const text = `${line1 || ''} ${line2 || ''}`.toLowerCase();
-  // A second line with no unit word ("4", "B") is still the unit: it is kept whole, so a
-  // bare "4" never matches a bare "9".
-  const unit = (text.match(UNIT_RE) || [])[1] || String(line2 || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const words = String(line1 || '').toLowerCase().replace(UNIT_RE, ' ').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
-  return { street: words.map((w) => STREET_WORDS[w] || w).join(' '), unit, numbered: /^\d/.test(words[0] || '') };
-}
-export function propertyIdForStatedAddress(properties = [], statedLine1 = '', statedLine2 = '') {
-  const wanted = streetAndUnit(statedLine1, statedLine2);
-  if (!wanted.numbered || wanted.street.split(' ').length < 2) return '';
-  const hits = properties.filter((p) => {
-    if (!p) return false;
-    const saved = streetAndUnit(p.address_line1, p.address_line2);
-    return saved.street === wanted.street && saved.unit === wanted.unit;
-  });
-  return hits.length === 1 ? String(hits[0].id) : '';
-}
-
 export function defaultBookingPropertyId(properties = []) {
   const primary = properties.find((p) => p && p.is_primary) || properties[0];
   return primary ? String(primary.id) : '';
@@ -1523,7 +1493,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, defaultAddressLine1 = '', defaultAddressLine2 = '', onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1634,8 +1604,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [bookingProperties, setBookingProperties] = useState([]);
   const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
-  // Set by the property load when a call's stated address names no single saved property.
-  const [addressChoiceNeeded, setAddressChoiceNeeded] = useState(false);
   const [propertyRefresh, setPropertyRefresh] = useState(0);
   // Wait for the selected customer's advisory address card before enabling
   // submit, so a slow warning cannot arrive just after booking.
@@ -1870,7 +1838,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const customerId = selectedCustomer?.id;
     setBookingProperties([]);
     setSelectedPropertyId('');
-    setAddressChoiceNeeded(false);
     if (!customerId) { setBookingPropertyState('idle'); return undefined; }
     let cancelled = false;
     setBookingPropertyState('loading');
@@ -1889,32 +1856,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // started before this list arrived was scored at the primary, and
           // the default here may be a complete SECONDARY.
           resetAddressDerivedState();
-          // A booking opened from a call lands on the property the caller named, when exactly
-          // one saved property carries that address; otherwise the usual default.
-          const named = propertyIdForStatedAddress(complete, defaultAddressLine1, defaultAddressLine2);
-          // The call stated an address and no single saved property is it: no property is
-          // preselected and the form cannot be saved until the person chooses one. Booking
-          // the primary by default would put the visit at an address the caller did not name.
-          const mustChoose = !!String(defaultAddressLine1 || '').trim() && !named;
-          setAddressChoiceNeeded(mustChoose);
-          setSelectedPropertyId(named || (mustChoose ? '' : defaultBookingPropertyId(complete)));
+          setSelectedPropertyId(defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
         } else {
-          // No picker (one saved property, or the address picker is off): the stated address
-          // is still checked. When it is not that one property, the person must say so
-          // before the form can be saved (the notice below has the button).
-          setAddressChoiceNeeded(!!String(defaultAddressLine1 || '').trim()
-            && !propertyIdForStatedAddress(all, defaultAddressLine1, defaultAddressLine2));
           setBookingPropertyState('hidden');
         }
       })
-      .catch(() => {
-        if (cancelled) return;
-        // The saved properties could not be read: a stated address cannot be checked, so the
-        // person must confirm the saved address before the form can be saved.
-        setAddressChoiceNeeded(!!String(defaultAddressLine1 || '').trim());
-        setBookingPropertyState('error');
-      });
+      .catch(() => { if (!cancelled) setBookingPropertyState('error'); });
     return () => { cancelled = true; };
   }, [selectedCustomer?.id, propertyRefresh]);
 
@@ -1932,7 +1880,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // address now would split one booking across two properties.
     if (partialCommitLocked) return false;
     setSelectedPropertyId(String(propertyId));
-    setAddressChoiceNeeded(false);
     resetAddressDerivedState();
     return true;
   };
@@ -4966,7 +4913,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
   // primary before the operator was shown the choice.
-  const canSubmit = timeChosen && !addressChoiceNeeded && canSubmitAppointments({
+  const canSubmit = timeChosen && canSubmitAppointments({
     selectedCustomer,
     services,
     bookingPropertyState,
@@ -5255,27 +5202,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               Part of this booking is already saved for this customer. Close and start a new appointment to change customers.
             </div>
           )}
-          {selectedCustomer && !propertyPickerActive && addressChoiceNeeded && (
-            <div role="status" style={{ margin: '14px 0 0', padding: 12, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, color: D.text }}>
-              <div style={{ marginBottom: 8 }}>
-                The address stated on the call ({[defaultAddressLine1, defaultAddressLine2].filter(Boolean).join(', ')}) is not this customer's saved address. This visit will be booked at the saved address. Add the property to the customer first if the visit is for another address.
-              </div>
-              <button type="button" onClick={() => setAddressChoiceNeeded(false)} style={{ ...inputStyle, width: 'auto', cursor: 'pointer', minHeight: 44 }}>
-                Book at the saved address
-              </button>
-            </div>
-          )}
           {selectedCustomer && propertyPickerActive && (
             <div role="radiogroup" aria-label="Service address" style={{ margin: '14px 0 0' }} data-testid="booking-property-picker">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                 <span style={{ ...labelStyle, fontSize: 14, marginBottom: 0 }}>Service address</span>
                 <span style={{ fontSize: 14, color: D.muted }}>{bookingProperties.length} saved</span>
               </div>
-              {addressChoiceNeeded && (
-                <div role="status" style={{ fontSize: 14, color: D.text, marginBottom: 8 }}>
-                  The address stated on the call matches no single saved property ({[defaultAddressLine1, defaultAddressLine2].filter(Boolean).join(', ')}). Choose the property for this visit.
-                </div>
-              )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {bookingProperties.map((property) => {
                   const selected = String(property.id) === String(selectedPropertyId);
