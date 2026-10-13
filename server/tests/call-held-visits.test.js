@@ -311,3 +311,10 @@ describe('the requested part of the day', () => {
     expect(row({}).daypart).toBeNull();
   });
 });
+
+describe('the stated unit', () => {
+  it('rides on the row address', () => {
+    const [row] = run([call({ ai_extraction_enriched: dayOnly({ property: { service_address: { street_line_1: '40 Sample Rd', street_line_2: 'Unit 4', city: 'Bradenton', postal_code: '34205' } } }) })]);
+    expect(row.address).toEqual({ line1: '40 Sample Rd', line2: 'Unit 4', city: 'Bradenton', zip: '34205' });
+  });
+});

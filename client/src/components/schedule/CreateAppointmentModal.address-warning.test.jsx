@@ -67,6 +67,8 @@ const PREPAY_PREVIEW = {
 };
 
 function installModalFetch({
+  // The customer's saved properties; 2+ complete rows open the property picker.
+  properties = [],
   firstScheduleRequest,
   secondScheduleRequest,
   submitAddressRequest,
@@ -174,7 +176,7 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({ id: 'unexpected-later-appointment' }));
     }
     if (url.includes('/properties?context=appointment_address')) {
-      return Promise.resolve(jsonResponse({ properties: [], canChangeAppointmentAddress: false }));
+      return Promise.resolve(jsonResponse({ properties, canChangeAppointmentAddress: properties.length > 1 }));
     }
     if (url.includes('/schedule-source')) {
       const match = url.match(/\/admin\/estimates\/([^/?]+)\/schedule-source/);
@@ -3380,5 +3382,38 @@ describe('requireTimeChoice', () => {
     await addOneSeasonalService();
     expect(screen.queryByRole('option', { name: 'Choose a time' })).toBeNull();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(false));
+  });
+});
+
+// Dispatch "Book it" on a held visit for a customer with several saved properties.
+describe('defaultAddressLine1 / defaultAddressLine2', () => {
+  const PROPERTIES = [
+    { id: 'prop-primary', is_primary: true, address_line1: '100 Example Loop', city: 'Bradenton', state: 'FL', zip: '34205' },
+    { id: 'prop-unit', address_line1: '40 Sample Rd', address_line2: 'Unit 4', city: 'Bradenton', state: 'FL', zip: '34205' },
+  ];
+  const book = async (address) => {
+    const { fetcher } = installModalFetch({ properties: PROPERTIES });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" {...address}
+      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />);
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    return JSON.parse(schedulePosts(fetcher)[0][1].body);
+  };
+
+  it('books the secondary unit the caller named, not the primary', async () => {
+    const body = await book({ defaultAddressLine1: '40 Sample Road', defaultAddressLine2: 'Unit 4' });
+    expect(JSON.stringify(body)).toContain('prop-unit');
+    expect(JSON.stringify(body)).not.toContain('prop-primary');
+  });
+
+  it('keeps the primary when the stated unit is another one, and when no address is passed', async () => {
+    expect(JSON.stringify(await book({ defaultAddressLine1: '40 Sample Road', defaultAddressLine2: 'Unit 9' }))).toContain('prop-primary');
+    cleanup();
+    expect(JSON.stringify(await book({}))).toContain('prop-primary');
   });
 });

@@ -1521,7 +1521,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, defaultAddressLine1 = '', onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', requireTimeChoice = false, defaultAddressLine1 = '', defaultAddressLine2 = '', onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1886,7 +1886,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           resetAddressDerivedState();
           // A booking opened from a call lands on the property the caller named, when exactly
           // one saved property carries that address; otherwise the usual default.
-          setSelectedPropertyId(propertyIdForStatedAddress(complete, defaultAddressLine1) || defaultBookingPropertyId(complete));
+          setSelectedPropertyId(propertyIdForStatedAddress(complete, defaultAddressLine1, defaultAddressLine2) || defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
         } else {
           setBookingPropertyState('hidden');

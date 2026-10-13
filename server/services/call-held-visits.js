@@ -159,7 +159,7 @@ function heldRow({ call, extraction, kind, minutes }, { dateET, customerNames })
     time_label: timeLabel(minutes),
     caller_name: (call.customer_id && customerNames.get(call.customer_id)) || spokenName || 'Unknown caller',
     phone: externalPhone(call),
-    address: { line1: svc.street_line_1 || null, city: svc.city || null, zip: svc.postal_code || null },
+    address: { line1: svc.street_line_1 || null, line2: svc.street_line_2 || null, city: svc.city || null, zip: svc.postal_code || null },
     service: request.specific_service_name || request.primary_service_category || null,
     call_at: new Date(call.created_at).toISOString(),
     customer_id: call.customer_id || null,

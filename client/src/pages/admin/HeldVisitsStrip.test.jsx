@@ -40,6 +40,11 @@ describe('HeldVisitsStrip', () => {
     expect(screen.getByText('From the call: Caller can meet after 10:30.')).toBeInTheDocument();
   });
 
+  it('shows the unit the caller stated', () => {
+    render(<HeldVisitsStrip heldVisits={[{ ...timed, address: { line1: '40 Sample Rd', line2: 'Unit 4', city: 'Bradenton', zip: '34205' } }]} onBook={() => {}} />);
+    expect(screen.getByText('40 Sample Rd, Unit 4, Bradenton · General Pest Control')).toBeInTheDocument();
+  });
+
   it('never calls a day-only row a promise', () => {
     render(<HeldVisitsStrip heldVisits={[dayOnly]} onBook={() => {}} />);
     expect(screen.getByText('NOT CONFIRMED · not booked')).toBeInTheDocument();

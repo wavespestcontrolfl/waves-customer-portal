@@ -40,7 +40,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
       </h2>
       <ul className="divide-y divide-zinc-200">
         {heldVisits.map((row) => {
-          const place = [row.address?.line1, row.address?.city].filter(Boolean).join(', ');
+          const place = [row.address?.line1, row.address?.line2, row.address?.city].filter(Boolean).join(', ');
           return (
             <li key={row.call_log_id} className="px-4 py-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div className="min-w-0 text-14 text-ink-primary">

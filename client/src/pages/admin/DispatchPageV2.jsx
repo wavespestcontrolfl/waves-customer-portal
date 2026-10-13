@@ -918,7 +918,7 @@ export default function DispatchPageV2({
     // The call marker makes the new visit carry the call under any customer,
     // so the held row (and the booking-miss bell) clears once it is booked.
     // An agreed time the form cannot take stays visible in the same notes.
-    const stated = [row.address?.line1, row.address?.city, row.address?.zip].filter(Boolean).join(", ");
+    const stated = [row.address?.line1, row.address?.line2, row.address?.city, row.address?.zip].filter(Boolean).join(", ");
     const internalNotes = [
       `Booked from a phone call. Call ID: ${row.call_log_id}.`,
       onTheHour || !row.time_label ? "" : `Time agreed on the call: ${row.time_label}. Visits start on the hour: agree a whole-hour time with the caller.`,
@@ -928,7 +928,7 @@ export default function DispatchPageV2({
     // No agreed whole-hour time (a day-only row, or 2:30 PM): the form opens
     // with no time selected and cannot be saved until the person picks one.
     // A customer with several saved properties: the form lands on the one the caller named.
-    setNewApptDefaults({ date: row.date_et, windowStart, customer, internalNotes, requireTimeChoice: !onTheHour, addressLine1: row.address?.line1 || "" });
+    setNewApptDefaults({ date: row.date_et, windowStart, customer, internalNotes, requireTimeChoice: !onTheHour, addressLine1: row.address?.line1 || "", addressLine2: row.address?.line2 || "" });
     setShowNewAppt(true);
   }, []);
 
@@ -1660,6 +1660,7 @@ export default function DispatchPageV2({
           defaultInternalNotes={newApptDefaults?.internalNotes || ""}
           requireTimeChoice={newApptDefaults?.requireTimeChoice === true}
           defaultAddressLine1={newApptDefaults?.addressLine1 || ""}
+          defaultAddressLine2={newApptDefaults?.addressLine2 || ""}
           onClose={() => {
             setShowNewAppt(false);
             setNewApptDefaults(null);
