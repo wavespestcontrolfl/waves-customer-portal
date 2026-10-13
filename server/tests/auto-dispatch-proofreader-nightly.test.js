@@ -283,11 +283,11 @@ describe('raiseNotices', () => {
     expect(body).toBe('Move from Oct 20 to Oct 22 held; the record says “never come on Thursdays”');
     expect(opts).toMatchObject({
       bell: true, dedupeKey: 'auto-dispatch-proofreader:s1:2026-10-20:09:00:t1', link: '/admin/dispatch?tab=schedule&date=2026-10-20&appointment=s1',
-      metadata: { scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-10-20', windowStart: '09:00', technicianId: 't1', kind: 'model_unsure', proposedDate: '2026-10-22' },
+      metadata: { scheduledServiceId: 's1', customerId: 'c1', scheduledDate: '2026-10-20', windowStart: '09:00', technicianId: 't1', kind: 'model_unsure', proposedDate: '2026-10-22', proposedWindowStart: '13:00', proposedTechnicianId: 't2' },
     });
     // Written once: a later run that is still unsure must not reopen a notice a person closed.
     expect(opts.refreshOnDedupe).toBeUndefined();
-    expect(opts.detail).toContain('from Tuesday Oct 20, 09:00-11:00 to Thursday Oct 22, 13:00-15:00.');
+    expect(opts.detail).toContain('from Tuesday Oct 20, 09:00-11:00, technician Alex to Thursday Oct 22, 13:00-15:00, technician Sam.');
     expect(opts.detail).toContain('The check said: The note may be about another service.');
     expect(opts.detail).toContain('(text, customer, 2026-09-01T10:00:00-04:00): “never come on Thursdays”');
     expect(opts.detail).toContain('mark this done and the visit stays');
@@ -304,6 +304,16 @@ describe('raiseNotices', () => {
     await nightly.checkMove({ service: SERVICE, best: { ...BEST, date: '2026-10-20' }, run }, { conn: conn(), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
     await nightly.raiseNotices(run.proofreader, { conn: visits() });
     expect(notifications.notifyAdmin.mock.calls[0][2]).toBe('New time on Oct 20 held: a note may limit when this visit can happen.');
+  });
+
+  test('a technician change at the same day and time says so and names both technicians', async () => {
+    const run = runOf();
+    await nightly.checkMove({ service: SERVICE, best: { date: '2026-10-20', start_time: '09:00', end_time: '10:00', technician_id: 't2' }, run }, { conn: conn(), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
+    await nightly.raiseNotices(run.proofreader, { conn: visits() });
+    const [, , body, opts] = notifications.notifyAdmin.mock.calls[0];
+    expect(body).toBe('Technician change on Oct 20 held: a note may limit when this visit can happen.');
+    expect(opts.detail).toContain('technician Alex to Tuesday Oct 20, 09:00-11:00, technician Sam.');
+    expect(opts.metadata).toMatchObject({ proposedTechnicianId: 't2', proposedWindowStart: '09:00' });
   });
 
   test('the shared ring allowance: soonest date first, the rest wait', async () => {
@@ -382,5 +392,7 @@ describe('raiseNotices', () => {
     audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
     await expect(nightly.closeNotices(new Date())).resolves.toBeUndefined();
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
+    // The run reads this count: a held visit nobody was told about is not a green run.
+    expect(state.noticesFailed).toBe(1);
   });
 });

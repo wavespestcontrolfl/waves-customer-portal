@@ -82,7 +82,7 @@ const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
 // and one call can take two minutes (r7).
 function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, broke: 0, notices: new Map(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, broke: 0, noticesFailed: 0, notices: new Map(),
     deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
@@ -187,7 +187,7 @@ async function recordStillAsRead(answer, record, { service, conn, proofreader })
   return { ...answer, verdict: 'unknown', why: 'record_changed', model_verdict: 'allow' };
 }
 
-function collectNotice(state, service, { answer, move, entry }) {
+function collectNotice(state, service, best, { answer, move, entry }) {
   if (!move || !PERSON_SETTLES[answer.why]) return;
   const date = toDateStr(service.scheduled_date);
   const key = noticeKey(service.id, date, `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
@@ -195,6 +195,7 @@ function collectNotice(state, service, { answer, move, entry }) {
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
     window_start: textOrNull(service.window_start), technician_id: textOrNull(service.technician_id),
+    to_window_start: textOrNull(best.start_time), to_technician_id: textOrNull(best.technician_id || service.technician_id),
     quote: answer.quote || null, reason: answer.reason || null, entry: entry ? { channel: entry.channel, from: entry.from, at: entry.at } : null,
   });
 }
@@ -243,7 +244,7 @@ async function checkMove({ service, best, run }, deps = {}) {
   }
   state.unsure += 1;
   if (CHECK_BROKE.has(answer.why)) state.broke += 1;
-  collectNotice(state, service, asked);
+  collectNotice(state, service, best, asked);
   return stopped('unknown', answer);
 }
 
@@ -269,7 +270,7 @@ function approvedSlotTaken(checked, err) {
   return !!(checked && err && err.code === 'SLOT_TAKEN' && !err.movedCount && !(Array.isArray(err.failedMembers) && err.failedMembers.length));
 }
 
-const slotWords = (slot, shortDateET) => `${slot.weekday} ${shortDateET(`${slot.date}T12:00:00Z`)}, ${slot.arrival_window}`;
+const slotWords = (slot, shortDateET) => `${slot.weekday} ${shortDateET(`${slot.date}T12:00:00Z`)}, ${slot.arrival_window}, technician ${slot.technician}`;
 
 // Cut at a word, with a visible mark that words are missing.
 function bounded(text, max) {
@@ -293,10 +294,16 @@ function detailFor(item, { shortDateET, redactedWords }) {
   return lines.join('\n');
 }
 
+// What kind of change was held (prompt.js changeOf names the three kinds).
+function leadFor(move, from, to) {
+  if (move.from.date !== move.to.date) return `Move from ${from} to ${to} held`;
+  return move.from.arrival_window === move.to.arrival_window ? `Technician change on ${from} held` : `New time on ${from} held`;
+}
+
 function whyFor(item, { shortDateET, redactedWords, whyWithQuote }) {
   const from = shortDateET(`${item.date}T12:00:00Z`);
   const to = shortDateET(`${item.move.to.date}T12:00:00Z`);
-  const lead = item.move.from.date === item.move.to.date ? `New time on ${from} held` : `Move from ${from} to ${to} held`;
+  const lead = leadFor(item.move, from, to);
   if (item.quote) return whyWithQuote({ lead: `${lead}; the record says `, quote: redactedWords(item.quote) });
   return `${lead}: ${PERSON_SETTLES[item.why].replace(/\.$/, '').replace(/^./, (c) => c.toLowerCase())}.`;
 }
@@ -317,7 +324,7 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
     detail: detailFor(item, names),
     metadata: {
       scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, windowStart: item.window_start, technicianId: item.technician_id,
-      kind: item.why, proposedDate: item.move.to.date,
+      kind: item.why, proposedDate: item.move.to.date, proposedWindowStart: item.to_window_start, proposedTechnicianId: item.to_technician_id,
     },
   });
 }
@@ -387,13 +394,22 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
         // Only a new notice rings and spends a slot; a key that exists is left as it is.
         if (audit.noticeRang(await raiseOne(item, { raiseAdminAlert, names, audit }))) { left -= 1; rang += 1; }
       } catch (err) {
+        // A visit held for a person and nobody told: the run reports it
+        // (state.noticesFailed, read by index.js; Codex #6313 r8).
+        state.noticesFailed += 1;
         logger.error(`[auto-dispatch] move-check notice failed for ${item.id}: ${err.message}`);
       }
     }
   } catch (err) {
+    state.noticesFailed += 1;
     logger.error(`[auto-dispatch] move-check notices failed: ${err.message}`);
   }
   return rang;
+}
+
+// A held visit whose notice could not be written is not a green run.
+function statusAfterNotices(state, runStatus) {
+  return state && state.noticesFailed > 0 && runStatus === 'completed' ? 'completed_with_errors' : runStatus;
 }
 
 // For the run's log line.
@@ -402,6 +418,6 @@ function tallyOf(state) {
 }
 
 module.exports = {
-  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, approvedSlotTaken, closeNotices, raiseNotices, tallyOf,
+  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, approvedSlotTaken, closeNotices, raiseNotices, statusAfterNotices, tallyOf,
   _internals: { whyFor, detailFor, plannedMove },
 };

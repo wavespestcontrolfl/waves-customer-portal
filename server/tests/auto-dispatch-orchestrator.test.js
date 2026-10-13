@@ -1715,6 +1715,14 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
+  test('a held visit whose notice could not be written ends the run completed_with_errors', async () => {
+    await applyMode(async () => {
+      checkMove.mockImplementation(async ({ run }) => { run.proofreader.notices.set('k', { key: 'k', id: 's1', date: '2026-08-04' }); return stop('PROOFREADER_UNSURE', 'unknown'); });
+      jest.spyOn(audit, 'withinRingBudget').mockImplementation(() => { throw new Error('store down'); });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+    });
+  });
+
   test('the approved slot is taken before the write: nothing moves and the run is not a failed run', async () => {
     await applyMode(async () => {
       checkMove.mockResolvedValue(ALLOW);

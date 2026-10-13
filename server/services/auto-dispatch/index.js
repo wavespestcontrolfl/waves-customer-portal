@@ -1466,6 +1466,7 @@ async function runAutoDispatch(opts = {}) {
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
   await moveCheck.raiseNotices(run.proofreader);
+  runStatus = moveCheck.statusAfterNotices(run.proofreader, runStatus);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
