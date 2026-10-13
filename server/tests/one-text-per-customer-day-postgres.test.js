@@ -1,13 +1,19 @@
 /**
  * One text per customer, address and day (GATE_ONE_TEXT_PER_CUSTOMER_DAY)
- * against a real migrated schema. Set ONE_TEXT_TEST_DATABASE_URL to a private
- * database named waves_test (localhost) or waves_qa_<32 hex>; the suite skips
- * without it. The senders (sendCustomerMessage, the tracker SMS functions) are
- * stubs: nothing here can reach a real customer. Customers, addresses and
- * phone numbers are synthetic.
+ * against a real migrated schema. Runs when DATABASE_URL is set (CI's
+ * "DB-gated suites" step: `waves_test` with CI=true; locally: a private clone
+ * named `waves_invoiced_fast_test`) and reports skipped otherwise. The senders
+ * (sendCustomerMessage, the tracker SMS functions) are stubs: nothing here can
+ * reach a real customer. Customers, addresses and phone numbers are synthetic.
  *
- * Real path: AppointmentReminders.checkAndSendReminders() for the 24h reminder
- * and markEnRoute / markOnProperty for the tracker texts, over real
+ * Isolation: no truncate. The suite inserts its own synthetic technicians,
+ * customers, properties, services and reminder rows and deletes exactly those in
+ * afterAll, so it neither depends on nor removes another suite's rows.
+ * checkAndSendReminders() scans every reminder row in the database; the fake
+ * clock puts "now" two to three months out, where no other suite keeps live rows.
+ *
+ * Real path: AppointmentReminders.checkAndSendReminders() for the 24h and 72h
+ * reminders and markEnRoute / markOnProperty for the tracker texts, over real
  * scheduled_services / appointment_reminders rows.
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
@@ -27,6 +33,14 @@ jest.mock('../services/tech-status', () => ({
   setTechJobStatus: jest.fn(async () => {}),
   clearTechCurrentJob: jest.fn(async () => {}),
 }));
+// No email provider call can happen: the email legs are stubs too.
+jest.mock('../services/appointment-email', () => ({
+  sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
+  sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
+  sendAppointmentNoShowEmail: jest.fn(async () => ({ ok: true })),
+  sendTechArrivedEmail: jest.fn(async () => ({ ok: true })),
+  sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
+}));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn(async () => null) }));
 jest.mock('../sockets', () => ({ getIo: () => null }));
 jest.mock('../services/recurring-app-intro-email', () => ({ maybeSendOnEnRoute: jest.fn(async () => {}) }));
@@ -35,8 +49,20 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 
-const connection = process.env.ONE_TEXT_TEST_DATABASE_URL;
-const postgres = connection ? describe : describe.skip;
+// Verified private clone only. The literal `const SKIP = !process.env.DATABASE_URL` line is the marker the CI
+// "DB-gated suites" step greps.
+const SKIP = !process.env.DATABASE_URL;
+const connection = process.env.DATABASE_URL;
+if (connection) {
+  const url = new URL(connection);
+  const localHost = ['localhost', '127.0.0.1'].includes(url.hostname);
+  const ownedQA = localHost && url.pathname === '/waves_invoiced_fast_test';
+  const ci = localHost && process.env.CI === 'true' && url.pathname === '/waves_test';
+  if (!ownedQA && !ci) {
+    throw new Error('One-text-per-day Postgres tests require their own waves_invoiced_fast_test or CI\'s waves_test.');
+  }
+}
+const postgres = SKIP ? describe.skip : describe;
 let mockPg;
 jest.setTimeout(120000);
 
@@ -53,9 +79,6 @@ postgres('one text per customer, address and day', () => {
   let dayCursor = 60; // each test uses its own future date
 
   beforeAll(async () => {
-    const url = new URL(connection);
-    const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/waves_test';
-    if (!local && !/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use the verified private dev database');
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 6 } });
     for (let i = 0; i < 2; i += 1) {
       const id = randomUUID();
@@ -89,6 +112,7 @@ postgres('one text per customer, address and day', () => {
     const ids = created.rows;
     if (ids.length) {
       await mockPg('audit_log').whereIn('resource_id', ids).del();
+      await mockPg('short_codes').whereIn('entity_id', ids).del();
       await mockPg('scheduled_services').whereIn('id', ids).update({ visit_id: null });
       await mockPg('service_visits').whereIn('customer_id', created.customers).del();
       await mockPg('appointment_reminders').whereIn('scheduled_service_id', ids).del();
@@ -348,7 +372,9 @@ postgres('one text per customer, address and day', () => {
         { start: '09:00', end: '10:00', name: 'Quarterly Pest Control' },
         { start: '10:00', end: '11:00', name: 'Lawn Care' },
       ] });
+      // the text and its email fallback both fail for the first row
       sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'PROVIDER_ERROR', retryable: true });
+      require('../services/appointment-email').sendAppointmentReminderEmail.mockResolvedValueOnce({ ok: false, error: 'stub failure' });
       await runReminders(f.date);
       // the first attempt failed, so it covered nothing: the second row still
       // sent its own text (two provider calls, one delivered)
