@@ -8,10 +8,11 @@
  *
  *   create_customer_link     — one of the Insert Link kinds (reschedule,
  *                              re-service, pay balance, latest estimate,
- *                              referral, consultation, appointment page, card
- *                              request, prep guide, service report, receipt,
- *                              project report; the payer statement and the
- *                              contract signing link stay composer-only — the
+ *                              referral, consultation, appointment page, prep
+ *                              guide, service report, receipt, project report;
+ *                              the card request link, the payer statement and the
+ *                              contract signing link stay composer-only — a card
+ *                              request can enroll a saved card for Auto Pay, the
  *                              statement resolves from the payer's AP phone
  *                              and the contract send needs the composer's own
  *                              Insert Link state (contractId) to activate). Runs admin-communications.js's
@@ -59,9 +60,6 @@ const KINDS = {
   referral: { label: 'Referral link', route: 'customerLinkInsert', builds: 'their personal referral link (their referral code is created if they have none)', sendHow: ANY_SENDER },
   consultation: { label: 'Free consultation link', route: 'customerLinkInsert', builds: 'a 14-day pick-a-time page for their open lead', sendHow: COMPOSER_ONLY },
   appointment: { label: 'Appointment page link', route: 'customerLinkInsert', builds: 'the appointment page for the soonest upcoming visit on the account', sendHow: ANY_SENDER },
-  // A consented saved card already covering the visit is enrolled instead
-  // (requestCardForAppointment auto-secure): a committed write with no link.
-  card_request: { label: 'Card request link', route: 'customerLinkInsert', builds: 'a secure card-on-file request for their next visit (one text ever per visit); if a consented saved card already covers that visit, confirming enrolls that card for it instead and no link is built', sendHow: COMPOSER_ONLY, autoSecure: true },
   prep_guide: { label: 'Upcoming visit prep link', route: 'customerLinkInsert', builds: 'the prep guide page for their upcoming visit', sendHow: COMPOSER_ONLY },
   service_report: { label: 'Latest service report link', route: 'customerLinkInsert', builds: 'the latest completed-visit report on the account', sendHow: ANY_SENDER },
   receipt: { label: 'Latest receipt link', route: 'customerLinkInsert', builds: 'the latest paid receipt on the account', sendHow: ANY_SENDER },
@@ -75,8 +73,8 @@ const LINK_FACT_FIELDS = ['balance', 'estimate', 'appointment', 'prep', 'report'
 const CUSTOMER_LINK_TOOLS = [
   {
     name: 'create_customer_link',
-    description: `Build one of the customer links the Communications composer's Insert Link sheet offers, for ONE customer, exactly as that sheet builds it: reschedule, reservice, pay_balance, estimate, referral, consultation, appointment, card_request, prep_guide, service_report, receipt, project_report. The first call returns a PREVIEW and builds nothing: the customer, their number, what the link is and how it may be sent. The operator approves on the confirmation card; the confirmed run builds the link and returns url, line (a ready SMS sentence) and the link's facts (balance, estimate, appointment, expiry). NOTHING IS SENT by this tool. A kind with nothing to link (no open balance, no upcoming visit, no open estimate, no active plan, link switched off) is refused with the plain reason. card_request: when a consented saved card already covers the visit, the confirmed run enrolls that card for it instead and returns auto_secured with no link (an Auto Pay enrollment confirmation may be emailed).
-Sending: reschedule, reservice, pay_balance, estimate, referral, appointment, service_report and receipt links may ride send_sms (Communications page) or a draft_sms the operator sends. consultation, card_request, prep_guide and project_report links are texted from the Communications composer only — its send verifies and records them (claims, sent marks); send_sms refuses a text carrying one. Not here: review requests (trigger_review_request), Auto Pay setup (the Customers page button), payer statement links and contract signing links (composer only — the statement resolves from the payer's AP phone, and a contract link only activates through the composer's own Insert Link flow). Admin-only.
+    description: `Build one of the customer links the Communications composer's Insert Link sheet offers, for ONE customer, exactly as that sheet builds it: reschedule, reservice, pay_balance, estimate, referral, consultation, appointment, prep_guide, service_report, receipt, project_report. The first call returns a PREVIEW and builds nothing: the customer, their number, what the link is and how it may be sent. The operator approves on the confirmation card; the confirmed run builds the link and returns url, line (a ready SMS sentence) and the link's facts (balance, estimate, appointment, expiry). NOTHING IS SENT by this tool. A kind with nothing to link (no open balance, no upcoming visit, no open estimate, no active plan, link switched off) is refused with the plain reason.
+Sending: reschedule, reservice, pay_balance, estimate, referral, appointment, service_report and receipt links may ride send_sms (Communications page) or a draft_sms the operator sends. consultation, prep_guide and project_report links are texted from the Communications composer only — its send verifies and records them (claims, sent marks); send_sms refuses a text carrying one. Not here: review requests (trigger_review_request), Auto Pay setup (the Customers page button), card request links (the Communications composer / visit card only: building one can enroll a saved card for Auto Pay), payer statement links and contract signing links (composer only — the statement resolves from the payer's AP phone, and a contract link only activates through the composer's own Insert Link flow). Admin-only.
 Use for: "get Henderson a pay link", "send Smith the link to their estimate", "build a referral link for Garcia", "I need the prep guide link for their visit"`,
     input_schema: {
       type: 'object',
@@ -92,15 +90,13 @@ Use for: "get Henderson a pay link", "send Smith the link to their estimate", "b
 
 const last10 = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 const fullUsNumber = (value) => { const d = String(value || '').replace(/\D/g, ''); return d.length === 10 || (d.length === 11 && d.startsWith('1')); };
-// "f•••@example.com": enough for the operator to recognise the address.
-const maskEmail = (address) => address.replace(/^(.)[^@]*/, '$1•••');
 const fullName = (row) => [row?.first_name, row?.last_name].filter(Boolean).join(' ') || null;
 
 async function liveCustomer(customerId) {
   const id = String(customerId || '').trim().toLowerCase();
   if (!UUID_RE.test(id)) return { error: 'A valid customer_id is required', code: 'invalid_target' };
   const row = await db('customers').where({ id }).whereNull('deleted_at')
-    .first('id', 'first_name', 'last_name', 'phone', 'email');
+    .first('id', 'first_name', 'last_name', 'phone');
   if (!row) return { error: 'Customer not found', code: 'customer_not_found' };
   return { customer: row };
 }
@@ -121,10 +117,6 @@ async function deriveLinkPlan(input) {
   // number the confirmed handler would refuse.
   if (!fullUsNumber(customer.phone)) return { plan: { error: 'This customer has no full 10-digit US phone on file — customer links are built for their own number.', code: 'no_phone' } };
   const digits = last10(customer.phone);
-  // An auto-secure enrolls a saved card and its confirmation email goes to the
-  // customer's address on file: that address is shown (masked) and pinned, so
-  // an address changed after the card is never mailed without a fresh card.
-  const email = String(customer.email || '').trim().toLowerCase();
   const plan = {
     preview: true,
     kind,
@@ -135,13 +127,7 @@ async function deriveLinkPlan(input) {
     builds: `${spec.label}: ${spec.builds}, for this customer's own number.`,
     sends: 'Nothing is sent by this step. If there is nothing to link, the confirmed run refuses with the reason.',
     send_how: spec.sendHow,
-    ...(spec.autoSecure ? {
-      auto_secure: 'If a consented saved card already covers the visit, confirming enrolls that card for it instead, builds no link, and the Auto Pay enrollment confirmation email may go out — the result says auto_secured.',
-      // The authorization contract reads this: a conditional customer email.
-      notifies_customer: 'may',
-      enrollment_email: email ? maskEmail(email) : 'none on file',
-    } : {}),
-    _version: { customer_id: customer.id, kind, phone_last10: digits, ...(spec.autoSecure ? { email } : {}) },
+    _version: { customer_id: customer.id, kind, phone_last10: digits },
     note: 'PREVIEW ONLY — no link exists yet. Confirm builds exactly this link.',
   };
   return { plan, customer };
@@ -154,7 +140,7 @@ async function linkPlan(input) {
 // The approved card's _version rides to the confirmed run (the route's
 // VERIFIED_VERSION_PARAMS hands the fingerprint-verified preview's _version
 // as _verified_*_version); the commit re-derives its own and refuses on any
-// difference, so a customer whose number or email changed after the card is
+// difference, so a customer whose number changed after the card is
 // never acted on — and a call with no pin never commits.
 function pinnedVersionRefusal(pinned, live, noun) {
   if (!pinned) return { error: 'Use the confirmation card to approve this change.' };
@@ -177,17 +163,6 @@ async function buildLink(input) {
     phone: customer.phone, customerId: plan.customer_id, kind: plan.kind,
   });
   const body = answer?.body || {};
-  // A committed write with no link: the composer handler answers 200 +
-  // autoSecured when a consented saved card covered the visit and was
-  // enrolled for it (card_request). Reported as the success it is.
-  if (answer?.status === 200 && body.autoSecured) {
-    return {
-      success: true, kind: plan.kind, label: spec.label, customer_id: plan.customer_id, customer_name: plan.customer_name,
-      auto_secured: true, url: null, sent: false,
-      enrollment_confirmation: 'The Auto Pay enrollment confirmation email may have been sent by the enrollment itself.',
-      summary: 'A consented saved card already covered the visit: it was enrolled for it and NO link was built. Tell the operator.',
-    };
-  }
   if (answer?.status !== 200 || !body.url) {
     return {
       error: body.error || 'Nothing to link for this customer',
@@ -230,11 +205,11 @@ async function executeCustomerLinkTool(toolName, input = {}, actionContext = {})
   } catch (err) {
     logger.error(`[intelligence-bar:customer-links] ${toolName} failed (${err.code || err.name || 'error'})`);
     // A throw after an approval may follow a committed write (a referral code,
-    // a tracked short link, an office move approval, a card auto-secure):
+    // a tracked short link, an office move approval):
     // never invite a retry as if nothing happened.
     if (input.confirmed === true) {
       return { outcome_unknown: true, code: 'execution_interrupted',
-        error: 'The link build was interrupted — it may or may not have been built, and its side effects (a referral code, a tracked link, an office move approval, a card auto-secure) may have been recorded. Check before trying again. Nothing was sent.' };
+        error: 'The link build was interrupted — it may or may not have been built, and its side effects (a referral code, a tracked link, an office move approval) may have been recorded. Check before trying again. Nothing was sent.' };
     }
     return { error: 'Could not prepare the customer link' };
   }

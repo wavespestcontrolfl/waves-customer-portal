@@ -1556,13 +1556,20 @@ async function bearerSeamCheck({ body, toLast10, customerId, usDestination, reci
 // email phase surfaces nested links in renderedTextForLinkCheck and refuses
 // every owned link.)
 const WRAPPED_LINK_REFUSAL = 'This text has a Waves customer link wrapped inside another web address — put the customer link in the text as itself. Nothing was sent.';
+// A token still percent-decoding past the scan's cap cannot be vouched for:
+// refused in every phase, the email phase included.
+function unverifiableLinkCheck({ body }) {
+  return links().linkTextUnstable(body)
+    ? { error: 'Could not verify a link in this message (it is encoded too many times) — nothing was sent. Put the link in as itself.', code: 'customer_link_unverified' }
+    : null;
+}
 function wrappedOwnedLinkCheck({ body }) {
   return links().wrappedOwnedLinkIn(body) ? { error: WRAPPED_LINK_REFUSAL, code: 'customer_link_refused' } : null;
 }
 const LINK_CHECKS_BY_PHASE = {
-  proposal: [wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
-  email: [composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
-  commit: [wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
+  proposal: [unverifiableLinkCheck, wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  email: [unverifiableLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck],
+  commit: [unverifiableLinkCheck, wrappedOwnedLinkCheck, composerOnlyLinkCheck, autopayLinkCheck, linkOwnerCheck, bearerSeamCheck],
 };
 async function customerLinkSendRefusal(message, phone, customerId, { phase = 'commit', recipientSelected = true } = {}) {
   const body = String(message || '');

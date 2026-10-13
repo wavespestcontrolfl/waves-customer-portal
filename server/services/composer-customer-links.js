@@ -940,32 +940,46 @@ function ownedPortalLinkSpans(body) {
 // foreign URL's path, query or fragment ("https://evil.example/?next=https://
 // portal…/receipt/<tok>", raw or percent-encoded, even twice): every run
 // reader above parses that as ONE evil.example link, so the bearer inside is
-// invisible to it. This reads the FULL text, raw and then percent-decoded up
-// to three more times (a malformed escape is left as typed), and returns each
-// owned-host occurrence — host plus whatever follows it — as its own run, for
-// a caller (the email-reply guard) to judge like any top-level owned link.
+// invisible to it. This reads the FULL text, raw and then percent-decoded
+// until it stops changing (a malformed escape is left as typed), scanning every
+// pass including the last, and returns each owned-host occurrence — host plus
+// whatever follows it — as its own run, for a caller (the email-reply guard)
+// to judge like any top-level owned link. A text still changing after the
+// NESTED_DECODE_CAP loop guard is reported `unstable`: no scan can vouch for
+// it, so callers refuse it (linkTextUnstable).
 // Hosts come from ownedPortalHosts (never a second list); the host must not
 // be the tail of a longer name ("evilportal…", "x.portal…") nor the head of a
 // look-alike ("portal….evil.example"). Over-reports on purpose (fail closed).
-const NESTED_DECODE_PASSES = 3;
+const NESTED_DECODE_CAP = 12;
 // A browser's URL parser (IDNA) reads full-width letters as ASCII and the
 // ideographic / full-width / half-width full stops as a dot, so
 // "portal。wavespestcontrol。com" opens the portal. The scan reads the text
 // the same way (in every decode pass: the stop can arrive percent-encoded).
 const IDNA_DOTS_RE = /[\u3002\uFF0E\uFF61]/g;
 const asciiHostText = (text) => text.normalize('NFKC').replace(IDNA_DOTS_RE, '.');
-function nestedOwnedLinkRuns(text) {
+function scanNestedOwnedLinks(text) {
   const hostAlt = ownedPortalHosts().map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const hostRe = new RegExp(`(?<![A-Za-z0-9.-])(?:${hostAlt})(?![A-Za-z0-9-]|\\.[A-Za-z0-9-])\\.?(?::\\d+)?(?:[/?#][^\\s"'<>]*)?`, 'gi');
   const found = new Set();
   let view = asciiHostText(String(text || ''));
-  for (let pass = 0; pass <= NESTED_DECODE_PASSES; pass += 1) {
+  let unstable = false;
+  for (let pass = 0; ; pass += 1) {
     for (const match of view.matchAll(hostRe)) found.add(match[0]);
     const next = asciiHostText(decodeLinkText(view));
     if (next === view) break;
+    if (pass >= NESTED_DECODE_CAP) {
+      unstable = true;
+      break;
+    }
     view = next;
   }
-  return [...found];
+  return { runs: [...found], unstable };
+}
+const nestedOwnedLinkRuns = (text) => scanNestedOwnedLinks(text).runs;
+// True when some whitespace token of a body is still percent-decoding past the
+// cap: nothing can be said about what it opens, so the senders refuse it.
+function linkTextUnstable(body) {
+  return String(body || '').split(/\s+/).some((token) => scanNestedOwnedLinks(token).unstable);
 }
 // True when a body carries an owned-host link that is NOT a plain owned link:
 // any whitespace token holding an owned-host run (nestedOwnedLinkRuns) must
@@ -979,7 +993,9 @@ function nestedOwnedLinkRuns(text) {
 function wrappedOwnedLinkIn(body) {
   const hosts = ownedPortalHosts();
   return String(body || '').split(/\s+/).some((token) => {
-    if (!nestedOwnedLinkRuns(token).length) return false;
+    const scan = scanNestedOwnedLinks(token);
+    if (scan.unstable) return true;
+    if (!scan.runs.length) return false;
     const core = shedLinkRun(token);
     let url;
     try {
@@ -3141,6 +3157,7 @@ module.exports = {
   composerOnlyLinkPresence,
   linkOwnersInBody,
   nestedOwnedLinkRuns,
+  linkTextUnstable,
   wrappedOwnedLinkIn,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,

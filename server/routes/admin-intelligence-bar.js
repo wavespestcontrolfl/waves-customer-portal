@@ -37,7 +37,7 @@ const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-ba
 const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
-const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool, sendEmailReplyProposalRefusal } = require('../services/intelligence-bar/email-tools');
+const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool, sendEmailReplyProposalRefusal, replyViaSmsProposalRefusal } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
@@ -1656,6 +1656,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Same recipient pin send_sms has (codex P1 on #3648): resolve the
       // human the message goes to NOW, show name + last4 on the card, and
       // let /confirm-action refuse if the resolved phone drifts.
+      if (toolUse.name === 'reply_via_sms') {
+        // No card for a text the send would refuse for a customer link in it
+        // (the read-only proposal-phase check, run on the recipient exactly as
+        // the send resolves it); the execution-time check stays.
+        const replyRefusal = await replyViaSmsProposalRefusal(params);
+        if (replyRefusal) return { failed: true, modelResult: replyRefusal };
+      }
       const recipient = toolUse.name === 'reply_via_sms'
         ? await resolveReplyViaSmsRecipient(params)
         : await resolveReviewRequestRecipient(params);
@@ -3344,7 +3351,7 @@ CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
-- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, card request, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. Never say there is no link tool. Auto Pay setup links are the Customers page button; payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
+- Customer links: create_customer_link builds any Insert Link kind (pay balance, estimate, referral, reschedule, re-service, appointment page, service report, receipt, prep guide, project report, consultation) for a customer and returns the url + a ready line. It shows a confirmation card and sends nothing. Never say there is no link tool. Auto Pay setup links are the Customers page button; card request links, payer statement links and contract signing links are composer-only (Communications page, Insert Link) — point the operator there.
 
 SCHEDULING INTELLIGENCE:
 - Quarterly pest = every ~90 days

@@ -502,6 +502,24 @@ async function emailReplyLinkRefusal(body) {
   }
 }
 
+// Proposal-time refusal for reply_via_sms, so no card is offered for a text a
+// customer link in it would make the send refuse (the execution-time check
+// stays). Resolves the recipient exactly as the send does (resolveReplyTarget)
+// and runs the read-only 'proposal' phase. An unresolvable recipient or a
+// missing message is not judged here: the pin step refuses that on its own.
+async function replyViaSmsProposalRefusal(params = {}) {
+  if (!params.message) return null;
+  try {
+    const sourceEmail = params.email_id ? await db('emails').where('id', params.email_id).first() : null;
+    const target = await resolveReplyTarget(params, sourceEmail);
+    if (target.error || !target.phone) return null;
+    return await require('./comms-tools').customerLinkSendRefusal(params.message, target.phone, target.custId || null, { phase: 'proposal', recipientSelected: target.recipientSelected });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:email] reply_via_sms link pre-check failed — refusing: ${err.message}`);
+    return { success: false, error: 'Could not verify the links in this text — nothing was proposed. Try again in a moment.', blocked: true, code: 'customer_link_unverified' };
+  }
+}
+
 // Proposal-time refusal for send_email_reply, so no card is offered for a body
 // the send would refuse (the execution-time check stays). Null = offer the card.
 async function sendEmailReplyProposalRefusal(params = {}) {
@@ -571,17 +589,48 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
   }
 }
 
+// Who a reply_via_sms goes to, resolved ONE way for the send and for the
+// card's read-only link check (replyViaSmsProposalRefusal), so they cannot
+// drift: a pinned customer_id, else the source email's attributed customer,
+// else the customer whose email is the sender's address, else a name match.
+// recipientSelected is false when the customer is only what an address or a
+// name matched (first row), not the pinned/attributed one: the link guard then
+// needs the number to name one account.
+async function resolveReplyTarget({ email_id, customer_name, customer_id }, sourceEmail) {
+  const found = (customer, extra = {}) => ({
+    phone: customer.phone, custName: `${customer.first_name} ${customer.last_name}`, custId: customer.id, recipientSelected: true, ...extra,
+  });
+  if (customer_id) {
+    // Pinned recipient (Intelligence Bar confirm card, W0B): the proposal
+    // resolved the customer and the operator approved THAT identity —
+    // send to exactly that row, never a fresh name/email match.
+    const customer = await db('customers').where('id', customer_id).first();
+    return customer ? found(customer) : { error: 'Pinned customer no longer exists' };
+  }
+  if (email_id) {
+    if (sourceEmail?.customer_id) {
+      const customer = await db('customers').where('id', sourceEmail.customer_id).first();
+      // An attributed customer with no phone falls through to the address match.
+      if (customer?.phone) return found(customer);
+    }
+    // Try matching by email address
+    const byAddress = sourceEmail ? await db('customers').where('email', sourceEmail.from_address).first() : null;
+    return byAddress ? found(byAddress, { recipientSelected: false }) : { custName: customer_name, custId: null, phone: null, recipientSelected: true };
+  }
+  if (customer_name) {
+    const customer = await db('customers').where(function () {
+      const s = `%${customer_name}%`;
+      this.whereILike('first_name', s).orWhereILike('last_name', s);
+    }).first();
+    // The name match keeps the typed name (it never overwrote custName).
+    if (customer) return { phone: customer.phone, custName: customer_name, custId: customer.id, recipientSelected: false };
+  }
+  return { custName: customer_name, custId: null, phone: null, recipientSelected: true };
+}
+
 async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone, _pinned_email }) {
   let providerOutcome = null;
   try {
-    let phone = null;
-    let custName = customer_name;
-    let custId = null;
-    // False when the customer is only what an address or a name matched (first
-    // row), not the pinned/attributed one: the link guard then needs the number
-    // to name one account.
-    let recipientSelected = true;
-
     let sourceEmail = null;
     if (email_id) {
       sourceEmail = await db('emails').where('id', email_id).first();
@@ -598,46 +647,9 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
       }
     }
 
-    if (customer_id) {
-      // Pinned recipient (Intelligence Bar confirm card, W0B): the proposal
-      // resolved the customer and the operator approved THAT identity —
-      // send to exactly that row, never a fresh name/email match.
-      const customer = await db('customers').where('id', customer_id).first();
-      if (!customer) return { error: 'Pinned customer no longer exists' };
-      phone = customer.phone;
-      custName = `${customer.first_name} ${customer.last_name}`;
-      custId = customer.id;
-    } else if (email_id) {
-      const email = sourceEmail;
-      if (email?.customer_id) {
-        const customer = await db('customers').where('id', email.customer_id).first();
-        if (customer) {
-          phone = customer.phone;
-          custName = `${customer.first_name} ${customer.last_name}`;
-          custId = customer.id;
-        }
-      }
-      // Try matching by email address
-      if (!phone && email) {
-        const customer = await db('customers').where('email', email.from_address).first();
-        if (customer) {
-          phone = customer.phone;
-          custName = `${customer.first_name} ${customer.last_name}`;
-          custId = customer.id;
-          recipientSelected = false;
-        }
-      }
-    } else if (customer_name) {
-      const customer = await db('customers').where(function () {
-        const s = `%${customer_name}%`;
-        this.whereILike('first_name', s).orWhereILike('last_name', s);
-      }).first();
-      if (customer) {
-        phone = customer.phone;
-        custId = customer.id;
-        recipientSelected = false;
-      }
-    }
+    const target = await resolveReplyTarget({ email_id, customer_name, customer_id }, sourceEmail);
+    if (target.error) return target;
+    const { phone, custName, custId, recipientSelected } = target;
 
     if (!phone) return { error: 'Could not find phone number for this customer' };
     // W0B pinned recipient: enforce the approved phone at the send boundary.
@@ -912,4 +924,4 @@ async function executeEmailTool(toolName, input, actionContext = {}) {
   }
 }
 
-module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply, renderedTextForLinkCheck, sendEmailReplyProposalRefusal };
+module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply, renderedTextForLinkCheck, sendEmailReplyProposalRefusal, replyViaSmsProposalRefusal };

@@ -166,6 +166,7 @@ const {
   composerOnlyLinkPresence,
   linkOwnersInBody,
   nestedOwnedLinkRuns,
+  linkTextUnstable,
   wrappedOwnedLinkIn,
   buildAppointmentPageLink,
   buildCardRequestLink,
@@ -3350,6 +3351,27 @@ describe('nestedOwnedLinkRuns', () => {
     ['with full-width letters', `https://evil.example/?next=\uFF50ortal.wavespestcontrol.com/receipt/${T}`],
   ])('finds the owned link nested %s', (_label, text) => {
     expect(nestedOwnedLinkRuns(text).map((run) => run.replace(/\\/g, '/').toLowerCase())).toContain(OWNED.toLowerCase());
+  });
+
+  // Decoded until stable, scanning every pass: a link encoded N times is found for any N within the cap.
+  test.each([[4], [5], [8], [12]])('finds an owned link nested and percent-encoded %i times', (times) => {
+    let link = `https://portal.wavespestcontrol.com/receipt/${T}`;
+    for (let i = 0; i < times; i += 1) link = link.replace(/%/g, '%25').replace(/:/g, '%3A').replace(/\//g, '%2F');
+    const text = `https://evil.example/?next=${link}`;
+    expect(nestedOwnedLinkRuns(text).map((run) => run.toLowerCase())).toContain(OWNED.toLowerCase());
+    expect(linkTextUnstable(text)).toBe(false);
+    expect(wrappedOwnedLinkIn(text)).toBe(true);
+  });
+
+  test('a token still decoding after the cap is reported unstable and refused as wrapped; ordinary escapes are stable', () => {
+    let link = `https://portal.wavespestcontrol.com/receipt/${T}`;
+    for (let i = 0; i < 14; i += 1) link = link.replace(/%/g, '%25').replace(/:/g, '%3A').replace(/\//g, '%2F');
+    const text = `https://evil.example/?next=${link}`;
+    expect(linkTextUnstable(`See ${text} thanks`)).toBe(true);
+    expect(wrappedOwnedLinkIn(text)).toBe(true);
+    for (const plain of ['https://example.com/a%20b', 'https://example.com/?q=100%25', 'https://example.com/?r=x%2520y', 'no links here', '']) {
+      expect(linkTextUnstable(plain)).toBe(false);
+    }
   });
 
   test('finds the branded short host too, and a fully-qualified (trailing dot) portal host', () => {

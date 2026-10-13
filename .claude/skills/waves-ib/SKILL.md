@@ -74,7 +74,8 @@ their UI-confirm card.
 Customer links ride every admin context too (`customer-link-tools.js`,
 admin-only, carded): `create_customer_link` builds any kind the composer's
 Insert Link sheet offers (except review request, Auto Pay, which stays on the
-Customers page button and the composer, the payer
+Customers page button and the composer, the card request link, which stays
+on the composer / visit card because it can enroll a saved card for Auto Pay, the payer
 statement, which needs the payer's AP phone, and contract signing, whose send
 needs the composer's own Insert Link state) through the SAME exported route handlers
 (`customerLinkInsert` / `rescheduleLinkInsert` / `reserviceLinkInsert` on

@@ -28,6 +28,7 @@ jest.mock('../services/composer-customer-links', () => ({
   // The real scanner: send_email_reply's rendered text surfaces nested links through it.
   nestedOwnedLinkRuns: jest.requireActual('../services/composer-customer-links').nestedOwnedLinkRuns,
   wrappedOwnedLinkIn: jest.requireActual('../services/composer-customer-links').wrappedOwnedLinkIn,
+  linkTextUnstable: jest.requireActual('../services/composer-customer-links').linkTextUnstable,
 }));
 
 const db = require('../models/db');
@@ -61,12 +62,13 @@ describe('tool definitions', () => {
     expect(byName.create_customer_link._sideEffects).toBe(true);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).toEqual([
       'reschedule', 'reservice', 'pay_balance', 'estimate', 'referral', 'consultation', 'appointment',
-      'card_request', 'prep_guide', 'service_report', 'receipt', 'project_report',
+      'prep_guide', 'service_report', 'receipt', 'project_report',
     ]);
     expect(byName.create_customer_link.input_schema.properties.kind.enum).not.toContain('contract');
     expect(byName.create_customer_link.input_schema.properties.kind.enum).not.toContain('statement');
     expect(byName.create_customer_link.input_schema.properties.kind.enum).not.toContain('review_request');
     expect(byName.create_customer_link.input_schema.properties.kind.enum).not.toContain('autopay_setup');
+    expect(byName.create_customer_link.input_schema.properties.kind.enum).not.toContain('card_request');
   });
 
   test('a technician token is refused before any read', async () => {
@@ -125,28 +127,24 @@ describe('create_customer_link', () => {
     expect(routeExports.customerLinkInsert).not.toHaveBeenCalled();
   });
 
-  test('confirmed: card_request auto-secure is a committed enrollment, reported as success with no link', async () => {
+  test('card_request is composer-only: not an offered kind, and a call for it is refused before any read or build', async () => {
     wireCustomer();
-    const preview = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request' }, { isAdmin: true });
-    expect(preview.auto_secure).toMatch(/enrolls that card/);
-    expect(preview.notifies_customer).toBe('may');
-    routeExports.customerLinkInsert.mockResolvedValue({ status: 200, body: { kind: 'card_request', url: null, line: '', autoSecured: true, firstName: 'Customer' } });
-    // The address the enrollment confirmation would go to is shown masked and pinned (card_request only).
-    expect(preview.enrollment_email).toBe('f•••@example.com');
-    const CARD_PIN = { ...LINK_PIN, kind: 'card_request', email: 'fixture@example.com' };
-    expect(preview._version).toEqual(CARD_PIN);
-    const result = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request', confirmed: true, _verified_link_version: CARD_PIN }, { isAdmin: true });
-    expect(result).toMatchObject({ success: true, auto_secured: true, url: null, sent: false });
-    expect(result.blocked).toBeUndefined();
-    // The email changed after the card: nothing runs, a fresh card is asked for.
-    routeExports.customerLinkInsert.mockClear();
-    wireCustomer({ ...CUSTOMER, email: 'changed@example.com' });
-    const moved = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request', confirmed: true, _verified_link_version: CARD_PIN }, { isAdmin: true });
-    expect(moved).toMatchObject({ preview_changed: true });
+    for (const input of [{}, { confirmed: true, _verified_link_version: { customer_id: CUSTOMER_ID, kind: 'card_request', phone_last10: '9415550123' } }]) {
+      const result = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request', ...input }, { isAdmin: true });
+      expect(result).toMatchObject({ code: 'invalid_target' });
+      expect(result.error).toMatch(/kind must be one of/);
+      expect(result.error).not.toMatch(/card_request/);
+    }
     expect(routeExports.customerLinkInsert).not.toHaveBeenCalled();
-    // No address on file: the card says so.
-    wireCustomer({ ...CUSTOMER, email: null });
-    expect((await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'card_request' }, { isAdmin: true })).enrollment_email).toBe('none on file');
+    const tool = CUSTOMER_LINK_TOOLS[0];
+    expect(tool.input_schema.properties.kind.enum).not.toContain('card_request');
+    expect(tool.description).toMatch(/card request links \(the Communications composer \/ visit card only/);
+    // The preview carries no enrollment keys for any kind.
+    const preview = await executeCustomerLinkTool('create_customer_link', { customer_id: CUSTOMER_ID, kind: 'pay_balance' }, { isAdmin: true });
+    expect(preview).not.toHaveProperty('auto_secure');
+    expect(preview).not.toHaveProperty('enrollment_email');
+    expect(preview).not.toHaveProperty('notifies_customer');
+    expect(preview._version).toEqual({ customer_id: CUSTOMER_ID, kind: 'pay_balance', phone_last10: '9415550123' });
   });
 
   test('confirmed: runs the composer handler with the row\'s own phone and reports its body; nothing is sent', async () => {
@@ -259,6 +257,25 @@ describe('customerLinkSendRefusal (comms-tools)', () => {
 
     links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [{ kind: 'estimate', token: 'gone' }] });
     expect(await customerLinkSendRefusal('See: portal.wavespestcontrol.com/estimate/gone', '+19415550123', CUSTOMER_ID)).toMatchObject({ code: 'customer_link_unverified' });
+  });
+
+  describe('a link encoded past the scan cap', () => {
+    const enc = (text, times) => { let out = text; for (let i = 0; i < times; i += 1) out = out.replace(/%/g, '%25').replace(/:/g, '%3A').replace(/\//g, '%2F'); return out; };
+    const pad = (times) => 'https://other.example/?next=' + enc('https://portal.wavespestcontrol.com/pay/tok', times);
+
+    test('a still-changing body is refused in both SMS phases and the email phase; sane encodings are not', async () => {
+      links.autopayLinkSendCheck.mockResolvedValue({ present: false });
+      links.bearerLinkSendCheck.mockResolvedValue({ ok: true });
+      for (const phase of ['proposal', 'commit']) {
+        expect(await customerLinkSendRefusal(`See ${pad(14)}`, '+19415550123', CUSTOMER_ID, { phase })).toMatchObject({ blocked: true, code: 'customer_link_unverified' });
+      }
+      expect(await customerLinkSendRefusal(`See ${pad(14)}`, '', null, { phase: 'email' })).toMatchObject({ blocked: true, code: 'customer_link_unverified' });
+      // A plain %20 / %25 in an ordinary foreign URL settles at once and is not refused.
+      for (const phase of ['proposal', 'commit']) {
+        expect(await customerLinkSendRefusal('Map: https://other.example/a%20b?q=100%25&r=x%2520y', '+19415550123', CUSTOMER_ID, { phase })).toBeNull();
+      }
+      expect(await customerLinkSendRefusal('Map: https://other.example/a%20b?q=100%25', '', null, { phase: 'email' })).toBeNull();
+    });
   });
 
   describe('a customer attached only because a typed number matched them', () => {
@@ -538,6 +555,88 @@ describe('send_email_reply carries the same guard', () => {
     expect(await executeEmailTool('send_email_reply', { email_id: 'em-3', body: `Receipt: portal.wavespestcontrol.com/receipt/${TOKEN}` })).toMatchObject({ blocked: true });
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     links.composerOnlyLinkPresence.mockResolvedValue({ present: false, kinds: [] });
+  });
+
+  describe('reply_via_sms: the card is not offered for a text the send would refuse (proposal phase)', () => {
+    const { replyViaSmsProposalRefusal } = require('../services/intelligence-bar/email-tools');
+    const OTHER = '7a7a7a7a-1111-4111-8111-111111111111';
+    const MINE = { id: CUSTOMER_ID, first_name: 'Customer', last_name: 'Fixture', phone: '+19415550123', email: 'fixture@example.com', account_id: null };
+    const THEIRS = { id: OTHER, first_name: 'Other', last_name: 'Fixture', phone: '+19415550123', email: 'other@example.com', account_id: null };
+    const BODY = 'Pay here: portal.wavespestcontrol.com/pay/tok';
+
+    // customers: where('id', x) / where({ id }) -> byId; where('email', x) -> byAddress; whereIn().select() -> owner rows;
+    // whereNull().whereRaw().select() -> the live customers on the typed number.
+    function wireReply({ email = null, byAddress = null, numberRows = [MINE] } = {}) {
+      db.mockImplementation((table) => {
+        const b = {}; let mode = 'id'; let ids = [];
+        const byId = { [CUSTOMER_ID]: MINE, [OTHER]: THEIRS };
+        b.where = (a, v) => {
+          if (typeof a === 'object') ids = [a.id]; else if (a === 'id') ids = [v]; else if (a === 'email') mode = 'email';
+          return b;
+        };
+        b.whereNull = () => b; b.whereILike = () => b;
+        b.whereRaw = () => { mode = 'number'; return b; };
+        b.whereIn = (_c, list) => { mode = 'ids'; ids = list; return b; };
+        b.first = async () => (table === 'emails' ? email : mode === 'email' ? byAddress : byId[ids[0]] || null);
+        b.select = async () => (mode === 'ids' ? ids.map((id) => byId[id]).filter(Boolean) : numberRows);
+        return b;
+      });
+    }
+    beforeEach(() => {
+      links.autopayLinkSendCheck.mockResolvedValue({ present: false });
+      links.bearerLinkSendCheck.mockResolvedValue({ ok: true });
+      links.composerOnlyLinkPresence.mockResolvedValue({ present: false, kinds: [] });
+      links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [] });
+    });
+
+    test('a composer-only link and a foreign-owner link refuse; a clean body passes', async () => {
+      wireReply();
+      links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['prep_guide'] });
+      expect(await replyViaSmsProposalRefusal({ customer_id: CUSTOMER_ID, message: 'Prep: portal.wavespestcontrol.com/prep/abc' }))
+        .toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+
+      links.composerOnlyLinkPresence.mockResolvedValue({ present: false, kinds: [] });
+      links.linkOwnersInBody.mockResolvedValue({ owners: [{ kind: 'pay', token: 'tok', customerId: OTHER }], unresolved: [] });
+      expect(await replyViaSmsProposalRefusal({ customer_id: CUSTOMER_ID, message: BODY })).toMatchObject({ blocked: true, code: 'customer_link_owner_mismatch' });
+
+      links.linkOwnersInBody.mockResolvedValue({ owners: [], unresolved: [] });
+      expect(await replyViaSmsProposalRefusal({ customer_id: CUSTOMER_ID, message: 'Running late, sorry!' })).toBeNull();
+      expect(links.bearerLinkSendCheck).not.toHaveBeenCalled();
+    });
+
+    test('recipientSelected follows the send: a pinned or attributed customer is trusted; one matched by address or name needs a single-account number', async () => {
+      links.linkOwnersInBody.mockResolvedValue({ owners: [{ kind: 'pay', token: 'tok', customerId: CUSTOMER_ID }], unresolved: [] });
+      const email = { id: 'em-9', customer_id: CUSTOMER_ID, from_address: 'fixture@example.com' };
+      // Pinned customer_id, and the email's own attributed customer: never counted.
+      wireReply({ email, numberRows: [MINE, THEIRS] });
+      expect(await replyViaSmsProposalRefusal({ customer_id: CUSTOMER_ID, message: BODY })).toBeNull();
+      expect(await replyViaSmsProposalRefusal({ email_id: 'em-9', message: BODY })).toBeNull();
+      // Matched only by the sender's address (no attributed customer) or by name, two accounts on the number: refused.
+      wireReply({ email: { id: 'em-9', customer_id: null, from_address: 'fixture@example.com' }, byAddress: MINE, numberRows: [MINE, THEIRS] });
+      expect(await replyViaSmsProposalRefusal({ email_id: 'em-9', message: BODY })).toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+      wireReply({ numberRows: [MINE, THEIRS], byAddress: MINE });
+      db.mockImplementationOnce(() => { const b = {}; b.where = () => b; b.first = async () => MINE; return b; });
+      expect(await replyViaSmsProposalRefusal({ customer_name: 'Customer', message: BODY })).toMatchObject({ blocked: true, code: 'customer_link_recipient' });
+      // The same address match on a one-account number passes.
+      wireReply({ email: { id: 'em-9', customer_id: null, from_address: 'fixture@example.com' }, byAddress: MINE, numberRows: [MINE] });
+      expect(await replyViaSmsProposalRefusal({ email_id: 'em-9', message: BODY })).toBeNull();
+    });
+
+    test('an unresolvable recipient or an empty message is not judged here (the pin step and the send refuse it); an unreadable lookup refuses', async () => {
+      wireReply({ email: null, byAddress: null });
+      expect(await replyViaSmsProposalRefusal({ email_id: 'em-none', message: BODY })).toBeNull();
+      expect(await replyViaSmsProposalRefusal({ customer_id: '00000000-0000-4000-8000-000000000000', message: BODY })).toBeNull();
+      expect(await replyViaSmsProposalRefusal({ customer_id: CUSTOMER_ID })).toBeNull();
+      db.mockImplementation(() => { throw new Error('db down'); });
+      expect(await replyViaSmsProposalRefusal({ customer_id: CUSTOMER_ID, message: BODY })).toMatchObject({ blocked: true, code: 'customer_link_unverified' });
+    });
+
+    test('the send still re-checks (execution-time) and uses the same recipient resolution', async () => {
+      wireReply();
+      links.composerOnlyLinkPresence.mockResolvedValue({ present: true, kinds: ['prep_guide'] });
+      const { executeEmailTool: run } = require('../services/intelligence-bar/email-tools');
+      expect(await run('reply_via_sms', { customer_id: CUSTOMER_ID, message: 'Prep: portal.wavespestcontrol.com/prep/abc' })).toMatchObject({ blocked: true, code: 'customer_link_composer_only' });
+    });
   });
 
   test('a nested portal link reaches the owned-link refusal; a foreign URL with no owned link still passes', async () => {
