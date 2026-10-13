@@ -16,37 +16,24 @@ validation and effects where those need extraction.
 Reads have one exception (owner ruling 2026-10-12: "The Intelligence Bar may read
 what any admin screen reads, on the owner login, behind a gate"). `find_admin_reads`
 and `read_admin_data` (`admin-read-tools.js`, `GATE_IB_GENERAL_READ`, owner login
-only) read through the reviewed catalog `admin-read-catalog.json`: the admin GET
-endpoints the request census (`docs/intelligence-bar-capabilities.json`) resolves,
-minus credentials, identity flows, files, streams, action verbs and any handler the
-generator finds writing to the database or calling an outside service
-(`npm run ib:read-catalog`; reviewed exceptions in `admin-read-exclusions.json`).
-The model passes a catalog pattern and parameter values, never a URL; the server
-sends a loopback GET with the operator's own bearer token (set on the action context
-by the route, never model input, logged or stored), so every router middleware
-applies as on the screen. This is a catalog of reads, not an arbitrary executor: an
-endpoint outside it is refused, and writes are unchanged (they still need their own
-registered tool, `write-gates.js` entry and confirmation). A catalog read is not
-coverage evidence: do not mark census rows verified because of it.
-
-Writes must also register in `write-gates.js` and the write-gate contract test.
-The model can prepare a proposal, never approve it. Bind target IDs, recipient,
-amount, quantity, scope, and current versions; check them under the domain lock
-at execution. The existing pending-action record is the durable receipt and
-dedupe authority. A provider timeout needs reconciliation, not another send.
-Task writes proceed one at a time after recorded successful predecessors.
-
-Map each new/changed portal request site in
-`docs/intelligence-bar-capabilities.json`, with the reviewed source fingerprint,
-role/approval/inputs/effects and actual outcome evidence. A tool-list assertion
-does not establish coverage. `npm run check:ib-coverage` rejects unmapped changes;
-dynamic endpoints and server-generated action variants must stay in scope.
-Reviewed exceptions require a concrete reason and review reference. Never reset
-the original baseline to hide missing actions.
-
-See `docs/intelligence-bar-platform-implementation.md` for rollout, verification,
-and remaining work. The wiring below describes the retained non-platform path;
-new platform-only tools do not need another branch in that legacy dispatcher.
+only) read through `admin-read-catalog.json`, a **hand-reviewed list that grows by
+review** (35 endpoints today). An endpoint is in it only when
+`admin-read-reviewed.json` holds a row a person wrote after reading the handler and
+every function it calls, end to end; the row carries the scan fingerprint (signals,
+unresolved callees, and a content hash of the handler chain), so any edit to that
+chain drops the endpoint until it is reviewed again. `npm run ib:read-catalog
+-- --fingerprint <endpoint>` prints the fingerprint for a new row. The static scan
+(`scripts/build-ib-admin-read-catalog.js`) is only a second lock: a reviewed
+endpoint is still left out if the scan finds a write, an outside call, DDL, a signed
+link or credential signal, or middleware that does any of that. The model passes a
+catalog pattern and parameter values, never a URL; the server sends a loopback GET
+with the operator's own bearer token (set on the action context by the route, never
+model input, logged or stored), so every router middleware applies as on the screen,
+and credentials in the answer are removed (`signed-link-redaction.js`). This is a
+short list of reads, not an arbitrary executor: an endpoint outside it is refused, and
+writes are unchanged (they still need their own registered tool, `write-gates.js`
+entry and confirmation). A catalog read is not coverage evidence: do not mark census
+rows verified because of it.
 
 ## Gap reports
 

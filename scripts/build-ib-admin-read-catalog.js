@@ -5,26 +5,29 @@
  * (`find_admin_reads`, `read_admin_data`; owner ruling 2026-10-12: the bar may
  * read what any admin screen reads, on the owner login, behind a gate).
  *
- * Source: docs/intelligence-bar-capabilities.json, the census of every admin
- * UI request site. Only a GET endpoint the census resolved to a literal path
- * can join. For each one this script:
- *   1. applies the path deny rules (server/utils/admin-read-rules.js, also re-checked at
- *      call time): credentials, identity flows, files, streams, action verbs;
- *   2. finds the backend route (server/index.js mounts + server/routes/*.js)
- *      and its handler; a route or handler it cannot find is excluded;
- *   3. scans the handler (and the local functions it calls, two levels deep)
- *      for a database write, an outside-service call, a file or stream
- *      response, or an effect verb. A flagged handler is excluded unless a
- *      reviewer cleared that exact signal set in admin-read-exclusions.json;
- *   4. applies the reviewed exclusions in admin-read-exclusions.json.
- * It also lists the unreviewed GET routes a parameter value could spell its
- * way into (`blockedRoutes`); the reader refuses a path that lands on one.
+ * ADMISSION IS BY REVIEWED ROW ONLY. An endpoint is in the catalog when
+ * admin-read-reviewed.json holds a row for it that a person wrote after
+ * reading the handler chain end to end, and that row still matches the code:
+ * the same scan signals, the same unresolved callees and the same content hash
+ * of the handler and of every function the scan followed for it. Any edit to
+ * that chain drops the endpoint until someone reviews it again.
+ *
+ * The static scan is only a second lock. A reviewed endpoint is still left out
+ * when the scan finds a write, an outside call, DDL, a signed-URL or credential
+ * signal, a file response, or middleware that does any of that. The scan works
+ * on the GET endpoints in docs/intelligence-bar-capabilities.json (the census)
+ * that pass the path deny rules (server/utils/admin-read-rules.js), whose
+ * backend handler it can find, following calls across modules, named callbacks
+ * and the middleware that runs before the route.
  *
  * Run: `npm run ib:read-catalog`. A test regenerates the catalog and compares
- * it byte for byte, so the catalog cannot drift from the census silently.
+ * it byte for byte, so the catalog cannot drift from the reviewed list silently.
+ * `--fingerprint <endpoint>...` prints the fingerprint to put in a new row;
+ * `--report` prints counts and every endpoint left out, with the reason.
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const parser = require('@babel/parser');
 const rules = require('../server/utils/admin-read-rules');
 const { isCredentialName, isStrongCredentialName } = require('../server/utils/credential-fields');
@@ -32,7 +35,7 @@ const { isCredentialName, isStrongCredentialName } = require('../server/utils/cr
 const ROOT = path.resolve(__dirname, '..');
 const CENSUS_FILE = path.join(ROOT, 'docs/intelligence-bar-capabilities.json');
 const OUT_FILE = path.join(ROOT, 'server/services/intelligence-bar/admin-read-catalog.json');
-const EXCLUSIONS_FILE = path.join(ROOT, 'server/services/intelligence-bar/admin-read-exclusions.json');
+const REVIEWED_FILE = path.join(ROOT, 'server/services/intelligence-bar/admin-read-reviewed.json');
 const CATALOG_VERSION = 1;
 const ANALYSIS_DEPTH = 8;
 
@@ -402,7 +405,7 @@ function firstWord(name) {
 // What counts as safe WITHOUT following the call into source. Anything else
 // that the scan cannot resolve to a function body it has scanned is
 // "unresolved", and a route with an unresolved call is excluded unless a
-// reviewer allowed that exact callee list (admin-read-exclusions.json).
+// reviewer's row names that exact callee list (admin-read-reviewed.json).
 //   1. Objects whose methods are response, logging or language built-ins.
 const SAFE_ROOTS = new Set(['res', 'req', 'logger', 'console', 'JSON', 'Math', 'Date', 'Number', 'String', 'Boolean', 'Object', 'Array',
   'Promise', 'Set', 'Map', 'WeakMap', 'WeakSet', 'Buffer', 'Intl', 'RegExp', 'URL', 'URLSearchParams', 'Symbol', 'BigInt', 'path', 'crypto',
@@ -479,6 +482,10 @@ const JSON_RESPONSE = new Set(['json', 'send', 'jsonp']);
 
 // Files whose functions the scan read (review aid).
 const touchedFiles = new Set();
+// The text of every function body the scan followed for the current route
+// (the handler, its middleware, every callee and named callback). A reviewed
+// row stores a hash of these, so any edit to the chain drops the row.
+const followedSources = new Set();
 
 // Where each signal was first seen (review aid for --explain).
 const origins = new Map();
@@ -527,6 +534,7 @@ function analyze(fn, info, depth, seen = new Set()) {
   if (!fn || seen.has(fn)) return signals;
   seen.add(fn);
   touchedFiles.add(path.relative(ROOT, info.file));
+  followedSources.add(`${path.relative(ROOT, info.file)}\n${info.source.slice(fn.start, fn.end)}`);
   const ctx = { info, depth, seen, signals, sawResponse: false, nested: nestedFunctionNames(fn) };
   walk(fn.body || fn, (node, parent) => visitNode(node, parent, ctx));
   if (!ctx.sawResponse && depth === 0) flag(signals, 'no_json_response', info, fn);
@@ -549,6 +557,7 @@ function visitNode(node, parent, ctx) {
   inspectWriteCall(node, name, receiver, info, signals);
   if (SIGNING_RE.test(name)) flag(signals, `signed_url:${name}`, info, node);
   if (name && (LINK_BUILDER_RE.test(name) || MINT_RE.test(name) || isCredentialName(name))) flag(signals, `credential_link:${name}`, info, node);
+  inspectCallbacks(node, name, ctx);
   inspectCallee(node, name, receiver, ctx);
 }
 
@@ -733,6 +742,36 @@ function inlineRequire(callee, info) {
   return requireTarget(callee.object, info.file);
 }
 
+// A named function passed as an argument runs as part of the call
+// (rows.map(markSeen), p.then(save), modify(scopeFn), withRetry(load)). Resolve
+// it and scan it. For the array/promise/builder methods that always call their
+// argument, one that cannot be resolved is an unresolved callee.
+const CALLBACK_METHODS = new Set(['map', 'forEach', 'filter', 'reduce', 'reduceRight', 'find', 'findIndex', 'findLast', 'findLastIndex',
+  'some', 'every', 'flatMap', 'sort', 'toSorted', 'then', 'catch', 'finally', 'modify', 'tap', 'each']);
+const SAFE_CALLBACKS = new Set(['Boolean', 'Number', 'String', 'parseInt', 'parseFloat', 'Object', 'Array', 'BigInt', 'Symbol', 'isNaN',
+  'isFinite', 'encodeURIComponent', 'decodeURIComponent', 'Date', 'next', 'undefined']);
+
+function callbackTarget(arg, info) {
+  if (arg.type === 'Identifier') {
+    return { label: arg.name, builtin: SAFE_CALLBACKS.has(arg.name), next: info.functions.has(arg.name) ? { fn: info.functions.get(arg.name), info } : resolveImported(arg.name, null, info) };
+  }
+  if (arg.type === 'MemberExpression' && !arg.computed && arg.object.type === 'Identifier' && arg.property.type === 'Identifier') {
+    return { label: `${arg.object.name}.${arg.property.name}`, builtin: SAFE_ROOTS.has(arg.object.name), next: resolveImported(arg.property.name, arg.object.name, info) };
+  }
+  return null;
+}
+
+function inspectCallbacks(node, name, ctx) {
+  const { info, depth, seen, signals } = ctx;
+  const always = CALLBACK_METHODS.has(name);
+  for (const arg of node.arguments) {
+    const target = callbackTarget(arg, info);
+    if (!target || target.builtin || ctx.nested.has(target.label)) continue;
+    if (target.next && depth < ANALYSIS_DEPTH) mergeSignals(signals, analyze(target.next.fn, target.next.info, depth + 1, seen));
+    else if (target.next || (always && arg === node.arguments[0])) noteUnresolved(info, `callback ${target.label}${target.next ? ' (depth limit)' : ''}`);
+  }
+}
+
 function inspectCallee(node, name, receiver, ctx) {
   const { info, depth, seen, signals } = ctx;
   const callee = node.callee;
@@ -812,11 +851,11 @@ function routeKey(full) {
   return `GET ${rules.splitPath(full).map(s => (rules.isParam(s) ? ':param' : s)).map(s => `/${s}`).join('')}`;
 }
 
-function loadExclusions() {
-  const raw = JSON.parse(fs.readFileSync(EXCLUSIONS_FILE, 'utf8'));
+function loadReviewed() {
+  const raw = JSON.parse(fs.readFileSync(REVIEWED_FILE, 'utf8'));
   return {
-    exclude: new Map(raw.exclude.map(row => [row.route, row.reason])),
-    allow: new Map(raw.allow.map(row => [row.route, row])),
+    exclude: new Map((raw.exclude || []).map(row => [row.route, row.reason])),
+    reviewed: new Map((raw.reviewed || []).map(row => [routeKey(row.endpoint), row])),
   };
 }
 
@@ -841,6 +880,11 @@ function middlewareFunctions(entry) {
     if (resolved) out.push(resolved); else noteUnresolved(info, `middleware ${label}`);
   }
   return out;
+}
+
+// Forget parsed files (a test rewrites a fixture and judges it again).
+function resetCaches() {
+  parsed.clear();
 }
 
 let appLevelCache = null;
@@ -869,24 +913,26 @@ function appLabel({ arg, info }) {
   return argLabel(arg);
 }
 
-// A reviewer's allow row clears a route only for the exact scan result the
-// reviewer read: the same signals AND the same unresolved callee list.
-function allowedBy(exclusions, key, list, unresolved) {
-  const row = exclusions.allow.get(key);
-  const same = (a, b) => Array.isArray(a) && a.join('\n') === b.join('\n');
-  return row && same(row.signals, list) && same(row.unresolved, unresolved) ? row : null;
+// The scan is a second lock: whatever a reviewer wrote, a route whose chain
+// writes, calls out, runs DDL, mints a link or token, touches a credential or
+// answers with a file stays out.
+const HARD_SIGNAL_RE = /^(write:|outside|signed_url|credential_|response:|writes_process_state|no_json_response)/;
+
+function chainHash() {
+  return crypto.createHash('sha256').update([...followedSources].sort().join('\n=====\n')).digest('hex').slice(0, 32);
 }
 
-function judgeRoute(entry, exclusions, opaqueMounts) {
+function judgeRoute(entry, reviewed, opaqueMounts) {
   const key = routeKey(entry.full);
   const ruled = rules.denyReason(entry.full);
   if (ruled) return { safe: false, kind: 'rule', reason: ruled };
-  if (exclusions.exclude.has(key)) return { safe: false, kind: 'review', reason: exclusions.exclude.get(key) };
+  if (reviewed.exclude.has(key)) return { safe: false, kind: 'review', reason: reviewed.exclude.get(key) };
   if (opaqueMounts.some(prefix => entry.full === prefix || entry.full.startsWith(`${prefix}/`))) {
     return { safe: false, kind: 'review', reason: 'router has a catch-all or dynamic route' };
   }
   unresolvedCalls.clear();
   touchedFiles.clear();
+  followedSources.clear();
   const { functions, handlerFound } = routeFunctions(entry.route);
   if (!functions.length || !handlerFound) return { safe: false, kind: 'review', reason: 'handler_not_found' };
   const middleware = middlewareFunctions(entry);
@@ -896,16 +942,28 @@ function judgeRoute(entry, exclusions, opaqueMounts) {
   [...functions, ...middleware].forEach((item) => {
     analyze(item.fn, item.info, 0).forEach((signal) => { if (item === handler || signal !== 'no_json_response') signals.add(signal); });
   });
-  const unresolved = [...unresolvedCalls].sort();
-  const touched = [...touchedFiles].sort();
-  const list = [...signals].sort();
-  if (!list.length && !unresolved.length) return { safe: true, signals: list, unresolved, touched };
-  // A route that mints signed links, or selects, returns or builds a
-  // credential or a token link, is never cleared by a review.
-  const allowed = list.some(signal => /^(signed_url|credential_)/.test(signal)) ? null : allowedBy(exclusions, key, list, unresolved);
-  if (allowed) return { safe: true, signals: list, unresolved, touched, cleared: allowed.reason };
-  const why = [list.length ? `scan: ${list.join(', ')}` : null, unresolved.length ? `unresolved: ${unresolved.join(', ')}` : null].filter(Boolean).join(' | ');
-  return { safe: false, kind: 'review', reason: why, signals: list, unresolved };
+  const scan = { signals: [...signals].sort(), unresolved: [...unresolvedCalls].sort(), touched: [...touchedFiles].sort(), hash: chainHash() };
+  const hard = scan.signals.filter(signal => HARD_SIGNAL_RE.test(signal));
+  if (hard.length) return { safe: false, kind: 'review', reason: `scan: ${hard.join(', ')}`, ...scan };
+  return { safe: true, ...scan };
+}
+
+// What a reviewer signs off on, for one endpoint: the union of its routes'
+// signals and unresolved callees, and one hash over every route's chain.
+function endpointFingerprint(verdicts) {
+  const union = key => [...new Set(verdicts.flatMap(verdict => verdict[key] || []))].sort();
+  const hashes = verdicts.map(verdict => verdict.hash).filter(Boolean).sort();
+  return { signals: union('signals'), unresolved: union('unresolved'), hash: crypto.createHash('sha256').update(hashes.join('\n')).digest('hex').slice(0, 32) };
+}
+
+// null when the row covers exactly this fingerprint, else why not.
+function checkReview(fingerprint, row) {
+  if (!row) return 'not reviewed';
+  const same = (a, b) => Array.isArray(a) && a.join('\n') === b.join('\n');
+  if (row.hash !== fingerprint.hash) return 'review is stale: the handler chain changed';
+  if (!same(row.signals, fingerprint.signals)) return 'review is stale: scan signals changed';
+  if (!same(row.unresolved, fingerprint.unresolved)) return 'review is stale: unresolved callees changed';
+  return null;
 }
 
 // ── census → catalog ─────────────────────────────────────────────────────
@@ -968,18 +1026,19 @@ function labelFor(pattern, handlers) {
   return how ? `${where} (${how})` : where;
 }
 
-function buildCatalog({ census, exclusions = loadExclusions() } = {}) {
+function buildCatalog({ census, reviewed = loadReviewed() } = {}) {
   const source = census || JSON.parse(fs.readFileSync(CENSUS_FILE, 'utf8'));
   const { table, opaqueMounts } = routeTable();
   const judged = new Map();
   const judgeOnce = (entry) => {
-    if (!judged.has(entry)) judged.set(entry, judgeRoute(entry, exclusions, opaqueMounts));
+    if (!judged.has(entry)) judged.set(entry, judgeRoute(entry, reviewed, opaqueMounts));
     return judged.get(entry);
   };
   const { groups, skipped } = censusGets(source);
   const entries = [];
   const excluded = { rule: [], review: [], unresolvable: [...skipped.partial_template].sort() };
   const reviewAid = [];
+  const admittedRoutes = [];
   for (const [endpoint, group] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
     const ruled = rules.denyReason(endpoint);
     if (ruled) { excluded.rule.push({ endpoint, reason: ruled }); continue; }
@@ -989,6 +1048,11 @@ function buildCatalog({ census, exclusions = loadExclusions() } = {}) {
     const verdicts = matches.map(match => ({ match, verdict: judgeOnce(match) }));
     const bad = verdicts.find(({ verdict }) => !verdict.safe);
     if (bad) { excluded[bad.verdict.kind === 'rule' ? 'rule' : 'review'].push({ endpoint, reason: bad.verdict.reason }); continue; }
+    // Admission is by reviewed row only: the scan above is a second lock.
+    const fingerprint = endpointFingerprint(verdicts.map(({ verdict }) => verdict));
+    const notAdmitted = checkReview(fingerprint, reviewed.reviewed.get(routeKey(endpoint)));
+    if (notAdmitted) { excluded.review.push({ endpoint, reason: notAdmitted, fingerprint }); continue; }
+    admittedRoutes.push(...matches);
     const pattern = `/${uniqueParamNames(nameParams(segments, matches[0].match || matches[0])).join('/')}`;
     if (rules.denyReason(pattern)) { excluded.rule.push({ endpoint, reason: rules.denyReason(pattern) }); continue; }
     reviewAid.push({ endpoint, unresolved: [...new Set(verdicts.flatMap(({ verdict }) => verdict.unresolved || []))],
@@ -1010,7 +1074,8 @@ function buildCatalog({ census, exclusions = loadExclusions() } = {}) {
     known.label = labelFor(entry.endpoint, known.handlers);
   }
   const catalog = [...unique.values()].sort((a, b) => a.endpoint.localeCompare(b.endpoint));
-  const blockedRoutes = blockedFor(table, catalog, judgeOnce);
+  const admitted = new Set(admittedRoutes);
+  const blockedRoutes = blockedFor(table, catalog, entry => admitted.has(entry));
   return {
     output: {
       version: CATALOG_VERSION,
@@ -1032,10 +1097,10 @@ function buildCatalog({ census, exclusions = loadExclusions() } = {}) {
 
 // Unreviewed GET routes that a parameter value could reach: same shape as a
 // catalog pattern, with a literal where the pattern takes a parameter.
-function blockedFor(table, catalog, judgeOnce) {
+function blockedFor(table, catalog, isAdmitted) {
   const blocked = new Set();
   for (const entry of table) {
-    if (judgeOnce(entry).safe) continue;
+    if (isAdmitted(entry)) continue;
     const segments = rules.splitPath(entry.full);
     const reachable = catalog.some((item) => {
       const pattern = rules.splitPath(item.endpoint);
@@ -1068,10 +1133,21 @@ function main() {
     console.log(JSON.stringify({ counts: output.counts, excluded, reviewAid }, null, 1));
     return;
   }
+  if (process.argv.includes('--fingerprint')) {
+    const { table, opaqueMounts } = routeTable();
+    const reviewed = loadReviewed();
+    for (const endpoint of process.argv.slice(process.argv.indexOf('--fingerprint') + 1)) {
+      const normalized = `/${rules.splitPath(endpoint).map(seg => (rules.isParam(seg) ? ':param' : seg)).join('/')}`;
+      const verdicts = matchRoutes(rules.splitPath(normalized), table).map(match => judgeRoute(match, reviewed, opaqueMounts));
+      const hard = verdicts.filter(v => !v.safe).map(v => v.reason);
+      console.log(JSON.stringify({ endpoint, routes: verdicts.length, scanBlocked: hard, ...endpointFingerprint(verdicts) }));
+    }
+    return;
+  }
   if (process.argv.includes('--explain')) {
     const wanted = process.argv[process.argv.indexOf('--explain') + 1];
     const { table, opaqueMounts } = routeTable();
-    const exclusions = loadExclusions();
+    const exclusions = loadReviewed();
     for (const entry of table.filter(e => routeKey(e.full) === `GET ${wanted}`)) {
       origins.clear();
       const verdict = judgeRoute(entry, exclusions, opaqueMounts);
@@ -1090,4 +1166,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, routeKey, loadExclusions, CENSUS_FILE, OUT_FILE, EXCLUSIONS_FILE };
+module.exports = { resetCaches, appLevelMiddleware, appLabel, origins, touchedFiles, buildCatalog, serialize, routeTable, routerRoutes, judgeRoute, endpointFingerprint, checkReview, routeKey, loadReviewed, CENSUS_FILE, OUT_FILE, REVIEWED_FILE };

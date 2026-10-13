@@ -6,8 +6,9 @@
  *   find_admin_reads  searches the catalog of admin screen reads by words.
  *   read_admin_data   calls ONE catalog endpoint as the logged-in owner.
  *
- * The catalog (admin-read-catalog.json) is generated from the admin request
- * census by scripts/build-ib-admin-read-catalog.js and is the allow-list: the
+ * The catalog (admin-read-catalog.json) is a HAND-REVIEWED list (a row in
+ * admin-read-reviewed.json per endpoint, fingerprinted to the handler chain),
+ * built by scripts/build-ib-admin-read-catalog.js, and is the allow-list: the
  * model passes a catalog pattern and the parameter values separately, never a
  * URL. The read is a loopback GET to this same server with the Authorization
  * header of the request that is running the bar, so every router middleware
@@ -36,13 +37,14 @@ const MAX_MATCHES = 10;
 const BEARER_RE = /^Bearer [A-Za-z0-9._~+/=-]{10,4000}$/;
 const PAGINATION_KEY_RE = /^(page|pages|page_size|pageSize|per_page|perPage|limit|offset|cursor|next|next_cursor|nextCursor|after|before|has_more|hasMore|total|total_count|totalCount|count)$/i;
 
+const REVIEWED_COUNT = catalog.entries.length;
 const ADMIN_READ_FIND_TOOL = 'find_admin_reads';
 const ADMIN_READ_DATA_TOOL = 'read_admin_data';
 
 const ADMIN_READ_TOOLS = [
   {
     name: ADMIN_READ_FIND_TOOL,
-    description: `Find the admin screen read that holds data no purpose-built tool returns. Searches a catalog of the admin portal's data reads by words (path, screen name, handler name, label) and returns up to 10 entries: the exact endpoint pattern, its parameter names, a label and the screen. It reads no rows. Purpose-built tools come first; use this when no tool has the data. Then call read_admin_data with the exact pattern. Never tell the operator to open a screen for data this can read. It cannot change anything.
+    description: `Find the admin screen read that holds data no purpose-built tool returns. Searches a short, hand-reviewed list of the admin portal's data reads (${REVIEWED_COUNT} today; it grows only when a person reviews another) by words (path, screen name, handler name, label) and returns up to 10 entries: the exact endpoint pattern, its parameter names, a label and the screen. It reads no rows. A screen that is not on the list cannot be read this way. Purpose-built tools come first; use this when no tool has the data. Then call read_admin_data with the exact pattern. Never tell the operator to open a screen for data this can read. It cannot change anything.
 Use for: "which screen shows X", "what can I read about Y", before any read_admin_data call.`,
     input_schema: {
       type: 'object',
@@ -54,7 +56,7 @@ Use for: "which screen shows X", "what can I read about Y", before any read_admi
   },
   {
     name: ADMIN_READ_DATA_TOOL,
-    description: `Read what an admin screen reads: one GET to a reviewed admin endpoint, as the logged-in owner, returning the JSON the screen gets (capped at 12,000 characters; long lists are cut to the first items with the total). Fallback only: use a purpose-built tool when one has the data. Call find_admin_reads first to get the exact endpoint pattern; pass it unchanged in "endpoint" (for example /admin/customers/:id/timeline) and give each :name in "params" (letters, digits, dot, dash, underscore; never a slash or a URL). Filters go in "query" as plain values. An endpoint that is not in the catalog is refused. Never tell the operator to open a screen for data this can read. It reads only; it cannot change anything.`,
+    description: `Read what an admin screen reads: one GET to a reviewed admin endpoint, as the logged-in owner, returning the JSON the screen gets (capped at 12,000 characters; long lists are cut to the first items with the total). Fallback only: use a purpose-built tool when one has the data. Call find_admin_reads first to get the exact endpoint pattern; pass it unchanged in "endpoint" (for example /admin/customers/:id/timeline) and give each :name in "params" (letters, digits, dot, dash, underscore; never a slash or a URL). Filters go in "query" as plain values. An endpoint that is not on the reviewed list is refused. Never tell the operator to open a screen for data this can read. It reads only; it cannot change anything.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -145,7 +147,7 @@ function loopbackOrigin() {
 function buildRequestPath(endpoint, input) {
   const entry = typeof endpoint === 'string' ? BY_ENDPOINT.get(endpoint) : null;
   if (!entry || rules.denyReason(entry.endpoint)) {
-    return { refusal: refusal('That endpoint is not in the reviewed admin read catalog. Call find_admin_reads to get an exact endpoint pattern.', 'capability_unimplemented', { hint: 'find_admin_reads' }) };
+    return { refusal: refusal('That endpoint is not on the hand-reviewed admin read list. Call find_admin_reads to get an exact endpoint pattern.', 'capability_unimplemented', { hint: 'find_admin_reads' }) };
   }
   const filled = rules.fillPattern(entry.endpoint, input.params === undefined ? {} : input.params);
   if (filled.error) return { refusal: refusal(filled.error, 'invalid_input') };
