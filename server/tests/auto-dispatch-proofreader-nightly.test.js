@@ -315,6 +315,13 @@ describe('raiseNotices', () => {
       return run.proofreader;
     };
     expect(await nightly.raiseNotices(await collect(), { conn: stopConn(members) })).toBe(1);
+    // One notice for the stop, keyed by the stop: a second member held in the same run adds none.
+    expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('auto-dispatch-proofreader:visit-v1:2026-10-20');
+    const both = runOf();
+    for (const id of ['s1', 's2']) {
+      await nightly.checkMove({ service: { ...SERVICE, id, visit_id: 'v1' }, best: BEST, run: both }, { conn: stopConn(members), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
+    }
+    expect(both.proofreader.notices.size).toBe(1);
     notifications.notifyAdmin.mockClear();
     const retimed = [members[0], { ...members[1], window_start: '15:00' }];
     expect(await nightly.raiseNotices(await collect(), { conn: stopConn(retimed) })).toBe(0);

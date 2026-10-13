@@ -16,7 +16,7 @@
  * paid for. A run asks at most config.proofreaderMaxCalls times; past that a
  * move waits for the next run.
  *
- * THE NOTICE. One per visit and date (dedupe key below), written once: a
+ * THE NOTICE. One per visit (or grouped stop) and date (dedupe key below), written once: a
  * later run that is still unsure about the same visit writes nothing, a
  * notice a person marked done included. It is raised for an "unknown" a
  * person can settle from the record (the model was unsure, or part of the
@@ -173,7 +173,9 @@ async function ask({ service, best }, { conn, proofreader, state }) {
 function collectNotice(state, service, { answer, move, entry, stop }) {
   if (!move || !PERSON_SETTLES[answer.why]) return;
   const date = toDateStr(service.scheduled_date);
-  const key = noticeKey(service.id, date);
+  // A grouped stop is one notice, whichever member the run tried to move: two
+  // members that both qualify describe the same stop (Codex #6313 r3).
+  const key = noticeKey(stop && service.visit_id ? `visit-${service.visit_id}` : service.id, date);
   if (!date || state.notices.has(key)) return;
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
