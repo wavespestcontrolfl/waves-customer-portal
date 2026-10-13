@@ -998,6 +998,18 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true })))
       .rejects.toMatchObject({ code: 'one_time_unrepresentable', message: expect.stringMatching(/Wasp Nest Removal.*comped/) });
   });
+  test('round 61: a label-only raw mirror (no service key) is the mapped row\'s twin: one $100 job, never two', async () => {
+    const mapped = [{ name: 'Wasp Nest Removal', price: 100 }];
+    const raw = [{ label: 'Wasp Nest Removal', price: 100, billingCadence: 'one_time' }];
+    const world = rawOnly(raw, { result: { oneTime: { items: mapped }, lineItems: raw } });
+    expect(await lineNames(world)).toEqual([['Wasp Nest Removal', 100]]);
+  });
+  test('round 61: a legacy oneTimePrice mirror is a gross copy of a discounted row, so the $80 net is the line, not a conflict', async () => {
+    const mapped = [{ service: 'wasp', name: 'Wasp Nest Removal', price: 100, priceAfterDiscount: 80 }];
+    const raw = [{ service: 'wasp', label: 'Wasp Nest Removal', oneTimePrice: 100, billingCadence: 'one_time' }];
+    const world = rawOnly(raw, { result: { oneTime: { items: mapped }, lineItems: raw } });
+    expect(await lineNames(world)).toEqual([['Wasp Nest Removal', 80]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

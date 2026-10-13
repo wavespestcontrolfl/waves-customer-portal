@@ -1062,8 +1062,12 @@ function mergeMirrorFacts(keptRow, other) {
 // verdict ('comped' | 'conflicted') or the merged amount/taxable.
 // Explicit sold-net aliases (manualFinalOneTime aside, which outranks all).
 const MAPPED_SOLD_NET_ALIASES = MAPPED_NET_ALIASES.slice(1);
-const RAW_SOLD_NET_ALIASES = RAW_NET_ALIASES.slice(1);
-const grossOf = (row) => num(row.price ?? row.amount ?? row.total);
+// The legacy one-time price keys are a GROSS copy of the row, never a sold
+// net of their own: a discounted row mirrored as `{ oneTimePrice: 100 }`
+// describes one sale from that gross (codex #6113 r61).
+const LEGACY_GROSS_ALIASES = ['oneTimePrice', 'onetime_price', 'oneTime'];
+const RAW_SOLD_NET_ALIASES = RAW_NET_ALIASES.slice(1).filter((k) => !LEGACY_GROSS_ALIASES.includes(k));
+const grossOf = (row) => num(row.price ?? row.amount ?? row.total ?? row.oneTimePrice ?? row.onetime_price ?? row.oneTime);
 const mappedNetShape = (row) => ({ manual: num(row.manualFinalOneTime) != null, alias: firstApplicableAlias(row, MAPPED_SOLD_NET_ALIASES) !== undefined, gross: grossOf(row) });
 const rawNetShape = (row) => ({ manual: num(row.manualFinalOneTime) != null, alias: firstApplicableAlias(row, RAW_SOLD_NET_ALIASES) !== undefined, gross: grossOf(row) });
 // With neither manual net present: the resolved amounts agree, or exactly
@@ -1115,11 +1119,17 @@ function mergeMappedTwin(item, mappedAmount, twin) {
 }
 const explicitTaxableOf = (item, twin) => ((item.taxable === true || item.taxable === false) ? item.taxable
   : ((twin.taxable === true || twin.taxable === false) ? twin.taxable : undefined));
+// The names a row answers to: its service key and every display label it
+// carries. Two rows are the same persisted charge when any name is shared,
+// so a raw mirror that keeps only a `label` still meets its mapped twin
+// (codex #6113 r61).
+const rowNames = (row) => new Set([row.service, row.name, row.label, row.displayName, row.display?.name]
+  .map((v) => String(v || '').trim().toLowerCase()).filter(Boolean));
+const sameIdentity = (item, line) => { const names = rowNames(item); return [...rowNames(line)].some((n) => names.has(n)); };
 // Twin: the exact-amount mirror, else any same-service raw row (one engine
 // run persists both shapes, so the same service key is a mirror).
 function claimRawTwin(rawPool, item, mappedAmount) {
-  const service = String(item.service || item.name || '').toLowerCase();
-  const sameService = (entry) => !entry.used && String(entry.line.service || entry.line.name || '').toLowerCase() === service;
+  const sameService = (entry) => !entry.used && sameIdentity(item, entry.line);
   const sameAmount = (e) => roundCents(rawResolvedAmount(e.line)) === roundCents(mappedAmount);
   // Repeated same-price rows pair by sold scope first, so two legitimate
   // rows persisted in the opposite order in the raw shape still meet their
@@ -1146,9 +1156,8 @@ function claimRawTwin(rawPool, item, mappedAmount) {
 // same-service manual row (codex #6113 r38): a comped mapped row beside a
 // separate $80 manual row keeps its own $0 twin.
 function claimManualNetTwin(rawPool, item) {
-  const service = String(item.service || item.name || '').toLowerCase();
   const sameGross = (e) => grossOf(item) == null || grossOf(e.line) == null || roundCents(grossOf(e.line)) === roundCents(grossOf(item));
-  const entry = rawPool.find((e) => !e.used && String(e.line.service || e.line.name || '').toLowerCase() === service
+  const entry = rawPool.find((e) => !e.used && sameIdentity(item, e.line)
     && num(e.line.manualFinalOneTime) > 0 && sameGross(e) && scopeCompatible(item, e.line));
   if (entry) entry.used = true;
   return entry ? entry.line : null;
@@ -1156,8 +1165,7 @@ function claimManualNetTwin(rawPool, item) {
 // A comped mapped row's OWN raw twin: the same service with an explicit
 // accepted zero and a compatible scope. Claimed before any manual-net row.
 function claimExactZeroTwin(rawPool, item) {
-  const service = String(item.service || item.name || '').toLowerCase();
-  const entry = rawPool.find((e) => !e.used && String(e.line.service || e.line.name || '').toLowerCase() === service
+  const entry = rawPool.find((e) => !e.used && sameIdentity(item, e.line)
     && explicitZeroNetRaw(e.line) && scopeCompatible(item, e.line));
   if (entry) entry.used = true;
   return entry ? entry.line : null;
