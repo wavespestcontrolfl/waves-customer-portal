@@ -438,6 +438,15 @@ const SKIP = !process.env.DATABASE_URL;
       expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
     });
 
+    test('the number copied into the caller\'s callback slot still files the card; a known calling line does not', async () => {
+      const account = await customer({ phone: HOLDER_PHONE });
+      const copied = await fileFamilyAccountCard(byPhone(await call(), { phone: HOLDER_PHONE }));
+      expect(copied).toMatchObject({ basis: 'contact_phone_on_account', candidates: [{ id: String(account) }] });
+      // The line the call arrived on already belongs to an account: no card.
+      await customer({ first_name: 'Pat', last_name: 'Other', phone: '+19415550101' });
+      expect(await fileFamilyAccountCard(byPhone(await call()))).toBeNull();
+    });
+
     test('the secondary phone counts; a service-contact slot, an inactive or a deleted account does not', async () => {
       const account = await customer({ secondary_phone: '(941) 555-0177' });
       expect((await matchContactPhoneAccounts(byPhone(await call()))).candidates.map((c) => c.id)).toEqual([String(account)]);

@@ -344,7 +344,14 @@ async function suggestFamilyAccounts({ phones = [], ...args }) {
   // The customer THIS call created for the caller (an earlier pass) carries the caller's own number; it
   // must not hide the suggestion on a reprocess of the same call.
   const knownElsewhere = own ? (table) => (args.conn || db)(table).whereNot('id', own) : (args.conn || db);
+  // A spoken number that IS this basis's evidence is not "the caller's number an account already
+  // knows" (the model can copy it into the caller's callback slot). The line the call arrived on
+  // is always checked.
+  const evidence = new Set((match.contact_phones || []).map(phoneIdentityKey));
+  const arrivedOn = phoneIdentityKey(args.call.from_phone);
   for (const phone of phones) {
+    const key = phoneIdentityKey(phone);
+    if (evidence.has(key) && key !== arrivedOn) continue;
     if (await findKnownCallerCustomer(knownElsewhere, phone, ['id'])) return null;
   }
   return match;
