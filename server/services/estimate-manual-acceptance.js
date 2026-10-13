@@ -1175,8 +1175,15 @@ async function settleEffects(trx, ctx, outcome, isCommercialProposal) {
       // An optional read inside the accept's transaction runs in a savepoint,
       // so a failed statement never aborts the accept (codex #6113 r55; the
       // same shape as readEmailInputs' notification_prefs read).
-      const { loadTaxabilityMap } = require('./estimate-proposal-generate');
-      const taxabilityMap = trx.isTransaction ? await trx.transaction((sp) => loadTaxabilityMap(sp)) : await loadTaxabilityMap(trx);
+      // The strict read rejects INSIDE the savepoint, so the savepoint rolls
+      // back; the fallback (no map) is taken out here (codex #6113 r57).
+      const { loadTaxabilityMap, loadTaxabilityMapStrict } = require('./estimate-proposal-generate');
+      let taxabilityMap = null;
+      try {
+        taxabilityMap = trx.isTransaction ? await trx.transaction((sp) => loadTaxabilityMapStrict(sp)) : await loadTaxabilityMap(trx);
+      } catch {
+        taxabilityMap = null;
+      }
       const { lines, refusal } = AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter, { billingTerm: ctx.billingTerm, taxabilityMap });
       throwRefusal(refusal);
       for (const line of lines) ctx.effects.add(line);

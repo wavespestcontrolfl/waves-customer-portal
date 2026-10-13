@@ -976,9 +976,12 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const broken = jest.fn((table) => { if (table === 'service_taxability') throw new Error('relation does not exist'); return realDb(table); });
     Object.assign(broken, realDb);
     broken.isTransaction = true;
-    broken.transaction = jest.fn(async (cb) => cb(broken));
+    // round 57: the failure must surface INSIDE the savepoint (the strict read rejects there), and the accept catches it outside.
+    const savepointFailures = [];
+    broken.transaction = jest.fn(async (cb) => { try { return await cb(broken); } catch (err) { savepointFailures.push(err.message); throw err; } });
     const { effects } = await markEstimateManuallyAccepted(base({ ...world, database: broken }, fakeConverter(world), { dryRun: true }));
     expect(broken.transaction.mock.calls.length).toBeGreaterThan(0);
+    expect(savepointFailures).toContain('relation does not exist');
     expect(effects.find((e) => e.kind === 'one_time_line')).toMatchObject({ name: 'Wasp Nest Removal', amount: 100, taxable: true });
   });
   test('round 56: a mapped $500 installation for Building A and a raw one for Building B are two charges, not mirrors', async () => {
@@ -986,7 +989,7 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const mapped = { service: 'termite_bait', name: 'Termite Bait Installation', price: 500, detail: 'Building A' };
     const world = rawOnly([recurring], { result: { oneTime: { items: [mapped] }, lineItems: [recurring] } });
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
-    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.taxable])).toEqual([['Termite Bait Installation', 500, true], ['Termite Bait Stations installation', 500, undefined]]);
+    expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.name, e.amount, e.taxable, e.includes])).toEqual([['Termite Bait Installation', 500, true, ['Building A']], ['Termite Bait Stations installation', 500, undefined, ['Building B']]]);
   });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];

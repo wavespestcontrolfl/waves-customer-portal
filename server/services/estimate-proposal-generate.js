@@ -260,13 +260,19 @@ const FAMILY_TAXABILITY_KEYS = {
 // table edits propagate (codex 1A-ii r6b). The family heuristic remains
 // only as the no-database fallback; explicit row flags always win, and
 // standalone inspections stay exempt (FL §212.08(6)).
+// The strict read rejects on a failed query, so a caller running it inside
+// a savepoint sees the failure there and the savepoint rolls back instead
+// of releasing an aborted subtransaction (codex #6113 r57).
+async function loadTaxabilityMapStrict(database) {
+  const rows = await database('service_taxability').select('service_key', 'is_taxable');
+  const map = new Map();
+  for (const row of rows) map.set(String(row.service_key), row.is_taxable === true);
+  return map.size ? map : null;
+}
 async function loadTaxabilityMap(database) {
   if (!database) return null;
   try {
-    const rows = await database('service_taxability').select('service_key', 'is_taxable');
-    const map = new Map();
-    for (const row of rows) map.set(String(row.service_key), row.is_taxable === true);
-    return map.size ? map : null;
+    return await loadTaxabilityMapStrict(database);
   } catch (_) {
     return null;
   }
@@ -1264,7 +1270,9 @@ function installationRowsToWork(installationRows, fromOneTime, taxabilityMap, ou
       label: `${rawLineLabel(line, 'Service').slice(0, 140)} installation`.slice(0, 160),
       amount: rounded,
       taxable: commercialTaxableDefault(line.service || line.name, line.installation?.taxable ?? line.taxable, { taxabilityMap, oneTime: true }),
-      includes: [],
+      // The row's stated scope rides on the line, so same-priced
+      // installations read apart (codex #6113 r57).
+      includes: scopeIncludes(line),
     });
   }
 }
@@ -1423,6 +1431,7 @@ module.exports = {
   programFamilyForService,
   buildFamilyRegistry,
   loadTaxabilityMap,
+  loadTaxabilityMapStrict,
   PROGRAM_EXCLUSIONS,
   FAMILY_RESPONSIBILITIES,
   COMMERCIAL_PEST_INCLUSIONS,
