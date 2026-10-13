@@ -35,6 +35,7 @@ const moveRules = require('./move-rules');
 const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
 const needsPerson = require('./needs-person-notice');
+const moveCheck = require('./proofreader/nightly');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -1233,18 +1234,33 @@ async function applyPlannedMove(pm, run, attempt) {
     return audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${grouped})`, ...fresh.audit });
   }
 
+  // GATE_AUTO_DISPATCH_PROOFREADER (proofreader/nightly.js): the last step
+  // before the write, so a move no rule or cap lets through is never paid
+  // for. Anything but "allow" leaves the visit where it is.
+  const checked = await moveCheck.checkMove({ service: pm.service, best: fresh.best, run });
+  if (checked && !checked.allowed) {
+    noteUnmoved(run, pm.service, checked.reason_code);
+    return audit.logDecision(runId, {
+      action: 'no_change', service: pm.service, reason_code: checked.reason_code, reason_description: checked.reason_description, ...fresh.audit, constraints: { ...fresh.audit.constraints, proofreader: checked.audit },
+    });
+  }
+  attempt.checked = checked;
+
   // Next-best still-scored candidates (GATE_AUTO_DISPATCH_SHARED_MODEL) —
   // apply falls back to one of these on a SLOT_TAKEN refusal instead of
   // failing the visit outright. No effect when the gate is off.
   // `rescore` (Codex r1): after a SLOT_TAKEN, re-run this visit's own
   // evaluation against the now-current schedule before the next attempt.
+  // A proofread move has no fallback: only the slot the model read may land.
   const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, {
     ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary,
-    alternateCandidates: fresh.rankedCandidates,
     // The conflict that lifted the bar for this move; the move guard re-reads
     // it on the move transaction and refuses when it is gone.
     sourceConflict: (fresh.current && fresh.current.conflict) || null,
-    rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
+    ...moveCheck.writeOptions(checked, {
+      alternateCandidates: fresh.rankedCandidates,
+      rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
+    }),
   });
   totals.changed += result.movedCount || 1;
   // A SLOT_TAKEN fallback (Codex pre-push P1) can land on a DIFFERENT
@@ -1263,7 +1279,7 @@ async function applyPlannedMove(pm, run, attempt) {
     scores: appliedAudit.scores,
     prefsSnapshot: fresh.audit.prefsSnapshot,
     routeMetrics: { ...appliedAudit.routeMetrics, attempts: appliedAudit.attempts },
-    constraints: appliedAudit.constraints,
+    constraints: checked ? { ...appliedAudit.constraints, proofreader: checked.audit } : appliedAudit.constraints,
     appliedBy: 'auto_dispatch',
   });
 }
@@ -1280,6 +1296,17 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
   noteUnmoved(run, pm.service, 'ERROR');
   try {
     await audit.logDecision(run.runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...failedPlacementAudit(fresh, pm, run.lockBoundary, applyErr), error: applyErr.message });
+  } catch (_) { /* swallow */ }
+}
+
+// The one slot the proofreader approved was taken before the write (a
+// proofread move has no fallback slot). Nothing moved; the next run tries again.
+async function logApprovedSlotTaken(pm, attempt, run) {
+  noteUnmoved(run, pm.service, 'APPROVED_SLOT_TAKEN');
+  try {
+    await audit.logDecision(run.runId, {
+      action: 'no_change', service: pm.service, reason_code: 'APPROVED_SLOT_TAKEN', reason_description: 'The slot the move proofreader approved was taken before the move; the next run tries again', ...attempt.fresh.audit, constraints: { ...attempt.fresh.audit.constraints, proofreader: attempt.checked.audit },
+    });
   } catch (_) { /* swallow */ }
 }
 
@@ -1313,11 +1340,12 @@ async function runPassTwo(run) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'VISIT_MOVE_INCOMPLETE', reason_description: 'Straggler of a partial grouped move earlier this run — staff repair owns this stop', ...pm.result.audit });
       continue;
     }
-    const attempt = { fresh: null };
+    const attempt = { fresh: null, checked: null };
     try {
       await applyPlannedMove(pm, run, attempt);
     } catch (applyErr) {
-      await recordApplyFailure(pm, attempt.fresh, applyErr, run);
+      if (moveCheck.approvedSlotTaken(attempt.checked, applyErr)) await logApprovedSlotTaken(pm, attempt, run);
+      else await recordApplyFailure(pm, attempt.fresh, applyErr, run);
     }
   }
 }
@@ -1377,6 +1405,9 @@ async function runAutoDispatch(opts = {}) {
     // One road-time reader for the whole run: it keeps every answer, so
     // pass 2 asks Google nothing twice (road-check.js).
     roadTravel: config.roadCheckEnabled === true ? roadCheck.createRunTravel(config) : null,
+    // GATE_AUTO_DISPATCH_PROOFREADER: this run's move-check tally and the
+    // notices it raises at its end (null = off; a dry run moves nothing).
+    proofreader: config.proofreaderEnabled === true && config.mode === 'apply' ? moveCheck.newRunState() : null,
   };
 
   try {
@@ -1428,8 +1459,10 @@ async function runAutoDispatch(opts = {}) {
   }
   await raiseMissingGeoNotices(run);
   await closeMissingGeoNotices(run);
+  await moveCheck.closeNotices(run.nowDate);
   await settleConflicts(run);
   await needsPerson.raiseNotices(run.needsPerson, { nowDate: run.nowDate, clearedIds: run.clearedIds });
+  await moveCheck.raiseNotices(run.proofreader);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   } finally {
@@ -1441,7 +1474,7 @@ async function runAutoDispatch(opts = {}) {
       await require('../tech-visit-notifications').pushAutoDispatchSummary({ runId });
     }
   }
-  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts} road_legs=${roadCheck.spendOf(run.roadTravel)}`);
+  logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts} road_legs=${roadCheck.spendOf(run.roadTravel)} proofread=${moveCheck.tallyOf(run.proofreader)}`);
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 

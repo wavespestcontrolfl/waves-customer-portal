@@ -97,6 +97,16 @@ function isRoadCheckEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_PROOFREADER: same call-time, fail-closed convention.
+function isProofreaderEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER');
+  } catch (_) {
+    return false;
+  }
+}
+
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
 function moveRuleConfig(overrides) {
@@ -129,6 +139,14 @@ function moveRuleConfig(overrides) {
     roadCheckEnabled: overrides.roadCheckEnabled ?? isRoadCheckEnabled(),
     roadCheckMaxElements: overrides.roadCheckMaxElements
       ?? intEnv('AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS', 600, { min: 0, max: 5000 }),
+    // MOVE PROOFREADER (GATE_AUTO_DISPATCH_PROOFREADER, proofreader/nightly.js;
+    // owner 2026-10-12): one model reads the customer record before a move in
+    // apply mode. Allow moves the visit; hold and unknown leave it, and an
+    // unknown tells a person. The cap is the most model calls one run may
+    // make; past it a move waits for the next run.
+    proofreaderEnabled: overrides.proofreaderEnabled ?? isProofreaderEnabled(),
+    proofreaderMaxCalls: overrides.proofreaderMaxCalls
+      ?? intEnv('AUTO_DISPATCH_PROOFREADER_MAX_CALLS', 60, { min: 0, max: 1000 }),
   };
 }
 
@@ -203,5 +221,5 @@ function getAutoDispatchConfig(overrides = {}) {
 }
 
 module.exports = {
-  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isConflictMovesEnabled, isRoadCheckEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
+  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isConflictMovesEnabled, isRoadCheckEnabled, isProofreaderEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
 };

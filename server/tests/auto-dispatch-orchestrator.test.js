@@ -1663,3 +1663,90 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
     });
   });
 });
+
+describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026-10-12)', () => {
+  const moveCheck = require('../services/auto-dispatch/proofreader/nightly');
+  const ALLOW = { allowed: true, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'm', prompt_version: 'v' } };
+  const stop = (code, verdict) => ({ allowed: false, reason_code: code, reason_description: 'stopped', audit: { verdict, why: 'x', entry_id: null, model: 'm', prompt_version: 'v' } });
+  const applyMode = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { return await fn(); } finally { process.env.AUTO_DISPATCH_ALLOW_APPLY = prev; }
+  };
+  let checkMove;
+  beforeEach(() => {
+    checkMove = jest.spyOn(moveCheck, 'checkMove');
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('allow: the visit moves on the approved slot only, and the row says the move was checked', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 1, failed: 0 });
+      const [{ service, best, run }] = checkMove.mock.calls[0];
+      expect(service.id).toBe('s1');
+      expect(best).toMatchObject({ date: CAND_BIG.date, start_time: CAND_BIG.start_time });
+      expect(run.proofreader).toMatchObject({ calls: 0 });
+      const options = apply.applyAutoDispatchMove.mock.calls[0][3];
+      expect(options.alternateCandidates).toEqual([]);
+      expect(options.rescore).toBeUndefined();
+      expect(lastDecision('changed').constraints.proofreader).toEqual(ALLOW.audit);
+    });
+  });
+
+  test.each([['PROOFREADER_HOLD', 'hold'], ['PROOFREADER_UNSURE', 'unknown'], ['PROOFREADER_NOT_ASKED', 'unknown']])('%s: the visit stays where it is', async (code, verdict) => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(stop(code, verdict));
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 0 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe(code);
+      expect(row.constraints.proofreader.verdict).toBe(verdict);
+    });
+  });
+
+  test('the approved slot is taken before the write: nothing moves and the run is not a failed run', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('taken'), { code: 'SLOT_TAKEN' }));
+      const res = await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true });
+      expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('APPROVED_SLOT_TAKEN');
+      expect(lastDecision('failed')).toBeUndefined();
+    });
+  });
+
+  test('any other write failure of a checked move is still a failure', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('locked'), { code: 'STALE_PLACEMENT' }));
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 1 });
+    });
+  });
+
+  test('a move the per-run cap holds is never asked about', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true, maxChangesPerRun: 0 });
+      expect(checkMove).not.toHaveBeenCalled();
+    });
+  });
+
+  test('gate off: the real check answers null, nothing is asked, and the fallback is unchanged', async () => {
+    await applyMode(async () => {
+      expect(await runAutoDispatch({ mode: 'apply' })).toMatchObject({ changed: 1 });
+      expect(checkMove.mock.calls[0][0].run.proofreader).toBeNull();
+      const options = apply.applyAutoDispatchMove.mock.calls[0][3];
+      expect(typeof options.rescore).toBe('function');
+      expect(options.alternateCandidates.length).toBeGreaterThan(0);
+      expect(lastDecision('changed').constraints.proofreader).toBeUndefined();
+    });
+  });
+
+  test('a dry run never asks', async () => {
+    checkMove.mockResolvedValue(ALLOW);
+    expect(await runAutoDispatch({ mode: 'dry_run', proofreaderEnabled: true })).toMatchObject({ recommended: 1 });
+    expect(checkMove).not.toHaveBeenCalled();
+  });
+});

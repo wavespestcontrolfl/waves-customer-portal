@@ -211,10 +211,13 @@ const DEFAULTS = Object.freeze({
   SMS_SCHEDULING_DECIDE: 'claude-sonnet-5-5',
   // Auto-dispatch move proofreader (owner 2026-10-09, "proofreader yes";
   // services/auto-dispatch/proofreader): reads the customer record before an
-  // automatic move and answers allow / hold / unknown. The replay over past
-  // moves (scripts/auto-dispatch-proofreader-replay.js) picks the model from
-  // measured errors; Sonnet 5.5 is the starting point, not a finding.
-  AUTO_DISPATCH_PROOFREADER: 'claude-sonnet-5-5',
+  // automatic move and answers allow / hold / unknown. Owner 2026-10-12
+  // ("go with the better agent"): Opus 5.5. In the 30-day replay of 134 past
+  // moves (scripts/auto-dispatch-proofreader-replay.js, 2026-10-10) both
+  // models got 18 of 18 made-up hard cases; Opus stopped or questioned 30
+  // moves and Sonnet 23. The owner gave no labels, so this is the more
+  // careful reader, not a measured error rate.
+  AUTO_DISPATCH_PROOFREADER: 'claude-opus-5-5',
   // Service report "Ask Waves" answer writer (owner 2026-10-05, "use sonnet
   // 5.5"): writes the answer to a customer's typed question from the report's
   // own facts. Customer-facing generated text, so it rides the two-provider
@@ -517,8 +520,9 @@ const ROUTES = Object.freeze({
   smsSchedulingDecide: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SCHEDULING_DECIDE, effort: 'high' }),
   // Auto-dispatch move proofreader (owner 2026-10-09,
   // auto-dispatch/proofreader/index.js): single leg, no automatic fallback —
-  // a miss is the verdict "unknown" and the visit stays where it is. No
-  // nightly call site yet; the replay script is the only caller.
+  // a miss is the verdict "unknown" and the visit stays where it is. Called
+  // by the nightly run behind GATE_AUTO_DISPATCH_PROOFREADER
+  // (proofreader/nightly.js) and by the replay script.
   autoDispatchProofreader: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: AUTO_DISPATCH_PROOFREADER, effort: 'high' }),
   // Lawn visit assessment name referee (owner ruling 2026-09-29,
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
