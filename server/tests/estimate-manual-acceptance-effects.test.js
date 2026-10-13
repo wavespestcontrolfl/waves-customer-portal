@@ -899,6 +899,23 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
     expect(effects.filter((e) => e.kind === 'one_time_line').map((e) => [e.amount, e.includes])).toEqual([[80, ['Kitchen']], [70, ['Garage']]]);
   });
+  test('round 49: the canonical service_taxability table decides a row with no explicit flag (exempt → no tax note; taxable → the note)', async () => {
+    for (const [isTaxable, expectTaxable] of [[false, undefined], [true, true]]) {
+      const world = makeWorld({
+        estimateOverrides: { onetime_total: null, estimate_data: JSON.stringify({ recurring: { services: solo }, result: { oneTime: { items: [{ service: 'wasp', name: 'Wasp Nest Removal', price: 100 }] } } }) },
+        extraTables: { service_taxability: [{ service_key: 'wasp', is_taxable: isTaxable }] },
+      });
+      const { effects } = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));
+      expect(effects.find((e) => e.kind === 'one_time_line').taxable).toBe(expectTaxable);
+    }
+  });
+  test('round 49: a website quote with only a frozen setupFeeQuote (no row, no cached fee, onetime_total 0) lists the $99 fee; a rodent-kind quote is not the fee', async () => {
+    const data = (quote) => JSON.stringify({ recurring: { services: solo }, setupFeeQuote: quote });
+    const world = makeWorld({ estimateOverrides: { onetime_total: 0, estimate_data: data({ kind: 'waveguard_membership', amount: 99 }) } });
+    expect(await lineNames(world)).toEqual([['WaveGuard membership fee', 99]]);
+    const rodent = makeWorld({ estimateOverrides: { onetime_total: 0, estimate_data: data({ kind: 'rodent_bait_setup', amount: 150 }) } });
+    expect(await lineNames(rodent)).toEqual([]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

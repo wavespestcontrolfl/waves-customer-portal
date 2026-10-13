@@ -1172,7 +1172,8 @@ async function settleEffects(trx, ctx, outcome, isCommercialProposal) {
   const plan = await planPostCommitSteps(trx, ctx, outcome);
   if (ctx.effects.enabled) {
     if (!isCommercialProposal) {
-      const { lines, refusal } = AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter, { billingTerm: ctx.billingTerm });
+      const taxabilityMap = await require('./estimate-proposal-generate').loadTaxabilityMap(trx);
+      const { lines, refusal } = AcceptEffects.oneTimeLineEffects(outcome.acceptedEstimate, ctx.estimateConverter, { billingTerm: ctx.billingTerm, taxabilityMap });
       throwRefusal(refusal);
       for (const line of lines) ctx.effects.add(line);
       // A positive one-time total with no itemized line: the card cannot name

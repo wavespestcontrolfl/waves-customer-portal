@@ -247,7 +247,23 @@ function membershipFeeLine(data, { applies, explicitFee }) {
   // An explicit row at $0 is a WAIVED fee: no fee line, and the cached
   // aggregate fee is not read past it (codex #6113 r45).
   const amount = explicitFee !== undefined ? (explicitFee > 0 ? explicitFee : null) : cachedMembershipFee(data);
-  return amount == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand' };
+  if (amount != null) return { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand' };
+  // The frozen quote fee is charged beside the one-time total, never
+  // inside it, so the total's reconciliation (pooled discount, unitemized
+  // refusal) leaves it out.
+  const frozen = explicitFee === undefined ? frozenMembershipFeeQuote(data) : null;
+  return frozen == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: frozen, consequence: 'invoice_by_hand', outside_total: true };
+}
+// The website quote freezes the disclosed membership fee as
+// setupFeeQuote.amount with no row and no cached fee (the converter's
+// frozenSetupFeeAmount charges exactly it), so the card lists it when the
+// fee applies; a zero quote is the waiver setupFeeApplies already honors
+// (codex #6113 r49). The rodent kind is a different setup, never this fee.
+function frozenMembershipFeeQuote(data) {
+  const quote = data?.setupFeeQuote;
+  if (!quote || typeof quote !== 'object' || quote.kind === 'rodent_bait_setup') return null;
+  const n = Number(quote.amount);
+  return Number.isFinite(n) && n > 0 ? round2(n) : null;
 }
 // Every explicit setup row the containers carry (mapped items and raw line
 // items alike), as its distinct sold amounts ascending; the row is never
@@ -292,9 +308,9 @@ function unrepresentableRefusal(warning) {
 // them. A row below zero (a bundle discount persisted as its own item) is
 // dropped by the extractor, so it is only representable through the pooled
 // discount line, which needs an aggregate to pool against.
-function canonicalOneTimeLines(estimate, data) {
+function canonicalOneTimeLines(estimate, data, taxabilityMap) {
   const { deriveCorrectiveWork } = require('./estimate-proposal-generate');
-  const { correctiveWork, warning } = deriveCorrectiveWork(data, { ...estimate, onetime_total: null }, null, { skipRow: isSetupFeeRow });
+  const { correctiveWork, warning } = deriveCorrectiveWork(data, { ...estimate, onetime_total: null }, taxabilityMap, { skipRow: isSetupFeeRow });
   if (warning) return { lines: [], refusal: unrepresentableRefusal(warning) };
   // The package visit count and the sold scope travel with the line: the
   // accept books nothing, so the card is the office's instruction for the
@@ -371,9 +387,12 @@ function rawLineAmount(line) {
   return null;
 }
 
-function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard' } = {}) {
+// taxabilityMap: the canonical service_taxability table (loadTaxabilityMap),
+// the same one the proposal generator classifies with; without it a row
+// with no explicit flag falls to the family default (codex #6113 r49).
+function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard', taxabilityMap = null } = {}) {
   const data = parseData(estimate.estimate_data);
-  const canonical = canonicalOneTimeLines(estimate, data);
+  const canonical = canonicalOneTimeLines(estimate, data, taxabilityMap);
   if (canonical.refusal) return canonical;
   const applies = setupFeeApplies(data, billingTerm);
   const explicitFees = explicitSetupFees(data);
@@ -400,7 +419,7 @@ function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard' } = 
 function pooledDiscountLine(estimate, lines) {
   const total = oneTimeAggregateTotal(estimate);
   if (total == null || !lines.length) return null;
-  const listed = round2(lines.reduce((sum, line) => sum + Number(line.amount || 0), 0));
+  const listed = round2(lines.filter((line) => !line.outside_total).reduce((sum, line) => sum + Number(line.amount || 0), 0));
   const pooled = round2(listed - total);
   if (cents(pooled) <= 0) return null;
   return { kind: 'one_time_line', name: 'Discount applied to the one-time total', amount: -pooled, consequence: 'subtract_when_invoicing' };
@@ -451,7 +470,7 @@ function oneTimeAggregateConflict(estimate) {
 function unitemizedOneTimeRefusal(estimate, lines) {
   const total = oneTimeAggregateTotal(estimate);
   if (total == null) return null;
-  const listed = round2(lines.filter((line) => line.kind === 'one_time_line').reduce((sum, line) => sum + Number(line.amount || 0), 0));
+  const listed = round2(lines.filter((line) => line.kind === 'one_time_line' && !line.outside_total).reduce((sum, line) => sum + Number(line.amount || 0), 0));
   const missing = round2(total - listed);
   if (cents(missing) === 0) return null;
   if (missing < 0) {
