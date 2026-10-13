@@ -144,28 +144,35 @@ function clearedByBooking({ call, kind, slot }, bookedRows, { dateET, namesakes 
   return bookedRows.some((row) => rowCarriesCall(row, call) || ownOnDay(row) || namesake(row));
 }
 
+// Who the row is for: the linked customer's name on file, else the name given on the call.
+function callerName(call, caller = {}, customerNames) {
+  const spoken = caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' ');
+  return (call.customer_id && customerNames.get(call.customer_id)) || spoken || 'Unknown caller';
+}
+
+const orNull = (value) => value || null;
+
 // The display row for one held candidate.
 function heldRow({ call, extraction, kind, minutes }, { dateET, customerNames }) {
   const svc = extraction.property?.service_address || {};
-  const caller = extraction.caller || {};
-  const spokenName = caller.name_full || [caller.first_name, caller.last_name].filter(Boolean).join(' ');
   const request = extraction.service_request || {};
-  const notes = String(extraction.scheduling?.scheduling_notes_raw || '').trim();
+  const sched = extraction.scheduling || {};
+  const notes = String(sched.scheduling_notes_raw || '').trim().slice(0, NOTES_MAX_CHARS);
   return {
     call_log_id: call.id,
     kind,
     date_et: dateET,
     minutes,
     time_label: timeLabel(minutes),
-    caller_name: (call.customer_id && customerNames.get(call.customer_id)) || spokenName || 'Unknown caller',
+    caller_name: callerName(call, extraction.caller, customerNames),
     phone: externalPhone(call),
-    address: { line1: svc.street_line_1 || null, line2: svc.street_line_2 || null, city: svc.city || null, zip: svc.postal_code || null },
-    service: request.specific_service_name || request.primary_service_category || null,
+    address: { line1: orNull(svc.street_line_1), line2: orNull(svc.street_line_2), city: orNull(svc.city), zip: orNull(svc.postal_code) },
+    service: orNull(request.specific_service_name || request.primary_service_category),
     call_at: new Date(call.created_at).toISOString(),
-    customer_id: call.customer_id || null,
+    customer_id: orNull(call.customer_id),
     // The part of the day the caller asked for, when there is no agreed time.
-    daypart: DAYPARTS.has(extraction.scheduling?.preferred_time_of_day) ? extraction.scheduling.preferred_time_of_day : null,
-    notes: notes ? notes.slice(0, NOTES_MAX_CHARS) : null,
+    daypart: DAYPARTS.has(sched.preferred_time_of_day) ? sched.preferred_time_of_day : null,
+    notes: orNull(notes),
   };
 }
 

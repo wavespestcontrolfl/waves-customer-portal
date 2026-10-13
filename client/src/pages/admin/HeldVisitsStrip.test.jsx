@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import HeldVisitsStrip from './HeldVisitsStrip';
+import HeldVisitsStrip, { heldVisitFormDefaults } from './HeldVisitsStrip';
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -74,5 +74,23 @@ describe('HeldVisitsStrip', () => {
     render(<HeldVisitsStrip heldVisits={[timed, dayOnly]} onBook={onBook} />);
     fireEvent.click(screen.getAllByRole('button', { name: 'Book it' })[1]);
     expect(onBook).toHaveBeenCalledWith(dayOnly);
+  });
+});
+
+describe('heldVisitFormDefaults (what Book it opens the form on)', () => {
+  it('a whole-hour confirmed slot: the time, the call marker and the stated address', () => {
+    expect(heldVisitFormDefaults(timed)).toEqual({
+      date: '2026-10-14', windowStart: '11:00', requireTimeChoice: false, addressLine1: '12 Test Lane', addressLine2: '',
+      internalNotes: 'Booked from a phone call. Call ID: call-1. Address stated on the call: 12 Test Lane, Bradenton, 34205.',
+    });
+  });
+
+  it('an off-hour slot or a day-only row: no time, a required choice, and what the call said in the notes', () => {
+    const offHour = heldVisitFormDefaults({ ...timed, minutes: 870, time_label: '2:30 PM' });
+    expect(offHour).toMatchObject({ windowStart: undefined, requireTimeChoice: true });
+    expect(offHour.internalNotes).toContain('Time agreed on the call: 2:30 PM.');
+    const day = heldVisitFormDefaults({ ...dayOnly, daypart: 'morning', address: { line1: '40 Sample Rd', line2: 'Unit 4', city: 'Bradenton', zip: '34205' } });
+    expect(day).toMatchObject({ windowStart: undefined, requireTimeChoice: true, addressLine1: '40 Sample Rd', addressLine2: 'Unit 4' });
+    expect(day.internalNotes).toBe('Booked from a phone call. Call ID: call-2. The caller asked for the morning. Address stated on the call: 40 Sample Rd, Unit 4, Bradenton, 34205.');
   });
 });

@@ -31,6 +31,32 @@ function fromCall(row) {
 // Visits start on the hour: an agreed 2:30 PM cannot be booked as is, and is not prefilled.
 const offHour = (row) => Number.isFinite(row.minutes) && row.minutes % 60 !== 0;
 
+// What "Book it" opens the New appointment form on, from the row alone:
+//  - the time only when it is a whole hour (visits start on the hour; 2:00 for an agreed
+//    2:30 would book earlier than agreed). Otherwise the form must make the person pick one.
+//  - internal notes: the call marker (the booked visit then carries the call, so the row and
+//    the booking-miss bell clear under any customer), and what the call said that the form
+//    cannot hold: an off-hour agreed time, the part of the day asked for, the stated address.
+//  - the stated address, so the form lands on that saved property or asks for a choice.
+export function heldVisitFormDefaults(row) {
+  const onTheHour = Number.isFinite(row.minutes) && row.minutes % 60 === 0;
+  const address = row.address || {};
+  const stated = [address.line1, address.line2, address.city, address.zip].filter(Boolean).join(', ');
+  const said = [
+    !onTheHour && row.time_label && `Time agreed on the call: ${row.time_label}. Visits start on the hour: agree a whole-hour time with the caller.`,
+    row.daypart && `The caller asked for the ${row.daypart}.`,
+    stated && `Address stated on the call: ${stated}.`,
+  ];
+  return {
+    date: row.date_et,
+    windowStart: onTheHour ? `${String(row.minutes / 60).padStart(2, '0')}:00` : undefined,
+    internalNotes: [`Booked from a phone call. Call ID: ${row.call_log_id}.`, ...said].filter(Boolean).join(' '),
+    requireTimeChoice: !onTheHour,
+    addressLine1: address.line1 || '',
+    addressLine2: address.line2 || '',
+  };
+}
+
 export default function HeldVisitsStrip({ heldVisits, onBook }) {
   if (!Array.isArray(heldVisits) || heldVisits.length === 0) return null;
   return (

@@ -1632,6 +1632,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [bookingProperties, setBookingProperties] = useState([]);
   const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  // Set by the property load when a call's stated address names no single saved property.
+  const [addressChoiceNeeded, setAddressChoiceNeeded] = useState(false);
   const [propertyRefresh, setPropertyRefresh] = useState(0);
   // Wait for the selected customer's advisory address card before enabling
   // submit, so a slow warning cannot arrive just after booking.
@@ -1866,6 +1868,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const customerId = selectedCustomer?.id;
     setBookingProperties([]);
     setSelectedPropertyId('');
+    setAddressChoiceNeeded(false);
     if (!customerId) { setBookingPropertyState('idle'); return undefined; }
     let cancelled = false;
     setBookingPropertyState('loading');
@@ -1886,7 +1889,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           resetAddressDerivedState();
           // A booking opened from a call lands on the property the caller named, when exactly
           // one saved property carries that address; otherwise the usual default.
-          setSelectedPropertyId(propertyIdForStatedAddress(complete, defaultAddressLine1, defaultAddressLine2) || defaultBookingPropertyId(complete));
+          const named = propertyIdForStatedAddress(complete, defaultAddressLine1, defaultAddressLine2);
+          // The call stated an address and no single saved property is it: no property is
+          // preselected and the form cannot be saved until the person chooses one. Booking
+          // the primary by default would put the visit at an address the caller did not name.
+          const mustChoose = !!String(defaultAddressLine1 || '').trim() && !named;
+          setAddressChoiceNeeded(mustChoose);
+          setSelectedPropertyId(named || (mustChoose ? '' : defaultBookingPropertyId(complete)));
           setBookingPropertyState('ready');
         } else {
           setBookingPropertyState('hidden');
@@ -1910,6 +1919,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // address now would split one booking across two properties.
     if (partialCommitLocked) return false;
     setSelectedPropertyId(String(propertyId));
+    setAddressChoiceNeeded(false);
     resetAddressDerivedState();
     return true;
   };
@@ -4943,7 +4953,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
   // primary before the operator was shown the choice.
-  const canSubmit = timeChosen && canSubmitAppointments({
+  const canSubmit = timeChosen && !addressChoiceNeeded && canSubmitAppointments({
     selectedCustomer,
     services,
     bookingPropertyState,
@@ -5238,6 +5248,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 <span style={{ ...labelStyle, fontSize: 14, marginBottom: 0 }}>Service address</span>
                 <span style={{ fontSize: 14, color: D.muted }}>{bookingProperties.length} saved</span>
               </div>
+              {addressChoiceNeeded && (
+                <div role="status" style={{ fontSize: 14, color: D.text, marginBottom: 8 }}>
+                  The address stated on the call matches no single saved property ({[defaultAddressLine1, defaultAddressLine2].filter(Boolean).join(', ')}). Choose the property for this visit.
+                </div>
+              )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {bookingProperties.map((property) => {
                   const selected = String(property.id) === String(selectedPropertyId);

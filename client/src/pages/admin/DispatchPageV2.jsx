@@ -74,7 +74,7 @@ import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
-import HeldVisitsStrip from "./HeldVisitsStrip";
+import HeldVisitsStrip, { heldVisitFormDefaults } from "./HeldVisitsStrip";
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
@@ -900,11 +900,6 @@ export default function DispatchPageV2({
   // fails the modal still opens and the person picks the customer.
   const bookHeldVisit = useCallback(async (row) => {
     const seq = ++bookHeldSeq.current;
-    // Visits start on the hour. An off-hour slot (2:30 PM) is not prefilled:
-    // 2:00 would book earlier than the time agreed on the call. The strip and
-    // the form's internal notes both show the agreed time.
-    const onTheHour = Number.isFinite(row.minutes) && row.minutes % 60 === 0;
-    const windowStart = onTheHour ? `${String(row.minutes / 60).padStart(2, "0")}:00` : undefined;
     let customer;
     if (row.customer_id) {
       try {
@@ -915,20 +910,8 @@ export default function DispatchPageV2({
       }
     }
     if (seq !== bookHeldSeq.current) return;
-    // The call marker makes the new visit carry the call under any customer,
-    // so the held row (and the booking-miss bell) clears once it is booked.
-    // An agreed time the form cannot take stays visible in the same notes.
-    const stated = [row.address?.line1, row.address?.line2, row.address?.city, row.address?.zip].filter(Boolean).join(", ");
-    const internalNotes = [
-      `Booked from a phone call. Call ID: ${row.call_log_id}.`,
-      onTheHour || !row.time_label ? "" : `Time agreed on the call: ${row.time_label}. Visits start on the hour: agree a whole-hour time with the caller.`,
-      row.daypart ? `The caller asked for the ${row.daypart}.` : "",
-      stated ? `Address stated on the call: ${stated}.` : "",
-    ].filter(Boolean).join(" ");
-    // No agreed whole-hour time (a day-only row, or 2:30 PM): the form opens
-    // with no time selected and cannot be saved until the person picks one.
-    // A customer with several saved properties: the form lands on the one the caller named.
-    setNewApptDefaults({ date: row.date_et, windowStart, customer, internalNotes, requireTimeChoice: !onTheHour, addressLine1: row.address?.line1 || "", addressLine2: row.address?.line2 || "" });
+    // What the form opens on is decided by the row alone (heldVisitFormDefaults).
+    setNewApptDefaults({ ...heldVisitFormDefaults(row), customer });
     setShowNewAppt(true);
   }, []);
 

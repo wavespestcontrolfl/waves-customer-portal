@@ -3411,9 +3411,30 @@ describe('defaultAddressLine1 / defaultAddressLine2', () => {
     expect(JSON.stringify(body)).not.toContain('prop-primary');
   });
 
-  it('keeps the primary when the stated unit is another one, and when no address is passed', async () => {
-    expect(JSON.stringify(await book({ defaultAddressLine1: '40 Sample Road', defaultAddressLine2: 'Unit 9' }))).toContain('prop-primary');
-    cleanup();
+  it('keeps the usual default when no address is passed', async () => {
     expect(JSON.stringify(await book({}))).toContain('prop-primary');
+  });
+
+  it('a stated address that matches no single saved property must be chosen before the form can be saved', async () => {
+    const { fetcher } = installModalFetch({ properties: PROPERTIES });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00"
+      defaultAddressLine1="40 Sample Road" defaultAddressLine2="Unit 9"
+      onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />);
+    await addOneSeasonalService();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(await screen.findByText(/matches no single saved property \(40 Sample Road, Unit 9\)/)).toBeTruthy();
+    const radios = screen.getAllByRole('radio').filter((r) => r.name === 'booking-property');
+    expect(radios.some((r) => r.checked)).toBe(false);
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(submit.disabled).toBe(true);
+
+    fireEvent.click(radios.find((r) => r.value === 'prop-unit'));
+    expect(screen.queryByText(/matches no single saved property/)).toBeNull();
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0][1].body).toContain('prop-unit');
   });
 });
