@@ -35,7 +35,7 @@
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
  */
-const { gateEnvValue, ibGeneralReadLive } = require('../../config/feature-gates');
+const { gateEnvValue } = require('../../config/feature-gates');
 const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
@@ -227,10 +227,12 @@ async function threadTaintVerdict(actorId, threadId) {
 //   - with NO record to consult (no thread id, or the thread append failed so
 //     the client detached) a FOLLOW-UP turn (history, or a thread id) is
 //     tainted, because an earlier turn may have used the general read and
-//     nothing trusted says it did not: cards are required. Only this rule
-//     needs the general read to be live for the login (its gate, which needs
-//     the platform gate, AND full access); otherwise turning the feature off
-//     would card every owner follow-up for ever;
+//     nothing trusted says it did not: cards are required. This holds for a
+//     full-access login whatever the general read gate says NOW: the gate may
+//     have been on for the earlier turn and turned off since, and no trusted
+//     record exists to tell. The cost is narrow: with thread persistence on
+//     (production) a follow-up has a verified thread record, so this branch
+//     is only reached with threads off or after a failed append;
 //   - the first message of a conversation (no history, no thread id) is not.
 // `needed` is false when owner-direct is off, where the flag decides nothing.
 async function loadRequestTaint({ history, threadId, actorId, needed = true, fullAccess = false, conversationHistory = [] }) {
@@ -241,8 +243,7 @@ async function loadRequestTaint({ history, threadId, actorId, needed = true, ful
     taint.untrustedRead = verdict;
     return taint;
   }
-  const readLive = fullAccess === true && ibGeneralReadLive();
-  taint.untrustedRead = readLive && Array.isArray(conversationHistory) && conversationHistory.length > 0;
+  taint.untrustedRead = fullAccess === true && Array.isArray(conversationHistory) && conversationHistory.length > 0;
   return taint;
 }
 

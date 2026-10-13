@@ -132,10 +132,12 @@ describe('loadRequestTaint (once per request)', () => {
       // Request 1 read data and its append returned null, so the client holds history and no thread id.
       expect((await load({ threadId: undefined, conversationHistory: plainHistory })).untrustedRead).toBe(true);
     });
-    test('the general read off (its gate, or the platform gate it needs): no record + history is NOT tainted, owner-direct as before', async () => {
+    // Codex r10: the gate may have been on for the earlier turn and turned off
+    // since; with no trusted record, a follow-up fails closed whatever the gate says now.
+    test('the general read off now: a follow-up with no record is still tainted, a first message is not', async () => {
       for (const off of ['GATE_IB_GENERAL_READ', 'GATE_IB_PLATFORM']) {
         process.env[off] = 'false';
-        expect((await load({ conversationHistory: plainHistory })).untrustedRead).toBe(false);
+        expect((await load({ conversationHistory: plainHistory })).untrustedRead).toBe(true);
         expect((await load({})).untrustedRead).toBe(false);
         process.env[off] = 'true';
       }

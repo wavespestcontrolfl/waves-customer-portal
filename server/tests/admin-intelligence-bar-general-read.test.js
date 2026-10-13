@@ -434,11 +434,11 @@ describe('the taint follows the conversation (thread record)', () => {
     await run(editSteps(), { conversationHistory: [] });
     expect(editRound().untrusted).toBe(false);
   });
-  test('with the general read gate off the same follow-up is not tainted: owner-direct is unchanged', async () => {
+  test('with the general read gate off now, the same follow-up with no record is still tainted (fail closed)', async () => {
     process.env.GATE_IB_GENERAL_READ = 'false';
     try {
       await run(editSteps());
-      expect(editRound().untrusted).toBe(false);
+      expect(editRound().untrusted).toBe(true);
     } finally {
       process.env.GATE_IB_GENERAL_READ = 'true';
     }
