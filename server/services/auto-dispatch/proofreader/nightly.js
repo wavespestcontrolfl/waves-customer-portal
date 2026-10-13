@@ -234,13 +234,15 @@ async function personHeld(conn, service) {
 }
 
 // A model call takes up to two minutes: a person can mark the notice done
-// meanwhile. Asked again after an allow; an unreadable store holds the visit.
+// meanwhile. Asked again after an allow. An unreadable store is a broken
+// check (null): the visit stays and the run reports it, never a made-up
+// hold by a person (r14).
 async function heldSinceAsked(conn, service) {
   try {
     return await personHeld(conn, service);
   } catch (err) {
     logger.warn(`[auto-dispatch] move proofreader could not re-read the notice of ${service.id}: ${err.message}`);
-    return true;
+    return null;
   }
 }
 
@@ -297,7 +299,13 @@ async function checkMove({ service, best, run }, deps = {}) {
     state.notAsked += 1;
     return stopped('not_asked', answer);
   }
-  if (answer.verdict === 'allow' && await heldSinceAsked(conn, service)) {
+  const heldNow = answer.verdict === 'allow' ? await heldSinceAsked(conn, service) : false;
+  if (heldNow === null) {
+    state.unsure += 1;
+    state.broke += 1;
+    return stopped('unknown', { ...answer, verdict: 'unknown', why: 'check_failed' });
+  }
+  if (heldNow) {
     state.personHeld += 1;
     return stopped('person', { ...answer, verdict: 'unknown', why: 'person_held' });
   }
@@ -333,8 +341,18 @@ function assertNotGrouped(members, proofread, refuse, primaryId) {
 
 // The approved slot was taken between the check and the write. Nothing
 // moved: an ordinary "not tonight", never a failed run.
+// A model call takes up to two minutes, so the visit can also change under
+// it (a person re-times, locks, cancels or confirms it): the write's own
+// stale-placement refusal is then the ordinary "superseded during the run",
+// not a failed run (r14). Returns the no-change reason, or null for a failure.
+const NOT_A_FAILURE = {
+  SLOT_TAKEN: ['APPROVED_SLOT_TAKEN', 'The slot the move proofreader approved was taken before the move; the next run tries again'],
+  STALE_PLACEMENT: ['SUPERSEDED_DURING_RUN', 'Superseded by an operator while the move was checked'],
+};
 function approvedSlotTaken(checked, err) {
-  return !!(checked && err && err.code === 'SLOT_TAKEN' && !err.movedCount && !(Array.isArray(err.failedMembers) && err.failedMembers.length));
+  const nothingMoved = !!(checked && err) && !err.movedCount && !(Array.isArray(err.failedMembers) && err.failedMembers.length);
+  const reason = nothingMoved ? NOT_A_FAILURE[err.code] : null;
+  return reason ? { reason_code: reason[0], reason_description: reason[1] } : null;
 }
 
 const slotWords = (slot, shortDateET) => `${slot.weekday} ${shortDateET(`${slot.date}T12:00:00Z`)}, ${slot.arrival_window}, technician ${slot.technician}`;
@@ -466,10 +484,14 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
     const { raiseAdminAlert } = require('../../admin-alert-compose');
     const names = require('../../admin-alert-names');
     let left = await audit.ringsLeft();
+    // An open notice of this lane is rewritten without a ring, so it is
+    // written with the allowance spent too (r14): its text must follow the
+    // proposal the run holds now.
+    const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
     // Soonest date first; an internal test customer's visit takes no slot.
     for (const item of audit.withinRingBudget([...state.notices.values()], new Set(), Infinity, (row) => row.key)) {
-      // Allowance spent: the rest wait for the next run, which asks again.
-      if (left <= 0) break;
+      // Allowance spent: a new notice waits for the next run, which asks again.
+      if (left <= 0 && !standing.has(item.key)) continue;
       try {
         // The re-read and the write share one transaction and the visit's row lock.
         const written = await conn.transaction(async (trx) => {

@@ -1734,10 +1734,19 @@ describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026
     });
   });
 
-  test('any other write failure of a checked move is still a failure', async () => {
+  test('a visit a person changed while the model read is superseded, not a failed run', async () => {
     await applyMode(async () => {
       checkMove.mockResolvedValue(ALLOW);
       apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('locked'), { code: 'STALE_PLACEMENT' }));
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
+    });
+  });
+
+  test('any other write failure of a checked move is still a failure', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('guard'), { code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD' }));
       expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 1 });
     });
   });

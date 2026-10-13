@@ -1301,13 +1301,14 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
   } catch (_) { /* swallow */ }
 }
 
-// The one slot the proofreader approved was taken before the write (a
-// proofread move has no fallback slot). Nothing moved; the next run tries again.
-async function logApprovedSlotTaken(pm, attempt, run) {
-  noteUnmoved(run, pm.service, 'APPROVED_SLOT_TAKEN');
+// A proofread move that the write refused for an ordinary reason: the one
+// approved slot was taken (a proofread move has no fallback slot), or the
+// visit changed while the model read. Nothing moved; the next run tries again.
+async function logApprovedSlotTaken(pm, attempt, run, reason) {
+  noteUnmoved(run, pm.service, reason.reason_code);
   try {
     await audit.logDecision(run.runId, {
-      action: 'no_change', service: pm.service, reason_code: 'APPROVED_SLOT_TAKEN', reason_description: 'The slot the move proofreader approved was taken before the move; the next run tries again', ...attempt.fresh.audit, constraints: { ...attempt.fresh.audit.constraints, proofreader: attempt.checked.audit },
+      action: 'no_change', service: pm.service, ...reason, ...attempt.fresh.audit, constraints: { ...attempt.fresh.audit.constraints, proofreader: attempt.checked.audit },
     });
   } catch (_) { /* swallow */ }
 }
@@ -1346,7 +1347,8 @@ async function runPassTwo(run) {
     try {
       await applyPlannedMove(pm, run, attempt);
     } catch (applyErr) {
-      if (moveCheck.approvedSlotTaken(attempt.checked, applyErr)) await logApprovedSlotTaken(pm, attempt, run);
+      const notAFailure = moveCheck.approvedSlotTaken(attempt.checked, applyErr);
+      if (notAFailure) await logApprovedSlotTaken(pm, attempt, run, notAFailure);
       else await recordApplyFailure(pm, attempt.fresh, applyErr, run);
     }
   }

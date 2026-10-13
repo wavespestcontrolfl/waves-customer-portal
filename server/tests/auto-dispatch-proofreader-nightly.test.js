@@ -12,6 +12,7 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/auto-dispatch/audit', () => ({
   ...jest.requireActual('../services/auto-dispatch/audit'),
   ringsLeft: jest.fn(async () => 10),
+  standingNoticeKeys: jest.fn(async () => new Set()),
   retireResolvedNotices: jest.fn(async () => {}),
   namedVisitAction: jest.fn(async (_id, templates) => templates[0]('Pat Sample')),
 }));
@@ -60,6 +61,7 @@ beforeEach(() => {
   doneNotice = null;
   holdSql = [];
   audit.ringsLeft.mockResolvedValue(10);
+  audit.standingNoticeKeys.mockResolvedValue(new Set());
   notifications.notifyAdmin.mockResolvedValue({ id: 'n1' });
 });
 
@@ -193,6 +195,11 @@ describe('checkMove', () => {
     const slow = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
     slow.proofreadMove.mockImplementation(async () => { doneNotice = { id: 'n9' }; return { verdict: 'allow', why: 'nothing_breaks' }; });
     expect(await check(run, slow)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD' });
+    // The store fails on the read after an allow: a broken check the run reports, not a made-up hold.
+    doneNotice = null;
+    const failing = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+    failing.proofreadMove.mockImplementation(async () => { doneNotice = new Error('db down'); return { verdict: 'allow', why: 'nothing_breaks' }; });
+    expect(await check(run, failing)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { why: 'check_failed' }, broke: true });
     // An unreadable store is never an allow, and the run reports it.
     doneNotice = new Error('db down');
     expect(await check(run, proofreader)).toMatchObject({ allowed: false, audit: { why: 'check_failed' }, broke: true });
@@ -315,13 +322,14 @@ describe('the write of a checked move', () => {
   test('check off: the fallback is unchanged', () => {
     expect(nightly.writeOptions(null, fallback)).toBe(fallback);
   });
-  test('a taken approved slot is not a failure; a partial grouped move still is', () => {
-    const taken = Object.assign(new Error('taken'), { code: 'SLOT_TAKEN' });
-    expect(nightly.approvedSlotTaken({ allowed: true }, taken)).toBe(true);
-    expect(nightly.approvedSlotTaken(null, taken)).toBe(false);
-    expect(nightly.approvedSlotTaken({ allowed: true }, Object.assign(new Error('x'), { code: 'SLOT_TAKEN', movedCount: 1 }))).toBe(false);
-    expect(nightly.approvedSlotTaken({ allowed: true }, Object.assign(new Error('x'), { code: 'SLOT_TAKEN', failedMembers: ['s2'] }))).toBe(false);
-    expect(nightly.approvedSlotTaken({ allowed: true }, Object.assign(new Error('x'), { code: 'STALE_PLACEMENT' }))).toBe(false);
+  test('a taken approved slot, or a visit a person changed while the model read, is not a failure; a partial move is', () => {
+    const err = (code, extra = {}) => Object.assign(new Error('x'), { code, ...extra });
+    expect(nightly.approvedSlotTaken({ allowed: true }, err('SLOT_TAKEN'))).toMatchObject({ reason_code: 'APPROVED_SLOT_TAKEN' });
+    expect(nightly.approvedSlotTaken({ allowed: true }, err('STALE_PLACEMENT'))).toMatchObject({ reason_code: 'SUPERSEDED_DURING_RUN' });
+    expect(nightly.approvedSlotTaken(null, err('SLOT_TAKEN'))).toBeNull();
+    expect(nightly.approvedSlotTaken({ allowed: true }, err('SLOT_TAKEN', { movedCount: 1 }))).toBeNull();
+    expect(nightly.approvedSlotTaken({ allowed: true }, err('STALE_PLACEMENT', { failedMembers: ['s2'] }))).toBeNull();
+    expect(nightly.approvedSlotTaken({ allowed: true }, err('VISIT_MEMBER_AUTO_DISPATCH_GUARD'))).toBeNull();
   });
 });
 
@@ -412,6 +420,13 @@ describe('raiseNotices', () => {
     audit.ringsLeft.mockResolvedValue(2);
     expect(await nightly.raiseNotices(run.proofreader, { conn: visits() })).toBe(2);
     expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].metadata.scheduledServiceId)).toEqual(['soon', 'mid']);
+    // Allowance spent: an open notice is still rewritten (no ring), a new one waits.
+    notifications.notifyAdmin.mockClear();
+    audit.ringsLeft.mockResolvedValue(0);
+    audit.standingNoticeKeys.mockResolvedValue(new Set([[...run.proofreader.notices.values()].find((item) => item.id === 'late').key]));
+    notifications.notifyAdmin.mockResolvedValue({ id: 'n1', deduped: true, refreshed: true, rung: false });
+    expect(await nightly.raiseNotices(run.proofreader, { conn: visits() })).toBe(0);
+    expect(notifications.notifyAdmin.mock.calls.map((call) => call[3].metadata.scheduledServiceId)).toEqual(['late']);
   });
 
   test.each([
