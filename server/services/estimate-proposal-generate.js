@@ -741,10 +741,13 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
 // The gross in cents, whatever its persisted representation (100 and
 // "100.00" are one row, codex #6113 r41).
 const grossCentsKey = (value) => { const n = num(value); return n == null ? '' : String(roundCents(n)); };
+// A row's identity is its service and name; its amount is reconciled by the
+// collapse, never part of the key, so a mirror that states only its net (no
+// gross at all) meets its gross copy instead of listing beside it (codex
+// #6113 r45).
 const oneTimeIdentity = (item) => [
   String(item.service || '').toLowerCase(),
   String(item.name || item.label || '').toLowerCase(),
-  grossCentsKey(item.price ?? item.amount ?? item.total),
 ].join('|');
 // manualFinalOneTime is NOT part of the identity: it is the operator-accepted
 // net on one mirror of the same row, and the collapse's net reconciliation
@@ -752,10 +755,8 @@ const oneTimeIdentity = (item) => [
 // The gross a raw row states, whichever legacy alias carries it: one engine
 // run persists `price` in one shape and `oneTimePrice` in the other, and the
 // two copies must be one identity (codex #6113 r35).
-const rawGrossKey = (line) => grossCentsKey(line.price ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime ?? line.total);
 const rawIdentity = (line) => [
   String(line.service || line.name || '').toLowerCase(),
-  rawGrossKey(line),
   grossCentsKey(line.installation?.price),
 ].join('|');
 // manualFinalOneTime is the operator-ACCEPTED net (the engine keeps `price`
@@ -785,7 +786,8 @@ function mirrorNetWinner(keptRow, mirrorRow, net) {
   const m = net(mirrorRow);
   if (k.manual !== m.manual) return m.manual ? 'mirror' : 'kept';
   if (k.manual) return null;
-  const grossesAgree = k.gross != null && m.gross != null && roundCents(k.gross) === roundCents(m.gross);
+  // One side with no gross at all states only its net (codex #6113 r45).
+  const grossesAgree = (k.gross != null && m.gross != null && roundCents(k.gross) === roundCents(m.gross)) || (k.gross == null) !== (m.gross == null);
   if (!grossesAgree || k.alias === m.alias) return null;
   return m.alias ? 'mirror' : 'kept';
 }
@@ -815,6 +817,20 @@ function fullestSourceByKey(tagged) {
     fullestSource.set(key, best.sourceIndex);
   }
   return fullestSource;
+}
+// The kept clone a mirror reconciles with, and whether the mirror's copy is
+// the one to keep: equal resolved amounts first; else a copy with no amount
+// at all states nothing (the priced copy is kept, no conflict); else the net
+// rule (mirrorNetWinner). Null when nothing reconciles.
+function matchMirror(clones, t, { amount, net }) {
+  const unpriced = (row) => !Number.isFinite(Number(amount(row) ?? NaN));
+  const sameAmount = (k) => !unpriced(k.row) && !unpriced(t.row) && roundCents(amount(k.row)) === roundCents(amount(t.row));
+  let match = clones.find(sameAmount);
+  if (match) return { match, mirrorWins: false };
+  match = clones.find((k) => unpriced(k.row) || unpriced(t.row));
+  if (match) return { match, mirrorWins: unpriced(match.row) && !unpriced(t.row) };
+  match = clones.find((k) => mirrorNetWinner(k.row, t.row, net) !== null);
+  return match ? { match, mirrorWins: mirrorNetWinner(match.row, t.row, net) === 'mirror' } : null;
 }
 function collapseMirroredRows(sources, { identity, amount, label, net, compatible = () => true, merge = (kept) => kept }) {
   const seen = new Set();
@@ -847,17 +863,15 @@ function collapseMirroredRows(sources, { identity, amount, label, net, compatibl
   // match: such a pair conflicts rather than keeping the first container.
   const conflicted = [];
   const consumedBySource = new Map();
-  const sameAmount = (k, t) => roundCents(amount(k.row)) === roundCents(amount(t.row));
   for (const t of tagged) {
     if (t.sourceIndex === fullestSource.get(t.key)) continue;
     if (!consumedBySource.has(t.sourceIndex)) consumedBySource.set(t.sourceIndex, new Set());
     const consumed = consumedBySource.get(t.sourceIndex);
     const clones = (kept.get(t.key) || []).filter((k) => !consumed.has(k) && compatible(k.row, t.row) && !twinTaxabilityConflicts(k.row, t.row));
-    const match = clones.find((k) => sameAmount(k, t)) || clones.find((k) => mirrorNetWinner(k.row, t.row, net) !== null);
-    if (!match) { conflicted.push(label(t.row)); continue; }
-    consumed.add(match);
-    const mirrorWins = !sameAmount(match, t) && mirrorNetWinner(match.row, t.row, net) === 'mirror';
-    match.row = mirrorWins ? merge(t.row, match.row) : merge(match.row, t.row);
+    const found = matchMirror(clones, t, { amount, net });
+    if (!found) { conflicted.push(label(t.row)); continue; }
+    consumed.add(found.match);
+    found.match.row = found.mirrorWins ? merge(t.row, found.match.row) : merge(found.match.row, t.row);
   }
   const rows = tagged.filter((t) => t.sourceIndex === fullestSource.get(t.key)).map((t) => t.row);
   return { rows, conflicted };
@@ -942,9 +956,9 @@ function mappedSubContainers(doc) {
 // result.results, result.result, engineResult and its nests) is a document
 // here, so mapped work under e.g. result.result.oneTime.items is read
 // (codex #6113 r43); shared arrays dedupe by object in the collapse.
-function mappedOneTimeSources(estimateData) {
+function mappedOneTimeSources(estimateData, skipRow) {
   const docs = [estimateData, ...rawRowContainers(estimateData).filter((c) => c !== estimateData).map((c) => ({ result: c }))];
-  const sourceLists = docs.flatMap(mappedSubContainers);
+  const sourceLists = docs.flatMap(mappedSubContainers).map((list) => withoutSkipped(list, skipRow));
   const gatedIdentities = new Set(docs.flatMap((doc) => estimateOneTimeItemsFromData(doc))
     .filter((item) => rowIsReviewGated(item)).map(oneTimeIdentity));
   return { sourceLists, gatedIdentities };
@@ -959,8 +973,16 @@ function rawRowContainers(data) {
   const seen = new Set();
   return candidates.filter((c) => c && typeof c === 'object' && !seen.has(c) && seen.add(c));
 }
-function rawLineItemSources(estimateData) {
-  const rawContainers = rawRowContainers(estimateData).map((c) => (Array.isArray(c.lineItems) ? c.lineItems : [])).filter((rows) => rows.length);
+// Rows the caller lists itself (estimate-accept-effects lists the explicit
+// WaveGuard setup row as the fee line, codex #6113 r45) never reach the
+// extractor's work and comped gates. Lists stay the same arrays when
+// nothing is skipped, so shared arrays still dedupe by object.
+function withoutSkipped(list, skipRow) {
+  if (typeof skipRow !== 'function' || !list.some(skipRow)) return list;
+  return list.filter((row) => !skipRow(row));
+}
+function rawLineItemSources(estimateData, skipRow) {
+  const rawContainers = rawRowContainers(estimateData).map((c) => withoutSkipped(Array.isArray(c.lineItems) ? c.lineItems : [], skipRow)).filter((rows) => rows.length);
   const gatedIdentities = new Set(rawContainers.flat().filter((line) => rowIsReviewGated(line)).map(rawIdentity));
   return { rawContainers, gatedIdentities };
 }
@@ -1203,9 +1225,9 @@ function installationRowsToWork(installationRows, fromOneTime, taxabilityMap, ou
 // mapped and raw sources are collected and mirror-collapsed, the mapped
 // items consume their raw twins, the leftover raw rows and the carried
 // installation charges follow, and finishCorrectiveWork gives the verdict.
-function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null) {
-  const mapped = mappedOneTimeSources(estimateData);
-  const raw = rawLineItemSources(estimateData);
+function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null, { skipRow = null } = {}) {
+  const mapped = mappedOneTimeSources(estimateData, skipRow);
+  const raw = rawLineItemSources(estimateData, skipRow);
   const mappedCollapse = collapseMirroredRows(mapped.sourceLists, {
     identity: oneTimeIdentity, amount: mappedResolvedAmount, compatible: scopeCompatible, merge: mergeMirrorFacts, net: mappedNetShape, label: (item) => String(item.label || item.name || item.service || 'item'),
   });

@@ -864,6 +864,17 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
       expect(await lineNames(world)).toEqual([['German Roach Cleanout', 350]]);
     }
   });
+  test('round 45: a mirror that states only its net (specItems priceAfterDiscount 80, no gross) is the $80 line, never $100 + $80', async () => {
+    const world = feeWorld(solo, { items: [{ service: 'wasp', name: 'Wasp Nest Removal', price: 100 }], specItems: [{ service: 'wasp', name: 'Wasp Nest Removal', priceAfterDiscount: 80 }] });
+    expect(await lineNames(world)).toEqual([['Wasp Nest Removal', 80]]);
+    const raw = rawOnly([{ service: 'wasp', label: 'Wasp Nest Removal', price: 100, billingCadence: 'one_time' }], { engineResult: { lineItems: [{ service: 'wasp', label: 'Wasp Nest Removal', priceAfterDiscount: 80, billingCadence: 'one_time' }] } });
+    expect(await lineNames(raw)).toEqual([['Wasp Nest Removal', 80]]);
+  });
+  test('round 45: a waived explicit setup row (price 99, priceAfterDiscount 0) is no fee and no comped refusal, and the cached fee is not read past it', async () => {
+    const waived = { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, priceAfterDiscount: 0 };
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, items: [roach, waived] }))).toEqual([['German Roach Cleanout', 350]]);
+    expect(await lineNames(feeWorld(solo, { membershipFee: 99, items: [roach], specItems: [waived] }))).toEqual([['German Roach Cleanout', 350]]);
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };
@@ -1607,7 +1618,12 @@ describe('round 7: every post-commit step resolves its target in the dry run and
     const warnings = [];
     const ctx = { warnings, approvedEmail: 'send', conversion: { membershipEmail: { customerId: 'cust-1' } }, acceptedEstimate: { id: 'est-1', customer_id: 'cust-1' }, database: {} };
     await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, ctx);
-    expect(warnings).toEqual(['The membership email was not sent (prefs_unavailable). Send it by hand.']);
+    // round 45: an unreadable opt-out is never a go-ahead to send by hand.
+    expect(warnings).toEqual(["The membership email was not sent: the customer's email preferences could not be read, so they may have email turned off. Do not send it by hand; resend it from the account page once their preferences read."]);
+    AccountMembershipEmail.sendMembershipStarted.mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'provider_timeout' });
+    const transient = [];
+    await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, { ...ctx, warnings: transient });
+    expect(transient).toEqual(['The membership email was not sent (provider_timeout). Send it by hand.']);
     AccountMembershipEmail.sendMembershipStarted.mockResolvedValueOnce({ ok: true });
     const clean = [];
     await Effects.POST_COMMIT_STEPS.membership_email.run({ step: 'membership_email', target: { recipient_key: 'k' } }, { ...ctx, warnings: clean });

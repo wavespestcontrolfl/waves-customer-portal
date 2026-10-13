@@ -242,10 +242,23 @@ const cachedMembershipFee = (data) => cachedMembershipFees(data)[0] ?? null;
 // is the sold amount (its own net, as the estimate page's normalizer treats
 // it); the cached aggregate fee is read only when no such row exists
 // (codex #6113 r35).
-function membershipFeeLine(data, { applies, setupRows = [] }) {
+function membershipFeeLine(data, { applies, explicitFee }) {
   if (!applies) return null;
-  const amount = setupRows.map((r) => Number(r.amount)).find((n) => Number.isFinite(n) && n > 0) ?? cachedMembershipFee(data) ?? null;
+  // An explicit row at $0 is a WAIVED fee: no fee line, and the cached
+  // aggregate fee is not read past it (codex #6113 r45).
+  const amount = explicitFee !== undefined ? (explicitFee > 0 ? explicitFee : null) : cachedMembershipFee(data);
   return amount == null ? null : { kind: 'one_time_line', name: 'WaveGuard membership fee', amount: round2(amount), consequence: 'invoice_by_hand' };
+}
+// Every explicit setup row the containers carry (mapped items and raw line
+// items alike), as its distinct sold amounts ascending; the row is never
+// work, so it is read here and kept out of the extractor (codex #6113 r45).
+function explicitSetupFees(data) {
+  const rows = oneTimeContainers(data).flatMap((c) => [
+    ...(Array.isArray(c.oneTime?.items) ? c.oneTime.items : []), ...(Array.isArray(c.oneTime?.specItems) ? c.oneTime.specItems : []),
+    ...(Array.isArray(c.specItems) ? c.specItems : []), ...(Array.isArray(c.lineItems) ? c.lineItems : []),
+  ]).filter(isSetupFeeRow);
+  const amounts = rows.map((r) => (r.billingCadence || r.oneTimePrice != null ? rawLineAmount(r) : lineAmount(r))).filter((n) => n != null);
+  return [...new Set(amounts.map(cents))].sort((a, b) => a - b).map((c) => c / 100);
 }
 
 function unrepresentableRefusal(warning) {
@@ -259,7 +272,7 @@ function unrepresentableRefusal(warning) {
 // discount line, which needs an aggregate to pool against.
 function canonicalOneTimeLines(estimate, data) {
   const { deriveCorrectiveWork } = require('./estimate-proposal-generate');
-  const { correctiveWork, warning } = deriveCorrectiveWork(data, { ...estimate, onetime_total: null }, null);
+  const { correctiveWork, warning } = deriveCorrectiveWork(data, { ...estimate, onetime_total: null }, null, { skipRow: isSetupFeeRow });
   if (warning) return { lines: [], refusal: unrepresentableRefusal(warning) };
   // The package visit count and the sold scope travel with the line: the
   // accept books nothing, so the card is the office's instruction for the
@@ -297,6 +310,7 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   }
   for (const doc of docs) {
     for (const item of converter.estimateOneTimeItemsFromData(doc)) {
+      if (isSetupFeeRow(item)) continue;
       const amount = lineAmount(item);
       if (amount === 0 && !manualNetKeys.has(serviceKey(item))) return `${rowName(item)} is an accepted $0 (comped) row, and the card cannot say what to schedule for it`;
       if (amount != null && amount < 0 && !hasTotal) return `${rowName(item)} is a discount row with no one-time total to apply it to`;
@@ -307,6 +321,7 @@ function unrepresentableRow(data, converter, { hasTotal }) {
   // a negative row (a bundle discount) is dropped by the extractor, so with
   // no aggregate to pool against the gross line would over-invoice.
   for (const line of rawLines) {
+    if (isSetupFeeRow(line)) continue;
     const why = rawLineRefusal(line, { hasTotal, manualNetKeys, serviceKey, rowName });
     if (why) return why;
   }
@@ -338,10 +353,9 @@ function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard' } = 
   const data = parseData(estimate.estimate_data);
   const canonical = canonicalOneTimeLines(estimate, data);
   if (canonical.refusal) return canonical;
-  const setupRows = canonical.lines.filter(isSetupFeeRow);
-  canonical.lines = canonical.lines.filter((line) => !isSetupFeeRow(line));
   const applies = setupFeeApplies(data, billingTerm);
-  const cachedFees = applies && !setupRows.length ? cachedMembershipFees(data) : [];
+  const explicitFees = explicitSetupFees(data);
+  const cachedFees = applies && !explicitFees.length ? cachedMembershipFees(data) : (applies && explicitFees.length > 1 ? explicitFees : []);
   if (cachedFees.length > 1) {
     return { lines: [], refusal: { statusCode: 409, code: 'membership_fee_conflict', fees: cachedFees, message: `This estimate carries more than one accepted setup fee (${cachedFees.map(money).join(' and ')}), so the bar cannot say what to invoice. Accept it from the estimate page.` } };
   }
@@ -351,7 +365,7 @@ function oneTimeLineEffects(estimate, converter, { billingTerm = 'standard' } = 
   }
   const dropped = unrepresentableRow(data, converter, { hasTotal: oneTimeAggregateTotal(estimate) != null });
   if (dropped) return { lines: [], refusal: unrepresentableRefusal(dropped) };
-  const fee = membershipFeeLine(data, { applies, setupRows });
+  const fee = membershipFeeLine(data, { applies, explicitFee: explicitFees[0] });
   const listed = fee ? [...canonical.lines, fee] : canonical.lines;
   const discount = pooledDiscountLine(estimate, listed);
   return { lines: discount ? [...listed, discount] : listed, refusal: null };
@@ -661,9 +675,16 @@ const EMAIL_VETO_TEXT = {
   missing_email: 'the customer has no email address',
   customer_not_found: 'the customer record was not found',
 };
+// A failed preferences read means the customer MAY have email turned off:
+// a hand send would bypass that switch, so the card says retry, never send
+// by hand (codex #6113 r45).
+const EMAIL_HOLD_TEXT = {
+  prefs_unavailable: "the customer's email preferences could not be read, so they may have email turned off",
+};
 function membershipEmailWarning(result, reason) {
   const veto = EMAIL_VETO_TEXT[reason] || (result?.skipped === true || result?.blocked === true ? reason : null);
   if (veto) return `The membership email was suppressed: ${veto}. Do not send it by hand.`;
+  if (EMAIL_HOLD_TEXT[reason]) return `The membership email was not sent: ${EMAIL_HOLD_TEXT[reason]}. Do not send it by hand; resend it from the account page once their preferences read.`;
   return `${STEP_LABELS.membership_email} (${reason}). Send it by hand.`;
 }
 
