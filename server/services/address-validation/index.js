@@ -168,7 +168,10 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
   // with a house number ("100 Main St Apt CT") carries a state only when the
   // parse also found a locality or ZIP — otherwise the state-shaped token
   // is a unit value or a street suffix, not Connecticut (codex r11 P1).
-  const UNIT_DESIGNATOR_WORDS = 'apt|apartment|unit|ste|suite|bldg|building|floor|lot|spc|space|rm|room';
+  // `fl` is the abbreviated floor ("Fl GA" = floor GA); a real "FL <ZIP>" state
+  // tail is not affected, because only a state-shaped token AFTER the
+  // designator is discounted, and the line is then read again.
+  const UNIT_DESIGNATOR_WORDS = 'apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room';
   const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
   const geographyState = (line) => {
     const parsed = parseRawAddress(line);
