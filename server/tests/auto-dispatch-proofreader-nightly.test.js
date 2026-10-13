@@ -394,5 +394,9 @@ describe('raiseNotices', () => {
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
     // The run reads this count: a held visit nobody was told about is not a green run.
     expect(state.noticesFailed).toBe(1);
+    // The store answers null for a write that failed inside it: the same.
+    notifications.notifyAdmin.mockResolvedValue(null);
+    expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
+    expect(state.noticesFailed).toBe(2);
   });
 });

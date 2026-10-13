@@ -392,7 +392,10 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
       if (!(await stillAsChecked(item, conn))) continue;
       try {
         // Only a new notice rings and spends a slot; a key that exists is left as it is.
-        if (audit.noticeRang(await raiseOne(item, { raiseAdminAlert, names, audit }))) { left -= 1; rang += 1; }
+        const written = await raiseOne(item, { raiseAdminAlert, names, audit });
+        // The store answers null when its own write failed (it does not throw).
+        if (!written) state.noticesFailed += 1;
+        if (audit.noticeRang(written)) { left -= 1; rang += 1; }
       } catch (err) {
         // A visit held for a person and nobody told: the run reports it
         // (state.noticesFailed, read by index.js; Codex #6313 r8).
