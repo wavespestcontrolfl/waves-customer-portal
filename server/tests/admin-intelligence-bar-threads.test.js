@@ -369,6 +369,66 @@ describe('threads gate ON', () => {
     });
   });
 
+  describe('the idle rollover keeps the request identity', () => {
+    const history = [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: 'Synthetic old answer' }];
+    const reqFor = (body) => ({ body: { ...body }, techRole: 'admin', technician: { id: 'admin-1' }, technicianId: 'admin-1' });
+    const runGuard = async (req) => {
+      const next = jest.fn();
+      await intelligenceRouter.startFreshWhenThreadIdle(req, {}, next);
+      expect(next).toHaveBeenCalledTimes(1);
+    };
+    const taskRequest = (body) => ({
+      prompt: body.prompt, context: 'customers', pageData: {}, selectedTarget: null, images: [],
+      conversationHistory: (body.conversationHistory || []).slice(-10),
+      thread_id: body.thread_id || null, thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+    });
+    afterEach(() => mockIsThreadIdle.mockReset());
+
+    test('an idle rollover stashes the original thread fields and rewrites only the live body', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
+      const req = reqFor(sent);
+      await runGuard(req);
+      expect(req.body.thread_id).toBeUndefined();
+      expect(req.body.conversationHistory).toEqual([]);
+      // The identity the task hash reads is exactly what the client sent.
+      expect(intelligenceRouter.identityWithOriginalThread(req, taskRequest(req.body))).toEqual(taskRequest(sent));
+      // ...while the stored request is the rolled-over one.
+      expect(taskRequest(req.body)).toMatchObject({ thread_id: null, thread_seq: null, conversationHistory: [] });
+    });
+
+    test('no rollover: the identity is the request itself', async () => {
+      mockIsThreadIdle.mockResolvedValue(false);
+      const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
+      const req = reqFor(sent);
+      await runGuard(req);
+      expect(req.ibThreadRollover).toBeUndefined();
+      const request = taskRequest(req.body);
+      expect(intelligenceRouter.identityWithOriginalThread(req, request)).toBe(request);
+    });
+
+    test('a retry of the same request hashes the same whether or not the thread is still idle', async () => {
+      const sent = { prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, conversationHistory: history };
+      const identities = [];
+      for (const idle of [false, true, true, false]) {
+        mockIsThreadIdle.mockResolvedValue(idle);
+        const req = reqFor(sent);
+        await runGuard(req);
+        identities.push(JSON.stringify(intelligenceRouter.identityWithOriginalThread(req, taskRequest(req.body))));
+      }
+      expect(new Set(identities).size).toBe(1);
+    });
+
+    test('a reopened thread is never rolled over, so its identity is untouched', async () => {
+      mockIsThreadIdle.mockResolvedValue(true);
+      const req = reqFor({ prompt: 'a later ask', thread_id: THREAD_ID, thread_seq: 4, thread_reopened: true, conversationHistory: history });
+      await runGuard(req);
+      expect(mockIsThreadIdle).not.toHaveBeenCalled();
+      expect(req.ibThreadRollover).toBeUndefined();
+      expect(req.body.thread_id).toBe(THREAD_ID);
+    });
+  });
+
   test('a malformed thread_id starts a fresh seeded thread instead of a uuid cast error', async () => {
     mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
     scriptModelTurns([[{ type: 'text', text: 'ok' }]]);

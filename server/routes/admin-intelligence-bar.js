@@ -3402,12 +3402,13 @@ async function runQuery(req, res, next) {
     const ownerDirectCommits = ownerDirect && platformEnabled;
     let taskContext = null;
     if (platformEnabled) {
+      const taskRequest = { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
+        conversationHistory: conversationHistory.slice(-10),
+        thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
+        thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
-        request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
-          conversationHistory: conversationHistory.slice(-10),
-          thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
-          thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null },
+        request: taskRequest, identityRequest: identityWithOriginalThread(req, taskRequest),
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -4144,13 +4145,30 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 // client says the operator reopened it on purpose from History
 // (thread_reopened: true). Direct /query only: a saved task resumed through
 // /tasks/:id/* keeps its own thread. Fails open (the request runs unchanged)
-// when the lookup throws.
+// when the lookup throws. The rollover must not change the request's identity:
+// a retry of the same request key (lost response, failed run) is recognised by
+// the hash of what the client sent, so identityWithOriginalThread hands
+// IbTasks.begin the original thread fields to hash while the saved task keeps
+// the rolled-over ones (a later resume continues the new conversation).
+function identityWithOriginalThread(req, request) {
+  const original = req.ibThreadRollover;
+  return original ? { ...request, conversationHistory: original.conversationHistory.slice(-10),
+    thread_id: original.thread_id, thread_seq: original.thread_seq } : request;
+}
+
 async function startFreshWhenThreadIdle(req, res, next) {
   try {
     const body = req.body || {};
     if (IbThreads.threadsEnabled() && req.techRole === 'admin' && body.thread_reopened !== true
       && UUID_RE.test(String(body.thread_id || ''))
       && await IbThreads.isThreadIdle(getAdminActorId(req), body.thread_id)) {
+      // The request's identity (IbTasks.begin's hash) stays what the client
+      // sent; only the stored request and the model input are rolled over.
+      req.ibThreadRollover = {
+        thread_id: body.thread_id,
+        thread_seq: Number.isInteger(body.thread_seq) ? body.thread_seq : null,
+        conversationHistory: Array.isArray(body.conversationHistory) ? body.conversationHistory : [],
+      };
       delete body.thread_id;
       delete body.thread_seq;
       body.conversationHistory = [];
@@ -5118,6 +5136,9 @@ module.exports = router;
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
+// Exposed for the idle-thread rollover identity test.
+module.exports.identityWithOriginalThread = identityWithOriginalThread;
+module.exports.startFreshWhenThreadIdle = startFreshWhenThreadIdle;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
 // Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
 // keeps that test tied to the route's own offered-tool list instead of a

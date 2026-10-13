@@ -24,11 +24,14 @@ function withoutImages(messages) {
     : message.content }));
 }
 
-async function begin({ actorId, sessionId, requestKey, request, pageContext }) {
+// identityRequest: what the request key is matched against, when it differs
+// from the stored request (the idle-thread rollover stores the rolled-over
+// request but a retry still sends the original). Defaults to `request`.
+async function begin({ actorId, sessionId, requestKey, request, identityRequest = request, pageContext }) {
   if (!actorId || !UUID_RE.test(sessionId || '') || !REQUEST_KEY_RE.test(requestKey || '')) {
     return { error: 'A valid session and request key are required', code: 'invalid_request_identity' };
   }
-  const hash = requestHash(request);
+  const hash = requestHash(identityRequest);
   // Images remain ephemeral, as in threads. Their hash still participates in
   // request identity so swapping an attachment cannot replay an old response.
   const { images, ...persistedRequest } = request;

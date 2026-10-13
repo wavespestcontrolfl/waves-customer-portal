@@ -793,6 +793,34 @@ describe('idle conversations start fresh', () => {
     expect(body.conversationHistory).toHaveLength(2);
   });
 
+  it('a query in flight across the deadline survives a close and reopen: the answer lands in its own conversation and the next question rolls over', async () => {
+    const ref = await firstExchange();
+    const pending = [];
+    fetchMock.mockImplementation(async url => {
+      if (url.endsWith('/query')) return new Promise(resolve => pending.push(resolve));
+      return ok({ actions: [], tasks: [], threads: [] });
+    });
+    skewMs = 3.9 * 3600000;
+    submit('Synthetic ask sent just before the deadline');
+    await waitFor(() => expect(pending).toHaveLength(1));
+    skewMs = 4.2 * 3600000;
+    act(() => ref.current.close());
+    act(() => ref.current.open());
+    await screen.findByPlaceholderText(/Ask anything/);
+    await act(async () => pending[0](reply({ response: 'Answer two', threadSeq: 4 })));
+    expect(await screen.findByText('Answer two')).toBeInTheDocument();
+    // Settled: the submit guards were released, so the palette takes another question.
+    skewMs = 4.2 * 3600000 + 5 * 3600000;
+    submit('Synthetic next ask');
+    await waitFor(() => expect(pending).toHaveLength(2));
+    const sent = JSON.parse(fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).at(-1)[1].body);
+    expect(sent.thread_id).toBeUndefined();
+    expect(sent.conversationHistory).toEqual([]);
+    // The in-flight query was sent on the old thread, not rolled over.
+    const first = JSON.parse(fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).at(-2)[1].body);
+    expect(first.thread_id).toBe(THREAD);
+  });
+
   it('a thread opened by hand from History is not idle-limited, however old it is', async () => {
     fetchMock.mockImplementation(async url => {
       if (url.endsWith('/query')) return reply({ threadSeq: 6 });

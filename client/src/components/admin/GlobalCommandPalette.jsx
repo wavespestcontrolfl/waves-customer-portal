@@ -672,8 +672,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   }, [threadIsIdle, detachThread, threadId, conversationHistory]);
 
   // A palette left mounted past the idle limit opens as a new conversation.
+  // Never while a query is in flight: bumping the epoch then would strand the
+  // query's cleanup (loading and the submit guard would stay set). The check
+  // runs again when the query settles (next effect) and on the next open.
   useEffect(() => {
-    if (!open || !threadIsIdle()) return;
+    if (!open || loading || submittingRef.current || !threadIsIdle()) return;
     threadEpochRef.current += 1; // invalidate any inflight thread resume
     detachThread();
     setResponse(null);
@@ -683,6 +686,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setActiveTask(null);
     knowledgeGaps.reset();
   }, [open]);
+
+  // A query that settles while the palette is open and the held thread has
+  // gone idle (a failed query leaves the clock where it was) drops the thread
+  // so the next question starts fresh. The shown answer or error stays.
+  useEffect(() => {
+    if (open && !loading && !submittingRef.current && threadIsIdle()) detachThread();
+  }, [loading]);
 
   const submit = useCallback(
     async (text, selectedTarget) => {
