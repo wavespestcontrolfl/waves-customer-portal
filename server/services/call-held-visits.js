@@ -24,7 +24,9 @@
  * call reference, and an unlinked call has no customer to match, so one more rule
  * covers the normal hand booking (and "Book it"): a live visit CREATED AFTER the
  * call clears the row when its customer carries the caller's phone number, or
- * when its address is the address stated on the call (house number and street).
+ * when its address is the property stated on the call (house number, street,
+ * unit, and the city and ZIP when stated). Only a visit that is on the calendar
+ * or done counts for these fallback rules; a skipped one never does.
  * Dates come from to_char in SQL, never a JS
  * Date round-trip. Dark behind GATE_CALL_HELD_VISIT; read-only.
  */
@@ -36,12 +38,12 @@ const {
   namesakeRowClearsSlot,
   loadNamesakeAccounts,
   officeClosedCall,
-  INACTIVE_STATUSES,
+  NAMESAKE_LIVE_STATUSES: LIVE_STATUSES,
 } = require('./call-booking-miss-watchdog');
 const { etDateString } = require('../utils/datetime-et');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { phoneIdentityKey, phoneMatchDigits } = require('../utils/phone');
-const { sameHouseNumberStreet } = require('./call-triage-flags');
+const { statedAddressCorroborates } = require('./call-family-name-link');
 
 const LOOKBACK_DAYS = 30;
 const NOTES_MAX_CHARS = 200;
@@ -62,19 +64,23 @@ function parseExtraction(raw) {
 
 const externalPhone = (call) => (String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone) || null;
 
-// The office booked this caller after the call: a live visit created after it, under a
-// customer who carries the caller's number, or at the address stated on the call. `row`
-// carries customer_phone, customer_secondary_phone and visit_address (the visit's own
-// service address, else the customer's).
+// The office booked this caller after the call: a visit that is on the calendar or done
+// (LIVE_STATUSES, an allow-list: a skipped visit is not a booking), created after the call,
+// under a customer who carries the caller's number, or at the address stated on the call.
+// The address must be the same property: house number and street, the ZIP and city when the
+// call stated them, and the same unit (statedAddressCorroborates, fail closed). `row` carries
+// customer_phone, customer_secondary_phone and the visit's address parts (visit_address,
+// visit_address_line2, visit_city, visit_zip: the visit's own, else the customer's).
 function bookedForCallerAfterCall(row, call, extraction) {
-  if (INACTIVE_STATUSES.has(row.status)) return false;
+  if (!LIVE_STATUSES.has(row.status)) return false;
   const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
   const callAt = call.created_at ? new Date(call.created_at).getTime() : NaN;
   if (!Number.isFinite(rowAt) || !Number.isFinite(callAt) || rowAt <= callAt) return false;
   const callerKey = phoneIdentityKey(externalPhone(call));
   if (callerKey && [row.customer_phone, row.customer_secondary_phone].some((p) => p && phoneIdentityKey(p) === callerKey)) return true;
-  const stated = String(extraction?.property?.service_address?.street_line_1 || '').trim();
-  return !!stated && !!row.visit_address && sameHouseNumberStreet(stated, row.visit_address);
+  return statedAddressCorroborates(extraction?.property?.service_address, {
+    address_line1: row.visit_address, address_line2: row.visit_address_line2, city: row.visit_city, zip: row.visit_zip,
+  });
 }
 
 function timeLabel(minutes) {
@@ -125,7 +131,8 @@ function heldCandidates(calls, dateET, now = new Date()) {
 // v2_extraction_status, ai_extraction_enriched }); `bookedRows` are
 // scheduled_services rows ({ customer_id, status, sched_date ('YYYY-MM-DD'),
 // window_start, created_at, source_call_log_id, notes, customer_phone,
-// customer_secondary_phone, visit_address }); `triageRows` are
+// customer_secondary_phone, visit_address, visit_address_line2, visit_city,
+// visit_zip }); `triageRows` are
 // triage_items ({ call_log_id, status, resolution_source }). `namesakes` is
 // the watchdog's call id -> Set(customer id) map; `customerNames` maps a
 // customer id to "First Last".
@@ -134,7 +141,8 @@ function computeHeldVisits(calls, bookedRows, triageRows, {
 } = {}) {
   const rows = [];
   for (const { call, extraction, kind, minutes, slot } of heldCandidates(calls, dateET, now)) {
-    const own = (row) => !!call.customer_id && row.customer_id === call.customer_id && !INACTIVE_STATUSES.has(row.status);
+    // A visit that is on the calendar or done; a skipped, cancelled or rescheduled one is not a booking.
+    const own = (row) => !!call.customer_id && row.customer_id === call.customer_id && LIVE_STATUSES.has(row.status);
     const sameName = namesakes.get(call.id);
     const callAt = new Date(call.created_at).getTime();
     const cleared = bookedRows.some((row) => (
@@ -217,7 +225,11 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
     .map((c) => (String(c.extraction?.property?.service_address?.street_line_1 || '').trim().match(/^\d+/) || [])[0])
     .filter(Boolean))].map((n) => `${n} %`);
   const digits = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g')`;
-  const visitAddress = "COALESCE(NULLIF(btrim(ss.service_address_line1), ''), cu.address_line1)";
+  // The visit's own service address when it has one, else the customer's: all four parts from
+  // the same source.
+  const hasOwnAddress = "NULLIF(btrim(ss.service_address_line1), '') IS NOT NULL";
+  const part = (visitCol, customerCol) => `CASE WHEN ${hasOwnAddress} THEN ss.${visitCol} ELSE cu.${customerCol} END`;
+  const visitAddress = part('service_address_line1', 'address_line1');
   const bookedRows = await db('scheduled_services as ss')
     .leftJoin('customers as cu', 'cu.id', 'ss.customer_id')
     .where(function heldEvidence() {
@@ -247,6 +259,9 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
       'ss.customer_id', 'ss.status', 'ss.window_start', 'ss.created_at', 'ss.source_call_log_id', 'ss.notes',
       'cu.phone as customer_phone', 'cu.secondary_phone as customer_secondary_phone',
       db.raw(`${visitAddress} AS visit_address`),
+      db.raw(`${part('service_address_line2', 'address_line2')} AS visit_address_line2`),
+      db.raw(`${part('service_address_city', 'city')} AS visit_city`),
+      db.raw(`${part('service_address_zip', 'zip')} AS visit_zip`),
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
   const triageRows = await db('triage_items').whereIn('call_log_id', callIds).select('call_log_id', 'status', 'resolution_source');

@@ -38,7 +38,7 @@ function call(over = {}) {
   };
 }
 const visit = (over = {}) => ({
-  customer_id: 'cust-1', status: 'scheduled', sched_date: DAY, window_start: '11:00:00',
+  customer_id: 'cust-1', status: 'pending', sched_date: DAY, window_start: '11:00:00',
   created_at: '2026-10-12T15:00:00Z', source_call_log_id: null, notes: '', ...over,
 });
 const run = (calls, booked = [], triage = [], opts = {}) => computeHeldVisits(calls, booked, triage, { dateET: DAY, now: NOW, ...opts });
@@ -235,6 +235,22 @@ describe('a hand booking after the call clears the row', () => {
     expect(run([unlinkedDayOnly()], [older])).toHaveLength(1);
     const cancelled = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', status: 'cancelled' });
     expect(run([unlinkedDayOnly()], [cancelled])).toHaveLength(1);
+  });
+
+  it('a skipped visit is not a booking, for the caller rule and for the linked customer', () => {
+    const skipped = visit({ customer_id: 'cust-new', customer_phone: '+19415550100', status: 'skipped' });
+    expect(run([unlinkedDayOnly()], [skipped])).toHaveLength(1);
+    expect(run([call({ customer_id: 'cust-1' })], [visit({ status: 'skipped' })])).toHaveLength(1);
+  });
+
+  it('the address must be the same property: another unit, city or ZIP keeps the row', () => {
+    const at = (over) => visit({ customer_id: 'cust-new', visit_address: '12 Test Lane', visit_city: 'Bradenton', visit_zip: '34205', ...over });
+    expect(run([unlinkedDayOnly()], [at({})])).toEqual([]);
+    expect(run([unlinkedDayOnly()], [at({ visit_city: 'Venice', visit_zip: '34285' })])).toHaveLength(1);
+    expect(run([unlinkedDayOnly()], [at({ visit_address_line2: 'Unit 4' })])).toEqual([]); // call stated no unit
+    const unitCall = call({ ai_extraction_enriched: dayOnly({ property: { service_address: { street_line_1: '12 Test Lane', street_line_2: 'Unit 2', city: 'Bradenton', postal_code: '34205' } } }) });
+    expect(run([unitCall], [at({ visit_address_line2: 'Unit 4' })])).toHaveLength(1);
+    expect(run([unitCall], [at({ visit_address_line2: 'Unit 2' })])).toEqual([]);
   });
 
   it('an outbound call matches on the number Waves dialed', () => {

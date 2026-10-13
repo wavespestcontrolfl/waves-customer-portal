@@ -636,4 +636,5 @@ module.exports = {
   repeatWindowOpen,
   officeClosedCall,
   INACTIVE_STATUSES,
+  NAMESAKE_LIVE_STATUSES,
 };
