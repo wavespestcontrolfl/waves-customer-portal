@@ -290,6 +290,14 @@ describe('check_address served south-Hillsborough towns', () => {
     expect(validateAddress).not.toHaveBeenCalled();
   });
 
+  test.each([[{ address: '100 Example Way, Charlotte Court House, VA 23923' }], [{ address: '100 Example Way, Charlotte Court House', state: 'VA' }]])('a non-Florida result with a served county name is outside the service area', async (input) => {
+    validateAddress.mockResolvedValue(google({ county: 'Charlotte County', inServiceArea: true, normalized: normalized({ city: 'Charlotte Court House', state: 'VA', postal_code: '23923' }) }));
+    const out = await run(input);
+    expect(out.status).toBe('out_of_service_area');
+    expect(out.in_service_area).toBe(false);
+    expect(out.note).toMatch(/outside the service area/);
+  });
+
   test('a state field that Google contradicts holds the result, whatever Google said', async () => {
     validateAddress.mockResolvedValue(google());
     const out = await run({ address: '100 Example Way, Sarasota', state: 'GA' });

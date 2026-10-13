@@ -135,6 +135,16 @@ const COUNTY_GAP_NOTE = 'Google matched this address, but the county lookup that
 const ZIP_PLUS4_RE = /\b\d{5}-\d{4}\b/;
 const ZIP_PLUS4_NOTE = 'The operator gave a ZIP+4. Google\'s ZIP has five digits and the four-digit suffix was not checked: tell the operator the suffix is left out, or keep their ZIP+4 if they ask for it.';
 
+// The service area is in Florida. The provider's county rule matches county
+// NAMES (a "Charlotte County" exists in Virginia), and this tool asks it not
+// to read a state from the text, so the state Google itself resolved decides:
+// any resolved state other than Florida is outside the service area.
+function outsideFlorida(result) {
+  const googleState = normalizeState(result.normalized?.state);
+  if (!googleState || googleState === DEFAULT_STATE) return result;
+  return { ...result, status: STATUSES.OUT_OF_SERVICE_AREA, inServiceArea: false };
+}
+
 // The state FIELD is a hard constraint: when the operator passed one and
 // Google resolved the address in a different state, the result is held for
 // confirmation, whatever Google's own verdict was. (No state is read from the
@@ -148,7 +158,7 @@ function heldOnStateMismatch(result, state) {
 const STATE_MISMATCH_NOTE = 'Google resolved this address in a different state than the state the operator gave. Do not save it: tell the operator both states and ask which is right.';
 
 function shape(providerResult, given, state) {
-  const result = heldOnStateMismatch(servedHillsborough(providerResult, state), state);
+  const result = heldOnStateMismatch(servedHillsborough(outsideFlorida(providerResult), state), state);
   // isCountyGap also covers "only the unit is missing"; that stays an
   // explicit hold, so only a result with nothing missing is a pure lookup gap.
   const missing = Array.isArray(result.missingComponents) ? result.missingComponents : [];
