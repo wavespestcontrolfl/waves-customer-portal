@@ -45,6 +45,7 @@ import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import TechFieldHome from './TechFieldHome';
+import TechHeldVisits from './TechHeldVisits';
 import TechScheduleChanges from './TechScheduleChanges';
 import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
@@ -841,6 +842,7 @@ export default function TechHomePage({ section = 'today' }) {
           tools={fieldTools}
           followThrough={<TechFollowThroughCards />}
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
+          heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
           timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
           onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
           timekeeping={<>

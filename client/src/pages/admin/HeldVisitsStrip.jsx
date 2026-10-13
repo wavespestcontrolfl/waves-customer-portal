@@ -20,9 +20,12 @@ const KIND_TEXT = {
   confirmed: { lead: 'Promised on a call', tag: 'PROMISED · not booked' },
   day_only: { lead: 'Day discussed on a call', tag: 'NOT CONFIRMED · not booked' },
 };
-const kindText = (row) => KIND_TEXT[row.kind] || KIND_TEXT.day_only;
+export const kindText = (row) => KIND_TEXT[row.kind] || KIND_TEXT.day_only;
 
-function fromCall(row) {
+// The time column: the agreed time, else "Time not set" with the part of the day asked for.
+export const heldWhen = (row) => row.time_label || (row.daypart ? `Time not set · asked for the ${row.daypart}` : 'Time not set');
+
+export function fromCall(row) {
   if (!row.call_at) return kindText(row).lead;
   const day = formatETDate(row.call_at, { weekday: 'long' });
   return `${kindText(row).lead} ${day}, ${formatETTime(row.call_at)}`;
@@ -70,7 +73,7 @@ export default function HeldVisitsStrip({ heldVisits, onBook }) {
             <li key={row.call_log_id} className="px-4 py-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div className="min-w-0 text-14 text-ink-primary">
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span className="u-nums font-medium">{row.time_label || (row.daypart ? `Time not set · asked for the ${row.daypart}` : 'Time not set')}</span>
+                  <span className="u-nums font-medium">{heldWhen(row)}</span>
                   <span className="font-medium">{row.caller_name}</span>
                   <span className="inline-flex items-center border border-dashed border-zinc-400 rounded-xs px-2 text-14 text-ink-secondary">
                     {kindText(row).tag}
