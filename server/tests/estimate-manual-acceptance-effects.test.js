@@ -885,6 +885,13 @@ describe('finding 5: each accepted one-time line, with what the accept does abou
     expect(await lineNames(feeWorld(solo, { items: [roach] }, { one_time: { items: [setupRow] } }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 99]]);
     expect(await lineNames(feeWorld(solo, { items: [roach] }, { oneTimeItems: [setupRow] }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 99]]);
   });
+  test('round 47: a mapped setup row with a sold net ($99 gross, $49 net) beside its raw gross-only $99 mirror is one $49 fee; a raw $79 mirror is a conflict', async () => {
+    const mapped = { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, priceAfterDiscount: 49 };
+    const raw = (price) => ({ service: 'waveguard_setup', label: 'WaveGuard setup', price, billingCadence: 'one_time' });
+    expect(await lineNames(feeWorld(solo, { items: [roach, mapped] }, { engineResult: { lineItems: [raw(99)] } }))).toEqual([['German Roach Cleanout', 350], ['WaveGuard membership fee', 49]]);
+    const world = feeWorld(solo, { items: [roach, mapped] }, { engineResult: { lineItems: [raw(79)] } });
+    await expect(markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }))).rejects.toMatchObject({ code: 'membership_fee_conflict', message: expect.stringMatching(/\$49\.00.*\$79\.00/) });
+  });
   test('round 25: a raw engine discount row (negative) with no one-time total refuses; with a total it becomes the pooled discount line', async () => {
     const rows = [{ service: 'rodent_exclusion', label: 'Rodent Exclusion', price: 350, billingCadence: 'one_time' }, { service: 'rodent_bundle_discount', label: 'Rodent bundle discount', price: -50, billingCadence: 'one_time' }];
     const data = { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', monthly: 49 }] }, engineResult: { lineItems: rows } };

@@ -261,8 +261,26 @@ function explicitSetupFees(data) {
   const containers = rawRowContainers(data);
   const docs = [data, ...containers.filter((c) => c !== data).map((c) => ({ result: c }))];
   const rows = [...docs.flatMap(mappedSubContainers).flat(), ...containers.flatMap((c) => (Array.isArray(c.lineItems) ? c.lineItems : []))].filter(isSetupFeeRow);
-  const amounts = rows.map((r) => (r.billingCadence || r.oneTimePrice != null ? rawLineAmount(r) : lineAmount(r))).filter((n) => n != null);
-  return [...new Set(amounts.map(cents))].sort((a, b) => a - b).map((c) => c / 100);
+  return reconciledSetupFees(rows);
+}
+// Mirrored setup rows reconcile the way other one-time work does (codex
+// #6113 r47): an operator-accepted net (manualFinalOneTime) outranks every
+// other copy; else a copy carrying a sold-net alias outranks a gross-only
+// mirror with the SAME gross (the mapped shape keeps the net, the raw shape
+// the gross); a gross-only copy with a different gross is its own fee. The
+// distinct amounts ascending; more than one is a conflict.
+const SETUP_NET_ALIASES = ['oneTimePrice', 'onetime_price', 'oneTime', 'priceAfterDiscount', 'amountAfterDiscount', 'totalAfterDiscount'];
+const finiteField = (row, keys) => keys.map((k) => (row[k] == null || row[k] === '' ? NaN : Number(row[k]))).find((n) => Number.isFinite(n));
+function reconciledSetupFees(rows) {
+  const shaped = rows.map((r) => ({ manual: finiteField(r, ['manualFinalOneTime']), net: finiteField(r, SETUP_NET_ALIASES), gross: finiteField(r, ['price', 'amount', 'total']) }));
+  const distinct = (list) => [...new Set(list.filter((n) => n !== undefined).map(cents))].sort((a, b) => a - b).map((c) => c / 100);
+  const manual = shaped.filter((r) => r.manual !== undefined);
+  if (manual.length) return distinct(manual.map((r) => r.manual));
+  const net = shaped.filter((r) => r.net !== undefined);
+  if (!net.length) return distinct(shaped.map((r) => r.gross));
+  const netGrosses = new Set(net.filter((r) => r.gross !== undefined).map((r) => cents(r.gross)));
+  const strayGross = shaped.filter((r) => r.net === undefined && r.gross !== undefined && !netGrosses.has(cents(r.gross))).map((r) => r.gross);
+  return distinct([...net.map((r) => r.net), ...strayGross]);
 }
 
 function unrepresentableRefusal(warning) {
