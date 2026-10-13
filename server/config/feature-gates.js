@@ -3580,6 +3580,18 @@ const gates = {
   // switch: unset.
   autoDispatchRoadCheck: gateEnvValue('GATE_AUTO_DISPATCH_ROAD_CHECK'),
 
+  // Auto-dispatch move proofreader (owner 2026-10-09 "proofreader yes";
+  // 2026-10-12 "go with the better agent, and for moves it is unsure of
+  // moving forward create admin notifications"). On, the 04:10 run in apply
+  // mode asks one model (ROUTES.autoDispatchProofreader) about each move
+  // right before it is written: the model reads the customer record and
+  // answers allow / hold / unknown. Only an allow moves the visit, on the
+  // slot the model read. An unknown raises one admin notice for the visit.
+  // It can only stop a move and it sends the customer nothing. OFF in every
+  // environment; auto-dispatch/config.js reads it through gateEnvValue() at
+  // call time (config.proofreaderEnabled). Kill switch: unset.
+  autoDispatchProofreader: gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a

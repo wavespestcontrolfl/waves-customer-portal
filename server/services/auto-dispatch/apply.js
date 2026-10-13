@@ -341,6 +341,8 @@ function makeMoveGuard({ service, best, config = {} }) {
     // At most N automatic moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
+    // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
+    await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
@@ -490,6 +492,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId, isOperational: true },
   );
   return async ({ trx, members, targets }) => {
+    // GATE_AUTO_DISPATCH_PROOFREADER: a proofread move never moves a grouped stop.
+    require('./proofreader/nightly').assertNotGrouped(members, config.proofread, refuse, service.id);
     const siblings = (members || []).filter((m) => String(m.id) !== String(service.id));
     if (!siblings.length) return;
     checkMemberStatusAndTiming(siblings, targets, config, refuse);

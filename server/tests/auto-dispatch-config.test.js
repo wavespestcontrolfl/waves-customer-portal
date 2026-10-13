@@ -120,6 +120,22 @@ describe('day-move drive floor and conflict moves (owner 2026-10-09)', () => {
     expect(getAutoDispatchConfig().conflictMovesEnabled).toBe(true);
   });
 
+  test('the move proofreader is off unless the gate is set; its call cap defaults to 60', () => {
+    const prev = { gate: process.env.GATE_AUTO_DISPATCH_PROOFREADER, cap: process.env.AUTO_DISPATCH_PROOFREADER_MAX_CALLS };
+    try {
+      delete process.env.GATE_AUTO_DISPATCH_PROOFREADER;
+      delete process.env.AUTO_DISPATCH_PROOFREADER_MAX_CALLS;
+      expect(getAutoDispatchConfig()).toMatchObject({ proofreaderEnabled: false, proofreaderMaxCalls: 60, proofreaderDeadlineSeconds: 300 });
+      process.env.GATE_AUTO_DISPATCH_PROOFREADER = 'true';
+      process.env.AUTO_DISPATCH_PROOFREADER_MAX_CALLS = '5';
+      expect(getAutoDispatchConfig()).toMatchObject({ proofreaderEnabled: true, proofreaderMaxCalls: 5 });
+    } finally {
+      for (const [key, value] of [['GATE_AUTO_DISPATCH_PROOFREADER', prev.gate], ['AUTO_DISPATCH_PROOFREADER_MAX_CALLS', prev.cap]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
   test('the road check is off unless the gate is set; its leg cap defaults to 600', () => {
     const prev = { gate: process.env.GATE_AUTO_DISPATCH_ROAD_CHECK, cap: process.env.AUTO_DISPATCH_ROAD_CHECK_MAX_ELEMENTS, model: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
     try {

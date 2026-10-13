@@ -31,7 +31,11 @@ jest.mock('../services/admin-alert-compose', () => {
 });
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  safeErrorSummary: jest.requireActual('../services/notification-service').safeErrorSummary,
+  _private: { doneColumns: () => ({ done_at: 'now', done_by: 'auto-dispatch' }) },
+}));
 jest.mock('../services/auto-dispatch/audit', () => ({
   // Real budget helpers and key shape; only the notification-store read is faked.
   ...jest.requireActual('../services/auto-dispatch/audit'),
@@ -67,7 +71,7 @@ const { runAutoDispatch, _internals } = require('../services/auto-dispatch');
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy'];
+    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count', 'whereRaw', 'groupBy', 'update'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;
@@ -1661,5 +1665,168 @@ describe('move limit (owner 2026-10-09: at most two automatic moves per visit)',
       expect(res).toMatchObject({ status: 'completed_with_errors', failed: 1, changed: 0 });
       expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('move proofreader in pass 2 (GATE_AUTO_DISPATCH_PROOFREADER, owner 2026-10-12)', () => {
+  const moveCheck = require('../services/auto-dispatch/proofreader/nightly');
+  const ALLOW = { allowed: true, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'm', prompt_version: 'v' } };
+  const stop = (code, verdict) => ({ allowed: false, reason_code: code, reason_description: 'stopped', audit: { verdict, why: 'x', entry_id: null, model: 'm', prompt_version: 'v' } });
+  const applyMode = async (fn) => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try { return await fn(); } finally { process.env.AUTO_DISPATCH_ALLOW_APPLY = prev; }
+  };
+  let checkMove;
+  beforeEach(() => {
+    checkMove = jest.spyOn(moveCheck, 'checkMove');
+    // The run's end closes stored notices the run settled: a raw column expression on the fake store.
+    db.raw = (sql) => sql;
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE] });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('allow: the visit moves on the approved slot only, and the row says the move was checked', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 1, failed: 0 });
+      const [{ service, best, run }] = checkMove.mock.calls[0];
+      expect(service.id).toBe('s1');
+      expect(best).toMatchObject({ date: CAND_BIG.date, start_time: CAND_BIG.start_time });
+      expect(run.proofreader).toMatchObject({ calls: 0 });
+      // The deadline counts from the run's entry, 300 seconds by default.
+      expect(run.proofreader.deadlineAt).toBe(run.nowDate.getTime() + 300000);
+      const options = apply.applyAutoDispatchMove.mock.calls[0][3];
+      expect(options.alternateCandidates).toEqual([]);
+      expect(options.rescore).toBeUndefined();
+      expect(lastDecision('changed').constraints.proofreader).toEqual(ALLOW.audit);
+    });
+  });
+
+  test.each([['PROOFREADER_HOLD', 'hold'], ['PROOFREADER_UNSURE', 'unknown'], ['PROOFREADER_NOT_ASKED', 'unknown']])('%s: the visit stays where it is', async (code, verdict) => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(stop(code, verdict));
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 0 });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe(code);
+      expect(row.constraints.proofreader.verdict).toBe(verdict);
+    });
+  });
+
+  test('a check that broke leaves the visit and the run ends completed_with_errors; an unsure answer does not', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: true });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      checkMove.mockResolvedValue({ ...stop('PROOFREADER_UNSURE', 'unknown'), broke: false });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
+    });
+  });
+
+  test('a held visit whose notice could not be written ends the run completed_with_errors', async () => {
+    await applyMode(async () => {
+      checkMove.mockImplementation(async ({ run }) => { run.proofreader.notices.set('k', { key: 'k', id: 's1', date: '2026-08-04' }); return stop('PROOFREADER_UNSURE', 'unknown'); });
+      jest.spyOn(audit, 'withinRingBudget').mockImplementation(() => { throw new Error('store down'); });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+    });
+  });
+
+  test('the approved slot is taken before the write: nothing moves and the run is not a failed run', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('taken'), { code: 'SLOT_TAKEN' }));
+      const res = await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true });
+      expect(res).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('APPROVED_SLOT_TAKEN');
+      expect(lastDecision('failed')).toBeUndefined();
+    });
+  });
+
+  test('the customer changed a stored preference while the model read: the visit stays and the next run rescores it', async () => {
+    await applyMode(async () => {
+      const preferences = require('../services/auto-dispatch/preferences');
+      const before = await preferences.getCustomerSchedulingPreferences();
+      checkMove.mockImplementation(async () => {
+        preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
+        return ALLOW;
+      });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+      const row = lastDecision('no_change');
+      expect(row.reason_code).toBe('SUPERSEDED_DURING_RUN');
+      expect(row.reason_description).toMatch(/preferences changed/);
+    });
+  });
+
+  test('a check that broke AND changed preferences: superseded, and the run still ends completed_with_errors', async () => {
+    await applyMode(async () => {
+      const preferences = require('../services/auto-dispatch/preferences');
+      const before = await preferences.getCustomerSchedulingPreferences();
+      checkMove.mockImplementation(async () => {
+        preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
+        return { ...stop('PROOFREADER_UNSURE', 'unknown'), broke: true };
+      });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed_with_errors' });
+      expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
+    });
+  });
+
+  test('preferences changed under an unsure answer: superseded, and the queued notice is discarded', async () => {
+    await applyMode(async () => {
+      const preferences = require('../services/auto-dispatch/preferences');
+      const before = await preferences.getCustomerSchedulingPreferences();
+      let state;
+      checkMove.mockImplementation(async ({ run, service }) => {
+        state = run.proofreader;
+        state.notices.set(moveCheck.noticeKey(service.id, '2026-08-04', '09:00:t1'), { id: service.id });
+        preferences.getCustomerSchedulingPreferences.mockResolvedValueOnce({ ...before, preferred_day_indexes: [2] });
+        return stop('PROOFREADER_UNSURE', 'unknown');
+      });
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
+      expect(state.notices.size).toBe(0);
+    });
+  });
+
+  test('a visit a person changed while the model read is superseded, not a failed run', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('locked'), { code: 'STALE_PLACEMENT' }));
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 0, status: 'completed' });
+      expect(lastDecision('no_change').reason_code).toBe('SUPERSEDED_DURING_RUN');
+    });
+  });
+
+  test('any other write failure of a checked move is still a failure', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('guard'), { code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD' }));
+      expect(await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true })).toMatchObject({ changed: 0, failed: 1 });
+    });
+  });
+
+  test('a move the per-run cap holds is never asked about', async () => {
+    await applyMode(async () => {
+      checkMove.mockResolvedValue(ALLOW);
+      await runAutoDispatch({ mode: 'apply', proofreaderEnabled: true, maxChangesPerRun: 0 });
+      expect(checkMove).not.toHaveBeenCalled();
+    });
+  });
+
+  test('gate off: the real check answers null, nothing is asked, and the fallback is unchanged', async () => {
+    await applyMode(async () => {
+      expect(await runAutoDispatch({ mode: 'apply' })).toMatchObject({ changed: 1 });
+      expect(checkMove.mock.calls[0][0].run.proofreader).toBeNull();
+      const options = apply.applyAutoDispatchMove.mock.calls[0][3];
+      expect(typeof options.rescore).toBe('function');
+      expect(options.alternateCandidates.length).toBeGreaterThan(0);
+      expect(lastDecision('changed').constraints.proofreader).toBeUndefined();
+    });
+  });
+
+  test('a dry run never asks', async () => {
+    checkMove.mockResolvedValue(ALLOW);
+    expect(await runAutoDispatch({ mode: 'dry_run', proofreaderEnabled: true })).toMatchObject({ recommended: 1 });
+    expect(checkMove).not.toHaveBeenCalled();
   });
 });
