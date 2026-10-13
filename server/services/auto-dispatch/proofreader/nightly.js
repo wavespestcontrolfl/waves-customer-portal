@@ -16,7 +16,7 @@
  * paid for. A run asks at most config.proofreaderMaxCalls times; past that a
  * move waits for the next run.
  *
- * THE NOTICE. One per visit (or grouped stop) and placement (dedupe key below), written once: a
+ * THE NOTICE. One per visit and placement (dedupe key below), written once: a
  * later run that is still unsure about the same visit writes nothing, a
  * notice a person marked done included. It is raised for an "unknown" a
  * person can settle from the record (the model was unsure, or part of the
@@ -35,7 +35,9 @@ const { toDateStr } = require('../dates');
 const KEY_PREFIX = 'auto-dispatch-proofreader:';
 const RESOLVED_TITLE = 'Move check alert resolved';
 
-const REASON_CODE = { hold: 'PROOFREADER_HOLD', unknown: 'PROOFREADER_UNSURE', not_asked: 'PROOFREADER_NOT_ASKED' };
+const REASON_CODE = {
+  hold: 'PROOFREADER_HOLD', unknown: 'PROOFREADER_UNSURE', not_asked: 'PROOFREADER_NOT_ASKED', grouped: 'PROOFREADER_GROUPED_STOP',
+};
 
 // The "unknown" answers a person can settle by reading the record, with the
 // sentence the notice gives when there is no quote to show.
@@ -59,19 +61,18 @@ const PLACEMENT_SQL = "s.scheduled_date::text = notifications.metadata->>'schedu
 const OPEN_STATUSES = ['pending', 'confirmed'];
 const textOrNull = (value) => (value == null || value === '' ? null : String(value));
 
-// One notice per visit (or grouped stop) and PLACEMENT: the date, and the
-// arrival time and technician (a stop: a short print of every member's). A
+// One notice per visit and PLACEMENT: the date, the arrival time and the
+// technician. A
 // notice closed because the placement changed must not swallow an unsure
 // move on the new placement (Codex #6313 r5); on the same placement the key
 // repeats, so a notice a person marked done is not written again.
 const noticeKey = (id, date, placement) => `${KEY_PREFIX}${id}:${date}:${placement}`;
-const shortPrint = (text) => require('crypto').createHash('sha256').update(text).digest('hex').slice(0, 12);
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 
 // The run's own tally and the notices it will raise at its end.
 function newRunState() {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, notices: new Map(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, notices: new Map(),
   };
 }
 
@@ -82,54 +83,25 @@ async function technicianNames(conn, ids) {
   return new Map(rows.map((row) => [String(row.id), firstName(row.name)]));
 }
 
-// A grouped stop moves whole, and the unit mover gives each member its own
-// start (visit-groups.js predictMemberWindows, the mover's own planning). The
-// members that move with the visit, each with the start it has and the one
-// it would get. A stop whose plan cannot be made throws: the caller then
-// never allows the move.
-function openMembers(conn, visitId) {
-  const { TERMINAL_ROW_STATUSES } = require('../../visit-context/statuses');
-  return conn('scheduled_services').where({ visit_id: visitId })
-    .whereNotIn('status', TERMINAL_ROW_STATUSES)
-    .select('id', 'service_type', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+// GROUPED STOPS DO NOT MOVE while the check is on (owner 2026-10-12, "do
+// whatever you recommend"). A stop of two or more services moves whole, each
+// member on its own arrival time, and the model would have to judge every
+// member's window and every change to the stop until the write; the owner
+// ruled the same day to stop booking grouped stops. Such a visit is not asked
+// about and stays where it is (PROOFREADER_GROUPED_STOP, no notice; a visit
+// in conflict still gets the needs-a-person notice). The members are the unit
+// mover's own read (visit-groups.js openMembers).
+async function isGroupedStop(conn, service) {
+  if (!service.visit_id) return false;
+  return (await require('../../visit-groups').openMembers(conn, service.visit_id)).length > 1;
 }
 
-// Who is at the stop, where each member sits and whether it is still open
-// (pending and confirmed read the same; a member that went en route, on site
-// or to a reschedule request does not: Codex #6313 r6), as one comparable string.
-function stopSignature(members) {
-  const state = (m) => (OPEN_STATUSES.includes(m.status) ? 'open' : String(m.status));
-  return members
-    .map((m) => [m.id, toDateStr(m.scheduled_date), textOrNull(m.window_start), textOrNull(m.technician_id), state(m)].join('|'))
-    .sort().join(';');
-}
-
-async function otherServicesOf(conn, service, best, members) {
-  const { predictMemberWindows } = require('../../visit-groups');
-  if (members.length < 2) return [];
-  const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
-  const predicted = predictMemberWindows({
-    members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,
-    requestedStart: best.start_time, requestedEnd: best.end_time, newDateStr: best.date,
-  });
-  if (!predicted.ok) throw new Error(`grouped stop cannot be planned (${predicted.code})`);
-  return members
-    .map((member, i) => ({ member, target: predicted.targets[i] }))
-    .filter(({ target }) => !target.isPrimary)
-    .map(({ member, target }) => ({ service: member.service_type, fromStart: member.window_start, toStart: target.start || member.window_start }));
-}
-
-// The planned move as prompt.js moveFacts reads it. A grouped stop moves
-// whole, so it names every member's service and each other member's windows.
+// The planned move as prompt.js moveFacts reads it.
 async function plannedMove(conn, service, best, record) {
   const names = await technicianNames(conn, [service.technician_id, best.technician_id]);
   const tech = (id) => (id ? names.get(String(id)) || null : null);
   const services = record.serviceTypes || [];
-  const members = service.visit_id ? await openMembers(conn, service.visit_id) : [];
   return {
-    // The stop as the model was told it, for the run-end re-read (stillAsChecked).
-    stop: members.length > 1 ? stopSignature(members) : null,
-    otherServices: await otherServicesOf(conn, service, best, members),
     serviceType: services.length > 1 ? services.join(' + ') : (services[0] || service.service_type),
     from: {
       date: toDateStr(service.scheduled_date), windowStart: service.window_start, windowEnd: service.window_end, technician: tech(service.technician_id),
@@ -152,6 +124,7 @@ const DESCRIPTION = {
   hold: 'The move proofreader stopped this move: the customer record sets when visits happen',
   unknown: 'The move proofreader could not clear this move; the visit stays',
   not_asked: 'The move proofreader had no calls left this run; the next run asks',
+  grouped: 'A stop of two or more services is not moved while the move proofreader is on',
 };
 
 function stopped(kind, answer) {
@@ -166,16 +139,16 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     const planned = await plannedMove(conn, service, best, record);
     const move = proofreader.moveFacts(planned);
     // Only a call that goes to the model spends the run's call limit: a
-    // record or a stop that cannot be read, or a record too long to send,
-    // asks nobody (Codex #6313 r2).
+    // record that cannot be read, or one too long to send, asks nobody
+    // (Codex #6313 r2).
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
     const entry = answer.entry_id ? record.entries.find((row) => row.id === answer.entry_id) : null;
-    return { answer, move, entry: entry || null, stop: planned.stop };
+    return { answer, move, entry: entry || null };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${err.message}`);
-    return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null, stop: null };
+    return { answer: { verdict: 'unknown', why: 'check_failed' }, move: null, entry: null };
   }
 }
 
@@ -199,21 +172,28 @@ async function recordStillAsRead(answer, record, { service, conn, proofreader })
   return { ...answer, verdict: 'unknown', why: 'record_changed', model_verdict: 'allow' };
 }
 
-function collectNotice(state, service, { answer, move, entry, stop }) {
+function collectNotice(state, service, { answer, move, entry }) {
   if (!move || !PERSON_SETTLES[answer.why]) return;
   const date = toDateStr(service.scheduled_date);
-  // A grouped stop is one notice, whichever member the run tried to move: two
-  // members that both qualify describe the same stop (Codex #6313 r3).
-  const key = stop && service.visit_id
-    ? noticeKey(`visit-${service.visit_id}`, date, shortPrint(stop))
-    : noticeKey(service.id, date, `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
+  const key = noticeKey(service.id, date, `${textOrNull(service.window_start) || 'no-time'}:${textOrNull(service.technician_id) || 'no-tech'}`);
   if (!date || state.notices.has(key)) return;
   state.notices.set(key, {
     key, id: String(service.id), customer_id: service.customer_id || null, date, why: answer.why, move,
     window_start: textOrNull(service.window_start), technician_id: textOrNull(service.technician_id),
-    visit_id: service.visit_id || null, stop,
     quote: answer.quote || null, reason: answer.reason || null, entry: entry ? { channel: entry.channel, from: entry.from, at: entry.at } : null,
   });
+}
+
+// The stop for a grouped visit (see isGroupedStop), or for a stop that could
+// not be read (never asked, never allowed); null for a visit that is alone.
+async function groupedStop(conn, service) {
+  try {
+    if (!(await isGroupedStop(conn, service))) return null;
+    return { kind: 'grouped', stop: stopped('grouped', { verdict: 'unknown', why: 'grouped_stop' }) };
+  } catch (err) {
+    logger.warn(`[auto-dispatch] move proofreader could not read the stop of ${service.id}: ${err.message}`);
+    return { kind: 'unsure', stop: stopped('unknown', { verdict: 'unknown', why: 'check_failed' }) };
+  }
 }
 
 /**
@@ -224,17 +204,21 @@ function collectNotice(state, service, { answer, move, entry, stop }) {
 async function checkMove({ service, best, run }, deps = {}) {
   const state = run.proofreader;
   if (!state) return null;
+  const conn = deps.conn || require('../../../models/db');
+  const grouped = await groupedStop(conn, service);
+  if (grouped) {
+    state[grouped.kind === 'grouped' ? 'grouped' : 'unsure'] += 1;
+    return grouped.stop;
+  }
   if (state.calls >= run.config.proofreaderMaxCalls) {
     state.notAsked += 1;
     return stopped('not_asked', { verdict: 'unknown', why: 'call_limit' });
   }
-  const asked = await ask({ service, best }, {
-    conn: deps.conn || require('../../../models/db'), proofreader: deps.proofreader || require('./index'), state,
-  });
+  const asked = await ask({ service, best }, { conn, proofreader: deps.proofreader || require('./index'), state });
   const { answer } = asked;
   if (answer.verdict === 'allow') {
     state.allowed += 1;
-    return { allowed: true, audit: auditOf(answer), stop: asked.stop };
+    return { allowed: true, audit: auditOf(answer) };
   }
   if (answer.verdict === 'hold') {
     state.held += 1;
@@ -247,23 +231,18 @@ async function checkMove({ service, best, run }, deps = {}) {
 
 // The write options of an approved move: the slot the model read and no
 // other. The SLOT_TAKEN fallback would land a slot nobody checked, so a
-// checked move has none; a taken slot waits for the next run. `approvedStop`
-// is the grouped stop as the model was told it (null = the visit was alone):
-// the unit mover's member guard compares it under the stop lock
-// (assertApprovedStop).
+// checked move has none; a taken slot waits for the next run. `proofread`
+// reaches the unit mover's member guard (assertNotGrouped).
 function writeOptions(checked, fallback) {
-  return checked ? { alternateCandidates: [], approvedStop: checked.stop ?? null } : fallback;
+  return checked ? { alternateCandidates: [], proofread: true } : fallback;
 }
 
 // apply.js makeMemberGuard, under the unit mover's stop lock and before any
-// write: the members the mover is about to move are the ones the model read,
-// each on the placement it read. A member that joined, left or moved while
-// the model worked refuses the move; the next run asks again. `approved`
-// undefined = the move was not proofread.
-function assertApprovedStop(members, approved, refuse, primaryId) {
-  if (approved === undefined) return;
-  const now = (members || []).length > 1 ? stopSignature(members) : null;
-  if (now !== approved) throw refuse(primaryId, 'changed since the move was checked');
+// write: a visit that was alone when it was checked and has since joined a
+// stop of two or more is not moved (see isGroupedStop). The next run sees
+// the stop and leaves it.
+function assertNotGrouped(members, proofread, refuse, primaryId) {
+  if (proofread === true && (members || []).length > 1) throw refuse(primaryId, 'joined a grouped stop after the move was checked');
 }
 
 // The approved slot was taken between the check and the write. Nothing
@@ -320,8 +299,6 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
     detail: detailFor(item, names),
     metadata: {
       scheduledServiceId: item.id, customerId: item.customer_id, scheduledDate: item.date, windowStart: item.window_start, technicianId: item.technician_id,
-      // A grouped stop as the model was told it, for the close (staleStopVisits).
-      ...(item.stop ? { visitId: item.visit_id, stop: item.stop } : {}),
       kind: item.why, proposedDate: item.move.to.date,
     },
   });
@@ -330,42 +307,15 @@ async function raiseOne(item, { raiseAdminAlert, names, audit }) {
 // A notice stays open while its visit is still open on the placement the
 // notice is about. A person who gives the visit a new time or technician on
 // the same date has decided (Codex #6313 r1).
-// The visits of open grouped-stop notices whose stop is no longer the one
-// the notice describes: a member left, joined or moved while the tapped visit
-// stayed. The stop is compared here, with the same signature the raise uses,
-// because the close's SQL sees the tapped visit alone. A stop that cannot be
-// read keeps its notice.
-async function staleStopVisits(conn) {
-  const rows = await conn('notifications')
-    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-    .whereNot('title', RESOLVED_TITLE)
-    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${KEY_PREFIX}%`])
-    .whereRaw("metadata->>'stop' IS NOT NULL")
-    .select('metadata');
-  const stale = [];
-  for (const row of rows) {
-    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    if (!meta.stop || !meta.visitId) continue;
-    try {
-      if (stopSignature(await openMembers(conn, meta.visitId)) !== meta.stop) stale.push(String(meta.scheduledServiceId));
-    } catch (err) {
-      logger.warn(`[auto-dispatch] move-check notice stop ${meta.visitId} could not be re-read: ${err.message}`);
-    }
-  }
-  return stale;
-}
-
 // With the check turned off nothing holds a move any more, so no notice
 // stays open: a rollback leaves none standing (Codex #6313 r2).
-async function closeResolved(audit, nowDate, enabled, conn) {
+async function closeResolved(audit, nowDate, enabled) {
   try {
-    const stale = enabled ? await staleStopVisits(conn) : [];
     await audit.retireResolvedNotices({
       keyPattern: `${KEY_PREFIX}%`,
       stillOpen: (q) => {
         if (enabled) q.whereRaw(PLACEMENT_SQL).whereIn('s.status', OPEN_STATUSES);
         else q.whereRaw('1 = 0');
-        if (stale.length) q.whereNotIn('s.id', stale);
       },
       resolvedTitle: RESOLVED_TITLE,
       resolution: enabled ? 'The visit moved or is no longer open' : 'The move check is turned off',
@@ -376,19 +326,15 @@ async function closeResolved(audit, nowDate, enabled, conn) {
   }
 }
 
-// The visit (and, for a grouped stop, every member) is still open on the placement the check read. A person can move
+// The visit is still open on the placement the check read. A person can move
 // or cancel it between the check and the run's end; that notice would be
 // stale at once and would spend a ring (Codex #6313 r1). An unreadable visit
 // raises nothing: the next run asks again.
 async function stillAsChecked(item, conn) {
   try {
     const row = await conn('scheduled_services').where({ id: item.id }).first('status', 'scheduled_date', 'window_start', 'technician_id');
-    const same = !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
+    return !!row && OPEN_STATUSES.includes(row.status) && toDateStr(row.scheduled_date) === item.date
       && textOrNull(row.window_start) === item.window_start && textOrNull(row.technician_id) === item.technician_id;
-    // A grouped stop: the notice describes every member, so a member that
-    // left, joined or moved since the check makes it stale too (r2).
-    if (!same || !item.stop) return same;
-    return stopSignature(await openMembers(conn, item.visit_id)) === item.stop;
   } catch (err) {
     logger.warn(`[auto-dispatch] move-check notice visit ${item.id} could not be re-read: ${err.message}`);
     return false;
@@ -397,8 +343,8 @@ async function stillAsChecked(item, conn) {
 
 // Run end, in every run: close the notices that no longer apply; all of them
 // when the check is off (config.proofreaderEnabled). Never throws.
-async function closeNotices(nowDate = new Date(), { enabled = true, conn = require('../../../models/db') } = {}) {
-  await closeResolved(require('../audit'), nowDate, enabled, conn);
+async function closeNotices(nowDate = new Date(), { enabled = true } = {}) {
+  await closeResolved(require('../audit'), nowDate, enabled);
 }
 
 /**
@@ -434,10 +380,10 @@ async function raiseNotices(state, { conn = require('../../../models/db') } = {}
 
 // For the run's log line.
 function tallyOf(state) {
-  return state ? `${state.calls}/${state.allowed}/${state.held}/${state.unsure}` : 'off';
+  return state ? `${state.calls}/${state.allowed}/${state.held}/${state.unsure}/${state.grouped}` : 'off';
 }
 
 module.exports = {
-  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertApprovedStop, stopSignature, approvedSlotTaken, closeNotices, raiseNotices, tallyOf,
+  KEY_PREFIX, RESOLVED_TITLE, REASON_CODE, noticeKey, newRunState, checkMove, writeOptions, assertNotGrouped, approvedSlotTaken, closeNotices, raiseNotices, tallyOf,
   _internals: { whyFor, detailFor, plannedMove },
 };

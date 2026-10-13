@@ -64,42 +64,43 @@ describe('checkMove', () => {
     });
   });
 
-  describe('a grouped stop', () => {
-    // technicians, the stop's members and the visit row, by table.
-    const grouped = (members) => (table) => {
+  describe('a grouped stop does not move while the check is on (owner 2026-10-12)', () => {
+    const service = { ...SERVICE, visit_id: 'v1' };
+    // The unit mover's own member read, by how many open members the stop has.
+    const stopOf = (count) => (table) => {
       const chain = {
         where: () => chain, whereIn: () => chain, whereNotIn: () => chain,
-        select: async () => (table === 'technicians' ? [{ id: 't1', name: 'Alex Rivera' }] : members),
-        first: async () => ({ window_start: '09:00' }),
+        select: async () => {
+          if (table === 'technicians') return [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }];
+          if (count instanceof Error) throw count;
+          return Array.from({ length: count }, (_, i) => ({ id: `m${i}` }));
+        },
       };
       return chain;
     };
-    const MEMBERS = [
-      { id: 's1', service_type: 'Quarterly Pest Control', status: 'confirmed', technician_id: 't1', scheduled_date: '2026-10-20', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
-      { id: 's2', service_type: 'Lawn Care', status: 'confirmed', technician_id: 't1', scheduled_date: '2026-10-20', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 },
-    ];
-    const service = { ...SERVICE, visit_id: 'v1' };
-    const best = { ...BEST, technician_id: 't1' };
 
-    test('the model gets each other member with the window it has and the one it would get', async () => {
-      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, { ...RECORD, serviceTypes: ['Quarterly Pest Control', 'Lawn Care'] });
-      await nightly.checkMove({ service, best, run: runOf() }, { conn: grouped(MEMBERS), proofreader });
-      const { move } = proofreader.proofreadMove.mock.calls[0][0];
-      expect(move.service).toBe('Quarterly Pest Control + Lawn Care');
-      expect(move.other_services).toEqual([{ service: 'Lawn Care', from_arrival_window: '10:00-12:00', to_arrival_window: '14:00-16:00' }]);
+    test('two or more open members: nobody is asked, the visit stays, no notice', async () => {
+      const run = runOf();
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+      const got = await nightly.checkMove({ service, best: BEST, run }, { conn: stopOf(2), proofreader });
+      expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_GROUPED_STOP', audit: { verdict: 'unknown', why: 'grouped_stop' } });
+      expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
+      expect(run.proofreader).toMatchObject({ calls: 0, grouped: 1, unsure: 0 });
+      expect(run.proofreader.notices.size).toBe(0);
     });
 
-    test('a stop whose member plan cannot be made is never an allow, and no model is asked', async () => {
+    test('a visit whose stop holds it alone is asked like any other', async () => {
       const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
-      const got = await nightly.checkMove({ service: { ...service, id: 'not-a-member' }, best, run: runOf() }, { conn: grouped(MEMBERS), proofreader });
+      expect(await nightly.checkMove({ service, best: BEST, run: runOf() }, { conn: stopOf(1), proofreader })).toMatchObject({ allowed: true });
+    });
+
+    test('a stop that cannot be read is never an allow, and nobody is asked', async () => {
+      const run = runOf();
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
+      const got = await nightly.checkMove({ service, best: BEST, run }, { conn: stopOf(new Error('db down')), proofreader });
       expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE', audit: { why: 'check_failed' } });
-      expect(proofreader.proofreadMove).not.toHaveBeenCalled();
-    });
-
-    test('a visit that is alone at its stop has no other services', async () => {
-      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });
-      await nightly.checkMove({ service, best, run: runOf() }, { conn: grouped([MEMBERS[0]]), proofreader });
-      expect(proofreader.proofreadMove.mock.calls[0][0].move.other_services).toBeUndefined();
+      expect(proofreader.buildCustomerRecord).not.toHaveBeenCalled();
+      expect(run.proofreader.calls).toBe(0);
     });
   });
 
@@ -107,7 +108,7 @@ describe('checkMove', () => {
     const run = runOf();
     const got = await check(run, proofreaderOf({ verdict: 'allow', why: 'nothing_breaks', reason: 'Nothing limits the day.' }));
     expect(got).toEqual({
-      allowed: true, stop: null, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
+      allowed: true, audit: { verdict: 'allow', why: 'nothing_breaks', entry_id: null, model: 'claude-opus-5-5', prompt_version: 'move-proofreader-v1' },
     });
     expect(run.proofreader).toMatchObject({ calls: 1, allowed: 1, held: 0, unsure: 0 });
     expect(run.proofreader.notices.size).toBe(0);
@@ -196,38 +197,17 @@ describe('checkMove', () => {
 describe('the write of a checked move', () => {
   const fallback = { alternateCandidates: ['a', 'b'], rescore: () => {} };
   test('a checked move lands on the approved slot only: no alternates, no re-evaluation', () => {
-    expect(nightly.writeOptions({ allowed: true, stop: null }, fallback)).toEqual({ alternateCandidates: [], approvedStop: null });
-    expect(nightly.writeOptions({ allowed: true, stop: 'a;b' }, fallback)).toMatchObject({ approvedStop: 'a;b' });
+    expect(nightly.writeOptions({ allowed: true }, fallback)).toEqual({ alternateCandidates: [], proofread: true });
   });
 
-  describe('the grouped stop at the write is the one the model read', () => {
+  test('a visit that joined a stop of two or more after the check is refused at the write', () => {
     const refuse = (id, why) => new Error(`${id} ${why}`);
-    const members = [
-      { id: 's1', status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
-      { id: 's2', status: 'pending', scheduled_date: new Date('2026-10-20T00:00:00Z'), window_start: '10:00', technician_id: 't1' },
-    ];
-    const approved = nightly.stopSignature(members);
-    test('the same members on the same placements pass, in any order', () => {
-      expect(() => nightly.assertApprovedStop([members[1], members[0]], approved, refuse, 's1')).not.toThrow();
-      // pending and confirmed are both open: a confirmation is not a change of the stop.
-      expect(() => nightly.assertApprovedStop([members[0], { ...members[1], status: 'confirmed' }], approved, refuse, 's1')).not.toThrow();
-    });
-    test.each([
-      ['a member that moved', [members[0], { ...members[1], window_start: '15:00' }]],
-      ['a member that left', [members[0]]],
-      ['a member that went en route', [members[0], { ...members[1], status: 'en_route' }]],
-      ['a member with a reschedule request', [members[0], { ...members[1], status: 'rescheduled' }]],
-      ['a member that joined', [...members, { id: 's3', scheduled_date: '2026-10-20', window_start: '11:00', technician_id: 't1' }]],
-    ])('%s refuses the move', (_name, now) => {
-      expect(() => nightly.assertApprovedStop(now, approved, refuse, 's1')).toThrow('s1 changed since the move was checked');
-    });
-    test('a visit approved alone that gained a member is refused', () => {
-      expect(() => nightly.assertApprovedStop(members, null, refuse, 's1')).toThrow('changed since the move was checked');
-    });
-    test('a move that was not proofread is not compared', () => {
-      expect(() => nightly.assertApprovedStop(members, undefined, refuse, 's1')).not.toThrow();
-    });
+    expect(() => nightly.assertNotGrouped([{ id: 's1' }, { id: 's2' }], true, refuse, 's1')).toThrow('s1 joined a grouped stop after the move was checked');
+    expect(() => nightly.assertNotGrouped([{ id: 's1' }], true, refuse, 's1')).not.toThrow();
+    // A move that was not proofread keeps today's grouped behavior.
+    expect(() => nightly.assertNotGrouped([{ id: 's1' }, { id: 's2' }], undefined, refuse, 's1')).not.toThrow();
   });
+
   test('check off: the fallback is unchanged', () => {
     expect(nightly.writeOptions(null, fallback)).toBe(fallback);
   });
@@ -241,23 +221,6 @@ describe('the write of a checked move', () => {
   });
 });
 
-// The notification store as the close reads it: `standing` open grouped-stop
-// notices, and each stop's open members by visit id.
-const storeOf = (standing, membersByVisit = {}) => (table) => {
-  let visit = null;
-  const chain = {
-    where: (cond) => { if (cond && cond.visit_id) visit = cond.visit_id; return chain; },
-    whereNot: () => chain, whereRaw: () => chain, whereNotIn: () => chain,
-    select: async () => {
-      if (table === 'notifications') return standing;
-      const rows = membersByVisit[visit];
-      if (rows instanceof Error) throw rows;
-      return rows || [];
-    },
-  };
-  return chain;
-};
-const noStanding = storeOf([]);
 
 describe('raiseNotices', () => {
   // The run-end re-read of each visit: by default it is still as the check read it.
@@ -349,56 +312,6 @@ describe('raiseNotices', () => {
     expect(detail.endsWith('mark this done and the visit stays.')).toBe(true);
   });
 
-  test('a grouped stop whose other member changed since the check raises nothing', async () => {
-    const members = [
-      { id: 's1', status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
-      { id: 's2', status: 'pending', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
-    ];
-    const stopConn = (rows) => (table) => {
-      const chain = {
-        where: () => chain, whereIn: () => chain, whereNotIn: () => chain,
-        select: async () => (table === 'technicians' ? [] : rows),
-        first: async () => (table === 'service_visits' ? { window_start: '09:00' } : { status: 'confirmed', ...rows[0] }),
-      };
-      return chain;
-    };
-    const collect = async () => {
-      const run = runOf();
-      await nightly.checkMove({ service: { ...SERVICE, visit_id: 'v1' }, best: BEST, run }, { conn: stopConn(members), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
-      return run.proofreader;
-    };
-    expect(await nightly.raiseNotices(await collect(), { conn: stopConn(members) })).toBe(1);
-    // One notice for the stop, keyed by the stop: a second member held in the same run adds none.
-    expect(notifications.notifyAdmin.mock.calls[0][3].dedupeKey).toMatch(/^auto-dispatch-proofreader:visit-v1:2026-10-20:[0-9a-f]{12}$/);
-    const both = runOf();
-    for (const id of ['s1', 's2']) {
-      await nightly.checkMove({ service: { ...SERVICE, id, visit_id: 'v1' }, best: BEST, run: both }, { conn: stopConn(members), proofreader: proofreaderOf({ verdict: 'unknown', why: 'model_unsure' }) });
-    }
-    expect(both.proofreader.notices.size).toBe(1);
-    notifications.notifyAdmin.mockClear();
-    const retimed = [members[0], { ...members[1], window_start: '15:00' }];
-    expect(await nightly.raiseNotices(await collect(), { conn: stopConn(retimed) })).toBe(0);
-    expect(await nightly.raiseNotices(await collect(), { conn: stopConn([members[0]]) })).toBe(0);
-    expect(notifications.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('the close also retires a grouped-stop notice whose other member changed while the tapped visit stayed', async () => {
-    const members = [
-      { id: 's1', status: 'confirmed', scheduled_date: '2026-10-20', window_start: '09:00', technician_id: 't1' },
-      { id: 's2', status: 'pending', scheduled_date: '2026-10-20', window_start: '10:00', technician_id: 't1' },
-    ];
-    const notice = (id, visitId) => ({ metadata: { scheduledServiceId: id, visitId, stop: nightly.stopSignature(members) } });
-    const store = storeOf([notice('s1', 'same'), notice('a1', 'retimed'), notice('b1', 'left'), notice('c1', 'unreadable')], {
-      same: members,
-      retimed: [members[0], { ...members[1], window_start: '15:00' }],
-      left: [members[0]],
-      unreadable: new Error('db down'),
-    });
-    await nightly.closeNotices(new Date(), { conn: store });
-    const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q) };
-    audit.retireResolvedNotices.mock.calls[0][0].stillOpen(q);
-    expect(q.whereNotIn).toHaveBeenCalledWith('s.id', ['a1', 'b1']);
-  });
 
   test('the check turned off: the next run closes every open notice', async () => {
     await nightly.closeNotices(new Date(), { enabled: false });
@@ -410,7 +323,7 @@ describe('raiseNotices', () => {
   });
 
   test('the close keeps a notice open only while the visit is on the placement the check read', async () => {
-    await nightly.closeNotices(new Date(), { conn: noStanding });
+    await nightly.closeNotices(new Date());
     const q = { whereRaw: jest.fn(() => q), whereIn: jest.fn(() => q) };
     audit.retireResolvedNotices.mock.calls[0][0].stillOpen(q);
     const sql = q.whereRaw.mock.calls[0][0];
@@ -428,7 +341,7 @@ describe('raiseNotices', () => {
 
   test('every run closes the notices whose visit moved or is no longer open, the check off included', async () => {
     expect(await nightly.raiseNotices(null)).toBe(0);
-    await nightly.closeNotices(new Date('2026-10-12T08:10:00Z'), { conn: noStanding });
+    await nightly.closeNotices(new Date('2026-10-12T08:10:00Z'));
     expect(audit.retireResolvedNotices).toHaveBeenCalledTimes(1);
     const [spec] = audit.retireResolvedNotices.mock.calls[0];
     expect(spec).toMatchObject({ keyPattern: 'auto-dispatch-proofreader:%', resolvedTitle: 'Move check alert resolved' });
@@ -439,7 +352,7 @@ describe('raiseNotices', () => {
     const state = await unsure({ why: 'model_unsure' });
     notifications.notifyAdmin.mockRejectedValue(new Error('store down'));
     audit.retireResolvedNotices.mockRejectedValueOnce(new Error('close down'));
-    await expect(nightly.closeNotices(new Date(), { conn: noStanding })).resolves.toBeUndefined();
+    await expect(nightly.closeNotices(new Date())).resolves.toBeUndefined();
     expect(await nightly.raiseNotices(state, { conn: visits() })).toBe(0);
   });
 });
