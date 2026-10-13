@@ -279,13 +279,17 @@ describe('threads gate ON', () => {
 
   test('/threads/latest returns the actor\'s thread; technician gets 403', async () => {
     mockLatestThread.mockResolvedValue({
-      id: THREAD_ID, title: 'Test reschedule', context: 'schedule',
+      id: THREAD_ID, title: 'Test reschedule', context: 'schedule', idleForMs: 12600000,
       conversationHistory: [{ role: 'user', content: 'move the test appointment' }],
     });
     await withServer(async (baseUrl) => {
       const { status, body } = await getPath(baseUrl, '/threads/latest');
       expect(status).toBe(200);
       expect(body.thread.id).toBe(THREAD_ID);
+      // The server-computed age (3.5 h) reaches the palette as is; the client
+      // never subtracts a server timestamp from its own clock.
+      expect(body.thread.idleForMs).toBe(12600000);
+      expect(body.idleHours).toBe(4);
       expect(mockLatestThread).toHaveBeenCalledWith('admin-1');
 
       const techRes = await getPath(baseUrl, '/threads/latest', 'tech');

@@ -23,6 +23,7 @@ function makeDb() {
   function table(name) {
     if (name === 'ib_threads') {
       let rows = [...threads];
+      let selectsAge = false;
       const api = {
         where(cond, val) {
           const c = typeof cond === 'string' ? { [cond]: val } : cond;
@@ -43,7 +44,11 @@ function makeDb() {
             ? new Date(b[col]) - new Date(a[col]) : new Date(a[col]) - new Date(b[col])));
           return api;
         },
-        first: async () => rows[0],
+        // latestThread's select('*', db.raw(... AS idle_for_ms)): the fake adds
+        // what the database would compute, now minus last_active_at in ms.
+        select() { selectsAge = true; return api; },
+        first: async () => (selectsAge && rows[0]
+          ? { ...rows[0], idle_for_ms: Date.now() - new Date(rows[0].last_active_at).getTime() } : rows[0]),
       };
       return api;
     }
@@ -93,6 +98,9 @@ describe('IbThreads idle limit', () => {
     expect(thread.id).toBe('t-fresh');
     expect(thread.lastSeq).toBe(2);
     expect(thread.conversationHistory).toHaveLength(2);
+    // The server-computed age, 3.5 h (the fake db stands in for NOW() - last_active_at).
+    expect(thread.idleForMs).toBeGreaterThanOrEqual(3.5 * HOUR - 5000);
+    expect(thread.idleForMs).toBeLessThan(3.5 * HOUR + 5000);
   });
 
   test('a latest thread past the limit returns none, so a new conversation starts', async () => {

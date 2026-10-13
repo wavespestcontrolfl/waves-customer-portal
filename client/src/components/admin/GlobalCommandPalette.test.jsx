@@ -759,11 +759,14 @@ describe('idle conversations start fresh', () => {
     await waitFor(() => expect(screen.queryByText('Done.')).not.toBeInTheDocument());
   });
 
+  // The server reports the thread's age as idleForMs (database clock against its
+  // own row). last_active_at is deliberately absurd here: the palette must not
+  // subtract it from the browser clock, whatever that clock says.
   async function mountAutoResumed(hoursAgo) {
-    const lastActive = new Date(realNow() - hoursAgo * 3600000).toISOString();
     fetchMock.mockImplementation(async url => {
       if (url.endsWith('/query')) return reply({ threadSeq: 4 });
-      if (url.includes('/threads/latest')) return ok({ idleHours: 4, thread: { id: THREAD, title: 'Resumed', lastSeq: 2, last_active_at: lastActive,
+      if (url.includes('/threads/latest')) return ok({ idleHours: 4, thread: { id: THREAD, title: 'Resumed', lastSeq: 2, last_active_at: '2001-01-01T00:00:00Z',
+        idleForMs: hoursAgo * 3600000,
         conversationHistory: [{ role: 'user', content: 'Synthetic earlier ask' }, { role: 'assistant', content: 'Resumed answer' }] } });
       return ok({ actions: [], tasks: [], threads: [] });
     });
@@ -781,6 +784,26 @@ describe('idle conversations start fresh', () => {
     expect(body.thread_reopened).toBeUndefined();
     expect(body.conversationHistory).toEqual([]);
   });
+
+  it.each([['6 hours ahead', 6 * 3600000], ['6 hours behind', -6 * 3600000], ['correct', 0]])(
+    'a thread the server calls 3.5 h idle is kept 20 minutes later and dropped 40 minutes later, with the browser clock %s', async (_label, offset) => {
+      skewMs = offset;
+      await mountAutoResumed(3.5);
+      skewMs = offset + 20 * 60000;
+      submit('Synthetic ask after twenty minutes');
+      await waitFor(() => expect(queryBodies()).toHaveLength(1));
+      expect(queryBodies()[0].thread_id).toBe(THREAD);
+      await screen.findByText('Done.');
+      cleanup();
+      fetchMock.mockClear();
+      skewMs = offset;
+      await mountAutoResumed(3.5);
+      skewMs = offset + 40 * 60000;
+      submit('Synthetic ask after forty minutes');
+      await waitFor(() => expect(queryBodies()).toHaveLength(1));
+      expect(queryBodies()[0].thread_id).toBeUndefined();
+      expect(queryBodies()[0].conversationHistory).toEqual([]);
+    });
 
   it('an auto-resumed thread 3.5 h old is still continued 10 minutes later, without the reopened flag', async () => {
     await mountAutoResumed(3.5);
@@ -880,6 +903,49 @@ describe('idle conversations start fresh', () => {
       expect(edited.thread_id).toBeUndefined();
       expect(edited.conversationHistory).toEqual([]);
       expect(edited.request_key).not.toBe(JSON.parse(queryCalls()[1]).request_key);
+    });
+  });
+
+  describe('an idle rollover at submit starts a clean conversation', () => {
+    const card = { id: 'action-stale', tool: 'update_customer', summary: 'Save synthetic note', expiresInMs: 100 * 3600000 };
+    const staleReply = () => ok({ response: 'Prepared.', taskId: 'task-stale', taskState: 'awaiting_approval', pendingActions: [card],
+      conversationHistory: [{ role: 'user', content: 'Synthetic ask' }, { role: 'assistant', content: 'Prepared.' }],
+      threadId: THREAD, threadSeq: 2, threadsEnabled: true });
+    const confirm = () => screen.queryByRole('button', { name: 'Confirm', exact: true });
+    async function withStaleCardAndTask(next) {
+      fetchMock.mockImplementation(async url => {
+        if (url.endsWith('/query')) return fetchMock.mock.calls.filter(([u]) => u.endsWith('/query')).length === 1 ? staleReply() : next();
+        if (url.includes('/threads/latest')) return ok({ thread: null, idleHours: 4 });
+        return ok({ actions: [], tasks: [], threads: [] });
+      });
+      await mount();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/threads/latest'))).toBe(true));
+      submit('Synthetic ask');
+      expect(await screen.findByRole('button', { name: 'Confirm', exact: true })).toBeInTheDocument();
+      skewMs = 5 * 3600000;
+    }
+
+    it('the stale card and task are gone, the typed prompt is not touched, and the new reply\'s choices show', async () => {
+      await withStaleCardAndTask(() => ok({ response: 'Which one?', choices: ['Option A', 'Option B'],
+        conversationHistory: [{ role: 'user', content: 'Synthetic new ask' }, { role: 'assistant', content: 'Which one?' }],
+        threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', threadSeq: 2, threadsEnabled: true }));
+      submit('Synthetic new ask');
+      expect(await screen.findByRole('group', { name: 'Answer choices' })).toBeInTheDocument();
+      expect(confirm()).not.toBeInTheDocument();
+      expect(screen.queryByText(/Save synthetic note/)).not.toBeInTheDocument();
+      const bodies = queryBodies();
+      expect(bodies[1].thread_id).toBeUndefined();
+      expect(bodies[1].conversationHistory).toEqual([]);
+    });
+
+    it('a failed new request shows only its own error, with no old card beside it', async () => {
+      await withStaleCardAndTask(() => ({ ok: false, status: 503, json: async () => ({ error: 'Gateway timeout' }) }));
+      submit('Synthetic new ask');
+      expect(await screen.findByText(/Error: /)).toBeInTheDocument();
+      expect(confirm()).not.toBeInTheDocument();
+      expect(screen.queryByText(/Save synthetic note/)).not.toBeInTheDocument();
+      // The typed prompt stays for a retry.
+      expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('Synthetic new ask');
     });
   });
 

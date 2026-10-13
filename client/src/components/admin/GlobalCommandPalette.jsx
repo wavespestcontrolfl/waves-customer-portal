@@ -553,9 +553,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setThreadId(thread.id);
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     // A thread opened by hand from History counts as active from now, so the
-    // idle limit never blocks reading or continuing an old conversation.
-    const lastExchange = Date.parse(thread.last_active_at);
-    threadActivityRef.current = deliberate || !Number.isFinite(lastExchange) ? Date.now() : lastExchange;
+    // idle limit never blocks reading or continuing an old conversation. An
+    // automatic resume is anchored from the age the SERVER computed (idleForMs,
+    // database clock against database clock) on this browser's clock at the
+    // moment the reply arrives; only differences of this browser's own clock
+    // are used afterwards, so a skewed workstation clock changes nothing.
+    const idleFor = Number(thread.idleForMs);
+    threadActivityRef.current = Date.now() - (deliberate || !Number.isFinite(idleFor) || idleFor < 0 ? 0 : idleFor);
     threadReopenedRef.current = deliberate;
     setPendingActions([]);
     setChoices(null);
@@ -616,14 +620,24 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     && Date.now() - threadActivityRef.current > idleLimitMsRef.current
   ), [threadId]);
 
-  // Drop the held thread and its history so the next query starts a new
-  // conversation. The old thread stays on the server (History).
-  const detachThread = useCallback(() => {
+  // THE one place that starts a new conversation locally: New chat, the
+  // open-time idle rollover and the submit-time idle rollover all call it, so
+  // they cannot drift. It drops the held thread, its history, and everything
+  // that belonged to the old conversation (cards, the open task, answer
+  // buttons, tool activity, knowledge-gap prompts). It does not touch the
+  // typed prompt or the answer on screen (callers decide), and it cancels
+  // nothing on the server: a still-valid card stays in History.
+  const startNewConversation = useCallback(() => {
     setThreadId(null);
     threadSeqRef.current = null;
     threadActivityRef.current = 0;
     threadReopenedRef.current = false;
     setConversationHistory([]);
+    setPendingActions([]);
+    setActiveTask(null);
+    setChoices(null);
+    setToolActivity([]);
+    knowledgeGaps.reset();
   }, []);
 
   // Resume the latest server-persisted thread when the palette first opens
@@ -671,9 +685,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     } : {};
     const request = build(conversationHistory, threadFields);
     if (identityRef.current.isPending(JSON.stringify(request)) || !threadIsIdle()) return { request, sentThreadId: threadId };
-    detachThread();
+    startNewConversation();
     return { request: build([], {}), sentThreadId: null };
-  }, [threadIsIdle, detachThread, threadId, conversationHistory]);
+  }, [threadIsIdle, startNewConversation, threadId, conversationHistory]);
 
   // A palette left mounted past the idle limit opens as a new conversation.
   // Never while a request is unresolved (in flight, or sent with no answer
@@ -684,13 +698,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   useEffect(() => {
     if (!open || loading || submittingRef.current || identityRef.current.isPending() || !threadIsIdle()) return;
     threadEpochRef.current += 1; // invalidate any inflight thread resume
-    detachThread();
+    startNewConversation();
     setResponse(null);
-    setChoices(null);
-    setPendingActions([]);
-    setToolActivity([]);
-    setActiveTask(null);
-    knowledgeGaps.reset();
   }, [open]);
 
   const submit = useCallback(
@@ -918,16 +927,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     threadEpochRef.current += 1; // invalidate any inflight thread resume
     submittingRef.current = false;
     setLoading(false);
-    setActiveTask(null);
-    setConversationHistory([]);
+    startNewConversation();
     setResponse(null);
-    setChoices(null);
-    setPendingActions([]);
-    setToolActivity([]);
-    knowledgeGaps.reset();
     setPrompt("");
-    setThreadId(null);
-    threadSeqRef.current = null;
     setShowThreads(false);
     resetAttachments();
   };

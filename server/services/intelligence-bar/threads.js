@@ -147,6 +147,9 @@ async function latestThread(actorId) {
   const thread = await db('ib_threads')
     .where('admin_actor_id', actorId)
     .whereRaw("last_active_at >= NOW() - (? || ' hours')::interval", [String(idleHours())])
+    // The age is computed by the database (its clock against its own row), so
+    // the browser never compares a server timestamp with its own clock.
+    .select('*', db.raw('(EXTRACT(EPOCH FROM (NOW() - last_active_at)) * 1000)::float8 AS idle_for_ms'))
     .orderBy('last_active_at', 'desc')
     .first();
   if (!thread) return null;
@@ -156,6 +159,8 @@ async function latestThread(actorId) {
     title: thread.title,
     context: thread.context,
     last_active_at: thread.last_active_at,
+    // How long ago the last exchange was, in ms, by the server clock.
+    idleForMs: Math.max(0, Math.round(Number(thread.idle_for_ms)) || 0),
     lastSeq,
     conversationHistory: history,
   };
