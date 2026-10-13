@@ -100,6 +100,13 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(av.status).not.toBe('out_of_service_area');
   });
 
+  // #6297 r16: a unit code that equals the real state does not hide that state.
+  test('a state named after a matching unit code is still the stated state', async () => {
+    const av = await validateAddress({ addressLines: ['100 Main St Unit GA, Atlanta, GA 30303'], administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('GA');
+    expect(av.status).toBe('out_of_service_area');
+  });
+
   test.each(['123 Main Street, Lincoln NE', '123 Main Street Lincoln NE'])('a state in a locality tail remains explicit: %s', async raw_text => {
     const lines = buildAddressLines({ street_line_1: '123 Main Street', city: 'Lincoln', state: 'FL', raw_text });
     expect(lines).toEqual(['123 Main Street', 'Lincoln NE']);

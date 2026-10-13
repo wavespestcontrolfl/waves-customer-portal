@@ -179,7 +179,11 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     if (/^\d/.test(String(line).trim()) && !locality && !parsed.zip) return '';
     // "100 Main St Unit GA 34236": a state-shaped token right after a unit
     // designator is the unit's identifier, with or without a ZIP after it.
-    if (new RegExp(`(?:^|[\\s,])(?:#|${UNIT_DESIGNATOR_WORDS})\\.?\\s*#?\\s*${parsed.state}(?![A-Za-z])`, 'i').test(String(line))) return '';
+    // Only the unit position is discounted: with that token taken out, a
+    // state named elsewhere on the line ("Unit GA, Atlanta, GA 30303") is
+    // still the stated state.
+    const unitCode = new RegExp(`(^|[\\s,])((?:#|${UNIT_DESIGNATOR_WORDS})\\.?\\s*#?\\s*)${parsed.state}(?![A-Za-z])`, 'i');
+    if (unitCode.test(String(line))) return geographyState(String(line).replace(unitCode, '$1$2'));
     return parsed.state;
   };
   const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]

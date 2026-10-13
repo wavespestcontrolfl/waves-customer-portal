@@ -132,9 +132,18 @@ function servedHillsborough(result, state) {
 // a provider gap, not an address defect.
 const COUNTY_GAP_NOTE = 'Google matched this address, but the county lookup that decides the service area failed just now. The address itself is not in doubt: read Google\'s normalized address back to the operator next to their own words before saving, and say the service area could not be checked. Google does not check a unit, apartment, suite, building, floor or lot: carry any unit over exactly as the operator said it.';
 
+// Google returns a five-digit ZIP. A ZIP+4 the operator gave is never dropped
+// silently: the result says so (a format test on the input, not a parse).
+const ZIP_PLUS4_RE = /\b\d{5}-\d{4}\b/;
+const ZIP_PLUS4_NOTE = 'The operator gave a ZIP+4. Google\'s ZIP has five digits and the four-digit suffix was not checked: tell the operator the suffix is left out, or keep their ZIP+4 if they ask for it.';
+
 function shape(providerResult, given, state) {
   const result = servedHillsborough(providerResult, state);
-  const countyGap = isCountyGap(result);
+  // isCountyGap also covers "only the unit is missing"; that stays an
+  // explicit hold, so only a result with nothing missing is a pure lookup gap.
+  const missing = Array.isArray(result.missingComponents) ? result.missingComponents : [];
+  const countyGap = isCountyGap(result) && missing.length === 0;
+  const zipPlus4 = ZIP_PLUS4_RE.test(`${given.address || ''} ${given.zip || ''}`);
   const n = result.normalized;
   const hintUsed = !state;
   return {
@@ -148,9 +157,10 @@ function shape(providerResult, given, state) {
     google_replaced: Boolean(result.hasReplaced),
     google_inferred: Boolean(result.hasInferred),
     unconfirmed: Boolean(result.hasUnconfirmed),
-    missing: Array.isArray(result.missingComponents) ? result.missingComponents : [],
+    missing,
+    zip_plus4_given: zipPlus4,
     state_hint_used: hintUsed ? DEFAULT_STATE : null,
-    note: countyGap ? COUNTY_GAP_NOTE : noteFor(result.status, result, hintUsed),
+    note: [countyGap ? COUNTY_GAP_NOTE : noteFor(result.status, result, hintUsed), zipPlus4 ? ZIP_PLUS4_NOTE : ''].filter(Boolean).join(' '),
   };
 }
 

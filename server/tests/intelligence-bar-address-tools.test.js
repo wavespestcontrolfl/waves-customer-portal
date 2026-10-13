@@ -118,6 +118,7 @@ describe('check_address result', () => {
       google_inferred: false,
       unconfirmed: false,
       missing: [],
+      zip_plus4_given: false,
       service_area_lookup_failed: false,
       state_hint_used: 'FL',
       note: expect.any(String),
@@ -253,6 +254,20 @@ describe('check_address served south-Hillsborough towns', () => {
     expect(out.service_area_lookup_failed).toBe(true);
     expect(out.note).toMatch(/county lookup/);
     expect(out.note).not.toMatch(/what is missing/);
+  });
+
+  test('a missing unit beside a failed county lookup stays a hold', async () => {
+    validateAddress.mockResolvedValue(google({ status: 'missing_component', county: null, inServiceArea: null, missingComponents: ['subpremise'] }));
+    const out = await run({ address: '100 Example Way, Sarasota, FL 34236' });
+    expect(out.service_area_lookup_failed).toBe(false);
+    expect(out.note).toMatch(/Do not save this address yet/);
+  });
+
+  test.each([[{ address: '100 Example Way, Sarasota, FL 34236-1234' }], [{ address: '100 Example Way, Sarasota, FL', zip: '34236-1234' }]])('a ZIP+4 is reported, not silently shortened', async (input) => {
+    validateAddress.mockResolvedValue(google());
+    const out = await run(input);
+    expect(out.zip_plus4_given).toBe(true);
+    expect(out.note).toMatch(/ZIP\+4/);
   });
 
   test('another Hillsborough city stays outside the service area', async () => {
