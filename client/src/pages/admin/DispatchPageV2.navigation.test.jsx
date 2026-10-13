@@ -353,3 +353,28 @@ it('shows a held visit above the stops and Book it opens the new-appointment mod
     defaultInternalNotes: 'Booked from a phone call. Call SID: CAsynthetic001.',
   });
 });
+
+it('only the newest Book it click opens the form when an earlier customer lookup is slow', async () => {
+  const row = (id, customerId) => ({
+    call_log_id: id, kind: 'confirmed', date_et: '2026-10-14', minutes: 660, time_label: '11:00 AM', caller_name: `Caller ${id}`,
+    phone: '+19415550100', address: { line1: '12 Test Lane', city: 'Bradenton', zip: '34205' }, service: 'General Pest Control',
+    call_at: '2026-10-12T14:30:00.000Z', customer_id: customerId, notes: null, call_sid: `CA${id}`,
+  });
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  vi.mocked(adminFetch).mockImplementation(async (url) => {
+    if (url.startsWith('/admin/schedule/held-visits')) return { heldVisits: [row('first', 'cust-slow'), row('second', 'cust-fast')] };
+    if (url === '/admin/customers/cust-slow') { await slow; return { customer: { id: 'cust-slow', firstName: 'Slow', lastName: 'Sample' } }; }
+    if (url === '/admin/customers/cust-fast') return { customer: { id: 'cust-fast', firstName: 'Fast', lastName: 'Sample' } };
+    return { services: [], technicians: [], products: [], types: [] };
+  });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-10-14']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  const buttons = await screen.findAllByRole('button', { name: 'Book it' });
+  fireEvent.click(buttons[0]);
+  fireEvent.click(buttons[1]);
+  await screen.findByRole('dialog');
+  expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
+  await act(async () => { releaseSlow(); await slow; });
+  expect(appointmentModalState.props.defaultCustomer).toMatchObject({ id: 'cust-fast' });
+  expect(appointmentModalState.props.defaultInternalNotes).toContain('CAsecond');
+});

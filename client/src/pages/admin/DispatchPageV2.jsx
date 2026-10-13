@@ -891,7 +891,11 @@ export default function DispatchPageV2({
   // Book it: open the New appointment modal on the held day and time. The
   // customer is preloaded only when the call is linked to one; if that lookup
   // fails the modal still opens and the person picks the customer.
+  // Only the newest Book it click opens the form: a slower customer lookup from an
+  // earlier click must not open it on that earlier caller.
+  const bookHeldSeq = useRef(0);
   const bookHeldVisit = useCallback(async (row) => {
+    const seq = ++bookHeldSeq.current;
     // Visits start on the hour. An off-hour slot (2:30 PM) is not prefilled:
     // 2:00 would book earlier than the time agreed on the call. The strip and
     // the form's internal notes both show the agreed time.
@@ -906,6 +910,7 @@ export default function DispatchPageV2({
         console.error("Failed to preload held-visit customer:", err);
       }
     }
+    if (seq !== bookHeldSeq.current) return;
     // The call marker makes the new visit carry the call under any customer,
     // so the held row (and the booking-miss bell) clears once it is booked.
     // An off-hour agreed time stays visible in the form, in the same notes.
