@@ -115,16 +115,34 @@ const asBlocks = content => (typeof content === 'string' ? [{ type: 'text', text
 // in order (a string becomes a text block). A trailing assistant message whose
 // tool_use blocks have no tool_result is left to the existing resume code,
 // exactly as for a task that never searched. Never mutates its input; the same
-// array comes back when there is nothing to strip. Other blocks (text,
-// tool_use, thinking) are kept as they are.
+// array comes back when there is nothing to strip.
+//
+// An assistant turn that holds `thinking` / `redacted_thinking` blocks must go
+// back to the API unchanged, or not carry them: a signed thinking block inside
+// a modified turn is rejected (400). So every assistant message this function
+// REWRITES (blocks removed, or merged with a neighbor) also loses its thinking
+// blocks. Messages it does not touch keep theirs.
+const isThinkingBlock = block => block?.type === 'thinking' || block?.type === 'redacted_thinking';
+const withoutThinking = content => asBlocks(content).filter(block => !isThinkingBlock(block));
+
+function strippedContent(message) {
+  if (!hasSearchBlock(message)) return message.content;
+  return message.content.filter(block => !isSearchBlock(block) && !isThinkingBlock(block));
+}
+
+function mergedContent(previous, content, role) {
+  const parts = [asBlocks(previous.content), asBlocks(content)];
+  return (role === 'assistant' ? parts.map(withoutThinking) : parts).flat();
+}
+
 function stripServerSearchBlocks(messages) {
   if (!messages.some(hasSearchBlock)) return messages;
   const kept = [];
   for (const message of messages) {
-    const content = hasSearchBlock(message) ? message.content.filter(block => !isSearchBlock(block)) : message.content;
+    const content = strippedContent(message);
     if (Array.isArray(content) && content.length === 0) continue;
     const previous = kept[kept.length - 1];
-    if (previous?.role === message.role) kept[kept.length - 1] = { ...previous, content: [...asBlocks(previous.content), ...asBlocks(content)] };
+    if (previous?.role === message.role) kept[kept.length - 1] = { ...previous, content: mergedContent(previous, content, message.role) };
     else kept.push(content === message.content ? message : { ...message, content });
   }
   return kept;

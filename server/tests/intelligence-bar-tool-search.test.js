@@ -163,3 +163,40 @@ describe('mergeDiscoveredTools', () => {
     expect(ToolSearch.mergeDiscoveredTools(tools, [])).toBe(tools);
   });
 });
+
+// Codex round 8: a signed thinking block inside a rewritten assistant turn is rejected.
+describe('stripServerSearchBlocks and thinking blocks', () => {
+  const search = [
+    { type: 'server_tool_use', id: 'srvtoolu_t1', name: 'tool_search_tool_bm25', input: { query: 'x' } },
+    { type: 'tool_search_tool_result', tool_use_id: 'srvtoolu_t1', content: { type: 'tool_search_tool_search_result', tool_references: [] } },
+  ];
+  const thinking = { type: 'thinking', thinking: 'plan', signature: 'sig' };
+  const redacted = { type: 'redacted_thinking', data: 'opaque' };
+
+  test('a rewritten assistant message loses its thinking blocks', () => {
+    const messages = [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: [thinking, redacted, ...search, { type: 'text', text: 'answer' }] },
+    ];
+    const out = ToolSearch.stripServerSearchBlocks(messages);
+    expect(out[1].content).toEqual([{ type: 'text', text: 'answer' }]);
+    expect(messages[1].content).toHaveLength(5);
+  });
+
+  test('an untouched assistant message keeps its thinking blocks, by identity', () => {
+    const untouched = { role: 'assistant', content: [thinking, { type: 'tool_use', id: 'toolu_1', name: 'a', input: {} }] };
+    const messages = [
+      { role: 'user', content: 'q' }, untouched,
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] },
+      { role: 'assistant', content: [...search, { type: 'text', text: 'done' }] },
+    ];
+    expect(ToolSearch.stripServerSearchBlocks(messages)[1]).toBe(untouched);
+  });
+
+  test('a message that held only thinking and search blocks is dropped', () => {
+    const messages = [{ role: 'user', content: 'q' }, { role: 'assistant', content: [thinking, ...search] }, { role: 'user', content: 'more' }];
+    const out = ToolSearch.stripServerSearchBlocks(messages);
+    expect(out).toHaveLength(1);
+    expect(out[0].role).toBe('user');
+  });
+});
