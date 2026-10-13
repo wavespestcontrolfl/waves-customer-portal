@@ -468,8 +468,8 @@ Return ONLY the email body text, no subject line, no metadata.`
 // entities decoded with the repo's own `entities` (every named, decimal and
 // hex form a client knows — &Tab; and &NewLine; included, Codex r6 on
 // #6266), then every host-shaped token — including one sitting inside a tag
-// attribute — appended as its own whitespace-separated run so the link check
-// sees it as a link.
+// attribute, and every owned-host link nested inside another URL — appended
+// as its own whitespace-separated run so the link check sees it as a link.
 function renderedTextForLinkCheck(body) {
   const { decodeHTML } = require('entities');
   let decoded = String(body || '');
@@ -482,7 +482,12 @@ function renderedTextForLinkCheck(body) {
   // A URL parser drops tab, CR and LF anywhere in its input (WHATWG), so a
   // host token is read with those removed too (Codex r5 on #6266 P2).
   const hostTokenRe = /[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\/[^\s"'<>]*)?/g;
-  const hostTokens = [...(decoded.match(hostTokenRe) || []), ...(decoded.replace(/[\t\r\n]/g, '').match(hostTokenRe) || [])];
+  const stripped = decoded.replace(/[\t\r\n]/g, '');
+  // A portal link nested in a foreign URL's path, query or fragment (raw or
+  // percent-encoded, even twice) reads above as one foreign-host token, so
+  // each owned-host occurrence inside any URL is surfaced as its own run too.
+  const { nestedOwnedLinkRuns } = require('../composer-customer-links');
+  const hostTokens = [...(decoded.match(hostTokenRe) || []), ...(stripped.match(hostTokenRe) || []), ...nestedOwnedLinkRuns(decoded), ...nestedOwnedLinkRuns(stripped)];
   return hostTokens.length ? `${decoded} ${[...new Set(hostTokens)].join(' ')}` : decoded;
 }
 

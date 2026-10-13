@@ -165,7 +165,7 @@ const {
   autopayLinkSendCheck,
   composerOnlyLinkPresence,
   linkOwnersInBody,
-  autopaySmsConsentBlock,
+  nestedOwnedLinkRuns,
   buildAppointmentPageLink,
   buildCardRequestLink,
   buildPrepGuideLink,
@@ -3326,32 +3326,37 @@ describe('composerOnlyLinkPresence', () => {
   });
 });
 
-describe('autopaySmsConsentBlock', () => {
-  const { loadContactState, checkConsentForPurpose } = require('../services/messaging/validators/consent');
-  const { loadSuppressionState, checkSuppression } = require('../services/messaging/validators/suppression');
-  const { PURPOSE_POLICY } = require('../services/messaging/policy');
+// An owned-host link nested in a foreign URL's path, query or fragment reads as
+// ONE foreign-host run everywhere else; this surfaces each as its own run.
+describe('nestedOwnedLinkRuns', () => {
+  const T = 'AbCdEfGhIjKlMnOpQrSt';
+  const OWNED = `portal.wavespestcontrol.com/receipt/${T}`;
 
-  test('runs the messaging policy\'s suppression + consent verdict for the Auto Pay text (purpose card_request), read-only, before any link exists (Codex r8 P2)', async () => {
-    expect(await autopaySmsConsentBlock('c2')).toBeNull();
-    expect(loadContactState).toHaveBeenCalledWith({ customerId: 'c2' });
-    const input = { customerId: 'c2', to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'card_request' };
-    expect(loadSuppressionState).toHaveBeenCalledWith(input, expect.any(Object));
-    expect(checkSuppression).toHaveBeenCalledWith(input, PURPOSE_POLICY.card_request, expect.any(Object));
-    expect(checkConsentForPurpose).toHaveBeenCalledWith(input, PURPOSE_POLICY.card_request, expect.any(Object));
-    expect(mockDb).not.toHaveBeenCalledWith('appointment_card_requests');
+  test.each([
+    ['raw in the query', `https://evil.example/?next=https://portal.wavespestcontrol.com/receipt/${T}`],
+    ['single-encoded', `https://evil.example/?next=https%3A%2F%2Fportal.wavespestcontrol.com%2Freceipt%2F${T}`],
+    ['double-encoded', `https://evil.example/?next=https%253A%252F%252Fportal.wavespestcontrol.com%252Freceipt%252F${T}`],
+    ['triple-encoded', `https://evil.example/?next=https%25253A%25252F%25252Fportal.wavespestcontrol.com%25252Freceipt%25252F${T}`],
+    ['in a fragment', `https://evil.example/#https://portal.wavespestcontrol.com/receipt/${T}`],
+    ['in a path segment', `https://evil.example/go/portal.wavespestcontrol.com/receipt/${T}`],
+    ['backslashed', `https://evil.example/?next=portal.wavespestcontrol.com\\receipt\\${T}`],
+    ['mixed case host', `https://evil.example/?next=HTTPS://Portal.WavesPestControl.com/receipt/${T}`],
+  ])('finds the owned link nested %s', (_label, text) => {
+    expect(nestedOwnedLinkRuns(text).map((run) => run.replace(/\\/g, '/').toLowerCase())).toContain(OWNED.toLowerCase());
   });
 
-  test('STOP, a suppressed number and an unreadable state each block with their own code; an unknown refusal still blocks', async () => {
-    checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'SMS_OPTED_OUT' });
-    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_opted_out', error: expect.stringMatching(/opted out of texts/) });
-    checkSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSED_MANUAL_DNC' });
-    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_suppressed' });
-    checkSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
-    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_consent_check_uncertain' });
-    checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'CONSENT_LOOKUP_FAILED' });
-    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_consent_check_uncertain' });
-    checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'NO_CONSENT_RECORD' });
-    expect(await autopaySmsConsentBlock('c2')).toMatchObject({ code: 'sms_blocked' });
+  test('finds the branded short host too, and a fully-qualified (trailing dot) portal host', () => {
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https%3A%2F%2Fwavespest.co%2Fl%2Fab12cd')).toContain('wavespest.co/l/ab12cd');
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https://portal.wavespestcontrol.com./receipt/x1')).toContain('portal.wavespestcontrol.com./receipt/x1');
+  });
+
+  test('a malformed percent escape is tolerated; a foreign URL with no owned host, and look-alike hosts, yield nothing', () => {
+    expect(nestedOwnedLinkRuns('https://evil.example/?a=100%&b=%E0%A4%A&n=https://portal.wavespestcontrol.com/pay/x1')).toContain('portal.wavespestcontrol.com/pay/x1');
+    expect(nestedOwnedLinkRuns('https://evil.example/?next=https%3A%2F%2Fother.example%2Fpage#frag')).toEqual([]);
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https://portal.wavespestcontrol.com.evil.example/pay/x1')).toEqual([]);
+    expect(nestedOwnedLinkRuns('https://evil.example/?u=https://evilportal.wavespestcontrol.com/pay/x1 and https://x.portal.wavespestcontrol.com/pay/x1')).toEqual([]);
+    expect(nestedOwnedLinkRuns('Thanks, see you Tuesday.')).toEqual([]);
+    expect(nestedOwnedLinkRuns(null)).toEqual([]);
   });
 });
 

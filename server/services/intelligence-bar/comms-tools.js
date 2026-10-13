@@ -1460,8 +1460,8 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
 // and statement sent marks, a project report's delivery claim and a
 // consultation's lead binding all happen in that route. The bar's text tools
 // can reach none of that bookkeeping, so a body carrying one of those links is
-// refused here with a pointer to the composer (or, for Auto Pay, to
-// send_autopay_setup_link). Links the seam only verifies (appointment page,
+// refused here with a pointer to the composer (or, for Auto Pay, the
+// Customers page button). Links the seam only verifies (appointment page,
 // service report, receipt) are verified the same way and allowed; a
 // verification failure refuses with the seam's own words. Any other text
 // passes untouched (the checks read nothing for a body with no portal link).
@@ -1479,7 +1479,7 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
 // verify-only bearers, unknown short codes, all of it) and runs no seam check.
 const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it. Text it from the composer. Nothing was sent.';
 const EMAIL_BEARER_REFUSAL = 'An email reply cannot carry a portal link (appointment page, report, receipt, pay, estimate, card request, contract, prep guide, statement, project report, consultation, or a short link) — the reply goes to the sender\'s address, which may not be the customer\'s. Text it to the customer\'s own number instead (send_sms, or the Communications composer). Nothing was sent.';
-const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — send it with send_autopay_setup_link (delivery sms) or from the Communications composer, which verifies the link at send time. Nothing was sent.';
+const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — send it from the Customers page Auto Pay button or the Communications composer, which verifies the link at send time. Nothing was sent.';
 const links = () => require('../composer-customer-links');
 // The checks, in order; the first refusal wins. Each is read-only except the
 // seam's own verification, which only the 'commit' phase runs.

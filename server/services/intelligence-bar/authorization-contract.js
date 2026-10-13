@@ -112,10 +112,9 @@ const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_pay
 // customer contact — the flag derives from the pinned email's customer
 // attribution (preview.pinned_recipient.linked_customer) instead.
 // customer-link-tools.js writes: contact derives from the preview's own
-// notifies_customer (true = the chosen delivery sends; 'may' = a conditional
-// enrollment confirmation), never from the name alone — inline builds send
-// nothing.
-const CUSTOMER_LINK_TOOL_NAMES = new Set(['create_customer_link', 'send_autopay_setup_link']);
+// notifies_customer ('may' = a conditional enrollment confirmation on a
+// card_request), never from the name alone — a link build sends nothing.
+const CUSTOMER_LINK_TOOL_NAMES = new Set(['create_customer_link']);
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
@@ -1038,9 +1037,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The portal's own Auto Pay-off / payment-method-removed notices, only
       // when their gate is on and an email is on file (the plan says which).
       || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
-      // The Auto Pay setup link's text/email delivery (true), or the
-      // enrollment confirmation an auto-secure may email ('may') — for the
-      // inline delivery and for a card_request link (customer-link-tools.js).
+      // The enrollment confirmation an auto-secure may email ('may') for a
+      // card_request link (customer-link-tools.js).
       || (CUSTOMER_LINK_TOOL_NAMES.has(toolName) && (preview?.notifies_customer === true || preview?.notifies_customer === 'may'))
       || tierUpgradeEmail
       || cancelCustomerNotice !== 'none');

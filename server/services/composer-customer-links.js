@@ -405,34 +405,6 @@ const AUTOPAY_SKIP_REASONS = {
 // branch checks — the customer-SMS rollout gate and the template's active
 // toggle — BEFORE anything mints or enrolls (GH Codex #3812 r1 P1). Fail
 // closed on an unreadable template row.
-// The messaging policy's own verdict for the text the service would send
-// (purpose 'card_request', the Auto Pay setup text's purpose): STOP /
-// sms_enabled=false, the suppression list, or an unreadable consent state.
-// requestAutopaySetupLink mints the 30-day link row BEFORE sendCustomerMessage
-// refuses such a send (reason 'opted_out' / suppression), so a card that
-// promises a text must judge this read-only first (Codex r8 on #6266 P2).
-// Returns { code, error } or null; fails closed on an unreadable state.
-const AUTOPAY_SMS_CONSENT_BLOCKS = [
-  [/^SMS_OPTED_OUT$/, 'sms_opted_out', 'This customer has opted out of texts (STOP) — email the Auto Pay setup link or hand it to the composer instead'],
-  [/^SUPPRESSED_/, 'sms_suppressed', 'This number is on the texting suppression list — email the Auto Pay setup link or hand it to the composer instead'],
-  [/_LOOKUP_FAILED$/, 'sms_consent_check_uncertain', 'Could not read this customer\'s texting consent — try again in a moment'],
-];
-async function autopaySmsConsentBlock(customerId) {
-  const { PURPOSE_POLICY } = require('./messaging/policy');
-  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
-  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
-  let contactState = await loadContactState({ customerId });
-  const input = { customerId, to: contactState.customer?.phone || null, channel: 'sms', audience: 'customer', purpose: 'card_request' };
-  contactState = await loadSuppressionState(input, contactState);
-  for (const check of [checkSuppression, checkConsentForPurpose]) {
-    const result = await check(input, PURPOSE_POLICY.card_request, contactState);
-    if (result.ok) continue;
-    const [, code, error] = AUTOPAY_SMS_CONSENT_BLOCKS.find(([re]) => re.test(String(result.code || ''))) || [];
-    return code ? { code, error } : { code: 'sms_blocked', error: 'This customer cannot be texted the Auto Pay setup link right now — email it or hand it to the composer instead' };
-  }
-  return null;
-}
-
 async function autopaySmsLever() {
   if (!require('../config/feature-gates').isEnabled('autopayCustomerSms')) return 'autopay_sms_gate_off';
   try {
@@ -963,6 +935,31 @@ function ownedPortalLinkSpans(body) {
     });
   }
   return spans;
+}
+// Owned-host links NESTED inside another URL — the portal bearer sitting in a
+// foreign URL's path, query or fragment ("https://evil.example/?next=https://
+// portal…/receipt/<tok>", raw or percent-encoded, even twice): every run
+// reader above parses that as ONE evil.example link, so the bearer inside is
+// invisible to it. This reads the FULL text, raw and then percent-decoded up
+// to three more times (a malformed escape is left as typed), and returns each
+// owned-host occurrence — host plus whatever follows it — as its own run, for
+// a caller (the email-reply guard) to judge like any top-level owned link.
+// Hosts come from ownedPortalHosts (never a second list); the host must not
+// be the tail of a longer name ("evilportal…", "x.portal…") nor the head of a
+// look-alike ("portal….evil.example"). Over-reports on purpose (fail closed).
+const NESTED_DECODE_PASSES = 3;
+function nestedOwnedLinkRuns(text) {
+  const hostAlt = ownedPortalHosts().map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const hostRe = new RegExp(`(?<![A-Za-z0-9.-])(?:${hostAlt})(?![A-Za-z0-9-]|\\.[A-Za-z0-9-])\\.?(?::\\d+)?(?:[/?#][^\\s"'<>]*)?`, 'gi');
+  const found = new Set();
+  let view = String(text || '');
+  for (let pass = 0; pass <= NESTED_DECODE_PASSES; pass += 1) {
+    for (const match of view.matchAll(hostRe)) found.add(match[0]);
+    const next = decodeLinkText(view);
+    if (next === view) break;
+    view = next;
+  }
+  return [...found];
 }
 // ONE resolver for every owned /l/<code> in a body (the SMS link wrap's
 // wrapper codes — messaging/sms-link-wrap.js — are kind 'other' and carry a
@@ -3111,8 +3108,7 @@ module.exports = {
   bearerLinkSendCheck,
   composerOnlyLinkPresence,
   linkOwnersInBody,
-  autopaySmsLever,
-  autopaySmsConsentBlock,
+  nestedOwnedLinkRuns,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,
   consultationLinkRows,

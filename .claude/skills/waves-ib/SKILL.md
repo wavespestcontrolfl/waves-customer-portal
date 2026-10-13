@@ -73,12 +73,12 @@ ones its modules execute (property writes are registry-only). Writes keep
 their UI-confirm card.
 Customer links ride every admin context too (`customer-link-tools.js`,
 admin-only, carded): `create_customer_link` builds any kind the composer's
-Insert Link sheet offers (except review request, Auto Pay, the payer
+Insert Link sheet offers (except review request, Auto Pay, which stays on the
+Customers page button and the composer, the payer
 statement, which needs the payer's AP phone, and contract signing, whose send
 needs the composer's own Insert Link state) through the SAME exported route handlers
 (`customerLinkInsert` / `rescheduleLinkInsert` / `reserviceLinkInsert` on
-`routes/admin-communications.js`) and sends nothing; `send_autopay_setup_link`
-is the Customers page button (`autopay-setup-link.js` entry point). The
+`routes/admin-communications.js`) and sends nothing. The
 composer's `/sms` route is the only sender that records some kinds (card
 claim, contract activation, prep/statement marks, project claim,
 consultation lead), so `comms-tools` `customerLinkSendRefusal` makes
