@@ -1015,7 +1015,7 @@ describe('financial identifiers and access PINs in returned text', () => {
   test.each(['PIN is 4821 at the front gate', 'Use PIN: 4821 for the gate', 'gate PIN: 1234', 'Lockbox on the side door, passcode 7788'])('an access code stays: %s', (text) => {
     expect(scrub(text)).toBe(text);
   });
-  test.each([['portal PIN is 4821', 'portal PIN is [removed]'], ['app passcode: 998877\nGate is open', 'app passcode: [removed]\nGate is open']])('a non-access PIN is still removed: %s', (text, expected) => {
+  test.each([['Portal PIN is 4821. Gate is open.', 'Portal PIN is [removed]. Gate is open.'], ['Bank passcode: 998877; use the side door.', 'Bank passcode: [removed]; use the side door.'], ['Gate portal PIN is 4821', 'Gate portal PIN is [removed]'], ['portal PIN is 4821', 'portal PIN is [removed]'], ['app passcode: 998877\nGate is open', 'app passcode: [removed]\nGate is open']])('a non-access PIN is still removed: %s', (text, expected) => {
     expect(scrub(text)).toBe(expected);
   });
 });

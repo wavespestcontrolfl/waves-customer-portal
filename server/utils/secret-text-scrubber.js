@@ -125,10 +125,18 @@ const KEPT_BEFORE_RE = /\b(?:gate|door|lockbox|access|garage|keypad)\s+(?:pin|pa
 // door, lockbox, garage, keypad, entry, callbox, clubhouse, lobby, elevator or pool is a property
 // access code, which the owner reads through the bar like a gate code.
 const ACCESS_WORD_RE = /\b(?:gate|gates|door|doors|lockbox|lock\s?box|garage|keypad|entry|entrance|callbox|call\s?box|clubhouse|lobby|elevator|pool)\b/i;
+// Only the PIN's own clause counts (to the nearest ".", ";", "!" , "?" or line
+// break on each side): "Portal PIN is 4821. Gate is open." names the gate in
+// another sentence and is still removed. A clause that names an account
+// (portal, bank, app, login, wifi, ...) is never an access code.
+const ACCOUNT_WORD_RE = /\b(?:portal|bank|banking|app|account|login|log-in|online|website|wifi|wi-fi|email|card|debit|credit|atm|voicemail|phone)\b/i;
 function accessCodeLine(text, offset) {
-  const start = text.lastIndexOf('\n', offset) + 1;
-  const nextBreak = text.indexOf('\n', offset);
-  return ACCESS_WORD_RE.test(text.slice(start, nextBreak === -1 ? text.length : nextBreak));
+  const before = text.slice(0, offset);
+  const start = Math.max(before.lastIndexOf('\n'), before.lastIndexOf('. '), before.lastIndexOf(';'), before.lastIndexOf('! '), before.lastIndexOf('? ')) + 1;
+  const rest = text.slice(offset);
+  const end = rest.search(/\n|;|[.!?](?:\s|$)/);
+  const clause = text.slice(start, end === -1 ? text.length : offset + end);
+  return ACCESS_WORD_RE.test(clause) && !ACCOUNT_WORD_RE.test(clause);
 }
 // After ":" / "=" these are not values; after "is" the value must also look
 // like a secret (a digit or a symbol, or be quoted).
