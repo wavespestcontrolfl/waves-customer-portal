@@ -740,6 +740,12 @@ describe('a backdated booking is judged against its own window', () => {
 });
 
 describe('the day of the visit is judged on every path (Codex round 9)', () => {
+  // "No day named" means the service's own today; pin the clock to TODAY so the 360-day-old
+  // application stays inside the 12 months (it fell out on the real 2026-10-14 and main went red).
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date(`${TODAY}T16:00:00.000Z`), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask'] });
+  });
+  afterEach(() => { jest.useRealTimers(); });
   const lastYear = world({ property_application_history: [ledger('p-top', 360)] });
   const fireAnt = { id: ESTIMATE, customer_id: CUSTOMER, property_id: PROPERTY, estimate_data: storedWith(['fire_ant_yard']) };
 
