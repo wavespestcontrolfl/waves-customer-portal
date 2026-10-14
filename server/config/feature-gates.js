@@ -1728,6 +1728,13 @@ const gates = {
   // gate is on, verdicts are only logged (shadow) and never block a caller.
   marchexAutoBlock: process.env.GATE_MARCHEX_AUTO_BLOCK === 'true',
 
+  // Lead Alert Call — the business-hours phone call to Adam's cell when a
+  // website quote form lands (announce, or Press-1 bridge under
+  // leadAutoBridge). Owner 2026-10-14: off for now. Off unless exactly
+  // 'true'; off, the lead is handled like an after-hours lead (new_lead
+  // bell, legacy SMS only as delivery fallback).
+  leadAlertCall: process.env.GATE_LEAD_ALERT_CALL === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
