@@ -974,7 +974,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
     const techName = tech?.name || 'Your Waves technician';
     // GATE_ONE_TEXT_PER_CUSTOMER_DAY: once per customer, address, technician and day, from a recorded
     // delivery, not from the claim above (which is stamped before any send). Gate off: just the send.
-    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }), { technicianId: techId });
+    const result = await sendTrackTextOnce(svc, 'arrived', () => TwilioService.sendTechArrived(svc.customer_id, techName, { scheduledServiceId: serviceId, scheduledDate: svc.scheduled_date ?? null, scheduledWindowStart: svc.window_start ?? null, arrivedAt: claimArrivedAt ?? null }), { fence: { id: serviceId, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null }, technicianId: techId });
     outcome = classifyArrivalSend(result);
   } catch (err) {
     logger.error(`[track-transitions] arrival SMS failed: ${err.message}`);

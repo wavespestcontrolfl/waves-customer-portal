@@ -2040,18 +2040,6 @@ function visitSummariesForRows(rows, {
   return byVisit;
 }
 
-// The plain slot candidates for a send quoting `live`'s arrival: the row's promised arrival and, for a
-// grouped stop, the stop's canonical start (so a LATER chained member's own start still passes).
-async function ordinarySlotCandidates(live, toMs) {
-  const arrivalStart = await require('./reservation-arrival').arrivalStartForService(db, live);
-  const candidates = [toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null)];
-  if (live.visit_id) {
-    const stopStart = await liveStopStartHHMM(db, live.visit_id);
-    if (stopStart) candidates.push(toMs(stopStart));
-  }
-  return candidates;
-}
-
 // ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
 // THE shared last-moment send guard for appointment notices (codex r47 —
 // one implementation for the SMS canonical path and the appointment-email
@@ -2061,12 +2049,9 @@ async function ordinarySlotCandidates(live, toMs) {
 //      neither the row's promised arrival nor the grouped stop's canonical start;
 //   3. the hold RE-READ after the slot/visit awaits — a mover can claim
 //      between the first hold read and those queries, with the row still
-//      showing the pre-move slot;
-//   4. a MERGED customer-day reminder (renderedDay token) is held unless the day validator
-//      (one-text-per-day dayArrivalCandidates) accepts it: every member it names still live at
-//      the quoted time, none held, the member set exactly as rendered.
+//      showing the pre-move slot.
 // Fail closed on any read error.
-async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null, renderedDay) {
+async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
   if (!scheduledServiceId) return false;
   const logger = require('./logger');
   try {
@@ -2077,7 +2062,7 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null, re
       return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
     };
     if (await holdLive()) return true;
-    if (Number.isFinite(renderedSlotMs) || Array.isArray(renderedDay)) {
+    if (Number.isFinite(renderedSlotMs)) {
       const live = await db('scheduled_services')
         .where({ id: scheduledServiceId })
         .first('id', 'reservation_service_mix', 'scheduled_date', 'window_start', 'visit_id');
@@ -2088,13 +2073,12 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null, re
         const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
         return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
       };
-      // GATE_ONE_TEXT_PER_CUSTOMER_DAY: a MERGED customer-day reminder carries `renderedDay` (the
-      // members its text named, each at its rendered arrival). That send is valid only if the day
-      // validator accepts it; no ordinary candidate (own arrival, visit stop start) can rescue it.
-      // Every other caller (confirmation, reschedule, rain-out, calls) keeps the plain rule.
-      const candidates = Array.isArray(renderedDay)
-        ? await require('./one-text-per-day').dayArrivalCandidates(scheduledServiceId, renderedDay)
-        : await ordinarySlotCandidates(live, toMs);
+      const arrivalStart = await require('./reservation-arrival').arrivalStartForService(db, live);
+      const candidates = [toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null)];
+      if (live.visit_id) {
+        const stopStart = await liveStopStartHHMM(db, live.visit_id);
+        if (stopStart) candidates.push(toMs(stopStart));
+      }
       if (!candidates.some((ms) => ms !== null && ms === renderedSlotMs)) return true;
       // The slot/visit reads above are awaits a mover can slip behind while
       // the row still shows the pre-move slot — the hold is checked LAST.

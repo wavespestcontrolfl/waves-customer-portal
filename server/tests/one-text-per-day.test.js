@@ -1,5 +1,5 @@
 /**
- * The pure rule and the fail-open edges of one-text-per-day.js
+ * The pure rule and the fail-open edges of one-text-per-day.js (tracker texts)
  * (GATE_ONE_TEXT_PER_CUSTOMER_DAY). The SQL paths are covered against a real
  * schema in one-text-per-customer-day-postgres.test.js.
  */
@@ -10,7 +10,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () =
 const db = require('../models/db');
 const logger = require('../services/logger');
 const {
-  sameTextDay, dayOf, closeCoveredReminderTiers, sendTrackTextOnce, earliestArrivalMs, dayArrivalCandidates,
+  sameTextDay, dayOf, sendTrackTextOnce,
 } = require('../services/one-text-per-day');
 
 const base = { customer_id: 'c1', property_id: 'p1', technician_id: 't1', day: '2026-10-14' };
@@ -63,8 +63,6 @@ describe('sameTextDay', () => {
   });
 });
 
-const snapshot = [{ scheduled_service_id: 's2', reminder_id: 'r2', appointment_time: new Date('2026-10-14T14:00:00Z'), day: '2026-10-14' }];
-
 describe('fail open and gate off', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -74,52 +72,37 @@ describe('fail open and gate off', () => {
 
   test('gate off: no query, nothing closed, the sender just runs', async () => {
     const send = jest.fn(async () => ({ success: true }));
-    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h', true, snapshot)).toBe(0);
     expect(await sendTrackTextOnce({ id: 's1', property_id: 'p1' }, 'en_route', send)).toEqual({ success: true });
-    expect(await dayArrivalCandidates('s1')).toEqual([]);
     expect(send).toHaveBeenCalledTimes(1);
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('gate on, database error: siblings stay armed, the tracker text goes out exactly once', async () => {
+  test('gate on, database error: the tracker text goes out exactly once', async () => {
     process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
     const send = jest.fn(async () => ({ success: true }));
-    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h', true, snapshot)).toBe(0);
     expect(await sendTrackTextOnce({ id: 's1', property_id: 'p1' }, 'arrived', send)).toEqual({ success: true });
     expect(send).toHaveBeenCalledTimes(1);
-    expect(await dayArrivalCandidates('s1')).toEqual([]);
     expect(logger.error).toHaveBeenCalled();
   });
 
   test('a sender that throws is not run twice', async () => {
     process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
-    db.mockImplementationOnce(() => ({ where: () => ({ first: async () => ({ id: 's1', customer_id: 'c1', property_id: 'p1', day: '2026-10-14' }) }) }));
-    db.transaction = jest.fn(async (fn) => fn(Object.assign(() => { throw new Error('unused'); }, { raw: async () => {} })));
+    const row = { id: 's1', customer_id: 'c1', property_id: 'p1', day: '2026-10-14' };
+    const chain = { where: () => chain, first: async () => row };
+    const inner = () => { throw new Error('check failed'); };
+    const outer = Object.assign(() => chain, { raw: async () => {}, transaction: async (fn) => fn(inner) });
+    db.transaction = jest.fn(async (fn) => fn(outer));
     const send = jest.fn(async () => { throw new Error('twilio down'); });
-    await expect(sendTrackTextOnce({ id: 's1', property_id: 'p1' }, 'en_route', send)).rejects.toThrow();
+    await expect(sendTrackTextOnce({ id: 's1', customer_id: 'c1', property_id: 'p1' }, 'en_route', send)).rejects.toThrow('twilio down');
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  test('a delivery that did not happen, no snapshot, or a visit with no saved address closes or covers nothing', async () => {
+  test('a visit with no saved address is never covered', async () => {
     process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY = 'true';
-    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h', false, snapshot)).toBe(0);
-    expect(await closeCoveredReminderTiers({ scheduled_service_id: 's1', customer_id: 'c1' }, '24h', true, null)).toBe(0);
     const send = jest.fn(async () => ({ success: true }));
     await sendTrackTextOnce({ id: 's1', property_id: null }, 'en_route', send);
     expect(send).toHaveBeenCalledTimes(1);
     expect(db).not.toHaveBeenCalled();
-  });
-});
-
-describe('earliestArrivalMs', () => {
-  test('the earliest quoted arrival of the day; a pre-closed placeholder never counts', () => {
-    const rows = [
-      { appointment_time: new Date('2026-10-14T14:00:00Z') },
-      { day: '2026-10-14', window_start: '09:00:00' },
-      { appointment_time: new Date('2026-10-14T12:00:00Z'), windows_preclosed: true },
-    ];
-    expect(earliestArrivalMs(rows)).toBe(new Date('2026-10-14T13:00:00Z').getTime());
-    expect(earliestArrivalMs([])).toBeNull();
   });
 });
 
