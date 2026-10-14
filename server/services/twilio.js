@@ -31,7 +31,8 @@ const HARDCODED_OWNER_FALLBACKS = ["+19413187612", "+19415993489"];
 // strips admin suffixes, joins add-ons) so the arrival text reads like the
 // reminders the customer already received. Best-effort: a failed lookup
 // falls back to "service" rather than dropping the arrival notice.
-async function arrivedServiceLabel(scheduledServiceId) {
+async function arrivedServiceLabel(scheduledServiceId, override) {
+  if (override) return override;
   if (!scheduledServiceId) return "service";
   try {
     const visit = await db("scheduled_services").where({ id: scheduledServiceId }).first("service_type");
@@ -2217,7 +2218,7 @@ const TwilioService = {
    * text. Copy must not say "on the way" (that's en-route). Fired from
    * track-transitions markOnProperty when the live tracker flips to on-site.
    */
-  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
+  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null, serviceLabel } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     // Same per-property toggle as en-route (app property scope, PR 3).
     const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'arrived');
@@ -2268,7 +2269,8 @@ const TwilioService = {
     const results = [];
     const { sendCustomerMessage } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
-    const serviceType = await arrivedServiceLabel(scheduledServiceId);
+    // serviceLabel: the one-text-per-day rule's merged label when this single text stands for several visits.
+    const serviceType = await arrivedServiceLabel(scheduledServiceId, serviceLabel);
     const arrivalDigits = (v) => String(v || "").replace(/\D/g, "").slice(-10);
     const arrivalHolderDigits = arrivalDigits(customer.phone);
     // Codex round 7 P2: under a callback-number hold the App-push arrival

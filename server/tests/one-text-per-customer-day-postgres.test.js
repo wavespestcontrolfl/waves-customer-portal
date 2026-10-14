@@ -607,5 +607,129 @@ postgres('one text per customer, address and day', () => {
         expect(await auditFor(original.id, 'track.one_text_per_day.en_route')).toHaveLength(1);
       });
     });
+
+    describe('legacy NULL status, post-send fence, merged arrival label, bounced proofs', () => {
+      const { sendTrackTextOnce, revokeBouncedTrackProof } = require('../services/one-text-per-day');
+      const proofsFor = (id) => auditFor(id, 'track.one_text_per_day.delivered');
+
+      test('a first visit with a legacy NULL status still covers a later visit', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await mockPg('scheduled_services').where({ id: f.rows[0].id }).update({ status: null });
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
+      test('a visit moved to another day DURING the provider call records no proof, and a later visit on the old day still texts', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const [moved, later] = f.rows;
+        const fence = { id: moved.id, scheduled_date: moved.scheduled_date };
+        const sender = jest.fn(async () => {
+          await mockPg('scheduled_services').where({ id: moved.id }).update({ scheduled_date: etDateString(new Date(Date.now() + 4 * 86400000)) });
+          return { success: true };
+        });
+        expect(await sendTrackTextOnce(moved, 'en_route', sender, { fence, technicianId: technicians[0] })).toEqual({ success: true });
+        expect(await proofsFor(moved.id)).toHaveLength(0);
+        await enRoute(later.id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
+      const arrivedOptions = (n = 0) => TwilioService.sendTechArrived.mock.calls[n][2];
+
+      test('two services, one arrived text naming both', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        await onSite(f.rows[0].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(1);
+        expect(arrivedOptions().serviceLabel).toMatch(/Quarterly Pest Control/);
+        expect(arrivedOptions().serviceLabel).toMatch(/Lawn Care/);
+        await onSite(f.rows[1].id);
+        expect(texted(TwilioService.sendTechArrived)).toBe(1);
+      });
+
+      test('a different technician on the second visit: each text names its own service', async () => {
+        gateOn();
+        const f = await fixture({ date: etDateString(), specs: [
+          { start: '09:00', end: '10:00', name: 'Quarterly Pest Control', tech: 0 },
+          { start: '10:00', end: '11:00', name: 'Lawn Care', tech: 1 },
+        ] });
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        await onSite(f.rows[0].id);
+        expect(arrivedOptions().serviceLabel).toBeUndefined();
+        await TrackTransitions.markOnProperty(f.rows[1].id, { actingTechId: technicians[1], allowFutureDate: true });
+        expect(texted(TwilioService.sendTechArrived)).toBe(2);
+        expect(arrivedOptions(1).serviceLabel).toBeUndefined();
+      });
+
+      test('an on-the-way text names no service, so it passes no label', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        expect(TwilioService.sendTechEnRoute.mock.calls[0].some((a) => a && typeof a === 'object' && 'serviceLabel' in a)).toBe(false);
+      });
+
+      test('a label lookup that fails falls back to the sender\'s own label', async () => {
+        gateOn();
+        const f = await twoVisits();
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        const reminders = require('../services/appointment-reminders');
+        const spy = jest.spyOn(reminders, 'buildServiceLabel').mockRejectedValue(new Error('synthetic label failure'));
+        try {
+          await onSite(f.rows[0].id);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(texted(TwilioService.sendTechArrived)).toBe(1);
+        expect(arrivedOptions().serviceLabel).toBeUndefined();
+      });
+
+      const sidOf = (n) => `SM${String(n).padStart(32, 'a')}`;
+      const sendWithSid = (sid) => TwilioService.sendTechEnRoute.mockImplementationOnce(async () => ({ success: true, results: [{ sent: true, providerMessageId: sid }] }));
+
+      test('delivered, then an undelivered callback: a sibling tapped afterwards sends its own text', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = sidOf(1);
+        sendWithSid(sid);
+        await enRoute(f.rows[0].id);
+        expect((await proofsFor(f.rows[0].id))[0].metadata.provider_message_ids).toEqual([sid]);
+        expect(await revokeBouncedTrackProof({ sid })).toBe(1);
+        expect(await revokeBouncedTrackProof({ sid })).toBe(0); // idempotent
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(2);
+      });
+
+      test('a callback for an unrelated SID changes nothing', async () => {
+        gateOn();
+        const f = await twoVisits();
+        sendWithSid(sidOf(2));
+        await enRoute(f.rows[0].id);
+        expect(await revokeBouncedTrackProof({ sid: sidOf(3) })).toBe(0);
+        await enRoute(f.rows[1].id);
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
+      test('a callback arriving after the sibling was already covered re-sends nothing retroactively', async () => {
+        gateOn();
+        const f = await twoVisits();
+        const sid = sidOf(4);
+        sendWithSid(sid);
+        await enRoute(f.rows[0].id);
+        await enRoute(f.rows[1].id);
+        await revokeBouncedTrackProof({ sid });
+        expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
+      });
+
+      test('gate off: the revoke hook does nothing and never throws', async () => {
+        expect(await revokeBouncedTrackProof({ sid: sidOf(5) })).toBe(0);
+        expect(await revokeBouncedTrackProof()).toBe(0);
+      });
+    });
   });
 });

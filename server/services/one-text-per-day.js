@@ -33,6 +33,10 @@
  *    own claim used) is checked right before the send; an attempt whose visit was moved, re-armed
  *    or changed meanwhile sends as it would without the rule and records no proof, so a stale
  *    send cannot cover another visit.
+ *  - A text the provider later reports undelivered is revoked (a `revoked` audit row written from
+ *    the status callback): it no longer covers other visits. Nothing is re-sent retroactively.
+ *  - The ONE arrived text names every service it covers (sender plus same-customer, property, day
+ *    and technician visits with no text of their own), using the existing per-visit label builder.
  *  - "Could not read" is never "already told": every read or write error fails OPEN toward the
  *    customer being informed (the text goes out as with the gate off).
  */
@@ -48,6 +52,9 @@ const TRACK_TEXTS = {
   arrived: { stamp: 'arrival_sms_sent_at' },
 };
 const DELIVERED_ACTION = 'track.one_text_per_day.delivered';
+const REVOKED_ACTION = 'track.one_text_per_day.revoked';
+// A visit that can still be worked: its status, with a legacy NULL counted as live (as the scheduling paths do).
+const LIVE_LABEL_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 const COVERED_BY_DAY = Object.freeze({ success: false, suppressed: true, reason: 'covered_by_day' });
 
 // ET calendar day of a row: an explicit `day` (YYYY-MM-DD) wins, else the ET day
@@ -76,7 +83,7 @@ function sameTextDay(a, b, { sameTechnician = false } = {}) {
 async function loadRef(conn, svc, fence) {
   const query = conn('scheduled_services').where({ id: svc.id });
   if (fence) query.where(fence);
-  const ref = await query.first('id', 'customer_id', 'property_id', 'technician_id', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+  const ref = await query.first('id', 'customer_id', 'property_id', 'technician_id', 'service_type', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
   const same = ref && String(ref.customer_id) === String(svc.customer_id) && String(ref.property_id) === String(svc.property_id);
   return same ? ref : null;
 }
@@ -106,7 +113,15 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
     .whereNot('sib.id', ref.id)
     // A visit that did not happen (cancelled, skipped, no-show, awaiting re-placement) told the customer
     // nothing about THIS service: the canonical non-performed list. A completed visit still covers.
-    .whereNotIn('sib.status', RETAINED_HISTORY_STATUSES)
+    .where(function liveOrLegacyNullStatus() {
+      this.whereNull('sib.status').orWhereNotIn('sib.status', RETAINED_HISTORY_STATUSES);
+    })
+    // A delivered text whose provider later reported it undelivered (revoked) told nobody.
+    .whereNotExists(function bounced() {
+      this.select(1).from('audit_log as rv')
+        .where('rv.action', REVOKED_ACTION)
+        .whereRaw("rv.metadata->>'delivered_audit_id' = al.id::text");
+    })
     .select('sib.id',
       conn.raw("al.metadata->>'customer_id' as customer_id"),
       conn.raw("al.metadata->>'property_id' as property_id"),
@@ -115,7 +130,7 @@ async function deliveredSibling(conn, ref, kind, technicianId) {
   return rows.find((r) => sameTextDay(ref, r) && String(r.delivered_technician_id || '') === String(technicianId || '')) || null;
 }
 
-async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false } = {}) {
+async function recordTrackOutcome(ref, kind, covering, technicianId, { critical = false, providerIds = [] } = {}) {
   await auditLog.recordAuditEvent({
     critical,
     actor_type: 'system',
@@ -125,17 +140,18 @@ async function recordTrackOutcome(ref, kind, covering, technicianId, { critical 
     metadata: {
       kind, customer_id: ref.customer_id, property_id: ref.property_id, day: ref.day,
       technician_id: technicianId || null,
+      ...(providerIds.length ? { provider_message_ids: providerIds } : {}),
       ...(covering ? { covered_by_scheduled_service_id: covering.id } : {}),
     },
   });
 }
 
 // The delivered proof: a critical write, retried once. Never throws: the text is already out.
-async function recordDeliveryProof(ref, kind, technicianId) {
+async function recordDeliveryProof(ref, kind, technicianId, providerIds) {
   let last = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true });
+      await recordTrackOutcome(ref, kind, null, technicianId, { critical: true, providerIds });
       return true;
     } catch (err) {
       last = err;
@@ -166,8 +182,11 @@ async function standDown(ref, covering, kind, named, fence) {
  *  2. Read the visit through the caller's attempt `fence`; gone or changed: send, record no proof.
  *  3. Look for another visit's delivered row (same customer, address, ET day, kind, technician).
  *  4. Found: stamp the guard, write the covered audit row, return COVERED_BY_DAY.
- *  5. Else run the sender ONCE (a throw propagates; it is never run twice).
- *  6. Only on success, write the delivered proof (critical, retried once).
+ *  5. Else run the sender ONCE (a throw propagates; it is never run twice). An arrived text that stands
+ *     for several visits gets their merged label (`sendFn({ serviceLabel })`; gate off: no argument).
+ *  6. Only on success, and only if the visit still matches the fence after the provider call, write the
+ *     delivered proof (critical, retried once) with the provider message ids, so an "undelivered"
+ *     status callback can revoke it (`revokeBouncedTrackProof`).
  */
 async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId = null } = {}) {
   let applies = false;
@@ -188,13 +207,120 @@ async function sendTrackTextOnce(svc, kind, sendFn, { fence = null, technicianId
     logger.error(`[one-text-per-day] ${kind} once-per-day check failed for ${svc.id} (sent as usual): ${err.message}`);
     ref = null;
   }
-  const result = await sendFn();
-  if (ref && result && result.success === true) await recordDeliveryProof(ref, kind, named);
+  const label = ref ? await coveredServiceLabel(ref, kind, named) : null;
+  const result = await (label ? sendFn({ serviceLabel: label }) : sendFn());
+  if (ref && result && result.success === true) await proveIfCurrent(svc, fence, ref, kind, named, result);
   return result;
+}
+
+// The provider ids (Twilio SIDs) of the texts a sender result accepted, kept on the proof so a later
+// "undelivered" status callback can revoke it.
+function acceptedProviderIds(result) {
+  const sent = Array.isArray(result && result.results) ? result.results.filter((r) => r && r.sent && r.providerMessageId) : [];
+  return sent.map((r) => String(r.providerMessageId));
+}
+
+// The proof is written only if the visit STILL matches the attempt's complete fence after the provider
+// call: a visit force-rescheduled or re-armed meanwhile sent a text about an abandoned snapshot, which
+// must not stand down another visit (the text went out and records no proof: the fail-open direction).
+async function proveIfCurrent(svc, fence, ref, kind, named, result) {
+  let current = null;
+  try {
+    current = await loadRef(db, svc, fence);
+  } catch (err) {
+    logger.error(`[one-text-per-day] ${kind} post-send fence read failed for ${svc.id} (no proof recorded): ${err.message}`);
+  }
+  if (current) await recordDeliveryProof(ref, kind, named, acceptedProviderIds(result));
+}
+
+// Join distinct service labels list-style ("A, B & C"), the shape the reminder labels use.
+function joinLabels(labels) {
+  const parts = [];
+  for (const raw of labels) {
+    const label = String(raw || '').trim();
+    if (label && label.toLowerCase() !== 'service' && !parts.some((p) => p.toLowerCase() === label.toLowerCase())) parts.push(label);
+  }
+  if (parts.length < 2) return parts[0] || null;
+  return `${parts.slice(0, -1).join(', ')} & ${parts[parts.length - 1]}`;
+}
+
+// The services ONE arrived text covers: the sender plus every live visit of the same customer, recorded
+// property, ET day and technician that has no text of its own (delivered or covered) for this kind and
+// day. Labelled with the existing per-visit label builder (parent + add-ons), so the single text names
+// each of them. Null (the sender's own label, as today) for the on-the-way text, which names no
+// service, for a lone visit, and on any lookup failure.
+async function coveredServiceLabel(ref, kind, technicianId) {
+  if (kind !== 'arrived') return null;
+  try {
+    const others = await db('scheduled_services as sib')
+      .where({ 'sib.customer_id': ref.customer_id, 'sib.property_id': ref.property_id })
+      .whereRaw("to_char(sib.scheduled_date, 'YYYY-MM-DD') = ?", [ref.day])
+      .whereNot('sib.id', ref.id)
+      .where(function sameTechnician() {
+        if (technicianId) this.where('sib.technician_id', technicianId);
+        else this.whereNull('sib.technician_id');
+      })
+      .where(function liveOrLegacyNullStatus() {
+        this.whereNull('sib.status').orWhereIn('sib.status', LIVE_LABEL_STATUSES);
+      })
+      .whereNotExists(function alreadyTold() {
+        this.select(1).from('audit_log as al')
+          .whereRaw('al.resource_id = sib.id')
+          .whereIn('al.action', [DELIVERED_ACTION, `track.one_text_per_day.${kind}`])
+          .whereRaw("al.metadata->>'kind' = ?", [kind])
+          .whereRaw("al.metadata->>'day' = ?", [ref.day]);
+      })
+      .orderBy('sib.window_start', 'asc')
+      .orderBy('sib.id', 'asc')
+      .select('sib.id', 'sib.service_type');
+    if (!others.length) return null;
+    const { buildServiceLabel } = require('./appointment-reminders');
+    const labels = [];
+    for (const v of [ref, ...others]) labels.push(await buildServiceLabel(v.id, v.service_type));
+    return joinLabels(labels);
+  } catch (err) {
+    logger.warn(`[one-text-per-day] covered-service label lookup failed for ${ref.id} (own label used): ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * A provider "failed / undelivered" status callback for `sid`: if that message was recorded as a
+ * delivered tracker text, write a revoked row so it no longer covers other visits (a visit tapped
+ * AFTER the bounce sends its own text; nothing is re-sent retroactively). A no-op with the gate off;
+ * never throws (it is called from the webhook).
+ */
+async function revokeBouncedTrackProof({ sid } = {}) {
+  try {
+    if (!sid || !oneTextPerCustomerDayLive()) return 0;
+    const proofs = await db('audit_log as al')
+      .where('al.action', DELIVERED_ACTION)
+      .whereRaw("al.metadata->'provider_message_ids' @> ?::jsonb", [JSON.stringify([String(sid)])])
+      .whereNotExists(function alreadyRevoked() {
+        this.select(1).from('audit_log as rv').where('rv.action', REVOKED_ACTION).whereRaw("rv.metadata->>'delivered_audit_id' = al.id::text");
+      })
+      .select('al.id', 'al.resource_id', 'al.metadata');
+    for (const p of proofs) {
+      await auditLog.recordAuditEvent({
+        critical: true,
+        actor_type: 'system',
+        action: REVOKED_ACTION,
+        resource_type: 'scheduled_service',
+        resource_id: p.resource_id,
+        metadata: { delivered_audit_id: String(p.id), kind: p.metadata && p.metadata.kind, sid: String(sid) },
+      });
+    }
+    if (proofs.length) logger.info(`[one-text-per-day] ${proofs.length} delivered tracker text(s) revoked: provider reported ${String(sid).slice(0, 6)}… undelivered`);
+    return proofs.length;
+  } catch (err) {
+    logger.error(`[one-text-per-day] tracker proof revoke failed: ${err.message}`);
+    return 0;
+  }
 }
 
 module.exports = {
   sameTextDay,
   dayOf,
   sendTrackTextOnce,
+  revokeBouncedTrackProof,
 };
