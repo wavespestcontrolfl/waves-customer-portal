@@ -165,6 +165,9 @@ const TIME_WORDS_RE = new RegExp([
   `\\b(?:${HOUR_LEADS})(?=\\s+(?:${HOUR}|${HHMM}|${HOUR_ISH}|${SPELLED_HOUR}|${TIME_ANCHORS}))`,
   `\\b${HOUR_ISH}`,
   `\\b${HHMM}(?=\\s{0,3}(?:hours|hrs|h)\\b)`,
+  // Minutes to / past an hour, spelled ("TEN TO TWO"): r23. Digits are read
+  // by the range pattern.
+  `\\b(?:five|ten|twenty(?:[\\s-]{1,3}five)?)(?=\\s{1,5}(?:to|past|after|til|till)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
   // Quarter or half to / past an hour ("QUARTER TO TEN"): r15.
   `\\b(?:quarter|half)(?=\\s{1,5}(?:to|past|after|til|till|before)\\s{1,5}(?:${HOUR}|${SPELLED_HOUR}))`,
   '\\b(?:lunch(?:time)?|breakfast|dinner|supper|sunrise|sunset|dawn|dusk)(?![\\w])',
@@ -283,11 +286,11 @@ const NEIGHBOR_TIME_WORDS = new Set([
 // lead word, and a note's own date stamp otherwise.
 const NEXT_MONTHS = new Set(['january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
   'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec']);
-// A word that limits a time, before the mask ("every [redacted]"); not when a
-// unit follows the mask ("after [redacted] seconds"): a quantity.
+// A word that limits a time, before the mask ("NEVER [redacted]"): only when
+// nothing but an end or a joining word follows the mask. "only [redacted]
+// dogs" is a count (r23); "every [redacted] Tuesday" is read by the weekday.
 const PREV_LIMITS = new Set(['until', 'till', 'before', 'after', 'except', 'never', 'every', 'only']);
-const UNIT_WORDS = new Set(['second', 'seconds', 'sec', 'secs', 'minute', 'minutes', 'min', 'mins', 'foot', 'feet', 'ft', 'inch', 'inches', 'in', 'lb', 'lbs',
-  'pound', 'pounds', 'gallon', 'gallons', 'gal', 'yard', 'yards', 'yd', 'step', 'steps', 'times', 'miles', 'mile', 'acres', 'acre', 'sq']);
+const AFTER_LIMIT_OK = new Set(['and', 'or', 'please', 'only', 'ok', 'okay', 'then', 'at', 'in', 'on', 'before', 'after', 'until', 'till', 'thanks', 'thank']);
 const MARK = '[redacted]';
 const CODE_NOUN_BEFORE_RE = /\b(?:code|password|passcode|passphrase|pin|combo|combination)\b\s{0,5}(?:(?:is|=|:|#|-)\s{0,5})?$/i;
 const CODE_NOUN_AFTER_RE = /^\s{0,5}(?:is|=)\s{1,5}(?:\S{1,30}\s{1,5}){0,4}?(?:code|password|passcode|passphrase|pin|combo|combination)\b/i;
@@ -303,7 +306,7 @@ function maskBesideTimeWord(masked) {
       const prev = wordsOf(before).pop();
       const next = wordsOf(after)[0];
       if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) return true;
-      if (PREV_LIMITS.has(prev) && !UNIT_WORDS.has(next)) return true;
+      if (PREV_LIMITS.has(prev) && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
     }
     at = masked.indexOf(MARK, at + MARK.length);
   }
