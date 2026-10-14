@@ -104,6 +104,28 @@ describe('voicemailCallbackAlertPlan', () => {
     expect(voicemailCallbackAsked(v2({ ...asked, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
     expect(voicemailCallbackAsked(v2({ ...asked, recommended_disposition: 'voicemail_processed' }), primary)).toBe(false);
     expect(voicemailCallbackAsked(null, primary)).toBe(false);
+    // A left message is a second basis: the model files the same voicemail
+    // under either label (call audit 2026-10-13).
+    const filed = { recommended_disposition: 'voicemail_processed', call_nature: 'voicemail_message', spam_verdict: { spam_kind: 'not_spam' } };
+    expect(voicemailCallbackAsked(v2(filed), primary)).toBe(true);
+    expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'silent_or_noise' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, call_nature: 'other', recommended_disposition: 'no_action_needed' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, spam_verdict: { spam_kind: 'solicitation' } }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed, 'invalid'), primary)).toBe(false);
+    // The spam_kind label is optional in the schema; the required boolean decides without it.
+    const noKind = (verdict) => v2({ ...filed, spam_verdict: verdict });
+    expect(voicemailCallbackAsked(noKind({ is_spam_content: false }), primary)).toBe(true);
+    expect(voicemailCallbackAsked(noKind({ is_spam_content: false, spam_kind: null }), primary)).toBe(true);
+    expect(voicemailCallbackAsked(noKind({ is_spam_content: true }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(noKind({}), primary)).toBe(false);
+    expect(voicemailCallbackAsked(noKind({ is_spam_content: false, spam_kind: 'wrong_number' }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(noKind({ is_spam_content: true, spam_kind: 'not_spam' }), primary)).toBe(false);
+    // A voicemail that asks not to be contacted rings nothing, in either shape of the flag.
+    expect(voicemailCallbackAsked(v2({ ...filed, consent: { do_not_contact_request: true } }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2(filed), { ...primary, extracted: { do_not_contact_request: true } })).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...asked, consent: { do_not_contact_request: true } }), primary)).toBe(false);
+    expect(voicemailCallbackAsked(v2({ ...filed, consent: { do_not_contact_request: false } }), primary)).toBe(true);
+    expect(voicemailCallbackAsked(v2(filed), { v2Primary: false })).toBe(false);
     // Shadow mode (V2 on, routing off): the verdict is evaluation data and rings nothing.
     expect(voicemailCallbackAsked(v2(asked), { v2Primary: false })).toBe(false);
     // The default reads the live mode; this test process runs with V2 off.
