@@ -141,6 +141,9 @@ describe('leadServiceDisplay', () => {
     // the stored text's cadence survives a rename to a name with none
     expect(leadServiceDisplay('Quarterly Pest Control + One-Time Lawn Care Service', { catalogNames, firstName: 'General Pest Program' }))
       .toBe('General Pest Program + Monthly Lawn Care Service');
+    // recurring wins: a keyed one-time first part beside recurring work
+    expect(leadServiceDisplay('One-Time Pest Control Service + Tree & Shrub Care', { catalogNames, firstName: 'One-Time Pest Control Service' }))
+      .toBe('Quarterly Pest Control Service + Bi-Monthly Tree & Shrub Care Service');
     // a configured package name stays as written; an upsell after it is named
     expect(leadServiceDisplay('Roach Package + Lawn Care', { catalogNames, firstName: 'Roach Package' }))
       .toBe('Roach Package + Waves Assessment (Lawn)');

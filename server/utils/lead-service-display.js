@@ -253,16 +253,18 @@ function leadServiceDisplay(serviceInterest, { catalogNames = null, firstName = 
   if (!text) return null;
 
   const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames));
-  if (firstName && parts[0].kind !== 'assessment') {
-    const first = parts[0];
-    parts[0] = { kind: 'other', name: clean(firstName), frequency: first.frequency, topic: first.topic || first.topics?.[0] || null };
-  }
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.
   // A one-time request is never an assessment.
   const assessmentBooked = !oneTime && parts.some((part) => part.kind === 'assessment');
   const plan = { recurring, oneTime, assessmentBooked, assess: assessmentBooked || (!recurring && !oneTime), catalogNames };
+  // The key's name stands unless the lead's frequency changes that part:
+  // a one-time first part beside recurring work is named as recurring.
+  if (firstName && parts[0].kind !== 'assessment' && !(recurring && parts[0].frequency === 'one_time')) {
+    const first = parts[0];
+    parts[0] = { kind: 'other', name: clean(firstName), frequency: first.frequency, topic: first.topic || first.topics?.[0] || null };
+  }
 
   const out = [];
   const shorts = [];
