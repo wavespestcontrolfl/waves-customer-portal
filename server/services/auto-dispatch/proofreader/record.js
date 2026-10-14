@@ -215,7 +215,11 @@ const TIME_WORDS_RE = new RegExp([
   // An hour after a word that names the visit's time ("appointment time 9"): r24.
   `\\b(?:time|arrival|arrive|appointment|appt|scheduled?|window|slot)(?=\\s{1,5}(?:(?:is|of|at)\\s{1,5}|:\\s{0,3})?(?:${HOUR}|${HHMM}|${SPELLED_HOUR}))`,
   // Windows named in words ("END OF DAY ONLY", "NIGHT ONLY"): r24.
-  '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|nights?|overnight|first\\s{1,3}thing)(?![\\w])',
+  '\\b(?:end\\s{1,3}of\\s{1,3}(?:the\\s{1,3})?day|eod|first\\s{1,3}thing)(?![\\w])',
+  // Night only as a limit ("NIGHT ONLY"); "NIGHT LIGHT" is a thing (r25).
+  '\\b(?:nights?|overnight)(?=\\s{0,3}(?:(?:only|ok|okay|please|preferred|works?|visits?|appointments?|service)\\b|[,;!)]|\\.(?:\\s|$)|$))',
+  // "FIRST APPOINTMENT ONLY", "last stop": r25.
+  '\\b(?:first|last)(?=\\s{1,5}(?:appointments?|appts?|stops?|slots?)\\b)',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -250,15 +254,19 @@ function timeWords(text) {
 // after the noun is taken: a passphrase of several words that are day or time
 // words ("Friday morning") still counts, on purpose. Which it is cannot be
 // told from the text, and the safe side is a person reading it.
+const CODE_PLACES = '(?:gate|front|back|side|main|door|garage|lockbox|lock|box|entry|access|keypad|community|pool|building|alarm|house|home|lanai|shed|fence|unit)';
 const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])["'\\u201d\\u2019]?(?![\\s,:;()\\u2013\\u2014-]{1,5}only\\b)`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
-// code" (r3, r7). Only "is" and "=", as the mask itself reads: "Friday WAS
+// code" (r3, r7). Between "is" and the code noun only words that name
+// what the code opens: "TUESDAY is available with gate code" is a day, not
+// the credential (r25).
+// Only "is" and "=", as the mask itself reads: "Friday WAS
 // the gate code" stays visible to the model, so it is not left out (r14).
 // Bounded tokens and gaps in both credential patterns: an unbounded run was
 // retried at every byte of a long stored text (a 64 KB entry took 5.9 s on
 // the event loop: Codex security r5; the forward one's spaces: r7).
-const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:(?!(?:when|what|day|days|date|dates|time|times|hours?|until|before|after|only)\b)[A-Za-z]{1,30}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
+const CREDENTIAL_VALUE_REVERSE_RE = new RegExp(String.raw`(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:${CODE_PLACES}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)`, 'gi');
 const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
 
 // The mask removed at least one word that can say when. The list is the
@@ -302,23 +310,39 @@ const PREV_LIMITS = new Set(['until', 'till', 'before', 'after', 'except', 'neve
 const AFTER_LIMIT_OK = new Set(['and', 'or', 'please', 'only', 'ok', 'okay', 'then', 'at', 'in', 'on', 'before', 'after', 'until', 'till', 'thanks', 'thank']);
 const MARK = '[redacted]';
 const CODE_NOUN_BEFORE_RE = /\b(?:code|password|passcode|passphrase|pin|combo|combination)\b\s{0,5}(?:(?:is|=|:|#|-)\s{0,5})?$/i;
-const CODE_NOUN_AFTER_RE = /^\s{0,5}(?:is|=)\s{1,5}(?:\S{1,30}\s{1,5}){0,4}?(?:code|password|passcode|passphrase|pin|combo|combination)\b/i;
+const CODE_NOUN_AFTER_RE = new RegExp(String.raw`^\s{0,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:${CODE_PLACES}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b`, 'i');
 const wordsOf = (text) => (text.replace(/\[redacted\]/g, ' ').toLowerCase().match(/[a-z][a-z.']*/g) || []).map((w) => w.replace(/\.+$/, ''));
+
+const CLAUSE_END_RE = /(?<!\b[ap]\.m)[.!?;](?=\s|$)|\n/gi;
+function firstClause(text) {
+  const re = new RegExp(CLAUSE_END_RE.source, 'gi');
+  const m = re.exec(text);
+  return m ? text.slice(0, m.index) : text;
+}
+function lastClause(text) {
+  const re = new RegExp(CLAUSE_END_RE.source, 'gi');
+  let end = 0;
+  let m;
+  while ((m = re.exec(text))) end = m.index + m[0].length;
+  return text.slice(end);
+}
 
 function maskBesideTimeWord(masked) {
   let at = masked.indexOf(MARK);
   while (at !== -1) {
-    const before = masked.slice(Math.max(0, at - 60), at);
-    const after = masked.slice(at + MARK.length, at + MARK.length + 80);
+    // Within the mask's own sentence (r25): "ask [redacted]. Friday works" is
+    // two statements. The dots inside "A.M." are not an end.
+    const before = lastClause(masked.slice(Math.max(0, at - 60), at));
+    const after = firstClause(masked.slice(at + MARK.length, at + MARK.length + 80));
     const own = CODE_NOUN_BEFORE_RE.test(before) || CODE_NOUN_AFTER_RE.test(after);
     if (!own) {
       const prev = wordsOf(before).pop();
       const next = wordsOf(after)[0];
       const following = wordsOf(after);
       if (NEIGHBOR_TIME_WORDS.has(prev) || NEIGHBOR_TIME_WORDS.has(next) || NEXT_MONTHS.has(next)) return true;
-      // "May" is also a verb: a month only when nothing follows it ("expires
-      // [redacted] May"): r24.
-      if (next === 'may' && following.length === 1) return true;
+      // "May" is also a verb: a month only when nothing, or a joining word,
+      // follows it ("expires [redacted] May", "... May only"): r24, r25.
+      if (next === 'may' && (following.length === 1 || AFTER_LIMIT_OK.has(following[1]))) return true;
       if (PREV_LIMITS.has(prev) && (next === undefined || AFTER_LIMIT_OK.has(next))) return true;
     }
     at = masked.indexOf(MARK, at + MARK.length);
