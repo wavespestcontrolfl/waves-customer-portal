@@ -200,13 +200,17 @@ function recurringName(topic, text, catalogNames) {
 
 // Parts are joined by " + ", but a few catalog names contain one
 // ("Lawn + Tree & Shrub Service"); those stay whole.
-function splitParts(text, catalogNames) {
+// Splits on " + ", but keeps whole any catalog or configured name that has
+// " + " in it (longest match first, at every position).
+function splitParts(text, catalogNames, kept = new Set()) {
   const pieces = text.split(/\s+\+\s+/).map(clean).filter(Boolean);
-  if (!catalogNames) return pieces;
+  const known = (name) => kept.has(name.toLowerCase()) || Boolean(catalogNames?.has(name.toLowerCase()));
   const parts = [];
-  for (let i = 0; i < pieces.length; i += 1) {
-    const joined = i + 1 < pieces.length ? `${pieces[i]} + ${pieces[i + 1]}` : null;
-    if (joined && catalogNames.has(joined.toLowerCase())) { parts.push(joined); i += 1; } else parts.push(pieces[i]);
+  for (let i = 0; i < pieces.length;) {
+    let end = pieces.length;
+    while (end > i + 1 && !known(pieces.slice(i, end).join(' + '))) end -= 1;
+    parts.push(pieces.slice(i, end).join(' + '));
+    i = end;
   }
   return parts;
 }
@@ -245,7 +249,7 @@ const PLACE = {
 };
 
 function nameParts(text, catalogNames, kept) {
-  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames, kept));
+  const parts = splitParts(text, catalogNames, kept).map((part) => classify(part, catalogNames, kept));
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.
@@ -265,27 +269,18 @@ function nameParts(text, catalogNames, kept) {
   return [...new Set(out.filter(Boolean))].join(' + ') || null;
 }
 
-// The configured name the text starts with (longest first), or null.
-function leadingLabel(text, labels) {
-  const lower = text.toLowerCase();
-  return [...labels].sort((a, b) => b.length - a.length)
-    .find((label) => lower === label.toLowerCase() || lower.startsWith(`${label.toLowerCase()} + `)) || null;
-}
-
 // asWritten: admin-configured package names with no catalog row (the roach
 // package names the quote wizard stores), shown as written, plus sign
 // included, wherever they appear. firstAsWritten: the lead's key says its
-// first part is such a name even if the config was renamed since. Text
-// after a configured name (an upsell) is named on its own.
+// first part is such a name even if the config was renamed since.
 function leadServiceDisplay(serviceInterest, { catalogNames = null, asWritten = [], firstAsWritten = false } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
-  const labels = asWritten.map(clean).filter(Boolean);
-  const kept = new Set(labels.map((label) => label.toLowerCase()));
-  const lead = leadingLabel(text, labels) || (firstAsWritten ? text.split(/\s+\+\s+/)[0] : null);
-  if (!lead) return nameParts(text, catalogNames, kept);
-  const rest = clean(text.slice(lead.length).replace(/^\s*\+\s*/, ''));
-  return [lead, rest ? nameParts(rest, catalogNames, kept) : null].filter(Boolean).join(' + ');
+  const kept = new Set(asWritten.map(clean).filter(Boolean).map((label) => label.toLowerCase()));
+  if (firstAsWritten && !splitParts(text, null, kept).some((part) => kept.has(part.toLowerCase()))) {
+    kept.add(clean(text.split(/\s+\+\s+/)[0]).toLowerCase());
+  }
+  return nameParts(text, catalogNames, kept);
 }
 
 module.exports = { leadServiceDisplay, catalogNameIndex };

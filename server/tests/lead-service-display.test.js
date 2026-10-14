@@ -133,6 +133,8 @@ describe('leadServiceDisplay', () => {
     expect(leadServiceDisplay('Quarterly Pest Control + Roach Package', opts)).toBe('Quarterly Pest Control Service + Roach Package');
     expect(leadServiceDisplay('Roach Package + Lawn Care', opts)).toBe('Roach Package + Lawn Care');
     expect(leadServiceDisplay('Roach Package + Recurring Lawn Care', opts)).toBe('Roach Package + Monthly Lawn Care Service');
+    expect(leadServiceDisplay('Quarterly Pest Control + Roach Package + Lawn Care', opts))
+      .toBe('Quarterly Pest Control Service + Roach Package + Lawn Care');
   });
 
   test('aliases of one service stay one name', () => {
