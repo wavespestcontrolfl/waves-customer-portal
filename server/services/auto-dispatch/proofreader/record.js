@@ -142,7 +142,8 @@ const TIME_WORDS_RE = new RegExp([
   // A calendar date after a word that ties it to the visit or the access
   // ("CODE 4821 EXPIRES 10/20", "until Oct 20"): r7. A date alone is a
   // note's own stamp and does not count.
-  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])))`,
+  // A connector may stand between ("expires on 10/20"): r14.
+  `\\b(?:${DATE_HOUR_LEADS}|${DATE_LEADS})(?=\\s{1,5}(?:(?:on|by|at|the)\\s{1,5})?(?:\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]{0,6}\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])))`,
   // An hour a phrase after it makes a time ("10 in the morning", "9 sharp",
   // "8 onwards"): r9.
   // A look-ahead: the phrase is not consumed, so its own time word still
@@ -194,11 +195,12 @@ function timeWords(text) {
 const CREDENTIAL_VALUE_RE = new RegExp(`\\b(code|password|passcode|passphrase|pin|combo|combination)\\b(\\s{0,5}(?:is|=|:|-)?\\s{0,5})(?!(?:${HOUR_LEADS}|${DATE_LEADS})\\b)["'\\u201c\\u2018]?[A-Za-z0-9#*]{1,40}(?![A-Za-z0-9#*])["'\\u201d\\u2019]?(?!\\s{1,5}only\\b)`, 'gi');
 // The same in the reverse order the mask also reads: "Friday is the gate
 // code", "Noon is the gate password", "Friday is the front door access
-// code" (r3, r7).
+// code" (r3, r7). Only "is" and "=", as the mask itself reads: "Friday WAS
+// the gate code" stays visible to the model, so it is not left out (r14).
 // Bounded tokens and gaps in both credential patterns: an unbounded run was
 // retried at every byte of a long stored text (a 64 KB entry took 5.9 s on
 // the event loop: Codex security r5; the forward one's spaces: r7).
-const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|was|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:(?!(?:when|what|day|days|date|dates|time|times|hours?|until|before|after|only)\b)[A-Za-z]{1,30}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
+const CREDENTIAL_VALUE_REVERSE_RE = /(?<![A-Za-z0-9#*])["'\u201c\u2018]?[A-Za-z0-9#*]{1,40}["'\u201d\u2019]?(\s{1,5}(?:is|=)\s{1,5}(?:(?:the|my|our|your)\s{1,5})?(?:(?!(?:when|what|day|days|date|dates|time|times|hours?|until|before|after|only)\b)[A-Za-z]{1,30}\s{1,5}){0,3}(?:code|password|passcode|passphrase|pin|combo|combination)\b)/gi;
 const withoutCredentialValues = (text) => String(text).replace(CREDENTIAL_VALUE_RE, '$1$2').replace(CREDENTIAL_VALUE_REVERSE_RE, '$1');
 
 // The mask removed at least one word that can say when. The list is the

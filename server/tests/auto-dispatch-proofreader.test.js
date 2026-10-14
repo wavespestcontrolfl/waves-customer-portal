@@ -396,6 +396,8 @@ describe('the customer record', () => {
       'Gate code 4821, BEFORE lunch only',
       'Gate code 4821, TEN THIRTY in the morning only',
       'Gate code 4821, NINE in the morning',
+      'Gate code 4821 expires on 10/20',
+      'Friday was the gate code, MONDAYS ONLY',
       'Gate code 4821, never before 9 please',
     ])('the mask hides it: %s', (text) => {
       expect(hid(text)).toBe(true);
