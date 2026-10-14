@@ -123,7 +123,7 @@ describe('notification trigger push tags', () => {
     const plain = TRIGGER_REGISTRY.sms_reply.build({ ...base, textCount: 1 });
     const plainMany = TRIGGER_REGISTRY.sms_reply.build({ ...base, textCount: 3 });
     expect(call.title).toBe('Wants a call: Dana Example');
-    expect(text.title).toBe('Prefers text: Dana Example');
+    expect(text.title).toBe('Prefers text: Dana Example (2 texts)');
     expect(plain.title).toBe('SMS from Dana Example');
     expect(plainMany.title).toBe('3 texts from Dana Example');
     // Body and link are identical with or without the preference.

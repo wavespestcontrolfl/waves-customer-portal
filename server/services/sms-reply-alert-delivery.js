@@ -88,11 +88,15 @@ const isOlderMessage = (ms, sid, base) => {
   if (!Number.isFinite(other)) return false;
   return ms < other || (ms === other && String(sid) < String(base.twilioSid || ''));
 };
-const threadRefresh = (MessageSid, receivedAtMs) => (existing, base) => {
+// A lead's CALL / TEXT choice (GATE_LEAD_CALL_TEXT_PREFERENCE) stays on the
+// standing row while it is unread, so a later text cannot drop the label the
+// owner sorts his callbacks by. A read or done row starts over.
+const threadRefresh = (MessageSid, receivedAtMs, leadPreference = null) => (existing, base) => {
   const count = Math.max(1, Math.floor(Number(base.textCount)) || 1);
-  if (base.twilioSid === MessageSid) return { payload: { textCount: count } };
+  const keepPreference = (pref) => (pref ? { leadPreference: pref } : {});
+  if (base.twilioSid === MessageSid) return { payload: { textCount: count, ...keepPreference(base.leadPreference) } };
   if (existing.read_at || existing.done_at) return { payload: { textCount: 1 } };
-  return { payload: { textCount: count + 1 }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
+  return { payload: { textCount: count + 1, ...keepPreference(leadPreference || base.leadPreference) }, keepContent: isOlderMessage(receivedAtMs, MessageSid, base) };
 };
 
 // When the text reached us: the unified message row's own time, else now.
@@ -126,7 +130,7 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message, afterRead
     twilioSid: MessageSid,
     ...(customer ? { textCount: 1, receivedAtMs: arrivedAtMs } : {}),
     ...(leadPreference ? { leadPreference } : {}),
-  }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) } : {}) });
+  }, { beforePush: unifiedStillUnread, dedupeKey, ...(customer ? { refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs, leadPreference || null) } : {}) });
   let receiptWritten = false;
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
     stats.deliveredAt = existingBell?.created_at || new Date();

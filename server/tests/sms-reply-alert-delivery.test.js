@@ -259,6 +259,15 @@ describe('known-sender thread bell', () => {
   };
   const rowAt = (over = {}, payload = {}) => ({ read_at: null, done_at: null, metadata: { payload: { twilioSid: 'SM-2', textCount: 2, receivedAtMs: 0, ...payload } }, ...over });
 
+  test('an unread row keeps the lead\'s CALL / TEXT choice when a later text arrives; a read row drops it', async () => {
+    const open = rowAt({}, { leadPreference: 'call' });
+    expect(await decide(open)).toMatchObject({ payload: { textCount: 3, leadPreference: 'call' } });
+    const read = rowAt({ read_at: new Date() }, { leadPreference: 'call' });
+    expect(await decide(read)).toEqual({ payload: { textCount: 1 } });
+    const plain = rowAt();
+    expect((await decide(plain)).payload).not.toHaveProperty('leadPreference');
+  });
+
   test('a newer text on a still-open row counts one more and takes over the row', async () => {
     expect(await decide(rowAt())).toEqual({ payload: { textCount: 3 }, keepContent: false });
   });
