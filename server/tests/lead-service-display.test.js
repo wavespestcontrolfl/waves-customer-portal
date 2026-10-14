@@ -38,6 +38,7 @@ describe('leadServiceDisplay', () => {
     ['Recurring Cockroach Control', 'Quarterly Pest Control Service'],
     ['Rodent Bait Stations', 'Quarterly Rodent Bait Station Service'],
     ['Tree & Shrub Care', 'Bi-Monthly Tree & Shrub Care Service'], // quote wizard's recurring program
+    ['Palm Injections', 'Semiannual Palm Injection Service'], // quote wizard's recurring program
     ['Recurring Termite Bait Stations', 'Termite Bait Station Service'],
     ['Recurring Lawn Care + One-Time Lawn Care Service', 'Monthly Lawn Care Service'],
     ['Quarterly Pest Control Service + One-Time Lawn Care Service', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
@@ -125,6 +126,23 @@ describe('leadServiceDisplay', () => {
     ['Pest control and lawn care, monthly or quarterly'],
   ])('a sentence is shown as written, never guessed at: %s', (text) => {
     expect(name(text)).toBe(text);
+  });
+
+  test('an admin-configured package name is shown as written', () => {
+    const opts = { catalogNames, keptLabels: ['Roach Package'] };
+    expect(leadServiceDisplay('Roach Package', opts)).toBe('Roach Package');
+    expect(leadServiceDisplay('Roach Package + Recurring Lawn Care', opts)).toBe('Roach Package + Monthly Lawn Care Service');
+    expect(leadServiceDisplay('Roach Package', { catalogNames })).toBe('Waves Assessment (Pest)');
+  });
+
+  test('a keyed lead shows its key\'s current catalog name after a rename', () => {
+    const opts = { catalogNames, keptLabels: ['Roach Package'], keyedName: 'Quarterly Pest Control Service' };
+    expect(leadServiceDisplay('General Pest Program', opts)).toBe('Quarterly Pest Control Service');
+    // the standalone roach package is keyed but reads its configured name
+    expect(leadServiceDisplay('Roach Package', opts)).toBe('Roach Package');
+    // a text that grew a second service is named part by part
+    expect(leadServiceDisplay('Recurring Pest Control + Recurring Lawn Care', opts))
+      .toBe('Quarterly Pest Control Service + Monthly Lawn Care Service');
   });
 
   test('empty text has no name, and a missing catalog still passes a "… Service" pick through', () => {

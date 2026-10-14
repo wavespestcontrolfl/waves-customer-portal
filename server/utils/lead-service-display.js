@@ -66,9 +66,8 @@ const ONE_TIME_LABELS = {
   'top dressing': 'Lawn Top Dressing Service',
 };
 
-// The quote wizard's label for its recurring tree and shrub program carries
-// no cadence word.
-const RECURRING_LABELS = new Set(['tree & shrub care']);
+// Quote-wizard labels for a recurring program that carry no cadence word.
+const RECURRING_LABELS = new Set(['tree & shrub care', 'palm injections']);
 
 // Intake labels with no catalog row of their own; shown as written. The
 // quote wizard's German cockroach add-on is one treatment inside a recurring
@@ -145,9 +144,9 @@ function catalogNameIndex(names) {
   return new Map([...(names || [])].map(clean).filter(Boolean).map((name) => [name.toLowerCase(), name]));
 }
 
-function classify(part, catalogNames) {
+function classify(part, catalogNames, keptLabels) {
   if (/^waves assessment$/i.test(part) || /^inspection$/i.test(part)) return { kind: 'assessment' };
-  if (KEPT_LABELS.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
+  if (KEPT_LABELS.has(part.toLowerCase()) || keptLabels.has(part.toLowerCase())) return { kind: 'other', name: part, frequency: null };
   const oneTimeLabel = ONE_TIME_LABELS[part.toLowerCase()];
   if (oneTimeLabel) return { kind: 'catalog', name: oneTimeLabel, frequency: 'one_time', topic: null };
   const catalogName = catalogMatch(part, catalogNames);
@@ -243,11 +242,18 @@ const PLACE = {
   },
 };
 
-function leadServiceDisplay(serviceInterest, { catalogNames = null } = {}) {
+// keptLabels: admin-configured names with no catalog row (the standalone
+// roach package), shown as written. keyedName: the current catalog name of
+// the lead's service_key, which survives a catalog rename.
+function leadServiceDisplay(serviceInterest, { catalogNames = null, keptLabels = [], keyedName = null } = {}) {
   const text = clean(serviceInterest);
   if (!text) return null;
+  const kept = new Set([...keptLabels].map((label) => clean(label).toLowerCase()).filter(Boolean));
+  // A keyed lead's text is its catalog name at the time (or a kept label);
+  // a text that grew a second service is named part by part instead.
+  if (keyedName && !kept.has(text.toLowerCase()) && !/\s\+\s/.test(text)) return clean(keyedName);
 
-  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames));
+  const parts = splitParts(text, catalogNames).map((part) => classify(part, catalogNames, kept));
   const recurring = parts.some((part) => part.frequency === 'recurring');
   const oneTime = !recurring && parts.some((part) => part.frequency === 'one_time');
   // An assessment visit covers the recurring work it was booked to look at.

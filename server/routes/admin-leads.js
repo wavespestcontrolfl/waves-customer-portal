@@ -24,48 +24,65 @@ const { leadServiceDisplayLive } = require('../config/feature-gates');
 // GATE_LEAD_SERVICE_DISPLAY: the Leads screen shows each lead's service the
 // way the booking catalog names it. Read-only: service_interest is untouched,
 // and with the gate off the field is absent so the screen shows the stored text.
-// The live catalog names, or null when the gate is off or the catalog cannot
-// be read. Without the catalog a name would be a guess, so callers then show
-// the stored text.
+// What naming needs from the live catalog, or null when the gate is off or
+// the catalog cannot be read. Without the catalog a name would be a guess,
+// so callers then show the stored text.
 async function serviceDisplayCatalog() {
   if (!leadServiceDisplayLive()) return null;
   try {
-    return catalogNameIndex(await db('services').pluck('name'));
+    const services = await db('services').select('name', 'service_key');
+    // The quote wizard stores the admin-configured roach package names
+    // (pest_base.initial_roach.display), which are not catalog rows.
+    const roachDisplay = require('../services/pricing-engine').constants?.PEST?.pestInitialRoach?.display || {};
+    return {
+      catalogNames: catalogNameIndex(services.map((service) => service.name)),
+      nameByKey: new Map(services.filter((service) => service.service_key).map((service) => [service.service_key, service.name])),
+      keptLabels: Object.values(roachDisplay).map((entry) => entry?.name).filter((name) => typeof name === 'string' && name.trim()),
+    };
   } catch (err) {
     logger.warn('[leads] service catalog unavailable for service_display', { error: err.message });
     return null;
   }
 }
 
+function serviceDisplayFor(catalog, serviceInterest, serviceKey) {
+  return leadServiceDisplay(serviceInterest, {
+    catalogNames: catalog.catalogNames,
+    keptLabels: catalog.keptLabels,
+    keyedName: serviceKey ? catalog.nameByKey.get(serviceKey) : null,
+  });
+}
+
 async function withServiceDisplay(leads) {
-  const catalogNames = leads.length ? await serviceDisplayCatalog() : null;
-  if (!catalogNames) return leads;
+  const catalog = leads.length ? await serviceDisplayCatalog() : null;
+  if (!catalog) return leads;
   return leads.map((lead) => ({
     ...lead,
-    service_display: leadServiceDisplay(lead.service_interest, { catalogNames }),
+    service_display: serviceDisplayFor(catalog, lead.service_interest, lead.service_key),
   }));
 }
 
 // Search matches what the screen shows: the stored service texts whose
 // display name contains the term, for applyLeadSearch to OR in. The
-// text → name index is rebuilt at most every five minutes (the Leads screen
-// re-runs an active search every 10 s) and one search adds at most 100 texts.
+// (text, key) → name index is rebuilt at most every five minutes (the Leads
+// screen re-runs an active search every 10 s); every match is used, so no
+// lead is missing from a search by the name it is shown under.
 const SHOWN_AS_TTL_MS = 5 * 60 * 1000;
-const SHOWN_AS_MAX_TEXTS = 100;
 let shownAsIndex = { builtAt: 0, rows: [] };
 
 async function serviceTextsShownAs(search) {
   const term = String(search).trim().replace(/\s+/g, ' ').toLowerCase();
-  const catalogNames = term ? await serviceDisplayCatalog() : null;
-  if (!catalogNames) return [];
+  const catalog = term ? await serviceDisplayCatalog() : null;
+  if (!catalog) return [];
   if (Date.now() - shownAsIndex.builtAt > SHOWN_AS_TTL_MS) {
-    const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest').distinct().pluck('service_interest');
+    const stored = await db('leads').whereNull('deleted_at').whereNotNull('service_interest')
+      .distinct('service_interest', 'service_key');
     shownAsIndex = {
       builtAt: Date.now(),
-      rows: stored.map((text) => [text, (leadServiceDisplay(text, { catalogNames }) || '').toLowerCase()]),
+      rows: stored.map((row) => [row.service_interest, (serviceDisplayFor(catalog, row.service_interest, row.service_key) || '').toLowerCase()]),
     };
   }
-  return shownAsIndex.rows.filter(([, shown]) => shown.includes(term)).slice(0, SHOWN_AS_MAX_TEXTS).map(([text]) => text);
+  return [...new Set(shownAsIndex.rows.filter(([, shown]) => shown.includes(term)).map(([text]) => text))];
 }
 
 // Format/length validation for manual lead creation. Permissive by design — it
