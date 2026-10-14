@@ -142,7 +142,7 @@ const HHMM = '(?:[01]\\d|2[0-3])[0-5]\\d(?![\\w:/-])';
 // r19, r28, r31.
 // Whole month names and their short forms only: "JANITOR" is not January (r33).
 const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const DATE_SHAPES = `(?:\\d{1,2}-\\d{1,2}-(?:\\d{4}|\\d{2})(?![\\w/-])|(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:the\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
+const DATE_SHAPES = `(?:(?:the\\s{1,5})?(?:year|month|week)[\\s-]{0,3}end(?![\\w/])|\\d{1,2}-\\d{1,2}-(?:\\d{4}|\\d{2})(?![\\w/-])|(?:19|20)\\d{2}(?![\\w/:-])|(?:the\\s{1,5})?end\\s{1,5}of\\s{1,5}(?:the\\s{1,5})?(?:${MONTHS}|month|year|week)(?![\\w/])|\\d{4}-\\d{1,2}-\\d{1,2}(?![\\w/-])|(?:${MONTHS})\\.?,?\\s{1,5}\\d{4}(?![\\w/])|\\d{1,2}(?:st|nd|rd|th)?\\s{1,5}(?:of\\s{1,5})?(?:${MONTHS})\\.?(?![\\w/])|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?(?![\\w/])|(?:${MONTHS})\\.?\\s{1,5}\\d{1,2}(?:st|nd|rd|th)?(?![\\w/])|(?:the\\s{1,5})?\\d{1,2}(?:st|nd|rd|th)(?![\\w/])|(?:${MONTHS})\\.?(?![\\w/])(?!\\s{1,5}(?:\\d|\\[)))`;
 // An hour with "ish" ("around 10ish", "10-ish"): r21.
 const HOUR_ISH = '(?:[01]?\\d|2[0-3])-?ish\\b';
 // A word between the quantity and the unit ("2 business days"): r21.
@@ -245,6 +245,10 @@ const TIME_WORDS_RE = new RegExp([
   `(?<![\\d:/.-])\\b(?:${HHMM}|[01]?\\d|2[0-3]|${SPELLED_HOURS})(?=\\s{1,5}(?:works?|only|please|preferred|is\\s{1,3}(?:best|better|fine|good|ok|okay))\\b)`,
   // "after work", "before school" (not "at work": a place): r39.
   '\\b(?:before|after|until|till|til|by)(?=\\s{1,5}(?:work|school)\\b)',
+  // Spanish, the other language the proofreader reads (its hard cases have
+  // Spanish standing statements): weekdays, months, parts of the day and
+  // the usual time words ("SOLO LOS MARTES", "NUNCA ANTES DE LAS DIEZ"): r42.
+  '\\b(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bados?|domingos?|ma[n\u00f1]ana|ma[n\u00f1]anas|tardes?|noches?|mediod[i\u00ed]a|madrugada|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|antes|despu[e\u00e9]s|hasta|horas?|semanas?|d[i\u00ed]as?|hoy|aviso)(?![\\w\u00c0-\u024f])',
   // "AFTER HOURS": r22.
   '\\bafter[\\s-]{1,3}hours\\b',
   // A named window of the day ("BUSINESS HOURS ONLY"): r18.
@@ -265,7 +269,7 @@ const TIME_WORDS_RE = new RegExp([
   // "Friday is when", "SCHEDULE FOR TUESDAY", "can't do Friday"): "OWNER
   // CALLED MONDAY" is history (r35, r37).
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s(?![\\w])',
-  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|avoid|avoids|skip|do|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
+  '(?<!\\[[a-z]{0,12}\\s{0,3})(?<=\\b(?:on|every|only|no|not|never|except|before|after|by|until|till|next|this|from|any|or|and|thru|through|to|for|avoid|avoids|skip|do|come|visit|service|arrive|show|go|stop|available|unavailable|free|busy|away|open|closed|cant|can\'t|cannot|won\'t|wont|prefer|prefers|book|schedule|scheduled)\\s{1,5})(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?![\\w])',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?=\\s{0,3}(?:[,/&-]|(?:available|unavailable|free|busy|closed|off|doesn.?t|does\\s{1,3}not|don.?t|won.?t|isn.?t|can.?t|cannot|not|never|no\\s{1,3}good|only|ok|okay|is|are|was|works?|please|preferred|and|or|thru|through|to|morning|afternoon|evening|night|mornings|afternoons|evenings)\\b))',
   '(?<!\\[[a-z]{0,12}\\s{0,3})\\b(?:mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\\.?(?=\\s{0,3}(?:[,/&-]|\\d|(?:only|ok|okay|and|or|thru|through|to)\\b|$))',
 ].join('|'), 'gi');
